@@ -6,12 +6,11 @@ on:
     branches: [ "main" ]
 
 concurrency:
-  group: deploy-senti-worker
+  group: deploy-senti-bot-worker
   cancel-in-progress: true
 
 env:
   SCRIPT_NAME: senti-bot-worker
-  # читаємо токен прямо з secrets в env (щоб не світити у степах)
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
 jobs:
@@ -25,9 +24,9 @@ jobs:
       - name: Ensure entrypoint exists
         run: |
           ls -la
-          test -f index.js || { echo "index.js not found"; exit 1; }
+          test -f index.js || { echo "index.js not found in repo root"; exit 1; }
 
-      - name: Verify CF token
+      - name: Verify Cloudflare API token
         run: |
           set -e
           curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
@@ -36,41 +35,26 @@ jobs:
       - name: Install Wrangler
         run: npm i -g wrangler@latest
 
-      # ---------- only-if-missing secrets (idempotent) ----------
-      - name: Ensure secrets (create only if missing)
+      - name: Upload secrets to Worker (always overwrite)
         env:
           CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
           set -e
-
-          ensure_secret () {
+          put_secret () {
             KEY="$1"; VALUE="$2"
-            echo "Check secret $KEY…"
-            # список секретів цього воркера
-            LIST=$(curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-              "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/workers/scripts/${SCRIPT_NAME}/secrets")
-            echo "$LIST" | jq -e ".success==true" >/dev/null 2>&1 || LIST="{}"
-            EXISTS=$(echo "$LIST" | jq -r --arg k "$KEY" '.result[]?.name | select(.==$k)')
-            if [ "$EXISTS" = "$KEY" ]; then
-              echo "  -> already exists, skip"
-            else
-              echo "  -> creating…"
-              printf "%s" "$VALUE" | wrangler secret put "$KEY" --name "$SCRIPT_NAME"
-            fi
+            echo "Updating secret $KEY…"
+            printf "%s" "$VALUE" | wrangler secret put "$KEY" --name "$SCRIPT_NAME" --silent
           }
+          put_secret TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
+          put_secret WEBHOOK_SECRET "$WEBHOOK_SECRET"
+          put_secret CLOUDFLARE_API_TOKEN "$CLOUDFLARE_API_TOKEN"
 
-          ensure_secret "TELEGRAM_BOT_TOKEN" "$TELEGRAM_BOT_TOKEN"
-          ensure_secret "WEBHOOK_SECRET" "$WEBHOOK_SECRET"
-          ensure_secret "CLOUDFLARE_API_TOKEN" "$CLOUDFLARE_API_TOKEN"
-
-      # ---------- deploy ----------
       - name: Deploy to Cloudflare Workers
         run: wrangler deploy --name "$SCRIPT_NAME"
 
-      # ---------- resolve workers.dev url ----------
-      - name: Resolve worker URL
+      - name: Resolve workers.dev URL
         id: url
         env:
           CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -80,7 +64,7 @@ jobs:
             "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/workers/subdomain" \
             | jq -r '.result.subdomain')
           test -n "$SUBDOMAIN"
-          echo "WORKER_URL=https://${{ env.SCRIPT_NAME }}.${SUBDOMAIN}.workers.dev" >> $GITHUB_OUTPUT
+          echo "WORKER_URL=https://${{ env.SCRIPT_NAME }}.${SUBDOMAIN}.workers.dev" >> "$GITHUB_OUTPUT"
           echo "Worker URL: https://${{ env.SCRIPT_NAME }}.${SUBDOMAIN}.workers.dev"
 
       - name: Healthcheck
@@ -94,8 +78,7 @@ jobs:
           done
           [ "$CODE" -eq 200 ] || (echo "healthcheck failed" && exit 1)
 
-      # ---------- Telegram webhook ----------
-      - name: getMe (sanity)
+      - name: Telegram getMe (sanity)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
@@ -104,9 +87,10 @@ jobs:
       - name: Reset webhook
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        run: curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook" || true
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook" || true
 
-      - name: Set webhook (retries)
+      - name: Set webhook (with retries)
         id: sethook
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -115,7 +99,7 @@ jobs:
         run: |
           set -e
           TARGET="${WORKER_URL}/webhook"
-          echo "Setting to: $TARGET"
+          echo "Setting webhook to: $TARGET"
           OK=0
           for i in 1 2 3 4 5; do
             RESP=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
@@ -126,9 +110,9 @@ jobs:
             sleep 2
           done
           [ "$OK" -eq 1 ] || (echo "setWebhook failed" && exit 1)
-          echo "HOOK_URL=$TARGET" >> $GITHUB_OUTPUT
+          echo "HOOK_URL=$TARGET" >> "$GITHUB_OUTPUT"
 
-      - name: Check webhookInfo
+      - name: Check getWebhookInfo
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           EXPECTED: ${{ steps.sethook.outputs.HOOK_URL }}
@@ -137,20 +121,22 @@ jobs:
           echo "$INFO" | jq .
           echo "$INFO" | grep -q "\"url\":\"$EXPECTED\"" || (echo "webhook url mismatch" && exit 1)
 
-      - name: Smoke /webhook
+      - name: Smoke test /webhook
         env:
           WORKER_URL: ${{ steps.url.outputs.WORKER_URL }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
           set -e
           BODY='{"update_id":1,"message":{"message_id":1,"chat":{"id":12345},"text":"/start"}}'
-          curl -s -o /tmp/out.txt -w "HTTP:%{http_code}\n" -X POST "${WORKER_URL}/webhook" \
+          CODE=$(curl -s -o /tmp/out.txt -w "%{http_code}" -X POST "${WORKER_URL}/webhook" \
             -H "Content-Type: application/json" \
             -H "X-Telegram-Bot-Api-Secret-Token: ${WEBHOOK_SECRET}" \
-            --data "$BODY"
-          echo "Response:"; cat /tmp/out.txt
+            --data "$BODY" || true)
+          echo "HTTP $CODE"
+          cat /tmp/out.txt
+          [ "$CODE" -ge 200 ] && [ "$CODE" -lt 300 ] || exit 1
 
-      - name: Final info
+      - name: Done
         run: |
-          echo "Worker URL: ${{ steps.url.outputs.WORKER_URL }}"
-          echo "Webhook:    ${{ steps.sethook.outputs.HOOK_URL }}"
+          echo "Worker URL:  ${{ steps.url.outputs.WORKER_URL }}"
+          echo "Webhook URL: ${{ steps.sethook.outputs.HOOK_URL }}"
