@@ -26,27 +26,33 @@ jobs:
           ls -la
           test -f index.js || { echo "index.js not found in repo root"; exit 1; }
 
+      - name: Install helpers (jq) and Wrangler
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+          npm i -g wrangler@latest
+
       - name: Verify Cloudflare API token
         run: |
           set -e
           curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             https://api.cloudflare.com/client/v4/user/tokens/verify | jq .
 
-      - name: Install Wrangler
-        run: npm i -g wrangler@latest
-
       - name: Upload secrets to Worker (always overwrite)
         env:
           CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        shell: bash
         run: |
           set -e
+
           put_secret () {
             KEY="$1"; VALUE="$2"
             echo "Updating secret $KEY…"
-            printf "%s" "$VALUE" | wrangler secret put "$KEY" --name "$SCRIPT_NAME" --silent
+            printf "%s" "$VALUE" | wrangler secret put "$KEY" --name "$SCRIPT_NAME"
           }
+
           put_secret TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
           put_secret WEBHOOK_SECRET "$WEBHOOK_SECRET"
           put_secret CLOUDFLARE_API_TOKEN "$CLOUDFLARE_API_TOKEN"
