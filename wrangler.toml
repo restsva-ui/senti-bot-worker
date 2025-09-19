@@ -1,19 +1,17 @@
 name = "senti-bot-worker"
 main = "index.js"
 
-# Твій акаунт
+# твій акаунт (в один рядок!)
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
 
-# Дата сумісності (можна залишити поточну)
+# вимоги wrangler v4
 compatibility_date = "2025-09-19"
-
-# Заміна старого node_compat → новий прапор для Wrangler v4
 compatibility_flags = ["nodejs_compat"]
 
-# Публікуємо на workers.dev
+# публікуємо на workers.dev
 workers_dev = true
 
-# Змінні оточення підтягуються як secrets у воркфлоу (не зберігаємо значення тут)
+# значення сюди НЕ пишемо — їх ставить GitHub Actions як secrets
 [vars]
 TELEGRAM_BOT_TOKEN = ""
 WEBHOOK_SECRET = ""
