@@ -1,0 +1,43 @@
+name: Deploy Senti Worker
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Wrangler
+        run: npm i -g wrangler@latest
+
+      - name: Put secrets into Worker (Telegram, Webhook secret)
+        run: |
+          echo -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" | wrangler secret put TELEGRAM_BOT_TOKEN --yes
+          echo -n "senti1984" | wrangler secret put WEBHOOK_SECRET --yes
+
+      - name: Deploy
+        id: deploy
+        run: |
+          set -e
+          wrangler deploy 2>&1 | tee /tmp/deploy.log
+          URL=$(grep -Eo 'https://[a-z0-9-]+\.workers\.dev' /tmp/deploy.log | tail -1 || true)
+          echo "WORKER_URL=$URL" >> $GITHUB_OUTPUT
+          echo "Deployed URL: $URL"
+
+      - name: Set Telegram webhook
+        if: steps.deploy.outputs.WORKER_URL != ''
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/setWebhook?url=${{ steps.deploy.outputs.WORKER_URL }}/webhook&secret_token=senti1984"
