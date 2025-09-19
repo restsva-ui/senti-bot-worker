@@ -1,1 +1,22 @@
+name = "senti-bot-worker"
+main = "src/index.ts"
+compatibility_date = "2025-09-19"
+compatibility_flags = ["nodejs_compat"]
 
+workers_ai = { binding = "AI" }
+
+[vars]
+# Will be set by you via `wrangler secret put` for security:
+# TELEGRAM_BOT_TOKEN, WEBHOOK_SECRET
+
+[observability]
+enabled = true
+
+[ai]
+# no extra config needed; binding is AI
+
+[placement]
+mode = "smart"
+
+[env.production]
+# optionally separate env
