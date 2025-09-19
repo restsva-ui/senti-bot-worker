@@ -1,164 +1,104 @@
-import { Tg, type TgUpdate } from './telegram';
-
-const APP_VERSION = 'Senti Worker v0.1.2';
-const TG_BASE_DEFAULT = 'https://api.telegram.org';
-
-export interface Env {
-  AI: any;                         // Workers AI binding (@cf/meta/llama-3.2-11b-vision-instruct)
-  TELEGRAM_BOT_TOKEN: string;      // GitHub Secret → wrangler secret put
-  WEBHOOK_SECRET: string;          // має дорівнювати secret_token у setWebhook (senti1984)
-  TG_API_BASE?: string;            // опційно (дефолт: https://api.telegram.org)
-}
-
-function ok(text = 'ok', status = 200) {
-  return new Response(text, { status });
-}
-
 export default {
-  async fetch(req: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(req.url);
-
-    // -------- Healthcheck --------
-    if (req.method === 'GET' && url.pathname === '/') {
-      return new Response(`${APP_VERSION} — up ✅`, { status: 200 });
-    }
-
-    // -------- Telegram Webhook --------
-    if (url.pathname === '/webhook' && req.method === 'POST') {
-      // ✅ Telegram надсилає секрет у X-Telegram-Bot-Api-Secret-Token
-      const tgSecret =
-        req.headers.get('x-telegram-bot-api-secret-token') ||
-        url.searchParams.get('secret') ||
-        '';
-      if (tgSecret !== env.WEBHOOK_SECRET) {
-        console.warn('[403] Bad webhook secret');
-        return new Response('Forbidden', { status: 403 });
-      }
-
-      let update: TgUpdate;
-      try {
-        update = (await req.json()) as TgUpdate;
-      } catch {
-        console.warn('[400] Bad JSON');
-        return new Response('Bad Request', { status: 400 });
-      }
-
-      const tgBase = env.TG_API_BASE || TG_BASE_DEFAULT;
-      const msg = update.message || update.edited_message;
-      if (!msg) return ok(); // нічого обробляти
-
-      try {
-        // ---------- Commands ----------
-        if (msg.text) {
-          const text = msg.text.trim();
-
-          if (text === '/start') {
-            await Tg.sendMessage(
-              tgBase,
-              env.TELEGRAM_BOT_TOKEN,
-              msg.chat.id,
-              'Привіт! Надішли фото — я опишу його українською у 2–3 реченнях.'
-            );
-            return ok();
-          }
-
-          if (text === '/version') {
-            await Tg.sendMessage(
-              tgBase,
-              env.TELEGRAM_BOT_TOKEN,
-              msg.chat.id,
-              `${APP_VERSION}\nМодель: @cf/meta/llama-3.2-11b-vision-instruct`
-            );
-            return ok();
-          }
-
-          if (text === '/help') {
-            await Tg.sendMessage(
-              tgBase,
-              env.TELEGRAM_BOT_TOKEN,
-              msg.chat.id,
-              'Надішли фото — я поверну короткий опис українською. Команди: /start, /version, /help'
-            );
-            return ok();
-          }
+  async fetch(request, env) {
+    try {
+      // Telegram webhook
+      if (request.method === "POST" && new URL(request.url).pathname === "/webhook") {
+        const secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
+        if (secret !== env.WEBHOOK_SECRET) {
+          return new Response("Unauthorized", { status: 403 });
         }
 
-        // ---------- Photo flow ----------
-        if (msg.photo && msg.photo.length > 0) {
-          // беремо найбільшу версію фото
-          const best = msg.photo.at(-1)!;
-
-          const fileInfo = await Tg.getFile(tgBase, env.TELEGRAM_BOT_TOKEN, best.file_id);
-          const file_path = fileInfo?.result?.file_path as string | undefined;
-          if (!file_path) {
-            await Tg.sendMessage(
-              tgBase,
-              env.TELEGRAM_BOT_TOKEN,
-              msg.chat.id,
-              'Не вдалося отримати файл фото.'
-            );
-            return ok();
-          }
-
-          const downloadUrl = Tg.fileDownloadUrl(tgBase, env.TELEGRAM_BOT_TOKEN, file_path);
-          const imgRes = await fetch(downloadUrl);
-          if (!imgRes.ok) {
-            console.error('Image download failed', imgRes.status, await imgRes.text().catch(() => ''));
-            await Tg.sendMessage(
-              tgBase,
-              env.TELEGRAM_BOT_TOKEN,
-              msg.chat.id,
-              'Проблема зі скачуванням фото. Спробуй ще раз.'
-            );
-            return ok();
-          }
-
-          const imgBuf = await imgRes.arrayBuffer();
-          const bytes = new Uint8Array(imgBuf);
-
-          const prompt =
-            'Опиши фото лаконічно українською у 2–3 реченнях. Будь точним, без вигадок і припущень.';
-
-          // Workers AI — vision instruct
-          const aiRes = await env.AI.run('@cf/meta/llama-3.2-11b-vision-instruct', {
-            prompt,
-            image: [...bytes],
-          });
-
-          const output = (aiRes?.response || aiRes?.result || '').toString().trim();
-          const reply =
-            output && output.length > 0
-              ? output
-              : 'Не впевнений. Спробуй інший кадр або кращу якість.';
-
-          await Tg.sendMessage(tgBase, env.TELEGRAM_BOT_TOKEN, msg.chat.id, reply);
-          return ok();
+        const update = await request.json();
+        if (update.message) {
+          return await handleMessage(update.message, env);
         }
 
-        // ---------- Fallback ----------
-        await Tg.sendMessage(
-          tgBase,
-          env.TELEGRAM_BOT_TOKEN,
-          msg.chat.id,
-          'Надішли фото — я опишу його українською у 2–3 реченнях. Команди: /start, /version, /help'
-        );
-        return ok();
-      } catch (err: any) {
-        console.error('webhook error:', err?.stack || err?.message || err);
-        // Тихо повідомляємо користувачу (якщо можемо)
-        try {
-          await Tg.sendMessage(
-            env.TG_API_BASE || TG_BASE_DEFAULT,
-            env.TELEGRAM_BOT_TOKEN,
-            (update.message || update.edited_message)!.chat.id,
-            'Сталася помилка обробки. Спробуй ще раз.'
-          );
-        } catch {}
-        return ok(); // не лякаємо Telegram 5xx
+        return new Response("ok");
       }
-    }
 
-    // -------- Not Found --------
-    return new Response('Not found', { status: 404 });
+      // Healthcheck
+      if (request.method === "GET" && new URL(request.url).pathname === "/") {
+        return new Response("Senti worker up ✅", { status: 200 });
+      }
+
+      return new Response("Not found", { status: 404 });
+    } catch (err) {
+      return new Response("Internal error: " + err.message, { status: 500 });
+    }
   },
 };
+
+async function handleMessage(msg, env) {
+  const chatId = msg.chat.id;
+
+  if (msg.text) {
+    // Якщо користувач відправив текст
+    const prompt = `Скажи українською 2-3 речення: ${msg.text}`;
+    const aiResponse = await callWorkersAI(env, prompt);
+
+    await sendTelegram(env, chatId, aiResponse);
+  }
+
+  if (msg.photo) {
+    // Якщо користувач відправив фото
+    const fileId = msg.photo[msg.photo.length - 1].file_id;
+    const file = await getFileUrl(env, fileId);
+    const prompt = "Опиши це фото українською у 2-3 реченнях.";
+    const aiResponse = await callWorkersAI(env, prompt, file);
+
+    await sendTelegram(env, chatId, aiResponse);
+  }
+
+  return new Response("ok");
+}
+
+async function callWorkersAI(env, prompt, imageUrl = null) {
+  const accountId = "2cf6e316af8623546c95c0354bc3aa00";
+  const model = imageUrl
+    ? "@cf/llava-hf/llava-1.5-7b-hf"
+    : "@cf/meta/llama-3.1-8b-instruct";
+
+  const body = imageUrl
+    ? { prompt, image: imageUrl }
+    : { prompt };
+
+  const resp = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    }
+  );
+
+  const data = await resp.json();
+  if (data.success && data.result?.response) {
+    return data.result.response;
+  } else {
+    return "⚠️ Помилка AI: " + JSON.stringify(data.errors || data);
+  }
+}
+
+async function sendTelegram(env, chatId, text) {
+  const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: text,
+    }),
+  });
+}
+
+async function getFileUrl(env, fileId) {
+  const resp = await fetch(
+    `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`
+  );
+  const data = await resp.json();
+  if (!data.ok) return null;
+  return `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${data.result.file_path}`;
+}
