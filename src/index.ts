@@ -1,25 +1,29 @@
 import { Tg, type TgUpdate } from './telegram';
 
-const APP_VERSION = 'Senti Worker v0.1.1';
+const APP_VERSION = 'Senti Worker v0.1.2';
 const TG_BASE_DEFAULT = 'https://api.telegram.org';
 
 export interface Env {
-  AI: any; // Workers AI binding (@cf/meta/llama-3.2-11b-vision-instruct)
-  TELEGRAM_BOT_TOKEN: string;
+  AI: any;                         // Workers AI binding (@cf/meta/llama-3.2-11b-vision-instruct)
+  TELEGRAM_BOT_TOKEN: string;      // GitHub Secret → wrangler secret put
   WEBHOOK_SECRET: string;          // має дорівнювати secret_token у setWebhook (senti1984)
-  TG_API_BASE?: string;            // опційно, за замовчуванням https://api.telegram.org
+  TG_API_BASE?: string;            // опційно (дефолт: https://api.telegram.org)
+}
+
+function ok(text = 'ok', status = 200) {
+  return new Response(text, { status });
 }
 
 export default {
   async fetch(req: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
 
-    // Healthcheck
+    // -------- Healthcheck --------
     if (req.method === 'GET' && url.pathname === '/') {
       return new Response(`${APP_VERSION} — up ✅`, { status: 200 });
     }
 
-    // Telegram webhook
+    // -------- Telegram Webhook --------
     if (url.pathname === '/webhook' && req.method === 'POST') {
       // ✅ Telegram надсилає секрет у X-Telegram-Bot-Api-Secret-Token
       const tgSecret =
@@ -27,7 +31,7 @@ export default {
         url.searchParams.get('secret') ||
         '';
       if (tgSecret !== env.WEBHOOK_SECRET) {
-        console.warn('Forbidden: bad webhook secret');
+        console.warn('[403] Bad webhook secret');
         return new Response('Forbidden', { status: 403 });
       }
 
@@ -35,15 +39,16 @@ export default {
       try {
         update = (await req.json()) as TgUpdate;
       } catch {
+        console.warn('[400] Bad JSON');
         return new Response('Bad Request', { status: 400 });
       }
 
       const tgBase = env.TG_API_BASE || TG_BASE_DEFAULT;
       const msg = update.message || update.edited_message;
-      if (!msg) return new Response('ok');
+      if (!msg) return ok(); // нічого обробляти
 
       try {
-        // --- Commands ---
+        // ---------- Commands ----------
         if (msg.text) {
           const text = msg.text.trim();
 
@@ -54,7 +59,7 @@ export default {
               msg.chat.id,
               'Привіт! Надішли фото — я опишу його українською у 2–3 реченнях.'
             );
-            return new Response('ok');
+            return ok();
           }
 
           if (text === '/version') {
@@ -64,13 +69,23 @@ export default {
               msg.chat.id,
               `${APP_VERSION}\nМодель: @cf/meta/llama-3.2-11b-vision-instruct`
             );
-            return new Response('ok');
+            return ok();
+          }
+
+          if (text === '/help') {
+            await Tg.sendMessage(
+              tgBase,
+              env.TELEGRAM_BOT_TOKEN,
+              msg.chat.id,
+              'Надішли фото — я поверну короткий опис українською. Команди: /start, /version, /help'
+            );
+            return ok();
           }
         }
 
-        // --- Photo flow ---
+        // ---------- Photo flow ----------
         if (msg.photo && msg.photo.length > 0) {
-          // найбільша версія фото
+          // беремо найбільшу версію фото
           const best = msg.photo.at(-1)!;
 
           const fileInfo = await Tg.getFile(tgBase, env.TELEGRAM_BOT_TOKEN, best.file_id);
@@ -82,7 +97,7 @@ export default {
               msg.chat.id,
               'Не вдалося отримати файл фото.'
             );
-            return new Response('ok');
+            return ok();
           }
 
           const downloadUrl = Tg.fileDownloadUrl(tgBase, env.TELEGRAM_BOT_TOKEN, file_path);
@@ -95,7 +110,7 @@ export default {
               msg.chat.id,
               'Проблема зі скачуванням фото. Спробуй ще раз.'
             );
-            return new Response('ok');
+            return ok();
           }
 
           const imgBuf = await imgRes.arrayBuffer();
@@ -104,6 +119,7 @@ export default {
           const prompt =
             'Опиши фото лаконічно українською у 2–3 реченнях. Будь точним, без вигадок і припущень.';
 
+          // Workers AI — vision instruct
           const aiRes = await env.AI.run('@cf/meta/llama-3.2-11b-vision-instruct', {
             prompt,
             image: [...bytes],
@@ -116,20 +132,20 @@ export default {
               : 'Не впевнений. Спробуй інший кадр або кращу якість.';
 
           await Tg.sendMessage(tgBase, env.TELEGRAM_BOT_TOKEN, msg.chat.id, reply);
-          return new Response('ok');
+          return ok();
         }
 
-        // --- Fallback help ---
+        // ---------- Fallback ----------
         await Tg.sendMessage(
           tgBase,
           env.TELEGRAM_BOT_TOKEN,
           msg.chat.id,
-          'Надішли фото — я опишу його українською у 2–3 реченнях. Команди: /start, /version'
+          'Надішли фото — я опишу його українською у 2–3 реченнях. Команди: /start, /version, /help'
         );
-        return new Response('ok');
+        return ok();
       } catch (err: any) {
-        console.error('webhook error', err?.stack || err?.message || err);
-        // тихе повідомлення користувачу, якщо можемо
+        console.error('webhook error:', err?.stack || err?.message || err);
+        // Тихо повідомляємо користувачу (якщо можемо)
         try {
           await Tg.sendMessage(
             env.TG_API_BASE || TG_BASE_DEFAULT,
@@ -138,10 +154,11 @@ export default {
             'Сталася помилка обробки. Спробуй ще раз.'
           );
         } catch {}
-        return new Response('ok');
+        return ok(); // не лякаємо Telegram 5xx
       }
     }
 
+    // -------- Not Found --------
     return new Response('Not found', { status: 404 });
   },
 };
