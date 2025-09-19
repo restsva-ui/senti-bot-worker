@@ -1,22 +1,18 @@
 name = "senti-bot-worker"
-main = "src/index.ts"
+main = "index.js"
 compatibility_date = "2025-09-19"
-compatibility_flags = ["nodejs_compat"]
 
-workers_ai = { binding = "AI" }
+# Вкажемо акаунт
+account_id = "2cf6e316af8623546c95c0354bc3aa00"
+
+# Мінімальні налаштування для стабільності
+workers_dev = true
+node_compat = true
 
 [vars]
-# Will be set by you via `wrangler secret put` for security:
-# TELEGRAM_BOT_TOKEN, WEBHOOK_SECRET
+# Значення беруться із GitHub Secrets під час деплою
+TELEGRAM_BOT_TOKEN = ""
+WEBHOOK_SECRET = ""
 
-[observability]
-enabled = true
-
-[ai]
-# no extra config needed; binding is AI
-
-[placement]
-mode = "smart"
-
-[env.production]
-# optionally separate env
+# Використаємо токен лише з secrets у GitHub (не зберігаємо тут)
+# CLOUDFLARE_API_TOKEN передається як secret
