@@ -38,7 +38,7 @@ jobs:
       - name: Put Cloudflare Worker secrets
         run: |
           echo -n "$TELEGRAM_BOT_TOKEN" | wrangler secret put TELEGRAM_BOT_TOKEN --yes --account-id "$CLOUDFLARE_ACCOUNT_ID"
-          echo -n "senti1984"        | wrangler secret put WEBHOOK_SECRET     --yes --account-id "$CLOUDFLARE_ACCOUNT_ID"
+          echo -n "senti1984"          | wrangler secret put WEBHOOK_SECRET     --yes --account-id "$CLOUDFLARE_ACCOUNT_ID"
 
       - name: Deploy to Cloudflare Workers
         id: deploy
@@ -49,22 +49,42 @@ jobs:
           echo "WORKER_URL=$URL" >> $GITHUB_OUTPUT
           echo "Deployed URL: $URL"
 
+      - name: Healthcheck worker
+        if: steps.deploy.outputs.WORKER_URL != ''
+        run: |
+          set -e
+          curl -sS "${{ steps.deploy.outputs.WORKER_URL }}/" | head -n 1
+
       - name: Set Telegram webhook
         if: steps.deploy.outputs.WORKER_URL != ''
         run: |
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook?url=${{ steps.deploy.outputs.WORKER_URL }}/webhook&secret_token=senti1984"
+          set -e
+          echo "Setting webhook to: ${{ steps.deploy.outputs.WORKER_URL }}/webhook"
+          RESP=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+            --data-urlencode "url=${{ steps.deploy.outputs.WORKER_URL }}/webhook" \
+            --data-urlencode "secret_token=senti1984")
+          echo "Telegram response: $RESP"
+          echo "$RESP" | grep -q '"ok":true' || exit 1
 
       - name: Smoke test webhook (/start)
         if: steps.deploy.outputs.WORKER_URL != ''
         run: |
           set -e
-          curl -i -s -X POST "${{ steps.deploy.outputs.WORKER_URL }}/webhook" \
+          URL="${{ steps.deploy.outputs.WORKER_URL }}/webhook"
+          echo "POST $URL"
+          HTTP_CODE=$(curl -s -o /tmp/body.txt -w "%{http_code}" -X POST "$URL" \
             -H "content-type: application/json" \
             -H "X-Telegram-Bot-Api-Secret-Token: senti1984" \
-            --data '{"update_id":1,"message":{"message_id":1,"chat":{"id":123},"text":"/start"}}' | head -n 20
+            --data '{"update_id":1,"message":{"message_id":1,"chat":{"id":123},"text":"/start"}}')
+          echo "Status: $HTTP_CODE"
+          echo "Body:"
+          cat /tmp/body.txt
+          test "$HTTP_CODE" -eq 200
+          grep -q 'ok' /tmp/body.txt
 
       - name: Show final info
         run: |
           echo "Worker: ${{ steps.deploy.outputs.WORKER_URL }}"
-          echo "To verify webhook:"
+          echo "Verify webhook:"
           echo "curl -s \"https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo\""
+```0
