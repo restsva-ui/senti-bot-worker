@@ -21,7 +21,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 0) Перевіряємо наявність секретів (довжина, не значення)
       - name: Debug secrets length
         run: |
           echo "CLOUDFLARE_ACCOUNT_ID length: ${#CLOUDFLARE_ACCOUNT_ID}"
@@ -34,39 +33,46 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
 
-      # 1) Верифікуємо токен Cloudflare
       - name: Verify Cloudflare API token
         run: |
           set -e
           curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             https://api.cloudflare.com/client/v4/user/tokens/verify
-          echo
-          echo "OK: Cloudflare API token verified"
+          echo; echo "OK: Cloudflare API token verified"
 
-      # 2) Встановлюємо wrangler
       - name: Install Wrangler
         run: npm i -g wrangler@latest
 
-      # 3) Записуємо секрети у Worker (⚠️ ТІЛЬКИ --name)
-      - name: Put Worker secrets (Telegram, webhook, CF token for AI)
+      - name: Ensure entrypoint exists
+        run: |
+          ls -la
+          test -f index.js || { echo "index.js not found in repo root"; exit 1; }
+
+      # UPSERT секретів: спершу DELETE через API, потім put через wrangler (уникаємо 10053)
+      - name: Upsert Worker secrets (Telegram, webhook, CF token for AI)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -e
-          echo -n "$TELEGRAM_BOT_TOKEN"     | wrangler secret put TELEGRAM_BOT_TOKEN     --name "$SCRIPT_NAME"
-          echo -n "$WEBHOOK_SECRET"         | wrangler secret put WEBHOOK_SECRET         --name "$SCRIPT_NAME"
-          echo -n "$CLOUDFLARE_API_TOKEN"   | wrangler secret put CLOUDFLARE_API_TOKEN   --name "$SCRIPT_NAME"
+          for KEY in TELEGRAM_BOT_TOKEN WEBHOOK_SECRET CLOUDFLARE_API_TOKEN; do
+            echo "Deleting secret $KEY (if exists)…"
+            curl -s -X DELETE \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/${{ env.SCRIPT_NAME }}/secrets/$KEY" >/dev/null || true
+          done
+          printf "%s" "$TELEGRAM_BOT_TOKEN"   | wrangler secret put TELEGRAM_BOT_TOKEN   --name "${{ env.SCRIPT_NAME }}"
+          printf "%s" "$WEBHOOK_SECRET"       | wrangler secret put WEBHOOK_SECRET       --name "${{ env.SCRIPT_NAME }}"
+          printf "%s" "$CLOUDFLARE_API_TOKEN" | wrangler secret put CLOUDFLARE_API_TOKEN --name "${{ env.SCRIPT_NAME }}"
 
-      # 4) Деплоїмо (account_id з wrangler.toml)
       - name: Publish to Cloudflare Workers
         id: deploy
         run: |
           set -e
           wrangler deploy --name "$SCRIPT_NAME"
-          echo "DEPLOY_DONE=1" >> $GITHUB_OUTPUT
 
-      # 5) Формуємо коректний workers.dev URL через API (без парсингу логів)
       - name: Resolve workers.dev URL
         id: url
         env:
@@ -81,8 +87,7 @@ jobs:
           echo "WORKER_URL=$URL" >> $GITHUB_OUTPUT
           echo "Resolved Worker URL: $URL"
 
-      # 6) Healthcheck / з ретраями (щоб дочекатись прогріву)
-      - name: Healthcheck worker (with retries)
+      - name: Healthcheck worker (retries)
         run: |
           set -e
           URL="${{ steps.url.outputs.WORKER_URL }}/"
@@ -95,7 +100,6 @@ jobs:
           test "$CODE" -eq 200
           curl -sS "$URL" | head -n 1
 
-      # 7) Перевірка валідності Telegram токена ДО setWebhook
       - name: Telegram getMe (token sanity check)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -105,15 +109,13 @@ jobs:
           echo "getMe: $RESP"
           echo "$RESP" | grep -q '"ok":true' || { echo "Telegram token invalid (getMe failed)"; exit 1; }
 
-      # 8) Скидаємо старий вебхук (на всяк випадок)
       - name: Telegram deleteWebhook
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook" || true
 
-      # 9) Ставимо вебхук з ретраями (чекаємо, якщо DNS/прогрів)
-      - name: Set Telegram webhook (with retries)
+      - name: Set Telegram webhook (retries)
         id: sethook
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -130,12 +132,11 @@ jobs:
               --data-urlencode "secret_token=${WEBHOOK_SECRET}")
             echo "Attempt #$i: $RESP"
             echo "$RESP" | grep -q '"ok":true' && { OK=1; break; }
-            sleep 3
+            sleep 2
           done
           test "$OK" -eq 1
           echo "HOOK_URL=$TARGET" >> $GITHUB_OUTPUT
 
-      # 10) Перевіряємо webhookInfo (чи точно той URL)
       - name: Telegram getWebhookInfo
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -147,7 +148,6 @@ jobs:
           echo "$INFO" | grep -q '"ok":true'
           echo "$INFO" | grep -q "\"url\":\"$EXPECTED\""
 
-      # 11) Смоук /webhook: /start (імітація Telegram)
       - name: Smoke test webhook (/start)
         env:
           WORKER_URL: ${{ steps.url.outputs.WORKER_URL }}
@@ -164,10 +164,9 @@ jobs:
           test "$HTTP_CODE" -eq 200
           grep -q 'ok' /tmp/body.txt
 
-      # 12) Фінальна інфа
       - name: Show final info
         run: |
           echo "Worker URL: ${{ steps.url.outputs.WORKER_URL }}"
           echo "Webhook URL: ${{ steps.sethook.outputs.HOOK_URL }}"
-          echo "Check in Telegram:"
-          echo "  https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/getWebhookInfo"
+          echo "Manual checks:"
+          echo "  curl -s \"https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/getWebhookInfo\""
