@@ -1,17 +1,16 @@
 name = "senti-bot-worker"
 main = "index.js"
 
-# твій акаунт (в один рядок!)
+# твій акаунт (одним рядком!)
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
 
-# вимоги wrangler v4
+# Wrangler v4
 compatibility_date = "2025-09-19"
 compatibility_flags = ["nodejs_compat"]
 
-# публікуємо на workers.dev
 workers_dev = true
 
-# значення сюди НЕ пишемо — їх ставить GitHub Actions як secrets
+# значення не зберігаємо тут — їх пише GitHub Actions як secrets
 [vars]
 TELEGRAM_BOT_TOKEN = ""
 WEBHOOK_SECRET = ""
