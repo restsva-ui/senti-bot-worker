@@ -1,121 +1,117 @@
-// index.js — стабільний мінімальний воркер для Telegram + health-check
-// Використовує змінні середовища:
-//   TELEGRAM_BOT_TOKEN  – токен бота
-//   WEBHOOK_SECRET      – секрет для X-Telegram-Bot-Api-Secret-Token
-
-const JSON_HEADERS = { "Content-Type": "application/json; charset=UTF-8" };
+// index.js — стабільний entry-point для Cloudflare Workers + Telegram webhook
 
 export default {
   async fetch(request, env, ctx) {
-    try {
-      const url = new URL(request.url);
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const isGET = request.method === "GET";
+    const isPOST = request.method === "POST";
 
-      // ---- 1) Health-check ---------------------------------------------------
-      if (url.pathname === "/health") {
-        return json({ ok: true, status: "alive", time: new Date().toISOString() });
-      }
+    // Усі потрібні змінні. (Додай їх у Secrets/Variables воркера)
+    const BOT_TOKEN = env.TELEGRAM_BOT_TOKEN || "";
+    const WEBHOOK_SECRET = env.WEBHOOK_SECRET || "";
 
-      // ---- 2) Проста домашня сторінка ---------------------------------------
-      if (url.pathname === "/" && request.method === "GET") {
-        return new Response(
-          "Senti Bot Worker is running. POST /webhook with valid Telegram secret.",
-          { status: 200, headers: { "Content-Type": "text/plain; charset=UTF-8" } }
-        );
-      }
+    // Допоміжні відповіді
+    const json = (obj, status = 200, headers = {}) =>
+      new Response(JSON.stringify(obj), {
+        status,
+        headers: { "content-type": "application/json; charset=utf-8", ...headers },
+      });
+    const text = (str, status = 200) =>
+      new Response(str, {
+        status,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
 
-      // ---- 3) Telegram webhook ----------------------------------------------
-      if (url.pathname === "/webhook" && request.method === "POST") {
-        // Перевірка секрета від Telegram
-        const incomingSecret = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
-        if (!incomingSecret || incomingSecret !== env.WEBHOOK_SECRET) {
-          return new Response("Forbidden", { status: 403 });
-        }
-
-        const update = await safeJson(request);
-        // Лог в tail (не впливає на відповідь Telegram)
-        ctx.waitUntil(logUpdate(update));
-
-        // Обробка лише текстових повідомлень
-        const msg = update?.message;
-        const chatId = msg?.chat?.id;
-        const text = msg?.text ?? "";
-
-        if (!chatId) {
-          // Нічого відповідати не потрібно, просто 200
-          return new Response("ok", { status: 200 });
-        }
-
-        // Команди
-        if (text === "/start") {
-          await sendMessage(env, chatId, "Бот Senti запущений ✅\nНапишіть мені щось, відповім дзеркально.");
-          return new Response("ok", { status: 200 });
-        }
-
-        // Ехо-відповідь
-        await sendMessage(env, chatId, `Ти написав: ${text}`);
-        return new Response("ok", { status: 200 });
-      }
-
-      // ---- 4) Неіснуючі маршрути --------------------------------------------
-      return new Response("Not found", { status: 404 });
-    } catch (err) {
-      // Безпечний fallback, щоб Telegram не ретраїв безкінченно
-      console.error("Worker error:", err);
-      return json({ ok: false, error: String(err) }, 200);
+    // Проста домашня сторінка
+    if (isGET && (path === "/" || path === "")) {
+      return text("Senti worker is alive. Try /health or POST /webhook");
     }
+
+    // Healthcheck
+    if (isGET && path === "/health") {
+      return json({
+        ok: true,
+        name: "senti-bot-worker",
+        time: new Date().toISOString(),
+      });
+    }
+
+    // (Опційно) ручна реєстрація вебхука:
+    // GET /set-webhook?url=https://<your-subdomain>.workers.dev/webhook
+    if (isGET && path === "/set-webhook") {
+      if (!BOT_TOKEN) return json({ ok: false, error: "BOT_TOKEN is empty" }, 500);
+      const hookUrl = url.searchParams.get("url");
+      if (!hookUrl) return json({ ok: false, error: "Provide ?url=" }, 400);
+      const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
+        method: "POST",
+        body: new URLSearchParams({
+          url: hookUrl,
+          secret_token: WEBHOOK_SECRET || "",
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      return json({ ok: true, telegram: data });
+    }
+
+    // Основний вебхук Telegram
+    if (isPOST && path === "/webhook") {
+      // Перевіряємо секрет від Telegram
+      const incomingSecret =
+        request.headers.get("x-telegram-bot-api-secret-token") || "";
+      if ((WEBHOOK_SECRET || "") !== (incomingSecret || "")) {
+        return json({ ok: false, error: "Forbidden (bad secret)" }, 403);
+      }
+
+      // Без токена далі сенсу немає
+      if (!BOT_TOKEN) {
+        return json({ ok: false, error: "BOT_TOKEN is not set" }, 500);
+      }
+
+      let update;
+      try {
+        update = await request.json();
+      } catch {
+        return json({ ok: false, error: "Invalid JSON" }, 400);
+      }
+
+      // Витягуємо текст і chat_id
+      const msg = update?.message || update?.edited_message;
+      const chatId = msg?.chat?.id;
+      const textIn = (msg?.text || "").trim();
+
+      // Якщо нема чату — просто підтверджуємо отримання
+      if (!chatId) return json({ ok: true, received: true });
+
+      // Сформуємо відповідь
+      let reply = "Я на звʼязку ✅";
+      if (textIn === "/start") {
+        reply =
+          "Привіт! Це Senti бот на Cloudflare Workers. Напиши мені щось ✍️";
+      } else if (textIn) {
+        reply = `Ти написав: «${textIn}»`;
+      }
+
+      // Відповідаємо користувачу
+      const tgRes = await fetch(
+        `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: reply,
+            parse_mode: "HTML",
+          }),
+        }
+      );
+
+      const tgJson = await tgRes.json().catch(() => ({}));
+      return json({ ok: true, delivered: tgJson });
+    }
+
+    // 404 для всього іншого
+    return json({ ok: false, error: "Not Found", path }, 404);
   },
 };
-
-// ========================= Допоміжні функції =================================
-
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
-}
-
-async function safeJson(request) {
-  try {
-    return await request.json();
-  } catch {
-    return null;
-  }
-}
-
-async function logUpdate(update) {
-  try {
-    console.log("TG update:", JSON.stringify(update));
-  } catch {
-    // ignore
-  }
-}
-
-async function sendMessage(env, chatId, text, extra = {}) {
-  const token = env.TELEGRAM_BOT_TOKEN;
-  if (!token) {
-    console.error("TELEGRAM_BOT_TOKEN is missing");
-    return;
-  }
-
-  const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const body = { chat_id: chatId, text, ...extra };
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: JSON_HEADERS,
-    body: JSON.stringify(body),
-  });
-
-  // Не валимо воркер, але логнемо помилки Telegram
-  if (!res.ok) {
-    const t = await safeRead(res);
-    console.error("sendMessage failed:", res.status, t);
-  }
-}
-
-async function safeRead(res) {
-  try {
-    return await res.text();
-  } catch {
-    return "<no-body>";
-  }
-}
 ```0
