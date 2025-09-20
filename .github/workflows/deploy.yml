@@ -1,92 +1,36 @@
-name: Deploy Senti Worker
+name: Deploy to Cloudflare Workers
 
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch: {}
-
-permissions:
-  contents: read
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    env:
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_API_TOKEN:  ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      SCRIPT_NAME:           ${{ secrets.SCRIPT_NAME }}
-      WORKERS_SUBDOMAIN:     ${{ secrets.WORKERS_SUBDOMAIN }}
-
+    permissions:
+      contents: read
+      deployments: write
     steps:
-      - name: Sanity: check required secrets
-        run: |
-          req=(CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN SCRIPT_NAME WORKERS_SUBDOMAIN)
-          missing=0
-          for k in "${req[@]}"; do
-            if [ -z "${!k}" ]; then echo "::error title=Missing secret::${k} is empty"; missing=1; fi
-          done
-          if [ "$missing" -eq 1 ]; then exit 1; fi
+      - uses: actions/checkout@v4
 
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20'
 
-      - name: Install wrangler
-        run: npm i -g wrangler@4
+      - name: Install Wrangler
+        run: npm i -g wrangler@3
 
-      - name: Who am I / Projects
-        run: |
-          set -x
-          wrangler --version
-          wrangler whoami || true
-          wrangler deployments list || true
-          echo "wrangler.toml"; cat wrangler.toml || true
-          echo "Files:"; ls -la
-
-      - name: Deploy Worker (by name)
-        # Якщо в toml інше ім’я – ми все одно форсимо потрібне
-        run: wrangler deploy --name "${SCRIPT_NAME}" --minify
-
-      - name: Upsert secrets via wrangler
+      - name: Publish
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          WEBHOOK_SECRET:     ${{ secrets.WEBHOOK_SECRET }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Секрети воркера:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
-          set -euo pipefail
-          upsert() {
-            local key="$1"; local val="${2:-}"
-            if [ -z "${val}" ]; then
-              echo "::notice title=Skip secret::${key} empty, skip"
-              return 0
-            fi
-            printf '%s' "${val}" | wrangler secret put "${key}" --name "${SCRIPT_NAME}" --yes
-            echo "::notice title=Secret upserted::${key}"
-          }
-          upsert TELEGRAM_BOT_TOKEN "${TELEGRAM_BOT_TOKEN:-}"
-          upsert WEBHOOK_SECRET     "${WEBHOOK_SECRET:-}"
-
-      - name: Set Telegram webhook
-        if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' && secrets.WEBHOOK_SECRET != '' }}
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          WEBHOOK_SECRET:     ${{ secrets.WEBHOOK_SECRET }}
-        run: |
-          set -euo pipefail
-          URL="https://${SCRIPT_NAME}.${WORKERS_SUBDOMAIN}.workers.dev/webhook"
-          echo "Webhook URL: ${URL}"
-          curl -fsS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" >/dev/null
-          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
-            -d "url=${URL}" -d "secret_token=${WEBHOOK_SECRET}" | jq .
-          echo "--- getWebhookInfo ---"
-          curl -fsS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" | jq .
-
-      - name: Smoke check (do not fail job)
-        continue-on-error: true
-        run: |
-          set -x
-          URL="https://${SCRIPT_NAME}.${WORKERS_SUBDOMAIN}.workers.dev/health"
-          curl -i -m 10 "$URL" || true
+          # Проставимо секрети (якщо не задані в акаунті)
+          wrangler secret put BOT_TOKEN --quiet <<< "${BOT_TOKEN}"
+          wrangler secret put WEBHOOK_SECRET --quiet <<< "${WEBHOOK_SECRET}"
+          wrangler publish
