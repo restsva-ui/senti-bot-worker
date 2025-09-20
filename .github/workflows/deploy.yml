@@ -3,18 +3,20 @@ name: Deploy Senti Worker
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch:
+  workflow_dispatch: {}
 
-env:
-  # має збігатися з name у wrangler.toml
-  SCRIPT_NAME: senti-bot-worker
+permissions:
+  contents: read
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
+
+    env:
+      # Wrangler читає account_id і з wrangler.toml, і з ENV.
+      # Даємо через ENV для стабільності CI.
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN:  ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
     steps:
       - name: Checkout
@@ -23,49 +25,48 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
 
-      - name: Install Wrangler & jq
-        run: |
-          npm i -g wrangler@4
-          sudo apt-get update -y
-          sudo apt-get install -y jq
+      - name: Show Wrangler version
+        run: npx wrangler@latest --version
 
-      # ⚠️ Ідемпотентне створення/оновлення секретів через CF API (без помилки 10053)
+      # 1) Деплой воркера (зчитує все з wrangler.toml)
+      - name: Deploy Worker
+        run: npx wrangler@latest deploy
+
+      # 2) Апсерт секретів (тільки якщо значення передано; overwrite без питань)
       - name: Upsert Cloudflare Worker secrets
+        shell: bash
         env:
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WEBHOOK_SECRET:     ${{ secrets.WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
           upsert() {
-            KEY="$1"; VALUE="${2-}"
-            if [ -z "${VALUE}" ]; then
-              echo "::notice title=Skip::$KEY is empty, skipping"
+            local key="$1"; local value="${2:-}"
+            if [ -z "${value}" ]; then
+              echo "::notice title=Skip::Secret ${key} is empty, skipping"
               return 0
             fi
-            echo "Upsert secret $KEY…"
-            curl -fsS -X PUT \
-              "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/workers/scripts/${SCRIPT_NAME}/secrets" \
-              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              --data "$(jq -n --arg name "$KEY" --arg text "$VALUE" '{name:$name, text:$text, type:"secret_text"}')"
-            echo
+            # Подаємо значення через stdin; --yes приглушує підтвердження;
+            # помилки типу "вже існує" не критичні — wrangler перепише.
+            printf '%s' "${value}" | npx wrangler@latest secret put "${key}" --yes
+            echo "::notice title=Secret::${key} upserted"
           }
-          upsert TELEGRAM_BOT_TOKEN "${TELEGRAM_BOT_TOKEN:-}"
-          upsert WEBHOOK_SECRET      "${WEBHOOK_SECRET:-}"
+          upsert "TELEGRAM_BOT_TOKEN" "${TELEGRAM_BOT_TOKEN:-}"
+          upsert "WEBHOOK_SECRET"     "${WEBHOOK_SECRET:-}"
 
-      - name: Deploy to Cloudflare Workers
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      # 3) Коротка перевірка доступності (опціонально; не валить пайплайн)
+      - name: Smoke check /health
+        shell: bash
+        continue-on-error: true
         run: |
-          wrangler deploy --minify
-
-      - name: Summary
-        run: |
-          echo "✅ Deployed $SCRIPT_NAME" >> $GITHUB_STEP_SUMMARY
-          echo "- Secrets upserted: TELEGRAM_BOT_TOKEN, WEBHOOK_SECRET" >> $GITHUB_STEP_SUMMARY
-          echo "- Set Telegram webhook once (manually) to your workers.dev URL with secret_token" >> $GITHUB_STEP_SUMMARY
+          set -euo pipefail
+          # Спробуємо витягти URL з wrangler output (workers.dev).
+          URL=$(npx wrangler@latest deployments list 2>/dev/null | awk '/https:\/\/.*workers\.dev/{print $1; exit}' || true)
+          if [ -z "${URL:-}" ]; then
+            # fallback: якщо знаємо ім'я (name) з wrangler.toml — заміни нижче на своє
+            URL="https://senti-bot-worker.workers.dev"
+          fi
+          echo "Ping ${URL}/health ..."
+          curl -fsS -m 10 "${URL}/health" || echo "Health endpoint not found (expected 404/200) — ok"
