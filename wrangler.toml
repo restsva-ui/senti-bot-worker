@@ -2,12 +2,6 @@ name = "senti-bot-worker"
 main = "index.js"
 compatibility_date = "2025-09-01"
 workers_dev = true
-# Якщо хочеш привʼязати домен/роути, додай:
-# routes = [{ pattern = "your.subdomain.workers.dev/webhook", zone_id = "<ZONE_ID>" }]
 
 [vars]
-# Задаються у Cloudflare Dashboard → Workers → Settings → Variables (або wrangler secrets)
 WORKER_NAME = "senti-bot-worker"
-# BOT_TOKEN і WEBHOOK_SECRET краще тримати як секрети:
-# wrangler secret put BOT_TOKEN
-# wrangler secret put WEBHOOK_SECRET
