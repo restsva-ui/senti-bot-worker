@@ -19,13 +19,12 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # Перевіряємо обов'язкові секрети в GitHub (а НЕ в Cloudflare Dashboard)
+      # Перевіряємо, чи задані потрібні секрети в GitHub
       - name: Sanity check required secrets
         run: |
-          : "${{ secrets.CF_API_TOKEN?CF_API_TOKEN is required (Cloudflare API Token) }}"
-          : "${{ secrets.CF_ACCOUNT_ID?CF_ACCOUNT_ID is required (Cloudflare Account ID) }}"
+          : "${{ secrets.CF_API_TOKEN?CF_API_TOKEN is required }}"
+          : "${{ secrets.CF_ACCOUNT_ID?CF_ACCOUNT_ID is required }}"
 
-      # Деплой без створення секретів: значення з Dashboard уже доступні воркеру
       - name: Deploy with Wrangler
         uses: cloudflare/wrangler-action@v3
         with:
@@ -33,14 +32,13 @@ jobs:
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           command: deploy --name ${{ env.SCRIPT_NAME }}
 
-      # (опц.) Дістанемо subdomain та зробимо health-check
-      - name: Install jq (for parsing JSON)
+      # Health-check
+      - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Get workers.dev subdomain
         id: sub
         run: |
-          set -e
           resp=$(curl -fsSL \
             -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
             "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/subdomain")
@@ -49,5 +47,4 @@ jobs:
 
       - name: Health check (non-blocking)
         run: |
-          set -x
           curl -fsS "https://${{ env.SCRIPT_NAME }}.${{ steps.sub.outputs.subdomain }}.workers.dev/health" || true
