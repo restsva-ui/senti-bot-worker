@@ -3,62 +3,51 @@ name: Deploy Senti Worker
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch: {}
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SCRIPT_NAME: senti-bot-worker
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    env:
-      SCRIPT_NAME: senti-bot-worker
-      # ці значення беруться з GitHub Secrets:
-      # CF_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, TELEGRAM_BOT_TOKEN, WEBHOOK_SECRET
+
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      # Перевіряємо обов'язкові секрети в GitHub (а НЕ в Cloudflare Dashboard)
+      - name: Sanity check required secrets
+        run: |
+          : "${{ secrets.CF_API_TOKEN?CF_API_TOKEN is required (Cloudflare API Token) }}"
+          : "${{ secrets.CF_ACCOUNT_ID?CF_ACCOUNT_ID is required (Cloudflare Account ID) }}"
+
+      # Деплой без створення секретів: значення з Dashboard уже доступні воркеру
+      - name: Deploy with Wrangler
+        uses: cloudflare/wrangler-action@v3
         with:
-          node-version: 20
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          command: deploy --name ${{ env.SCRIPT_NAME }}
 
-      - name: Install Wrangler
-        run: npm i -g wrangler@4
+      # (опц.) Дістанемо subdomain та зробимо health-check
+      - name: Install jq (for parsing JSON)
+        run: sudo apt-get update && sudo apt-get install -y jq
 
-      # ВАЖЛИВО: в wrangler.toml ми НЕ дублюємо ці ключі у [vars],
-      # інакше буде 10053 (binding already in use).
-      - name: Put secrets (create or update)
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+      - name: Get workers.dev subdomain
+        id: sub
         run: |
           set -e
-          printf '%s' "$TELEGRAM_BOT_TOKEN" | wrangler secret put TELEGRAM_BOT_TOKEN --name "$SCRIPT_NAME"
-          printf '%s' "$WEBHOOK_SECRET"       | wrangler secret put WEBHOOK_SECRET       --name "$SCRIPT_NAME"
-          printf '%s' "$CLOUDFLARE_API_TOKEN" | wrangler secret put CLOUDFLARE_API_TOKEN --name "$SCRIPT_NAME"
+          resp=$(curl -fsSL \
+            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/subdomain")
+          sub=$(echo "$resp" | jq -r '.result.subdomain')
+          echo "subdomain=$sub" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy to Cloudflare Workers
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: wrangler deploy --name "$SCRIPT_NAME"
-
-      - name: Get CF subdomain
-        id: sub
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      - name: Health check (non-blocking)
         run: |
-          SUBDOMAIN=$(curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/workers/subdomain" \
-            | jq -r '.result.subdomain')
-          echo "val=$SUBDOMAIN" >> $GITHUB_OUTPUT
-
-      - name: Set Telegram webhook
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
-        run: |
-          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
-            -d "url=https://${{ env.SCRIPT_NAME }}.${{ steps.sub.outputs.val }}.workers.dev/webhook" \
-            -d "secret_token=${WEBHOOK_SECRET}" | jq .
+          set -x
+          curl -fsS "https://${{ env.SCRIPT_NAME }}.${{ steps.sub.outputs.subdomain }}.workers.dev/health" || true
