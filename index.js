@@ -1,85 +1,71 @@
-// index.js — Cloudflare Workers (ES Modules)
-
+// index.js — стабільний echo з докладним логуванням
 const TG_BASE = 'https://api.telegram.org';
 
-function json(data, init = 200) {
+function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
-    status: typeof init === 'number' ? init : (init.status ?? 200),
-    headers: { 'content-type': 'application/json; charset=utf-8', ...(init.headers || {}) }
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8' }
   });
 }
 
 async function tgFetch(token, method, body) {
-  const res = await fetch(`${TG_BASE}/bot${token}/${method}`, {
+  const url = `${TG_BASE}/bot${token}/${method}`;
+  const res = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Telegram API ${method} failed: ${res.status} ${text}`);
-  }
-  return res.json();
+  const text = await res.text().catch(() => '');
+  // лог на всяк
+  console.log('Telegram call:', { method, status: res.status, body, resp: text.slice(0, 300) });
+  if (!res.ok) throw new Error(`Telegram ${method} failed: ${res.status} ${text}`);
+  try { return JSON.parse(text); } catch { return { ok: false, raw: text }; }
 }
 
-function isTelegramVerified(request, expectedSecret) {
-  if (!expectedSecret) return true; // дозволимо, якщо секрет не заданий (для локального тесту)
-  const got = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
-  return got && got === expectedSecret;
+function okSecret(req, expected) {
+  if (!expected) return true;
+  const got = req.headers.get('X-Telegram-Bot-Api-Secret-Token');
+  return got && got === expected;
 }
 
-// Проста логіка: відповідаємо на текст "ping" -> "pong", інакше — ехо
 async function handleUpdate(update, env) {
-  const msg = update.message || update.edited_message || update.channel_post;
-  if (!msg || !msg.chat || typeof msg.chat.id !== 'number') return;
+  try {
+    console.log('Update:', JSON.stringify(update).slice(0, 1000));
+    const msg = update.message || update.edited_message || update.channel_post;
+    if (!msg?.chat?.id) { console.log('No chat id'); return; }
 
-  const chatId = msg.chat.id;
-  const text = (msg.text || '').trim();
+    const chatId = msg.chat.id;
+    const text = (msg.text || '').trim();
+    const reply = text?.toLowerCase() === 'ping'
+      ? 'pong'
+      : text ? `Ти написав: ${text}` : 'Привіт! Я на звʼязку ✅';
 
-  let replyText = 'Привіт! Я на звʼязку ✅';
-  if (text.toLowerCase() === 'ping') replyText = 'pong';
-  else if (text) replyText = `Ти написав: ${text}`;
-
-  await tgFetch(env.BOT_TOKEN, 'sendMessage', {
-    chat_id: chatId,
-    text: replyText,
-  });
+    await tgFetch(env.BOT_TOKEN, 'sendMessage', { chat_id: chatId, text: reply });
+  } catch (e) {
+    console.error('handleUpdate error:', e?.stack || String(e));
+  }
 }
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Healthcheck
     if (request.method === 'GET' && url.pathname === '/health') {
       return json({ ok: true, name: env.WORKER_NAME || 'senti-bot-worker' });
     }
 
-    // Webhook endpoint
     if (request.method === 'POST' && url.pathname === '/webhook') {
-      if (!isTelegramVerified(request, env.WEBHOOK_SECRET)) {
+      if (!okSecret(request, env.WEBHOOK_SECRET)) {
+        console.warn('Bad secret header');
         return json({ ok: false, error: 'unauthorized' }, 401);
       }
-
       let update;
-      try {
-        update = await request.json();
-      } catch {
-        return json({ ok: false, error: 'invalid_json' }, 400);
-      }
+      try { update = await request.json(); }
+      catch { return json({ ok: false, error: 'invalid_json' }, 400); }
 
-      // Відповідаємо Telegram миттєво, а роботу виконуємо у фоні
-      ctx.waitUntil(handleUpdate(update, env).catch(err => {
-        // лог у tail
-        console.error('handleUpdate error:', err);
-      }));
-
-      return new Response('OK'); // швидкий 200
-    }
-
-    // Для зручності: показати, що воркер живий
-    if (request.method === 'GET' && url.pathname === '/') {
-      return new Response('Senti bot worker is running. Use /health or POST /webhook.');
+      // миттєво віддаємо 200, роботу — у фон
+      ctx.waitUntil(handleUpdate(update, env));
+      return new Response('OK');
     }
 
     return new Response('Not found', { status: 404 });
