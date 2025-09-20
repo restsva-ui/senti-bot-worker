@@ -11,12 +11,12 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     env:
-      # Wrangler читає account_id і з wrangler.toml, і з ENV.
-      # Даємо через ENV для стабільності CI.
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN:  ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # Заздалегідь задаємо відомі назви, щоб не гадати URL:
+      SCRIPT_NAME:           ${{ secrets.SCRIPT_NAME }}
+      WORKERS_SUBDOMAIN:     ${{ secrets.WORKERS_SUBDOMAIN }}
 
     steps:
       - name: Checkout
@@ -30,11 +30,9 @@ jobs:
       - name: Show Wrangler version
         run: npx wrangler@latest --version
 
-      # 1) Деплой воркера (зчитує все з wrangler.toml)
       - name: Deploy Worker
         run: npx wrangler@latest deploy
 
-      # 2) Апсерт секретів (тільки якщо значення передано; overwrite без питань)
       - name: Upsert Cloudflare Worker secrets
         shell: bash
         env:
@@ -48,25 +46,43 @@ jobs:
               echo "::notice title=Skip::Secret ${key} is empty, skipping"
               return 0
             fi
-            # Подаємо значення через stdin; --yes приглушує підтвердження;
-            # помилки типу "вже існує" не критичні — wrangler перепише.
             printf '%s' "${value}" | npx wrangler@latest secret put "${key}" --yes
             echo "::notice title=Secret::${key} upserted"
           }
           upsert "TELEGRAM_BOT_TOKEN" "${TELEGRAM_BOT_TOKEN:-}"
           upsert "WEBHOOK_SECRET"     "${WEBHOOK_SECRET:-}"
 
-      # 3) Коротка перевірка доступності (опціонально; не валить пайплайн)
-      - name: Smoke check /health
+      # --- опційно: одразу поставити Telegram вебхук і показати його стан
+      - name: Set Telegram webhook (optional but recommended)
+        if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' && secrets.WEBHOOK_SECRET != '' && secrets.WORKERS_SUBDOMAIN != '' && secrets.SCRIPT_NAME != '' }}
         shell: bash
-        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          WEBHOOK_SECRET:     ${{ secrets.WEBHOOK_SECRET }}
+          WORKERS_SUBDOMAIN:  ${{ secrets.WORKERS_SUBDOMAIN }}
+          SCRIPT_NAME:        ${{ secrets.SCRIPT_NAME }}
         run: |
           set -euo pipefail
-          # Спробуємо витягти URL з wrangler output (workers.dev).
-          URL=$(npx wrangler@latest deployments list 2>/dev/null | awk '/https:\/\/.*workers\.dev/{print $1; exit}' || true)
-          if [ -z "${URL:-}" ]; then
-            # fallback: якщо знаємо ім'я (name) з wrangler.toml — заміни нижче на своє
-            URL="https://senti-bot-worker.workers.dev"
-          fi
-          echo "Ping ${URL}/health ..."
-          curl -fsS -m 10 "${URL}/health" || echo "Health endpoint not found (expected 404/200) — ok"
+          URL="https://${SCRIPT_NAME}.${WORKERS_SUBDOMAIN}.workers.dev/webhook"
+          echo "Setting webhook to: ${URL}"
+          curl -fsS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true" >/dev/null
+          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+            -d "url=${URL}" \
+            -d "secret_token=${WEBHOOK_SECRET}"
+
+          echo "--- getWebhookInfo ---"
+          curl -fsS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" | jq .
+
+      # Надійний smoke-check: використовує відомий URL; 404/403 на /health допускаємо
+      - name: Smoke check
+        shell: bash
+        continue-on-error: true
+        env:
+          WORKERS_SUBDOMAIN:  ${{ secrets.WORKERS_SUBDOMAIN }}
+          SCRIPT_NAME:        ${{ secrets.SCRIPT_NAME }}
+        run: |
+          set -euo pipefail
+          URL="https://${SCRIPT_NAME}.${WORKERS_SUBDOMAIN}.workers.dev"
+          echo "Pinging ${URL}/health ..."
+          # будь-який код відповіді виводимо, але не фейлимо job
+          curl -i -m 10 "${URL}/health" || true
