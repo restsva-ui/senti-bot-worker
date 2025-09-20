@@ -5,3 +5,6 @@ workers_dev = true
 
 [vars]
 WORKER_NAME = "senti-bot-worker"
+
+[ai]
+binding = "AI"   # доступно в коді як env.AI
