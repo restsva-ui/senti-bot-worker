@@ -1,16 +1,12 @@
 name = "senti-bot-worker"
-main = "index.mjs"
+main = "index.js"
 
 # Твій акаунт
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
 
-# Сумісність (поточна дата ок)
+# Сумісність з новим Wrangler v4
 compatibility_date = "2025-09-19"
-# Замість застарілого node_compact -> новий прапор
 compatibility_flags = ["nodejs_compat"]
 
 # Публікуємо на workers.dev
 workers_dev = true
-
-# УВАГА: НЕ дублюємо назви секретів у [vars], щоб не ловити 10053.
-# [vars] залишаємо порожнім або взагалі без секції.
