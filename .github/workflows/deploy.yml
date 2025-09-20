@@ -5,35 +5,67 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+env:
+  # має збігатися з name у wrangler.toml
+  SCRIPT_NAME: senti-bot-worker
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    env:
-      SCRIPT_NAME: senti-bot-worker
-      CF_ACCOUNT_ID: 2cf6e316af8623546c95c0354bc3aa00
-
-      # беремо значення з GitHub Secrets репозиторію
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      WEBHOOK_SECRET:     ${{ secrets.WEBHOOK_SECRET }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Node & Wrangler
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-      - run: npm i -g wrangler@4.38.0
+          node-version: '20'
 
-      - name: Create CF Secrets (first run or overwrite)
-        shell: bash
+      - name: Install Wrangler & jq
         run: |
-          set -e
-          printf '%s' "$TELEGRAM_BOT_TOKEN" | wrangler secret put TELEGRAM_BOT_TOKEN --name "$SCRIPT_NAME"
-          printf '%s' "$WEBHOOK_SECRET"     | wrangler secret put WEBHOOK_SECRET     --name "$SCRIPT_NAME"
-          printf '%s' "$CLOUDFLARE_API_TOKEN" | wrangler secret put CLOUDFLARE_API_TOKEN --name "$SCRIPT_NAME"
+          npm i -g wrangler@4
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      # ⚠️ Ідемпотентне створення/оновлення секретів через CF API (без помилки 10053)
+      - name: Upsert Cloudflare Worker secrets
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          upsert() {
+            KEY="$1"; VALUE="${2-}"
+            if [ -z "${VALUE}" ]; then
+              echo "::notice title=Skip::$KEY is empty, skipping"
+              return 0
+            fi
+            echo "Upsert secret $KEY…"
+            curl -fsS -X PUT \
+              "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/workers/scripts/${SCRIPT_NAME}/secrets" \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data "$(jq -n --arg name "$KEY" --arg text "$VALUE" '{name:$name, text:$text, type:"secret_text"}')"
+            echo
+          }
+          upsert TELEGRAM_BOT_TOKEN "${TELEGRAM_BOT_TOKEN:-}"
+          upsert WEBHOOK_SECRET      "${WEBHOOK_SECRET:-}"
 
       - name: Deploy to Cloudflare Workers
-        run: wrangler deploy --name "$SCRIPT_NAME"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          wrangler deploy --minify
+
+      - name: Summary
+        run: |
+          echo "✅ Deployed $SCRIPT_NAME" >> $GITHUB_STEP_SUMMARY
+          echo "- Secrets upserted: TELEGRAM_BOT_TOKEN, WEBHOOK_SECRET" >> $GITHUB_STEP_SUMMARY
+          echo "- Set Telegram webhook once (manually) to your workers.dev URL with secret_token" >> $GITHUB_STEP_SUMMARY
