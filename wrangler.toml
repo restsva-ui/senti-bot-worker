@@ -1,12 +1,11 @@
-
 name = "senti-bot-worker"
 main = "index.js"
 compatibility_date = "2024-11-21"
 
-# KV
+# KV namespace
 [[kv_namespaces]]
 binding = "AIMAGIC_SESS"
-id = "aimagic-sess"           # або реальний existing_id із Cloudflare Dashboard
+id = "2cbb2a8da8d547358d577524cf3eb70a"
 
 # Workers AI
 [ai]
@@ -15,6 +14,3 @@ binding = "AI"
 [vars]
 WEBHOOK_SECRET = "senti1984"
 DEFAULT_FIAT = "UAH"
-
-# Telegram token тримай як secret (не у vars):
-# wrangler secret put TELEGRAM_TOKEN
