@@ -1,5 +1,5 @@
-// index.js — Senti v4.0 (Cloudflare Workers, модульний, 6 частин)
-// Очікувані bindings у wrangler.toml:
+// index.js — Senti v4.1 (Cloudflare Workers, модульний)
+// Bindings у wrangler.toml:
 // [[kv_namespaces]] binding = "AIMAGIC_SESS" ; id="2cbb2a8da8d547358d577524cf3eb70a"
 // [ai] binding = "AI"
 // [vars] WEBHOOK_SECRET="senti1984", DEFAULT_FIAT="UAH"
@@ -17,7 +17,7 @@ import {
   setChatLang,
   extractGenderTone,
   parseNumbersAndCurrency,
-  buildGreet, // NEW
+  buildGreet, // використовуємо для /start та звичайного привітання
 } from "./src/lang.js";
 
 // ===== Telegram helpers =====
@@ -57,17 +57,20 @@ async function tgReplyMediaHint(env, chat_id, langCode) {
 
 // ===== KV helpers =====
 const kvKey = (chatId, key) => `chat:${chatId}:${key}`;
+
 async function getDefaultFiat(env, chatId) {
   const v = await env.AIMAGIC_SESS.get(kvKey(chatId, "default_fiat"));
   if (v) return v;
   return env.DEFAULT_FIAT || "UAH";
 }
+
 async function setDefaultFiat(env, chatId, code) {
   await env.AIMAGIC_SESS.put(kvKey(chatId, "default_fiat"), code, { expirationTtl: 90 * 24 * 3600 });
 }
 
 // ===== Command handlers =====
 const CMD_SET_FIAT = new Set(["/uah", "/usd", "/eur"]);
+
 async function handleSetFiat(env, chatId, cmd) {
   const code = cmd.replace("/", "").toUpperCase();
   const map = { UAH: "UAH", USD: "USD", EUR: "EUR" };
@@ -105,6 +108,7 @@ async function dispatchMessage(env, update) {
   const isAnimation = Boolean(msg.animation);
   const hasMedia = isPhoto || isSticker || isAnimation;
 
+  // Мова
   const lastLang = (await getChatLang(env.AIMAGIC_SESS, chatId)) || "uk";
   const detectedLang = text ? await detectLang(text) : lastLang;
   const replyLang = detectedLang || lastLang;
@@ -112,7 +116,7 @@ async function dispatchMessage(env, update) {
     await setChatLang(env.AIMAGIC_SESS, chatId, replyLang);
   }
 
-  const genderTone = extractGenderTone(text);
+  const genderTone = extractGenderTone(text || "");
 
   // Команди /uah /usd /eur
   if (text && CMD_SET_FIAT.has(text.trim().toLowerCase())) {
@@ -120,9 +124,16 @@ async function dispatchMessage(env, update) {
     return;
   }
 
-  // ===== Greeting (живе, одноразове) =====
+  // ===== Greeting logic =====
+  // Перше знайомство: /start (в т.ч. з параметром /start xyz)
+  if (text && /^\/start\b/i.test(text.trim())) {
+    const greet = buildGreet({ name: userName, lang: replyLang, genderTone, firstTime: true });
+    await tgSendMessage(env, chatId, greet);
+    return;
+  }
+  // Звичайне привітання
   if (text && /\b(привіт|привет|hello|hi|hola|salut|hallo)\b/i.test(text)) {
-    const greet = buildGreet({ name: userName, lang: replyLang, genderTone });
+    const greet = buildGreet({ name: userName, lang: replyLang, genderTone, firstTime: false });
     await tgSendMessage(env, chatId, greet);
     return;
   }
@@ -137,7 +148,7 @@ async function dispatchMessage(env, update) {
     return;
   }
 
-  // 2) FX (fiat)
+  // 2) FX (fiat) — без "(ER)" у відповіді; "(НБУ/NBU)" лише для NBU
   if (text && /\b(курс|nbu|нбу|usd|eur|uah|\$|€|грн|долар|євро|гривн)/i.test(text)) {
     const defaultFiat = await getDefaultFiat(env, chatId);
     const res = await handleFX(env, { text, parsed, defaultFiat, replyLang });
@@ -176,7 +187,7 @@ async function dispatchMessage(env, update) {
     }
   }
 
-  // 6) Media-компліменти/стікери/гіф (без повторного привітання)
+  // 6) Media-компліменти/стікери/гіф (без дублю привітання)
   if (text && /(емодзі|emoji|стікер|стикер|gif|гіф|настрій|весело|сумно|люблю|клас)/i.test(text)) {
     const res = await handleMedia(env, { chatId, replyLang, mode: "friendly" });
     if (res?.text) await tgSendMessage(env, chatId, res.text);
@@ -232,7 +243,7 @@ export default {
 
       // Healthcheck
       if (request.method === "GET" && url.pathname === "/") {
-        return new Response("Senti v4.0 up", { status: 200 });
+        return new Response("Senti v4.1 up", { status: 200 });
       }
 
       // Webhook endpoint: /<WEBHOOK_SECRET> == /senti1984
