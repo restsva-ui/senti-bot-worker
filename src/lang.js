@@ -9,10 +9,10 @@ export async function setChatLang(kv, chatId, langCode) {
   try { await kv.put(kvKey(chatId, "lang"), langCode, { expirationTtl: 90 * 24 * 3600 }); } catch {}
 }
 
-// ===== Lightweight language detection (rule-based; fast & predictable) =====
+// ===== Lightweight language detection =====
 const langHints = {
-  uk: /[іїєґІЇЄҐ]|(привіт|будь ласка|будь-ласка|дякую|сьогодні|грн|долар|євро)/i,
-  ru: /[ёЁъЪыЫэЭ]|(привет|пожалуйста|спасибо|сегодня|руб|доллар|евро)/i,
+  uk: /[іїєґІЇЄҐ]|(привіт|будь ласка|дякую|сьогодні|грн|долар|євро)/i,
+  ru: /[ёЪЪыЫэЭ]|(привет|пожалуйста|спасибо|сегодня|руб|доллар|евро)/i,
   de: /\b(und|oder|nicht|heute|morgen|euro|danke|bitte)\b/i,
   fr: /\b(et|ou|pas|aujourd’hui|demain|merci|s’il vous plaît|euro)\b/i,
   en: /\b(and|or|please|thanks|today|tomorrow|usd|euro|dollar)\b/i,
@@ -25,25 +25,36 @@ export async function detectLang(text) {
   if (langHints.de.test(t)) return "de";
   if (langHints.fr.test(t)) return "fr";
   if (langHints.en.test(t)) return "en";
-  // fallback by alphabet coverage
   if (/[A-Za-z]/.test(t) && !/[А-Яа-яІЇЄҐЁЪЫЭ]/.test(t)) return "en";
   return "uk";
 }
 
-// ===== Persona tone (name + gender style) =====
+// ===== Persona tone =====
 export function ensurePersonaTone({ name, lang, genderTone }) {
-  const nm = (name || "").toString().trim();
-  const call =
-    genderTone === "fem" ? (lang === "uk" ? "подруго" : lang === "ru" ? "подруга" : "sis") :
-    genderTone === "masc" ? (lang === "uk" ? "друже" : lang === "ru" ? "друг" : "bro") :
-    (lang === "uk" ? "друже" : lang === "ru" ? "друг" : "friend");
-  if (!nm) return call;
-  // personalized: "Vitaliy" etc.
-  return `${nm}`;
+  const first = (name || "").toString().trim();
+  if (first) return first;
+  if (genderTone === "fem") return lang==="uk"?"подруго":lang==="ru"?"подруга":"sis";
+  if (genderTone === "masc") return lang==="uk"?"друже":lang==="ru"?"друг":"bro";
+  return lang==="uk"?"друже":lang==="ru"?"друг":"friend";
+}
+
+// Живе привітання — без дубляжу звертання
+export function buildGreet({ name, lang, genderTone }) {
+  const first = (name || "").toString().trim();
+  const call = first
+    ? first
+    : genderTone === "fem" ? (lang==="uk"?"подруго":lang==="ru"?"подруга":"sis")
+    : genderTone === "masc" ? (lang==="uk"?"друже":lang==="ru"?"друг":"bro")
+    : (lang==="uk"?"друже":lang==="ru"?"друг":"friend");
+  const emoji = ["😉","😊","🤝","✨","🚀"][Math.floor(Math.random()*5)];
+  if (lang === "uk") return `${call}, привіт ${emoji} Я Senti. Напиши кілька слів — допоможу.`;
+  if (lang === "ru") return `${call}, привет ${emoji} Я Senti. Напиши пару слов — помогу.`;
+  if (lang === "de") return `${call}, hallo ${emoji} Ich bin Senti. Schreib kurz, wobei helfen.`;
+  if (lang === "fr") return `${call}, salut ${emoji} Je suis Senti. Dis-moi en quelques mots.`;
+  return `${call}, hi ${emoji} I'm Senti — tell me in a few words and I'll help.`;
 }
 
 // ===== Gender tone extractor =====
-// тригери: "друже/подруго", "bro/sis", "бро", явні "я дівчина/хлопець"
 export function extractGenderTone(text) {
   const t = (text || "").toLowerCase();
   if (!t) return "neutral";
@@ -53,11 +64,9 @@ export function extractGenderTone(text) {
 }
 
 // ===== Numbers & currency NER =====
-// Повертає { amount, baseCurrency, quoteCurrency }
-// Розпізнає: "25$ в грн", "5 доларів у гривні", "курс євро", "1 євро в долари", тощо.
 const CURR_MAP = new Map([
   ["uah","UAH"], ["грн","UAH"], ["гривн","UAH"], ["гривня","UAH"], ["гривні","UAH"], ["₴","UAH"],
-  ["usd","USD"], ["$","USD"], ["долар","USD"], ["доларів","USD"], ["долары","USD"], ["доллар","USD"], ["бакс","USD"], ["бакси","USD"],
+  ["usd","USD"], ["$","USD"], ["долар","USD"], ["доларів","USD"], ["доллары","USD"], ["доллар","USD"], ["бакс","USD"], ["бакси","USD"],
   ["eur","EUR"], ["€","EUR"], ["євро","EUR"], ["евро","EUR"],
 ]);
 function normCurrencyToken(tok) {
@@ -81,58 +90,38 @@ function findCurrencies(text) {
 
 export function parseNumbersAndCurrency(text) {
   const out = { amount: null, baseCurrency: null, quoteCurrency: null };
-
   if (!text) return out;
   const t = text.replace(/\s+/g, " ").trim();
 
-  // 1) amount: catch "25$", "25 $", "0.5 eur", "100,25"
   const mAmtCompact = t.match(/(\d+(?:[.,]\d+)?)(?=\s*[€$₴]|(?:\s|$))/);
   const mAmtLoose = t.match(/(\d+(?:[.,]\d+)?)/);
   let amount = null;
   if (mAmtCompact) amount = Number(mAmtCompact[1].replace(",", "."));
   else if (mAmtLoose) amount = Number(mAmtLoose[1].replace(",", "."));
-  out.amount = amount ?? null;
+  out.amount = amount ?? 1;
 
-  // 2) currencies & direction
   const curList = findCurrencies(t);
-  // direct symbol after number defines base: "25$" → base USD
   let base = null, quote = null;
 
-  // Explicit pattern: "<amt> <base> (в|у|to|in) <quote>"
   const dir = t.match(/(?:в|у|to|in)\s+([A-Za-zА-Яа-яІЇЄҐёЁ€$₴]+)\b/i);
   if (dir && curList.length) {
-    // what is the 'quote' token?
     const qTok = dir[1].replace(/[^\p{L}€$₴]/gu, "");
     quote = normCurrencyToken(qTok);
   }
 
-  // token immediately following amount may hint base (e.g., "25$" or "25 usd")
   const afterAmt = t.match(/(\d+(?:[.,]\d+)?)[\s]*([€$₴]|usd|eur|uah|грн|гривн\w*|долар\w*|доллар\w*|євро|евро)/i);
-  if (afterAmt) {
-    base = normCurrencyToken(afterAmt[2]);
-  }
+  if (afterAmt) base = normCurrencyToken(afterAmt[2]);
 
-  // if still unknown, pick from detected list
   if (!base && curList.length) base = curList[0];
-  if (!quote && curList.length > 1) {
-    // choose a currency different from base as quote
-    quote = curList.find(c => c !== base) || null;
-  }
+  if (!quote && curList.length > 1) quote = curList.find(c => c !== base) || null;
 
-  // Defaults & special phrases "курс гривні", etc.
   if (!base && /курс\s+(гривн|гривні|uah|грн)/i.test(t)) base = "UAH";
   if (!base && /курс\s+(долар|usd|\$)/i.test(t)) base = "USD";
   if (!base && /курс\s+(євро|eur|€)/i.test(t)) base = "EUR";
 
-  // If only one side known → use other as default (UAH by defaultFiat in FX; here choose UAH as common target)
   if (base && !quote) quote = base === "UAH" ? "USD" : "UAH";
 
-  // Normalize result
   out.baseCurrency = base || null;
   out.quoteCurrency = quote || null;
-
-  // Amount fallback
-  if (out.amount == null) out.amount = 1;
-
   return out;
 }
