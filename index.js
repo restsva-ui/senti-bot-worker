@@ -1,3 +1,15 @@
+// /start → яскраве перше вітання
+if (text && /^\/start\b/i.test(text.trim())) {
+  const greet = buildGreet({ name: userName, lang: replyLang, genderTone, firstTime: true });
+  await tgSendMessage(env, chatId, greet);
+  return;
+}
+// звичайне привітання
+if (text && /\b(привіт|привет|hello|hi|hola|salut|hallo)\b/i.test(text)) {
+  const greet = buildGreet({ name: userName, lang: replyLang, genderTone, firstTime: false });
+  await tgSendMessage(env, chatId, greet);
+  return;
+}
 // index.js — Senti v4.1 (Cloudflare Workers, модульний)
 // Bindings у wrangler.toml:
 // [[kv_namespaces]] binding = "AIMAGIC_SESS" ; id="2cbb2a8da8d547358d577524cf3eb70a"
