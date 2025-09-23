@@ -6,7 +6,20 @@ minify = true
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
 
 kv_namespaces = [
-  { binding = "AIMAGIC_SESS", id = "2cbb2a8da8d547358d577524cf3eb70a" }
+  { binding = "AIMAGIC_SESS", id = "name = "senti-bot-worker"
+main = "index.js"
+compatibility_date = "2025-09-23"
+workers_dev = true
+minify = true
+account_id = "2cf6e316af8623546c95c0354bc3aa00"
+
+# ID підставиться автоматом із workflow
+kv_namespaces = [
+  { binding = "AIMAGIC_SESS", id = "KV_ID_WILL_BE_SET" }
+]
+
+[ai]
+binding = "AI"" }
 ]
 
 [ai]
