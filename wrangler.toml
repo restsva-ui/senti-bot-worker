@@ -10,3 +10,9 @@ kv_namespaces = [
 
 [ai]
 binding = "AI"
+
+# ✅ Увімкнені логи Worker'а
+[observability.logs]
+enabled = true
+# опціонально: 1.0 = 100% семплінгу (як у дашборді)
+sampling_rate = 1.0
