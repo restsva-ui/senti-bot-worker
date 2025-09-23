@@ -19,8 +19,15 @@ async function tg(apiBase, method, payload) {
 }
 function greet(name) { const who = name ? `, ${name}` : ""; return `Привіт${who}! ✨ Я вже чекав нашої зустрічі!`; }
 
-// === LLM providers ===
-// 1) Gemini (AI Studio) – безкоштовний tier
+// === KV helpers ===
+async function kvGet(env, key) {
+  return await env.AIMAGIC_SESS.get(key);
+}
+async function kvPut(env, key, value, ttl = 1800) {
+  return await env.AIMAGIC_SESS.put(key, value, { expirationTtl: ttl });
+}
+
+// === LLM providers (мінімум Gemini як приклад) ===
 async function llmGemini(apiKey, userText, sys = "Be helpful. Reply in user's language.") {
   const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + apiKey;
   const resp = await fetch(url, {
@@ -35,83 +42,6 @@ async function llmGemini(apiKey, userText, sys = "Be helpful. Reply in user's la
   const data = await resp.json();
   if (!resp.ok) throw new Error(`Gemini ${resp.status}: ${JSON.stringify(data)}`);
   return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-}
-
-// 2) Groq – швидко і щедрий безкоштовний доступ
-async function llmGroq(apiKey, userText, model = "llama-3.1-8b-instant", sys = "Be helpful. Reply in user's language.") {
-  const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: { "content-type": "application/json", "authorization": `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model,
-      temperature: 0.5,
-      messages: [
-        { role: "system", content: sys },
-        { role: "user", content: userText }
-      ]
-    }),
-  });
-  const data = await resp.json();
-  if (!resp.ok) throw new Error(`Groq ${resp.status}: ${JSON.stringify(data)}`);
-  return data?.choices?.[0]?.message?.content?.trim() || "";
-}
-
-// 3) Cloudflare Workers AI – fallback (binding AI)
-async function llmCF(env, userText, model = "@cf/meta/llama-3.1-8b-instruct", sys = "Be helpful. Reply in user's language.") {
-  // Workers AI: env.AI.run(model, { messages: [...] })
-  const res = await env.AI.run(model, {
-    messages: [
-      { role: "system", content: sys },
-      { role: "user", content: userText }
-    ],
-    temperature: 0.5
-  });
-  const out = res?.response || res?.result || "";
-  if (!out) throw new Error("CF AI empty response");
-  return String(out).trim();
-}
-
-// === router: вибір провайдера + фейловер ===
-function isHardTask(text) {
-  // дуже просте правило: довгі/складні запити — «hard»
-  const len = (text || "").split(/\s+/).length;
-  return len > 120 || /код|code|regex|оптимізуй|оптимизируй|архітектур|architecture|рефактор/i.test(text);
-}
-
-async function aiReply(env, userText) {
-  const sys = "Відповідай стисло, по суті, мовою користувача. Якщо це код — додай короткі коментарі.";
-  const wantHard = isHardTask(userText);
-
-  // Порядок провайдерів можна керувати через env.AI_PROVIDERS="gemini,groq,cfai"
-  const order = (env.AI_PROVIDERS || "gemini,groq,cfai")
-    .split(",")
-    .map(s => s.trim().toLowerCase())
-    .filter(Boolean);
-
-  const tries = [];
-  for (const p of order) {
-    try {
-      if (p === "gemini" && env.GEMINI_API_KEY) {
-        return await llmGemini(env.GEMINI_API_KEY, userText, sys);
-      }
-      if (p === "groq" && env.GROQ_API_KEY) {
-        // для «важких» — візьмемо більшу/точнішу модель
-        const model = wantHard ? "gemma2-9b-it" : "llama-3.1-8b-instant";
-        return await llmGroq(env.GROQ_API_KEY, userText, model, sys);
-      }
-      if (p === "cfai" && env.AI) {
-        const model = wantHard ? "@cf/meta/llama-3.1-70b-instruct" : "@cf/meta/llama-3.1-8b-instruct";
-        return await llmCF(env, userText, model, sys);
-      }
-      // якщо ключа/байндинга нема — пропускаємо
-      tries.push(`${p}: skipped`);
-    } catch (e) {
-      tries.push(`${p}: ${e.message || e}`);
-      continue; // фейловер до наступного
-    }
-  }
-  // якщо нічого не вдалось — повертаємо діагностику користувачу
-  return `На жаль, зараз моделі недоступні.\n\nСпробував: ${tries.join(" | ")}`;
 }
 
 // === main worker ===
@@ -154,6 +84,11 @@ export default {
       const chatId = msg.chat?.id;
       const textIn = (msg.text || "").trim();
 
+      // збережемо мову користувача
+      if (msg.from?.language_code) {
+        await kvPut(env, `lang:${chatId}`, msg.from.language_code, 3600);
+      }
+
       if (textIn === "/start") {
         const name = msg.from?.first_name || "";
         await tg(API, "sendMessage", { chat_id: chatId, text: greet(name) });
@@ -168,7 +103,24 @@ export default {
       }
 
       if (textIn) {
-        const reply = await aiReply(env, textIn);
+        // спробуємо витягти з KV кешовану відповідь
+        const cacheKey = `resp:${chatId}:${textIn}`;
+        let reply = await kvGet(env, cacheKey);
+
+        if (!reply) {
+          try {
+            if (env.GEMINI_API_KEY) {
+              reply = await llmGemini(env.GEMINI_API_KEY, textIn);
+            } else {
+              reply = `Ехо: ${textIn}`;
+            }
+            // кешуємо на 2 хв
+            await kvPut(env, cacheKey, reply, 120);
+          } catch (e) {
+            reply = `Помилка AI: ${e.message || e}`;
+          }
+        }
+
         await tg(API, "sendMessage", { chat_id: chatId, text: reply });
         return ok();
       }
