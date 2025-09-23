@@ -1,14 +1,16 @@
-name: Deploy to Cloudflare Workers
+name: Deploy to Cloudflare Worker
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -17,22 +19,29 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
 
-      - name: Install Wrangler
-        run: npm install -g wrangler@latest
+      - name: Install Wrangler (v4)
+        run: npm i -g wrangler@4
 
+      # Секрети мають бути додані в GitHub → Settings → Secrets and variables → Actions:
+      #   CLOUDFLARE_API_TOKEN  (з правами: Workers Scripts (Edit), Workers KV (Edit), Workers AI (Edit))
+      #   CF_ACCOUNT_ID         (або CLOUDFLARE_ACCOUNT_ID) — твій акаунт ID
+      #   TELEGRAM_TOKEN
+      #   WEBHOOK_SECRET
       - name: Upload Worker secrets
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          echo "$TELEGRAM_TOKEN" | wrangler secret put TELEGRAM_TOKEN --config wrangler.toml
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
-          TELEGRAM_TOKEN:       ${{ secrets.TELEGRAM_TOKEN }}
+          echo "$TELEGRAM_TOKEN"  | wrangler secret put TELEGRAM_TOKEN  --config wrangler.toml
+          echo "$WEBHOOK_SECRET"  | wrangler secret put WEBHOOK_SECRET  --config wrangler.toml
 
       - name: Deploy Worker
-        run: wrangler deploy --config wrangler.toml --minify
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: wrangler deploy --config wrangler.toml --minify
