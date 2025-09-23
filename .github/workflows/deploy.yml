@@ -10,16 +10,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Publish with Wrangler
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           command: deploy --verbose
-          # Тут ПИШЕМО ЛИШЕ НАЗВИ секретів, по одному в рядок
-          secrets: |
-            TELEGRAM_TOKEN
-            WEBHOOK_SECRET
-        # А тут — ПРИВ’ЯЗУЄМО значення GitHub Secrets до env
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
