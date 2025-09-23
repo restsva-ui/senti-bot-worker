@@ -1,7 +1,3 @@
-/**
- * Telegram → Cloudflare Worker
- * Очікує секрети: TELEGRAM_TOKEN, WEBHOOK_SECRET
- */
 const json = (obj, init = {}) =>
   new Response(JSON.stringify(obj), {
     headers: { "content-type": "application/json;charset=utf-8" },
@@ -33,10 +29,10 @@ function greet(name) {
 }
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Health-check
+    // Простий healthcheck
     if (request.method === "GET" && url.pathname === "/") return ok();
 
     const BOT_TOKEN = env.TELEGRAM_TOKEN;
@@ -45,11 +41,9 @@ export default {
     if (!WEBHOOK_SECRET) return bad(500, "WEBHOOK_SECRET is missing");
     const API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-    // Установка webhook (ручка: GET /setwebhook?secret=... )
+    // Ручне встановлення вебхука: /setwebhook?secret=...
     if (request.method === "GET" && url.pathname === "/setwebhook") {
-      if (url.searchParams.get("secret") !== WEBHOOK_SECRET)
-        return bad(403, "forbidden");
-
+      if (url.searchParams.get("secret") !== WEBHOOK_SECRET) return bad(403, "forbidden");
       const hookUrl = `${url.origin}/webhook`;
       const res = await tg(API, "setWebhook", {
         url: hookUrl,
@@ -57,13 +51,11 @@ export default {
         allowed_updates: ["message"],
         max_connections: 40,
       });
-
       return json({ status: "ok", set_to: hookUrl, tg: res });
     }
 
-    // Вебхук від Telegram
+    // Вебхук приймає апдейти від Telegram
     if (request.method === "POST" && url.pathname === "/webhook") {
-      // Перевірка секретного заголовка від Telegram
       const got = request.headers.get("x-telegram-bot-api-secret-token");
       if (got !== WEBHOOK_SECRET) return bad(403, "forbidden");
 
@@ -71,40 +63,28 @@ export default {
       if (!update) return bad(400, "no update");
 
       const msg = update.message;
-      if (!msg) return ok(); // ігноруємо не-повідомлення
+      if (!msg) return ok();
 
       const chatId = msg.chat?.id;
       const textIn = (msg.text || "").trim();
 
-      // Обробка простих команд
       if (textIn === "/start") {
         const name = msg.from?.first_name || "";
-        await tg(API, "sendMessage", {
-          chat_id: chatId,
-          text: greet(name),
-        });
+        await tg(API, "sendMessage", { chat_id: chatId, text: greet(name) });
         return ok();
       }
 
       if (textIn === "/help") {
         await tg(API, "sendMessage", {
           chat_id: chatId,
-          text:
-            "Команди:\n" +
-            "/start — вітання\n" +
-            "/help — допомога",
+          text: "Команди:\n/start — вітання\n/help — допомога",
         });
         return ok();
       }
 
-      // За замовчуванням — ехо-відповідь
       if (textIn) {
-        await tg(API, "sendMessage", {
-          chat_id: chatId,
-          text: textIn,
-        });
+        await tg(API, "sendMessage", { chat_id: chatId, text: textIn });
       }
-
       return ok();
     }
 
