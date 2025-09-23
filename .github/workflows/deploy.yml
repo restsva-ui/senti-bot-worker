@@ -17,6 +17,6 @@ jobs:
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           command: deploy
           secrets: |
-            TELEGRAM_TOKEN
-            WEBHOOK_SECRET
-            DEFAULT_FIAT
+            TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}
+            WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}
+            DEFAULT_FIAT=${{ secrets.DEFAULT_FIAT }}
