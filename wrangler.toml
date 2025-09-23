@@ -1,12 +1,12 @@
 name = "senti-bot-worker"
-main = "index.js"                 # бо index.js у корені репо
+main = "index.js"                 # індекс у корені
 compatibility_date = "2025-09-23"
 workers_dev = true
 minify = true
-account_id = "2cf6e316af8623546c95c0354bc3aa00" 
+account_id = "2cf6e316af8623546c95c0354bc3aa00"  # твій CF Account ID
+
 kv_namespaces = [
-  # !!! binding має бути саме AIMAGIC_SESS (так очікує код)
-  { binding = "AIMAGIC_SESS", id = "2cbb2a8da8d547358d577524cf3eb70a" }
+  { binding = "AIMAGIC_SESS", id = "2cbb2a8da8d547358d577524cf3eb70a" }  # реальний KV ID
 ]
 
 [ai]
