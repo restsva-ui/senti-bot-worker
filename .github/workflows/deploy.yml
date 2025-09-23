@@ -29,11 +29,20 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          echo "$TELEGRAM_TOKEN"  | wrangler secret put TELEGRAM_TOKEN  --config wrangler.toml
-          echo "$WEBHOOK_SECRET"  | wrangler secret put WEBHOOK_SECRET  --config wrangler.toml
+          echo "$TELEGRAM_TOKEN" | wrangler secret put TELEGRAM_TOKEN --config wrangler.toml
+          echo "$WEBHOOK_SECRET" | wrangler secret put WEBHOOK_SECRET --config wrangler.toml
 
       - name: Deploy Worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: wrangler deploy --config wrangler.toml --minify
+
+      # 🔗 Автовиставлення вебхука після успішного деплою
+      - name: Set Telegram webhook
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -fsS "https://senti-bot-worker.restsva.workers.dev/setwebhook?secret=${WEBHOOK_SECRET}"
+          echo "Webhook set successfully."
