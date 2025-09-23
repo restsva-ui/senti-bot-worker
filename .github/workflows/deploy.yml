@@ -1,5 +1,4 @@
 name: Deploy Cloudflare Worker
-
 on:
   push:
     branches: [ main ]
@@ -15,8 +14,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          command: deploy
+          command: deploy --verbose
           secrets: |
             TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}
             WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}
-            DEFAULT_FIAT=${{ secrets.DEFAULT_FIAT }}
