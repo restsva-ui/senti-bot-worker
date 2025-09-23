@@ -6,21 +6,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
 
-      - name: Install Wrangler v4
-        run: npm i -g name: Deploy Cloudflare Worker
-on:
-  push:
-    branches: [ main ]
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -30,36 +16,17 @@ jobs:
       - name: Install Wrangler v4
         run: npm i -g wrangler@4
 
-      - name: Auth check (whoami)
-        run: |
-          wrangler --version
-          wrangler whoami
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-
-      - name: Ensure KV binding id is visible
-        run: |
-          wrangler kv namespace list | tee kv.json
-          echo "Очікуємо KV id: 2cbb2a8da8d547358d577524cf3eb70a"
-          grep -q "2cbb2a8da8d547358d577524cf3eb70a" kv.json && echo "KV OK" || (echo "❌ У цьому акаунті такого KV немає"; exit 1)
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-
-      - name: Deploy
-        run: wrangler deploy --config wrangler.toml --minify --verbose
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}4
+      - name: Install jq (JSON CLI)
+        run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Auth check
         run: |
           wrangler --version
-          echo "CF_ACCOUNT_ID(secret)=${CF_ACCOUNT_ID}"
           wrangler whoami
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
 
-      # 1) Знаходимо або створюємо KV namespace AIMAGIC_SESS у цьому ж акаунті
+      # Знайти або створити KV AIMAGIC_SESS у поточному акаунті
       - name: Ensure KV namespace AIMAGIC_SESS
         run: |
           set -e
@@ -75,24 +42,13 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
-      # 2) Патчимо wrangler.toml на правильний KV id
+      # Прописати правильний KV id у wrangler.toml
       - name: Patch wrangler.toml with KV_ID
         run: |
           sed -i -E 's|(binding\s*=\s*"AIMAGIC_SESS",\s*id\s*=\s*")[^"]+(")|\1'${KV_ID}'\2|' wrangler.toml
           echo "----- wrangler.toml -----"
           cat wrangler.toml
 
-      # 3) Заливаємо секрети у воркер (з GitHub Secrets)
-      - name: Put worker secrets
-        run: |
-          printf "%s" "${TELEGRAM_TOKEN}" | wrangler secret put TELEGRAM_TOKEN --quiet --yes
-          printf "%s" "${WEBHOOK_SECRET}" | wrangler secret put WEBHOOK_SECRET --quiet --yes
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          TELEGRAM_TOKEN:       ${{ secrets.TELEGRAM_TOKEN }}
-          WEBHOOK_SECRET:       ${{ secrets.WEBHOOK_SECRET }}
-
-      # 4) Деплой
       - name: Deploy
         run: wrangler deploy --config wrangler.toml --minify --verbose
         env:
