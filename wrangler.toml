@@ -1,11 +1,12 @@
 name = "senti-bot-worker"
-main = "index.js"                 # файл індексу в корені
+main = "index.js"
 compatibility_date = "2025-09-23"
 workers_dev = true
 minify = true
+account_id = "2cf6e316af8623546c95c0354bc3aa00"       # ← встав сюди той самий ID
 
 kv_namespaces = [
-  { binding = "AIMAGIC_SESS", id = "2cbb2a8da8d547358d577524cf3eb70a" }  # твій KV id
+  { binding = "AIMAGIC_SESS", id = "2cbb2a8da8d547358d577524cf3eb70a" }
 ]
 
 [ai]
