@@ -1,4 +1,4 @@
-// index.js — ES Module, без addEventListener
+// index.js — ES Module
 
 const TG_API = (token, method, body) =>
   fetch(`https://api.telegram.org/bot${token}/${method}`, {
