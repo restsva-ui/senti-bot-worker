@@ -1,342 +1,384 @@
-/**
- * Senti Telegram bot on Cloudflare Workers
- * - AI provider routing via env.AI_PROVIDERS = "text:gemini,deepseek;vision:gemini"
- * - Fallback chain (first success wins)
- * - Vision (photo) via Gemini 1.5 Flash (inline base64)
- * - Webhook secret check
- * - Typing indicator while thinking
- */
+// index.js — Senti (Cloudflare Worker + Telegram)
+
+// ====== Конфіг за замовчуванням та утиліти ======
+
+const DEFAULTS = {
+  SYSTEM_STYLE: `Ти — Senti: доброзичливий, лаконічний асистент.
+Пиши простою мовою, без води. Коли доречно — давай короткі буліти.
+Якщо є фото — спочатку коротко розкажи "що на зображенні", потім дай корисні висновки.`,
+  TIMEOUT_MS: 55000, // тримаємо нижче за 60с таймаут CF
+};
+
+function json(data, status = 200, extra = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8", ...extra },
+  });
+}
+
+function text(body = "ok", status = 200, extra = {}) {
+  return new Response(body, { status, headers: { "content-type": "text/plain", ...extra } });
+}
+
+function isCommand(msg, name) {
+  if (!msg?.text) return false;
+  const t = msg.text.trim();
+  return t === `/${name}` || t.startsWith(`/${name} `);
+}
+
+function extractArg(msg, name) {
+  if (!msg?.text) return "";
+  return msg.text.replace(new RegExp(`^/${name}\\s*`), "").trim();
+}
+
+// Короткий "таєпінг"/"завантаження" індикатор
+async function tgAction(env, chatId, action) {
+  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendChatAction`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, action }),
+  });
+}
+
+// Відправка тексту
+async function tgSend(env, chatId, text, replyTo) {
+  return fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      reply_to_message_id: replyTo,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    }),
+  });
+}
+
+// Редагування повідомлення
+async function tgEdit(env, chatId, messageId, text) {
+  return fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/editMessageText`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    }),
+  });
+}
+
+// Надіслати фото як файл (buffer/blob)
+async function tgPhoto(env, chatId, blob, caption) {
+  const form = new FormData();
+  form.append("chat_id", chatId);
+  form.append("photo", new File([blob], "senti.png", { type: "image/png" }));
+  if (caption) form.append("caption", caption);
+  return fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendPhoto`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+// Завантажити файл Telegram (jpg/png/webp)
+async function fetchTelegramFile(env, fileId) {
+  // 1) дізнатись шлях
+  const meta = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/getFile?file_id=${fileId}`).then(r => r.json());
+  const path = meta?.result?.file_path;
+  if (!path) throw new Error("Cannot resolve Telegram file_path");
+  // 2) стягнути файл
+  const url = `https://api.telegram.org/file/bot${env.TELEGRAM_TOKEN}/${path}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+  return res.arrayBuffer();
+}
+
+// Безпечна Base64 (для Gemini vision)
+function toBase64(ab) {
+  const bytes = new Uint8Array(ab);
+  let str = "";
+  for (let i = 0; i < bytes.length; i++) str += String.fromCharCode(bytes[i]);
+  return btoa(str);
+}
+
+// Парсинг YAML-подібного списку провайдерів з env.AI_PROVIDERS
+function parseProviders(env) {
+  // формат: "text:gemini,workers-llama;vision:gemini,workers-vision;image:sdxl,flux"
+  const conf = { text: ["gemini", "workers-llama"], vision: ["gemini", "workers-vision"], image: ["sdxl", "flux"] };
+  const raw = env.AI_PROVIDERS || "";
+  for (const seg of raw.split(";")) {
+    const [k, v] = seg.split(":").map(s => s?.trim());
+    if (!k || !v) continue;
+    conf[k] = v.split(",").map(s => s.trim()).filter(Boolean);
+  }
+  return conf;
+}
+// ====== Провайдери AI ======
+
+// 1) Gemini 1.5 Flash / Vision (прямий виклик Google; безкоштовні квоти)
+async function geminiText(env, prompt) {
+  if (!env.GEMINI_API_KEY) throw new Error("No GEMINI_API_KEY");
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+  const body = {
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    system_instruction: { role: "system", parts: [{ text: DEFAULTS.SYSTEM_STYLE }] },
+  };
+  const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json();
+  const txt = j?.candidates?.[0]?.content?.parts?.map(p => p.text).join("")?.trim();
+  if (!txt) throw new Error("Gemini text empty");
+  return txt;
+}
+
+async function geminiVision(env, prompt, imageBytes, mime = "image/png") {
+  if (!env.GEMINI_API_KEY) throw new Error("No GEMINI_API_KEY");
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+  const body = {
+    contents: [{
+      role: "user",
+      parts: [
+        { text: `${DEFAULTS.SYSTEM_STYLE}\n\nКористувач: ${prompt || "Опиши це зображення та дай корисні висновки."}` },
+        { inline_data: { mime_type: mime, data: toBase64(imageBytes) } }
+      ]
+    }]
+  };
+  const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json();
+  const txt = j?.candidates?.[0]?.content?.parts?.map(p => p.text).join("")?.trim();
+  if (!txt) throw new Error("Gemini vision empty");
+  return txt;
+}
+
+// 2) Workers AI через AI Gateway — текст (Llama 3.1 8B)
+async function workersLlamaText(env, prompt) {
+  const base = env.CF_AI_GATEWAY_BASE;
+  if (!base) throw new Error("No CF_AI_GATEWAY_BASE");
+  const url = `${base}/workers-ai/@cf/meta/llama-3.1-8b-instruct`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input: prompt }),
+  });
+  const j = await r.json();
+  const txt = j?.result?.response?.trim() || j?.result?.output_text?.trim();
+  if (!txt) throw new Error("Workers Llama text empty");
+  return txt;
+}
+
+// 3) Workers AI Vision (Llama 3.2 Vision) — мультимодалка
+async function workersVision(env, prompt, imageBytes, mime = "image/png") {
+  const base = env.CF_AI_GATEWAY_BASE;
+  if (!base) throw new Error("No CF_AI_GATEWAY_BASE");
+  // Модель може називатися так:
+  // @cf/meta/llama-3.2-11b-vision-instruct
+  const url = `${base}/workers-ai/@cf/meta/llama-3.2-11b-vision-instruct`;
+  // Більшість обгорток Workers AI приймають "input" як масив частин
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      messages: [
+        { role: "system", content: DEFAULTS.SYSTEM_STYLE },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: prompt || "Опиши зображення та зроби корисні висновки." },
+            { type: "image", image: [...new Uint8Array(imageBytes)] } // бінар для vision моделей Workers AI
+          ]
+        }
+      ]
+    }),
+  });
+  const j = await r.json();
+  const txt = j?.result?.response?.trim() || j?.result?.output_text?.trim();
+  if (!txt) throw new Error("Workers Vision empty");
+  return txt;
+}
+
+// 4) Генерація зображень: SDXL (основний) → FLUX.1 (фолбек)
+async function workersImageSDXL(env, prompt) {
+  const base = env.CF_AI_GATEWAY_BASE;
+  if (!base) throw new Error("No CF_AI_GATEWAY_BASE");
+  // Стабільні варіанти в каталозі Workers AI:
+  // @cf/stabilityai/stable-diffusion-xl-base-1.0  (або lightning)
+  const url = `${base}/workers-ai/@cf/stabilityai/stable-diffusion-xl-base-1.0`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt }),
+  });
+  const j = await r.json();
+  // Шукаємо base64
+  let b64 = j?.result?.image || j?.result?.images?.[0];
+  if (!b64) throw new Error("SDXL: no image");
+  // інколи приходить dataURL — приберемо префікс
+  b64 = b64.replace(/^data:image\/\w+;base64,/, "");
+  const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  return new Blob([bin], { type: "image/png" });
+}
+
+async function workersImageFLUX(env, prompt) {
+  const base = env.CF_AI_GATEWAY_BASE;
+  if (!base) throw new Error("No CF_AI_GATEWAY_BASE");
+  // FLUX.1 Schnell
+  const url = `${base}/workers-ai/@cf/black-forest-labs/flux-1-schnell`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt }),
+  });
+  const j = await r.json();
+  let b64 = j?.result?.image || j?.result?.images?.[0];
+  if (!b64) throw new Error("FLUX: no image");
+  b64 = b64.replace(/^data:image\/\w+;base64,/, "");
+  const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  return new Blob([bin], { type: "image/png" });
+}// ====== Мультимодальний роутер ======
+
+async function answerText(env, prompt) {
+  const order = parseProviders(env).text; // напр. ["gemini","workers-llama"]
+  const errs = [];
+  for (const p of order) {
+    try {
+      if (p === "gemini") return await geminiText(env, prompt);
+      if (p === "workers-llama") return await workersLlamaText(env, prompt);
+    } catch (e) { errs.push(`${p}: ${e.message}`); }
+  }
+  throw new Error(`No text provider. ${errs.join(" | ")}`);
+}
+
+async function answerVision(env, prompt, imageBytes, mime) {
+  const order = parseProviders(env).vision; // ["gemini","workers-vision"]
+  const errs = [];
+  for (const p of order) {
+    try {
+      if (p === "gemini") return await geminiVision(env, prompt, imageBytes, mime);
+      if (p === "workers-vision") return await workersVision(env, prompt, imageBytes, mime);
+    } catch (e) { errs.push(`${p}: ${e.message}`); }
+  }
+  throw new Error(`No vision provider. ${errs.join(" | ")}`);
+}
+
+async function generateImage(env, prompt) {
+  const order = parseProviders(env).image; // ["sdxl","flux"]
+  const errs = [];
+  for (const p of order) {
+    try {
+      if (p === "sdxl") return await workersImageSDXL(env, prompt);
+      if (p === "flux") return await workersImageFLUX(env, prompt);
+    } catch (e) { errs.push(`${p}: ${e.message}`); }
+  }
+  throw new Error(`No image provider. ${errs.join(" | ")}`);
+}
+
+// ====== Telegram Webhook ======
+
+async function handleUpdate(env, update) {
+  const msg = update.message || update.edited_message;
+  if (!msg) return;
+
+  const chatId = msg.chat.id;
+
+  // Команди
+  if (isCommand(msg, "start")) {
+    const hello = "Привіт! Надішли текст чи фото — я відповім 🤖\n\n" +
+      "Щоб згенерувати зображення: на початку напиши <b>/imagine</b> або <b>img:</b>\n" +
+      "Приклад: <code>/imagine неоновий ліс у тумані, кінематографічне світло</code>";
+    await tgSend(env, chatId, hello, msg.message_id);
+    return;
+  }
+
+  if (isCommand(msg, "help")) {
+    const help = "Доступне:\n" +
+      "• Текст → відповідь\n" +
+      "• Фото → опис та висновки\n" +
+      "• /imagine або img: … → генерація зображення (SDXL/FLUX)\n";
+    await tgSend(env, chatId, help, msg.message_id);
+    return;
+  }
+
+  // Генерація зображень
+  let genPrompt = null;
+  if (isCommand(msg, "imagine")) genPrompt = extractArg(msg, "imagine");
+  else if (msg.text?.trim().toLowerCase().startsWith("img:")) genPrompt = msg.text.trim().slice(4).trim();
+
+  if (genPrompt) {
+    await tgAction(env, chatId, "upload_photo");
+    const thinking = await (await tgSend(env, chatId, "🎨 Генерую зображення…", msg.message_id)).json();
+    try {
+      const blob = await generateImage(env, genPrompt);
+      await tgPhoto(env, chatId, blob, `Готово ✅\nЗапит: ${genPrompt}`);
+      // Підчистимо “думаю”
+      await tgEdit(env, chatId, thinking.result.message_id, "✅ Готово");
+    } catch (e) {
+      await tgEdit(env, chatId, thinking.result.message_id, `❌ Не вдалося згенерувати: ${e.message}`);
+    }
+    return;
+  }
+
+  // Фото / зображення
+  const photo = msg.photo?.at(-1); // найбільше
+  if (photo?.file_id) {
+    await tgAction(env, chatId, "typing");
+    const tmp = await (await tgSend(env, chatId, "🧠 Дивлюсь на фото…", msg.message_id)).json();
+    try {
+      const ab = await fetchTelegramFile(env, photo.file_id);
+      const res = await answerVision(env, msg.caption || "", ab, "image/jpeg");
+      await tgEdit(env, chatId, tmp.result.message_id, res);
+    } catch (e) {
+      await tgEdit(env, chatId, tmp.result.message_id, `❌ Помилка аналізу зображення: ${e.message}`);
+    }
+    return;
+  }
+
+  // Звичайний текст
+  if (msg.text) {
+    await tgAction(env, chatId, "typing");
+    const dots = await (await tgSend(env, chatId, "… думаю", msg.message_id)).json();
+    try {
+      const res = await answerText(env, msg.text.trim());
+      await tgEdit(env, chatId, dots.result.message_id, res);
+    } catch (e) {
+      await tgEdit(env, chatId, dots.result.message_id, `❌ Помилка: ${e.message}`);
+    }
+  }
+}
+
+// ====== Маршрути Worker ======
 
 export default {
   async fetch(request, env, ctx) {
+    // Basic health
     const url = new URL(request.url);
-    const path = url.pathname;
+    if (request.method === "GET" && url.pathname === "/") return text("ok");
 
-    // Health-check
-    if (request.method === "GET" && (path === "/" || path === "/health")) {
-      return new Response("ok");
-    }
-
-    // Webhook endpoints (support both /webhook and any custom suffix)
-    const isWebhookPath =
-      path === "/webhook" ||
-      // allow any custom path you used when setting webhook (e.g. /senti1984)
-      /^\/[a-zA-Z0-9\-_]{4,64}$/.test(path);
-
-    if (request.method === "POST" && isWebhookPath) {
-      // 1) Verify Telegram secret (protection from spoofed calls)
-      const secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
-      if (!secret || secret !== env.WEBHOOK_SECRET) {
-        return new Response("forbidden", { status: 403 });
+    // Вебхук: будь-який шлях (ти вказав власний у setWebhook)
+    if (request.method === "POST") {
+      // 1) Перевірка Telegram secret header
+      const recv = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
+      if (env.WEBHOOK_SECRET && recv !== env.WEBHOOK_SECRET) {
+        return json({ ok: false, error: "bad secret" }, 401);
       }
 
-      // 2) Parse update
-      const update = await request.json().catch(() => ({}));
-      if (!update || !update.message) {
-        return new Response("no message", { status: 200 });
-      }
-
+      // 2) Прочитати апдейт
+      let update = null;
       try {
-        await handleUpdate(update, env, ctx);
-        return new Response("ok");
-      } catch (e) {
-        console.error("Handler error:", e);
-        // Не ламаємо вебхук — повертаємо 200, щоб Телеграм не відрізав
-        return new Response("ok");
+        update = await request.json();
+      } catch {
+        return json({ ok: false, error: "bad json" }, 400);
       }
+
+      // 3) Обробити з тайм-лімітом
+      const p = handleUpdate(env, update);
+      const res = await Promise.race([
+        p.then(() => json({ ok: true })),
+        new Promise(resolve => setTimeout(() => resolve(json({ ok: true, slow: true })), DEFAULTS.TIMEOUT_MS)),
+      ]);
+      return res;
     }
 
-    return new Response("not found", { status: 404 });
-  },
+    return text("Not found", 404);
+  }
 };
-
-// --------------------------- Telegram helpers ---------------------------
-
-async function sendTyping(chatId, env, action = "typing") {
-  const form = new FormData();
-  form.set("chat_id", String(chatId));
-  form.set("action", action);
-  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendChatAction`, {
-    method: "POST",
-    body: form,
-  }).catch(() => {});
-}
-
-async function sendMessage(chatId, text, env, extra = {}) {
-  const payload = {
-    chat_id: chatId,
-    text,
-    parse_mode: "HTML",
-    ...extra,
-  };
-  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-async function sendPhoto(chatId, fileUrl, caption, env) {
-  const form = new FormData();
-  form.set("chat_id", String(chatId));
-  form.set("photo", fileUrl);
-  if (caption) form.set("caption", caption);
-  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendPhoto`, {
-    method: "POST",
-    body: form,
-  });
-}
-
-async function getFileUrl(fileId, env) {
-  const res = await fetch(
-    `https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/getFile?file_id=${encodeURIComponent(
-      fileId
-    )}`
-  );
-  const data = await res.json();
-  if (!data.ok) throw new Error("Failed to getFile");
-  const path = data.result.file_path;
-  return `https://api.telegram.org/file/bot${env.TELEGRAM_TOKEN}/${path}`;
-}
-
-// --------------------------- Update handler ---------------------------
-
-async function handleUpdate(update, env, ctx) {
-  const msg = update.message;
-  const chatId = msg.chat.id;
-
-  // Show typing while we process
-  ctx.waitUntil(
-    (async () => {
-      await sendTyping(chatId, env, "typing");
-    })()
-  );
-
-  // /start
-  if (msg.text && /^\/start\b/i.test(msg.text)) {
-    await sendMessage(
-      chatId,
-      "Привіт! Надішли текст або фото — я відповім 🤖",
-      env
-    );
-    return;
-  }
-
-  // Photo (vision)
-  if (msg.photo && Array.isArray(msg.photo) && msg.photo.length > 0) {
-    const largest = msg.photo[msg.photo.length - 1]; // biggest size
-    const fileId = largest.file_id;
-    const fileUrl = await getFileUrl(fileId, env);
-    // try to caption with user's message if present
-    const userPrompt = msg.caption || "Опиши це зображення українською.";
-
-    await sendTyping(chatId, env, "upload_photo");
-    const answer = await aiVisionDescribe(fileUrl, userPrompt, env);
-    await sendMessage(chatId, answer, env);
-    return;
-  }
-
-  // Text
-  if (msg.text) {
-    const userText = msg.text.trim();
-
-    // Simple guardrails / small intents
-    if (/^\/setwebhook/i.test(userText)) {
-      await sendMessage(
-        chatId,
-        "Вебхук уже налаштований з GitHub Actions. Все працює ✅",
-        env
-      );
-      return;
-    }
-
-    // AI answer with fallback chain
-    const answer = await aiTextAnswer(userText, env);
-    await sendMessage(chatId, answer, env);
-    return;
-  }
-
-  // Fallback for unsupported update
-  await sendMessage(chatId, "Поки що розумію лише текст та фото 🙌", env);
-}
-
-// --------------------------- Provider routing ---------------------------
-
-function parseProviders(env) {
-  // Example: "text:gemini,deepseek;vision:gemini"
-  const cfg = (env.AI_PROVIDERS || "").trim();
-  const out = { text: [], vision: [] };
-
-  cfg.split(";").forEach((segment) => {
-    const [kindRaw, listRaw] = segment.split(":");
-    if (!kindRaw || !listRaw) return;
-    const kind = kindRaw.trim().toLowerCase();
-    const models = listRaw
-      .split(",")
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean);
-
-    if (kind === "text") out.text.push(...models);
-    if (kind === "vision") out.vision.push(...models);
-  });
-
-  // Sensible defaults if empty
-  if (out.text.length === 0) out.text = ["gemini"];
-  if (out.vision.length === 0) out.vision = ["gemini"];
-
-  return out;
-}
-
-// --------------------------- AI text (with fallback) ---------------------------
-
-async function aiTextAnswer(prompt, env) {
-  const providers = parseProviders(env).text;
-
-  const errors = [];
-  for (const name of providers) {
-    try {
-      if (name === "gemini") {
-        if (!env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY missing");
-        return await geminiText(prompt, env);
-      }
-      if (name === "deepseek") {
-        if (!env.DEEPSEEK_API_KEY) throw new Error("DEEPSEEK_API_KEY missing");
-        return await deepseekText(prompt, env);
-      }
-      // unknown keyword -> skip
-    } catch (e) {
-      errors.push(`${name}: ${e.message || e}`);
-    }
-  }
-
-  // If got here, all failed
-  console.error("All text providers failed:", errors.join(" | "));
-  return "Вибач, зараз не можу відповісти. Спробуй ще раз трохи пізніше 🙏";
-}
-
-// --------------------------- AI vision (Gemini) ---------------------------
-
-async function aiVisionDescribe(imageUrl, userPrompt, env) {
-  // Vision зараз через Gemini 1.5 (inline base64)
-  if (!env.GEMINI_API_KEY) {
-    return "Для аналізу зображень потрібен GEMINI_API_KEY — звернися до адміністратора.";
-  }
-
-  // Fetch & base64 the image
-  const { base64, mime } = await fetchAsBase64(imageUrl);
-
-  const prompt =
-    userPrompt && userPrompt.length > 1
-      ? userPrompt
-      : "Опиши зображення коротко та по суті українською.";
-
-  const res = await geminiGenerateContent(
-    [
-      { text: prompt },
-      {
-        inlineData: {
-          mimeType: mime || "image/jpeg",
-          data: base64,
-        },
-      },
-    ],
-    env
-  );
-
-  const text = extractGeminiText(res);
-  return text || "Не вдалося інтерпретувати зображення 😔";
-}
-
-async function fetchAsBase64(url) {
-  const resp = await fetch(url);
-  const buf = await resp.arrayBuffer();
-  const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-  // naive mime inference
-  const ct = resp.headers.get("content-type") || "";
-  let mime = "image/jpeg";
-  if (ct.startsWith("image/")) mime = ct.split(";")[0];
-  return { base64: b64, mime };
-}
-
-// --------------------------- Provider: Gemini ---------------------------
-
-async function geminiText(prompt, env) {
-  const res = await geminiGenerateContent([{ text: prompt }], env);
-  const text = extractGeminiText(res);
-  if (!text) throw new Error("Gemini empty");
-  return text.trim();
-}
-
-function extractGeminiText(apiResponse) {
-  try {
-    const parts =
-      apiResponse?.candidates?.[0]?.content?.parts ??
-      apiResponse?.candidates?.[0]?.content?.parts ??
-      [];
-    const firstText =
-      parts.find((p) => typeof p.text === "string")?.text ||
-      apiResponse?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      apiResponse?.candidates?.[0]?.content?.parts?.map?.((p) => p.text).join("\n");
-    return firstText || "";
-  } catch {
-    return "";
-  }
-}
-
-async function geminiGenerateContent(parts, env) {
-  // Using gemini-1.5-flash (fast & free tier)
-  const model = "gemini-1.5-flash";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
-    env.GEMINI_API_KEY
-  )}`;
-
-  const body = {
-    contents: [{ role: "user", parts }],
-    // you may tune safety / generationConfig if needed
-  };
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  if (!resp.ok) {
-    const t = await resp.text();
-    throw new Error(`Gemini HTTP ${resp.status} ${t}`);
-  }
-  return await resp.json();
-}
-
-// --------------------------- Provider: DeepSeek ---------------------------
-
-async function deepseekText(prompt, env) {
-  const url = "https://api.deepseek.com/chat/completions";
-  const body = {
-    model: "deepseek-chat",
-    messages: [{ role: "user", content: prompt }],
-    stream: false,
-  };
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!resp.ok) {
-    const t = await resp.text();
-    throw new Error(`DeepSeek HTTP ${resp.status} ${t}`);
-  }
-
-  const data = await resp.json();
-  const text =
-    data?.choices?.[0]?.message?.content ||
-    data?.choices?.[0]?.delta?.content ||
-    "";
-  if (!text) throw new Error("DeepSeek empty");
-  return text.trim();
-}
