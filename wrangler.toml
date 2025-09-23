@@ -3,13 +3,8 @@ main = "index.js"
 compatibility_date = "2025-09-23"
 minify = true
 
-kv_namespaces = [
-  { binding = "AIMAGIC_SESS", id = "2cbb2a8da8d547358d577524cf3eb70a" }
-]
-
 [ai]
 binding = "AI"
 
-# Логи в Cloudflare Dashboard → Workers Logs
 [observability.logs]
 enabled = true
