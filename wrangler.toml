@@ -1,16 +1,14 @@
 name = "senti-bot-worker"
-main = "index.js"
-compatibility_date = "2024-11-21"
+main = "src/index.js"
+compatibility_date = "2025-09-23"
+workers_dev = true
+minify = true
 
-# KV namespace
-[[kv_namespaces]]
-binding = "AIMAGIC_SESS"
-id = "2cbb2a8da8d547358d577524cf3eb70a"
+# KV: важливо, щоб binding називався саме AIMAGIC_SESS
+kv_namespaces = [
+  { binding = "AIMAGIC_SESS", id = "2cbb2a8da8d547358d577524cf3eb70a" }
+]
 
-# Workers AI
+# Workers AI можна залишити підключеним (код не викликає, але ESM уже витримано)
 [ai]
 binding = "AI"
-
-[vars]
-WEBHOOK_SECRET = "senti1984"
-DEFAULT_FIAT = "UAH"
