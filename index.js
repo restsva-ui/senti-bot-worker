@@ -17,6 +17,13 @@ async function tg(apiBase, method, payload) {
   if (!r.ok) throw new Error(`TG ${method} ${r.status}: ${body}`);
   return JSON.parse(body || "{}");
 }
+
+async function tgTyping(apiBase, chatId) {
+  try {
+    await tg(apiBase, "sendChatAction", { chat_id: chatId, action: "typing" });
+  } catch (_) {}
+}
+
 function greet(name, lang) {
   const greetings = {
     uk: `Привіт, ${name || "друже"}! ✨ Давай зробимо світ трішки яскравішим!`,
@@ -26,6 +33,18 @@ function greet(name, lang) {
     fr: `Salut, ${name || "ami"}! ✨ Rendons le monde un peu plus lumineux!`,
   };
   return greetings[lang] || greetings.en;
+}
+
+// emoji/gif/sticker за мовою
+function funReply(lang) {
+  const extras = {
+    uk: "🙂✨🎉",
+    ru: "🔥😉🚀",
+    en: "😎👍🔥",
+    de: "🍻🇩🇪😁",
+    fr: "🥖❤️🇫🇷",
+  };
+  return extras[lang] || "🤖";
 }
 
 // === KV helpers ===
@@ -38,8 +57,7 @@ async function kvPut(env, key, value, ttl = 1800) {
 
 // === LLM provider: Gemini ===
 async function llmGemini(apiKey, userText, lang = "en") {
-  // системна інструкція залежить від мови
-  const sys = `Відповідай мовою користувача (${lang}). Будь стислим і корисним. Якщо користувач просить код — дай короткі коментарі.`;
+  const sys = `Відповідай мовою користувача (${lang}). Будь стислим і корисним. Якщо користувач просить код — додай короткі коментарі.`;
   const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + apiKey;
   const resp = await fetch(url, {
     method: "POST",
@@ -60,7 +78,6 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // health
     if (request.method === "GET" && url.pathname === "/") return ok("ok");
 
     const BOT_TOKEN = env.TELEGRAM_TOKEN;
@@ -69,7 +86,6 @@ export default {
     if (!WEBHOOK_SECRET) return bad(500, "WEBHOOK_SECRET is missing");
     const API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-    // manual webhook setter
     if (request.method === "GET" && url.pathname === "/setwebhook") {
       if (url.searchParams.get("secret") !== WEBHOOK_SECRET) return bad(403, "forbidden");
       const hookUrl = `${url.origin}/webhook`;
@@ -80,9 +96,7 @@ export default {
       return json({ status: "ok", set_to: hookUrl, tg: res });
     }
 
-    // telegram webhook
     if (request.method === "POST" && url.pathname === "/webhook") {
-      // header secret check
       const got = request.headers.get("x-telegram-bot-api-secret-token");
       if (got !== WEBHOOK_SECRET) return bad(403, "forbidden");
 
@@ -95,12 +109,9 @@ export default {
       const chatId = msg.chat?.id;
       const textIn = (msg.text || "").trim();
 
-      // збережемо мову користувача в KV
       if (msg.from?.language_code) {
         await kvPut(env, `lang:${chatId}`, msg.from.language_code, 3600);
       }
-
-      // дістаємо останню мову з KV або беремо "en"
       let lang = await kvGet(env, `lang:${chatId}`);
       if (!lang) lang = msg.from?.language_code || "en";
 
@@ -122,7 +133,9 @@ export default {
       }
 
       if (textIn) {
-        // кеш відповідей
+        // typing indicator
+        await tgTyping(API, chatId);
+
         const cacheKey = `resp:${chatId}:${textIn}`;
         let reply = await kvGet(env, cacheKey);
 
@@ -131,15 +144,18 @@ export default {
             if (env.GEMINI_API_KEY) {
               reply = await llmGemini(env.GEMINI_API_KEY, textIn, lang);
             } else {
-              reply = textIn; // fallback
+              reply = textIn;
             }
-            await kvPut(env, cacheKey, reply, 120); // кеш 2 хв
+            await kvPut(env, cacheKey, reply, 120);
           } catch (e) {
             reply = `AI error: ${e.message || e}`;
           }
         }
 
-        await tg(API, "sendMessage", { chat_id: chatId, text: reply });
+        // додаємо трохи "емоційності"
+        const finalText = `${reply}\n\n${funReply(lang)}`;
+
+        await tg(API, "sendMessage", { chat_id: chatId, text: finalText });
         return ok();
       }
 
