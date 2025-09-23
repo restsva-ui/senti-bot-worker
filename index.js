@@ -32,18 +32,20 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Простий healthcheck
     if (request.method === "GET" && url.pathname === "/") return ok();
 
     const BOT_TOKEN = env.TELEGRAM_TOKEN;
     const WEBHOOK_SECRET = env.WEBHOOK_SECRET;
     if (!BOT_TOKEN) return bad(500, "TELEGRAM_TOKEN is missing");
     if (!WEBHOOK_SECRET) return bad(500, "WEBHOOK_SECRET is missing");
+
     const API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-    // Ручне встановлення вебхука: /setwebhook?secret=...
+    // Set webhook manually
     if (request.method === "GET" && url.pathname === "/setwebhook") {
-      if (url.searchParams.get("secret") !== WEBHOOK_SECRET) return bad(403, "forbidden");
+      if (url.searchParams.get("secret") !== WEBHOOK_SECRET)
+        return bad(403, "forbidden");
+
       const hookUrl = `${url.origin}/webhook`;
       const res = await tg(API, "setWebhook", {
         url: hookUrl,
@@ -54,7 +56,7 @@ export default {
       return json({ status: "ok", set_to: hookUrl, tg: res });
     }
 
-    // Вебхук приймає апдейти від Telegram
+    // Handle Telegram updates
     if (request.method === "POST" && url.pathname === "/webhook") {
       const got = request.headers.get("x-telegram-bot-api-secret-token");
       if (got !== WEBHOOK_SECRET) return bad(403, "forbidden");
