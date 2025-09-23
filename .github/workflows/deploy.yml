@@ -1,77 +1,38 @@
-name: Cloudflare Worker / deploy
+name: Deploy to Cloudflare Workers
 
 on:
   push:
-    branches: [ "main" ]
-  workflow_dispatch: {}
-
-permissions:
-  contents: read
-
-concurrency:
-  group: cf-worker-deploy
-  cancel-in-progress: true
-
-env:
-  # ці два секрети МАЮТЬ бути додані в Settings → Secrets → Actions
-  CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-  CLOUDLFARE_API_TOKEN_PLACEHOLDER: "do-not-use" # просто щоб не світились назви у логах
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: 20
 
-      - name: Install Wrangler v4
-        run: npm i -g wrangler@4
+      - name: Install Wrangler
+        run: npm install -g wrangler@latest
 
-      - name: Wrangler version
-        run: wrangler --version
-
-      # Перевіряємо авторизацію під твоїм токеном (використовує тільки CLOUDFLARE_API_TOKEN)
-      - name: Auth check (whoami)
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: wrangler whoami
-
-      # Гарантуємо наявність KV namespace з назвою AIMAGIC_SESS (назва == title у CF)
-      - name: Ensure KV namespace AIMAGIC_SESS exists
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          wrangler kv namespace list --config wrangler.toml > kv.json
-          KV_ID=$(jq -r '.[] | select(.title=="AIMAGIC_SESS" or .title=="aimagic-sess" or .title=="AIMAGIC_SESS (production)") | .id' kv.json | head -n1 || true)
-          if [ -z "${KV_ID:-}" ]; then
-            echo "KV not found → creating…"
-            wrangler kv namespace create AIMAGIC_SESS --config wrangler.toml
-          else
-            echo "KV exists: $KV_ID"
-          fi
-
-      # Заливаємо секрети воркеру (stdin; прапор --raw не потрібен у v4)
       - name: Upload Worker secrets
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
-        shell: bash
         run: |
           set -euo pipefail
-          echo "$TELEGRAM_TOKEN"  | wrangler secret put TELEGRAM_TOKEN  --config wrangler.toml
-          echo "$WEBHOOK_SECRET"  | wrangler secret put WEBHOOK_SECRET  --config wrangler.toml
-
-      # Деплой (без --verbose; з --minify). Wrangler v4 сам читає CF_ACCOUNT_ID із wrangler.toml або акаунта
-      - name: Deploy
+          echo "$TELEGRAM_TOKEN" | wrangler secret put TELEGRAM_TOKEN --config wrangler.toml
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
+          TELEGRAM_TOKEN:       ${{ secrets.TELEGRAM_TOKEN }}
+
+      - name: Deploy Worker
         run: wrangler deploy --config wrangler.toml --minify
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
