@@ -15,10 +15,34 @@ jobs:
       - name: Install Wrangler v4
         run: npm i -g wrangler@4
 
-      - name: Deploy to Cloudflare
+      - name: Show files
+        run: |
+          ls -la
+          echo "----- wrangler.toml -----"
+          cat wrangler.toml || true
+          echo "----- index.js head -----"
+          head -n 60 index.js || true
+
+      - name: Cloudflare whoami (auth check)
         run: |
           wrangler --version
-          wrangler deploy --account-id "${CF_ACCOUNT_ID}" --config wrangler.toml --minify --verbose
+          wrangler whoami --account-id "${CF_ACCOUNT_ID}"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
+
+      - name: Check KV namespace binding exists
+        run: |
+          wrangler kv namespace list --account-id "${CF_ACCOUNT_ID}" | tee kv.json
+          echo "Expecting namespace id: 2cbb2a8da8d547358d577524cf3eb70a"
+          grep -q "2cbb2a8da8d547358d577524cf3eb70a" kv.json && echo "KV OK" || (echo "❌ KV namespace id not found in this account"; exit 1)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
+
+      - name: Deploy to Cloudflare (debug logs)
+        run: |
+          WRANGLER_LOG=debug wrangler deploy --account-id "${CF_ACCOUNT_ID}" --config wrangler.toml --minify --verbose
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CF_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
