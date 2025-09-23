@@ -9,9 +9,6 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: read
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -21,14 +18,9 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install Wrangler (v4)
+      - name: Install Wrangler
         run: npm i -g wrangler@4
 
-      # Секрети мають бути додані в GitHub → Settings → Secrets and variables → Actions:
-      #   CLOUDFLARE_API_TOKEN  (з правами: Workers Scripts (Edit), Workers KV (Edit), Workers AI (Edit))
-      #   CF_ACCOUNT_ID         (або CLOUDFLARE_ACCOUNT_ID) — твій акаунт ID
-      #   TELEGRAM_TOKEN
-      #   WEBHOOK_SECRET
       - name: Upload Worker secrets
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
