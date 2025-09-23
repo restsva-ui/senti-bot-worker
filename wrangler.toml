@@ -8,6 +8,3 @@ account_id = "2cf6e316af8623546c95c0354bc3aa00"
 kv_namespaces = [
   { binding = "AIMAGIC_SESS", id = "2cbb2a8da8d547358d577524cf3eb70a" }
 ]
-
-[ai]
-binding = "AI"
