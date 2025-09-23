@@ -17,7 +17,16 @@ async function tg(apiBase, method, payload) {
   if (!r.ok) throw new Error(`TG ${method} ${r.status}: ${body}`);
   return JSON.parse(body || "{}");
 }
-function greet(name) { const who = name ? `, ${name}` : ""; return `Привіт${who}! ✨ Я вже чекав нашої зустрічі!`; }
+function greet(name, lang) {
+  const greetings = {
+    uk: `Привіт, ${name || "друже"}! ✨ Давай зробимо світ трішки яскравішим!`,
+    ru: `Привет, ${name || "друг"}! ✨ Давай сделаем этот мир ярче!`,
+    en: `Hi, ${name || "friend"}! ✨ Let's make the world a bit brighter!`,
+    de: `Hallo, ${name || "Freund"}! ✨ Lass uns die Welt etwas heller machen!`,
+    fr: `Salut, ${name || "ami"}! ✨ Rendons le monde un peu plus lumineux!`,
+  };
+  return greetings[lang] || greetings.en;
+}
 
 // === KV helpers ===
 async function kvGet(env, key) {
@@ -27,8 +36,10 @@ async function kvPut(env, key, value, ttl = 1800) {
   return await env.AIMAGIC_SESS.put(key, value, { expirationTtl: ttl });
 }
 
-// === LLM providers (мінімум Gemini як приклад) ===
-async function llmGemini(apiKey, userText, sys = "Be helpful. Reply in user's language.") {
+// === LLM provider: Gemini ===
+async function llmGemini(apiKey, userText, lang = "en") {
+  // системна інструкція залежить від мови
+  const sys = `Відповідай мовою користувача (${lang}). Будь стислим і корисним. Якщо користувач просить код — дай короткі коментарі.`;
   const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + apiKey;
   const resp = await fetch(url, {
     method: "POST",
@@ -84,40 +95,47 @@ export default {
       const chatId = msg.chat?.id;
       const textIn = (msg.text || "").trim();
 
-      // збережемо мову користувача
+      // збережемо мову користувача в KV
       if (msg.from?.language_code) {
         await kvPut(env, `lang:${chatId}`, msg.from.language_code, 3600);
       }
 
+      // дістаємо останню мову з KV або беремо "en"
+      let lang = await kvGet(env, `lang:${chatId}`);
+      if (!lang) lang = msg.from?.language_code || "en";
+
       if (textIn === "/start") {
         const name = msg.from?.first_name || "";
-        await tg(API, "sendMessage", { chat_id: chatId, text: greet(name) });
+        await tg(API, "sendMessage", { chat_id: chatId, text: greet(name, lang) });
         return ok();
       }
       if (textIn === "/help") {
-        await tg(API, "sendMessage", {
-          chat_id: chatId,
-          text: "Команди:\n/start — вітання\n/help — допомога\nБудь-який текст — відповідь від Сенті (LLM)."
-        });
+        const helps = {
+          uk: "Команди:\n/start — вітання\n/help — допомога\nБудь-який текст — відповідь від Сенті (LLM).",
+          ru: "Команды:\n/start — приветствие\n/help — помощь\nЛюбой текст — ответ от Сенти (LLM).",
+          en: "Commands:\n/start — greeting\n/help — help\nAny text — answer from Senti (LLM).",
+          de: "Befehle:\n/start — Begrüßung\n/help — Hilfe\nBeliebiger Text — Antwort von Senti (LLM).",
+          fr: "Commandes:\n/start — salutation\n/help — aide\nTout texte — réponse de Senti (LLM).",
+        };
+        await tg(API, "sendMessage", { chat_id: chatId, text: helps[lang] || helps.en });
         return ok();
       }
 
       if (textIn) {
-        // спробуємо витягти з KV кешовану відповідь
+        // кеш відповідей
         const cacheKey = `resp:${chatId}:${textIn}`;
         let reply = await kvGet(env, cacheKey);
 
         if (!reply) {
           try {
             if (env.GEMINI_API_KEY) {
-              reply = await llmGemini(env.GEMINI_API_KEY, textIn);
+              reply = await llmGemini(env.GEMINI_API_KEY, textIn, lang);
             } else {
-              reply = `Ехо: ${textIn}`;
+              reply = textIn; // fallback
             }
-            // кешуємо на 2 хв
-            await kvPut(env, cacheKey, reply, 120);
+            await kvPut(env, cacheKey, reply, 120); // кеш 2 хв
           } catch (e) {
-            reply = `Помилка AI: ${e.message || e}`;
+            reply = `AI error: ${e.message || e}`;
           }
         }
 
