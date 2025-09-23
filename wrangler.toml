@@ -1,5 +1,5 @@
 name = "senti-bot-worker"
-main = "src/index.js"
+main = "index.js"
 compatibility_date = "2025-09-23"
 workers_dev = true
 minify = true
