@@ -11,7 +11,55 @@ jobs:
 
     steps:
       - name: Checkout
+        uses: actions/name: Deploy Cloudflare Worker
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    # Потрібні права для checkout і доступу до secrets
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repo
+      # НЕ shallow, щоб wrangler не спотикався на метаданих
+      # (але за бажанням можна повернути fetch-depth: 1)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show Wrangler version (debug)
+        run: npx --yes wrangler@latest --version
+
+      # 1) Заливаємо секрети у Worker (беремо значення з GitHub Secrets)
+      - name: Upload Worker secrets
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          # список ключів, які треба створити/оновити у Worker
+          secrets: |
+            TELEGRAM_TOKEN
+            WEBHOOK_SECRET
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+
+      # 2) Деплой (читає wrangler.toml з репозиторію)
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          # без --verbose (у v4 це не флаг), без зайвих параметрів
+          command: deploy --config wrangler.toml --minify@v4
 
       # 1) Заливаємо секрети у Worker (беруться з GitHub Secrets)
       - name: Upload Worker secrets
