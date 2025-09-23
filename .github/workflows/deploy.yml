@@ -7,30 +7,20 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-
       - name: Install Wrangler v4
         run: npm i -g wrangler@4
-
-      - name: Show wrangler.toml
-        run: cat wrangler.toml
-
       - name: Auth check
         run: |
           wrangler --version
-          # у v4 без account-id
           wrangler whoami
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-
       - name: Deploy
-        run: |
-          # account_id береться з wrangler.toml
-          wrangler deploy --config wrangler.toml --minify --verbose
+        run: wrangler deploy --config wrangler.toml --minify --verbose
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
