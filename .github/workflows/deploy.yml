@@ -1,87 +1,44 @@
-name: Deploy Cloudflare Worker
+name: Cloudflare Worker
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      # потрібні лише для автентифікації wrangler
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
 
     steps:
       - name: Checkout
-        uses: actions/name: Deploy Cloudflare Worker
-
-on:
-  push:
-    branches: [ "main" ]
-  workflow_dispatch:
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-
-    # Потрібні права для checkout і доступу до secrets
-    permissions:
-      contents: read
-      id-token: write
-
-    steps:
-      - name: Checkout repo
-      # НЕ shallow, щоб wrangler не спотикався на метаданих
-      # (але за бажанням можна повернути fetch-depth: 1)
         uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          fetch-depth: 0
+          node-version: 20
 
-      - name: Show Wrangler version (debug)
-        run: npx --yes wrangler@latest --version
+      - name: Install Wrangler v4
+        run: npm i -g wrangler@4
 
-      # 1) Заливаємо секрети у Worker (беремо значення з GitHub Secrets)
+      - name: Wrangler version
+        run: wrangler --version
+
+      # ⬇️ Ллємо секрети без інтерaktivних запитів
       - name: Upload Worker secrets
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          # список ключів, які треба створити/оновити у Worker
-          secrets: |
-            TELEGRAM_TOKEN
-            WEBHOOK_SECRET
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          wrangler secret put TELEGRAM_TOKEN --raw --config wrangler.toml <<< "$TELEGRAM_TOKEN"
+          wrangler secret put WEBHOOK_SECRET --raw --config wrangler.toml <<< "$WEBHOOK_SECRET"
 
-      # 2) Деплой (читає wrangler.toml з репозиторію)
-      - name: Deploy Worker
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          # без --verbose (у v4 це не флаг), без зайвих параметрів
-          command: deploy --config wrangler.toml --minify@v4
-
-      # 1) Заливаємо секрети у Worker (беруться з GitHub Secrets)
-      - name: Upload Worker secrets
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          # список секретів, які потрібно створити/оновити у воркері
-          secrets: |
-            TELEGRAM_TOKEN
-            WEBHOOK_SECRET
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
-
-      # 2) Деплой (без застарілого флага --verbose)
       - name: Deploy
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          command: deploy --config wrangler.toml --minify
-        env:
-          # опційно: детальні логи у v4 через змінну оточення
-          WRANGLER_LOG: info
+        run: wrangler deploy --config wrangler.toml --minify
