@@ -3,7 +3,6 @@ main = "index.js"
 compatibility_date = "2025-09-23"
 minify = true
 
-# KV (залишаємо, якщо використовуватимеш надалі)
 kv_namespaces = [
   { binding = "AIMAGIC_SESS", id = "2cbb2a8da8d547358d577524cf3eb70a" }
 ]
@@ -11,6 +10,6 @@ kv_namespaces = [
 [ai]
 binding = "AI"
 
-# Новий синтаксис для логів у Wrangler v4
+# Логи в Cloudflare Dashboard → Workers Logs
 [observability.logs]
 enabled = true
