@@ -1,29 +1,14 @@
 name = "senti-bot-worker"
 main = "index.js"
 compatibility_date = "2024-09-20"
-
-# Публікуємо на workers.dev
 workers_dev = true
 
-# Не включаємо Logpush/Observability з конфіга, усе можна увімкнути в дашборді
-# [observability]
-# enabled = false
-
-# Опційно: дефолтні змінні (НЕ секрети). Секрети залишай у Dashboard/Actions.
 [vars]
 BOT_LOCALE = "uk"
 AI_MODEL   = "gemini-1.5-flash"
 AI_PROVIDERS = "text:gemini,deepseek;vision:gemini"
 
-# ВАЖЛИВО:
-# 1) Ми НЕ додаємо binding Workers AI (AI), щоб не ловити 10021.
-#    Якщо захочеш — додаси у дашборді (Bindings → Add binding → Workers AI).
-#
-# 2) Ми також НЕ прописуємо тут KV, щоб не перезаписати твою вже працюючу
-#    прив’язку з дашборда (AIMAGIC_SESS → aimagic-sess).
-#    Якщо хочеш керувати KV через файл, розкоментуй блок нижче і
-#    підстав САМЕ namespace_id (а не назву):
-#
+# Тільки якщо хочеш керувати KV з коду:
 # [[kv_namespaces]]
 # binding = "AIMAGIC_SESS"
-# id = "2cbb2a0d...ab70a"   # <- твій справжній KV namespace_id з Dashboard
+# id = "2cbb2a8d...f3eb70a"
