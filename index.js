@@ -1,5 +1,4 @@
 // index.js — ES Module, без addEventListener
-// Підтримка: /_status, /setwebhook (ручний), Telegram webhook, echo-команда, курс валют (AUTO)
 
 const TG_API = (token, method, body) =>
   fetch(`https://api.telegram.org/bot${token}/${method}`, {
@@ -20,7 +19,6 @@ const bad = (msg, code = 400) =>
     headers: { "content-type": "application/json; charset=utf-8" },
   });
 
-// простий курс через exchangerate.host
 async function fxAuto(base = "UAH", symbols = "USD") {
   const url = `https://api.exchangerate.host/latest?base=${encodeURIComponent(
     base
@@ -81,21 +79,18 @@ async function handleTelegram(update, env) {
   const lang = msg.from?.language_code || pickLang(msg.text);
   const text = (msg.text || "").trim();
 
-  // /start
   if (text === "/start") {
     const hi = greet(userName, lang);
     await TG_API(token, "sendMessage", { chat_id: chatId, text: hi });
     return ok();
   }
 
-  // валюта
   if (/курс|долар|доллара|usd|eur|євро/i.test(text)) {
     const isUSD = /usd|долар/i.test(text);
     const sym = isUSD ? "USD" : "EUR";
     try {
       const rate = await fxAuto("UAH", sym);
-      const v = rate ? (1 / rate) : null; // 1 UAH ~ ? USD/EUR
-      const ans = v
+      const ans = rate
         ? `1 ${sym} ≈ ${(rate).toFixed(2)} грн`
         : `Сталась помилка з курсом.`;
       await TG_API(token, "sendMessage", { chat_id: chatId, text: ans });
@@ -108,14 +103,12 @@ async function handleTelegram(update, env) {
     return ok();
   }
 
-  // eхо
   if (/^echo\s+/i.test(text)) {
     const echo = text.replace(/^echo\s+/i, "");
     await TG_API(token, "sendMessage", { chat_id: chatId, text: echo });
     return ok();
   }
 
-  // дефолт: коротке дружнє уточнення
   await TG_API(token, "sendMessage", {
     chat_id: chatId,
     text:
@@ -139,7 +132,6 @@ export default {
         ok: true,
         worker: "senti-bot-worker",
         kv: !!env.AIMAGIC_SESS,
-        ai_binding: !!env.AI,
         time: new Date().toISOString(),
       });
     }
@@ -157,13 +149,11 @@ export default {
       return ok(j);
     }
 
-    // Telegram webhook
     if (pathname === `/${env.WEBHOOK_SECRET}` && request.method === "POST") {
       const update = await request.json();
       return handleTelegram(update, env);
     }
 
-    // 404
     return new Response("ok", { status: 200 });
   },
 };
