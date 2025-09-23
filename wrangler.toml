@@ -1,14 +1,12 @@
 name = "senti-bot-worker"
-main = "index.js"
+main = "index.js"            # бо файл у корені
 compatibility_date = "2025-09-23"
 workers_dev = true
 minify = true
 
-# KV: важливо, щоб binding називався саме AIMAGIC_SESS
 kv_namespaces = [
-  { binding = "AIMAGIC_SESS", id = "2cbb2a8da8d547358d577524cf3eb70a" }
+  { binding = "AIMAGIC_SESS", id = "2cbb2a8da8d547358d577524cf3eb70a" } # твій KV id
 ]
 
-# Workers AI можна залишити підключеним (код не викликає, але ESM уже витримано)
 [ai]
-binding = "AI"
+binding = "AI"               # можна залишити; код не викликає
