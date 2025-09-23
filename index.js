@@ -1,111 +1,169 @@
-// Cloudflare Workers — ESM only
-// env: { TELEGRAM_TOKEN, WEBHOOK_SECRET, AIMAGIC_SESS, AI }
-const TG = {
-  api(token, method, params) {
-    const url = `https://api.telegram.org/bot${token}/${method}`;
-    return fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params),
-    });
-  },
-};
+// index.js — ES Module, без addEventListener
+// Підтримка: /_status, /setwebhook (ручний), Telegram webhook, echo-команда, курс валют (AUTO)
 
-async function replyTelegram(env, chatId, text, extra = {}) {
-  return TG.api(env.TELEGRAM_TOKEN, "sendMessage", {
-    chat_id: chatId,
-    text,
-    parse_mode: "HTML",
-    ...extra,
+const TG_API = (token, method, body) =>
+  fetch(`https://api.telegram.org/bot${token}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
-}
 
-function todayUA() {
-  const now = new Date();
-  const fmt = new Intl.DateTimeFormat("uk-UA", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    weekday: "long",
-    timeZone: "Europe/Kyiv",
+const ok = (data = { ok: true }) =>
+  new Response(JSON.stringify(data), {
+    status: 200,
+    headers: { "content-type": "application/json; charset=utf-8" },
   });
-  return fmt.format(now);
+
+const bad = (msg, code = 400) =>
+  new Response(JSON.stringify({ ok: false, error: msg }), {
+    status: code,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+
+// простий курс через exchangerate.host
+async function fxAuto(base = "UAH", symbols = "USD") {
+  const url = `https://api.exchangerate.host/latest?base=${encodeURIComponent(
+    base
+  )}&symbols=${encodeURIComponent(symbols)}`;
+  const r = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 600 } });
+  if (!r.ok) throw new Error("FX HTTP " + r.status);
+  const j = await r.json();
+  return j.rates?.[symbols];
 }
 
-async function usdToUah() {
-  // простий та стабільний AUTO (exchangerate.host)
-  const r = await fetch("https://api.exchangerate.host/latest?base=USD&symbols=UAH");
-  const j = await r.json().catch(() => ({}));
-  return j?.rates?.UAH ?? null;
+function pickLang(text) {
+  const t = (text || "").toLowerCase();
+  if (/[а-щьюяєіїґ]/.test(t)) return "uk";
+  if (/[а-яё]/.test(t)) return "ru";
+  return "en";
 }
 
-function pickStartGreeting(name) {
-  const n = name || "друже";
-  const opts = [
-    `${n}, привіт! 🌟 Я вже чекав нашої зустрічі!`,
-    `Радий тебе бачити, ${n}! 🚀 Чим допомогти?`,
-    `${n}, давай зробимо день трішки яскравішим ✨`,
-    `Гей, ${n}! 😉 Пиши, що потрібно — усе зробимо.`,
-    `${n}, вітаю! 🔥 Готовий підхопити будь-яку задачу.`,
-  ];
-  return opts[Math.floor(Math.random() * opts.length)];
+function greet(name = "друже", lang = "uk") {
+  const map = {
+    uk: [
+      `Привіт, ${name}! Давай зробимо день трішки яскравішим ✨`,
+      `Гей, ${name}! Я вже чекав на нашу зустріч 🌟`,
+      `${name}, вітаю! Чим допомогти сьогодні? 🙂`,
+      `Йо, ${name}! Поїхали творити магію 💫`,
+      `Вітаю, ${name}! Готовий підстрахувати у всьому 🤝`,
+      `${name}, радий бачити! Запитуй що завгодно 🙌`,
+    ],
+    en: [
+      `Hey ${name}! Let’s make the day brighter ✨`,
+      `Hi ${name}! I’ve been waiting for this moment 🌟`,
+      `Welcome, ${name}! What do you need today? 🙂`,
+      `Yo ${name}! Let’s make some magic 💫`,
+      `Hi ${name}! I’ve got your back 🤝`,
+      `${name}, great to see you! Ask me anything 🙌`,
+    ],
+    ru: [
+      `Привет, ${name}! Давай сделаем день ярче ✨`,
+      `Хей, ${name}! Я уже ждал нашей встречи 🌟`,
+      `${name}, привет! Чем помочь сегодня? 🙂`,
+      `Йо, ${name}! Погнали творить магию 💫`,
+      `Здорова, ${name}! Подстрахую во всём 🤝`,
+      `${name}, рад видеть! Спрашивай что угодно 🙌`,
+    ],
+  };
+  const arr = map[lang] || map.en;
+  return arr[Math.floor(Math.random() * arr.length)];
 }
 
-async function handleTelegramUpdate(env, update) {
+async function handleTelegram(update, env) {
+  const token = env.TELEGRAM_TOKEN;
+  if (!token) return;
+
   const msg = update.message || update.edited_message;
-  if (!msg || !msg.chat) return new Response("ok");
+  if (!msg) return ok();
 
   const chatId = msg.chat.id;
-  const name =
-    msg.from?.first_name ||
-    msg.chat?.first_name ||
-    msg.from?.username ||
-    "друже";
-
+  const userName = msg.from?.first_name || msg.chat?.first_name || "друже";
+  const lang = msg.from?.language_code || pickLang(msg.text);
   const text = (msg.text || "").trim();
 
-  // /start — одразу мовою користувача
-  if (text.startsWith("/start")) {
-    const greet = pickStartGreeting(name);
-    await replyTelegram(env, chatId, `${greet}\n\nНапиши запит своїми словами або надішли фото 😉`);
-    return new Response("ok");
+  // /start
+  if (text === "/start") {
+    const hi = greet(userName, lang);
+    await TG_API(token, "sendMessage", { chat_id: chatId, text: hi });
+    return ok();
   }
 
-  // приклад: "Курс долара"
-  if (/курс\s+долар/iu.test(text)) {
-    const rate = await usdToUah();
-    if (rate) {
-      await replyTelegram(env, chatId, `Сьогодні: ${todayUA()}\n$1 ≈ ${rate.toFixed(2)} грн`);
-    } else {
-      await replyTelegram(env, chatId, `Сталась помилка з курсом. Спробуй ще раз пізніше.`);
+  // валюта
+  if (/курс|долар|доллара|usd|eur|євро/i.test(text)) {
+    const isUSD = /usd|долар/i.test(text);
+    const sym = isUSD ? "USD" : "EUR";
+    try {
+      const rate = await fxAuto("UAH", sym);
+      const v = rate ? (1 / rate) : null; // 1 UAH ~ ? USD/EUR
+      const ans = v
+        ? `1 ${sym} ≈ ${(rate).toFixed(2)} грн`
+        : `Сталась помилка з курсом.`;
+      await TG_API(token, "sendMessage", { chat_id: chatId, text: ans });
+    } catch {
+      await TG_API(token, "sendMessage", {
+        chat_id: chatId,
+        text: "Сталась помилка з курсом.",
+      });
     }
-    return new Response("ok");
+    return ok();
   }
 
-  // дефолт
-  await replyTelegram(env, chatId, `Окей, ${name}. Спробуй переформулювати або дай більше деталей 😉`);
-  return new Response("ok");
+  // eхо
+  if (/^echo\s+/i.test(text)) {
+    const echo = text.replace(/^echo\s+/i, "");
+    await TG_API(token, "sendMessage", { chat_id: chatId, text: echo });
+    return ok();
+  }
+
+  // дефолт: коротке дружнє уточнення
+  await TG_API(token, "sendMessage", {
+    chat_id: chatId,
+    text:
+      lang === "uk"
+        ? `Окей, ${userName}. Спробуй переформулювати або дай більше деталей 😉`
+        : lang === "ru"
+        ? `Окей, ${userName}. Попробуй переформулировать или дай больше деталей 😉`
+        : `Okay, ${userName}. Try to rephrase or add more details 😉`,
+  });
+
+  return ok();
 }
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    const pathname = url.pathname;
 
-    // healthcheck
-    if (request.method === "GET" && url.pathname === "/_status") {
-      return new Response(
-        JSON.stringify({ ok: true, service: "senti-bot-worker", version: "v4.1.4-esm" }),
-        { headers: { "Content-Type": "application/json; charset=utf-8" } }
+    if (pathname === "/_status") {
+      return ok({
+        ok: true,
+        worker: "senti-bot-worker",
+        kv: !!env.AIMAGIC_SESS,
+        ai_binding: !!env.AI,
+        time: new Date().toISOString(),
+      });
+    }
+
+    if (pathname === "/setwebhook" && request.method === "POST") {
+      const token = env.TELEGRAM_TOKEN;
+      const hook = env.WEBHOOK_SECRET;
+      if (!token || !hook) return bad("no tg secrets", 500);
+      const r = await fetch(
+        `https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(
+          `${url.origin}/${hook}`
+        )}`
       );
+      const j = await r.json();
+      return ok(j);
     }
 
-    // Telegram вебхук: /<WEBHOOK_SECRET>
-    if (url.pathname === `/${env.WEBHOOK_SECRET}` && request.method === "POST") {
-      const update = await request.json().catch(() => ({}));
-      return handleTelegramUpdate(env, update);
+    // Telegram webhook
+    if (pathname === `/${env.WEBHOOK_SECRET}` && request.method === "POST") {
+      const update = await request.json();
+      return handleTelegram(update, env);
     }
 
-    // інші запити
-    return new Response("ok");
+    // 404
+    return new Response("ok", { status: 200 });
   },
 };
