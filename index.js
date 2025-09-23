@@ -1,164 +1,216 @@
-// Senti Telegram bot on Cloudflare Workers + AI Gateway (Workers AI -> Llama 3.1 8B Instruct)
+// index.js — Senti bot with brain: Gemini (free) + DeepSeek fallback + Vision (LLaVA)
 
-const TG_API = (token) => `https://api.telegram.org/bot${token}`;
-// Модель Workers AI через AI Gateway
-const WORKERS_AI_MODEL = "@cf/meta/llama-3.1-8b-instruct"; // можна замінити на іншу модель із каталогу
+// ---------- helpers ----------
+const ok = (b = "ok") => new Response(b, { status: 200, headers: { "content-type": "text/plain" } });
+const bad = (s = 400, m = "bad request") => new Response(m, { status: s, headers: { "content-type": "text/plain" } });
 
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-
-    // Простий ping/health
-    if (url.pathname === "/" || url.pathname === "/health") {
-      return new Response("ok", { status: 200 });
-    }
-
-    if (url.pathname === "/webhook" && request.method === "POST") {
-      // Перевіряємо секрет (Telegram шле в заголовку X-Telegram-Bot-Api-Secret-Token)
-      const tgSecret = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
-      if (env.WEBHOOK_SECRET && tgSecret !== env.WEBHOOK_SECRET) {
-        return new Response("forbidden", { status: 403 });
-      }
-
-      const update = await request.json().catch(() => null);
-      if (!update) return new Response("bad json", { status: 400 });
-
-      try {
-        // Обробка only messages
-        if (update.message && update.message.chat && (update.message.text || update.message.caption)) {
-          const chatId = update.message.chat.id;
-          const userText = (update.message.text ?? update.message.caption ?? "").trim();
-
-          // Системні команди
-          if (userText === "/start") {
-            await sendMessage(env, chatId, "Vitaliy, привіт! ✨ Я вже чекав нашої зустрічі! Напиши мені щось 😉");
-            return new Response("ok", { status: 200 });
-          }
-          if (userText === "/help") {
-            await sendMessage(env, chatId, "Напиши питання — я відповім. Підтримую українську та інші мови 🌍");
-            return new Response("ok", { status: 200 });
-          }
-          if (userText === "/ping") {
-            await sendMessage(env, chatId, "pong ✅");
-            return new Response("ok", { status: 200 });
-          }
-
-          // Показуємо "typing…"
-          ctx.waitUntil(sendChatAction(env, chatId, "typing"));
-
-          // Готуємо промпт та питаємо модель
-          const prompt = buildPrompt(userText, update);
-          const aiText = await runWorkersAIThroughGateway(env, prompt);
-
-          // Відповідаємо користувачу
-          await sendMessage(env, chatId, aiText ?? "Вибач, сталася помилка під час відповіді 😿");
-
-          return new Response("ok", { status: 200 });
-        }
-
-        // Інші типи апдейтів просто ігноруємо
-        return new Response("ignored", { status: 200 });
-      } catch (err) {
-        console.error("Webhook error:", err);
-        // Спробуємо м’яко повідомити користувача, якщо можемо
-        try {
-          if (update?.message?.chat?.id) {
-            await sendMessage(env, update.message.chat.id, "Ой! Щось пішло не так на сервері. Спробуй ще раз 🙏");
-          }
-        } catch (_) {}
-        return new Response("error", { status: 500 });
-      }
-    }
-
-    return new Response("not found", { status: 404 });
-  },
-};
-
-/** Формуємо дружній системний промпт */
-function buildPrompt(userText, update) {
-  const name = update?.message?.from?.first_name ?? "користувач";
-  return [
-    "Ти — помічник Senti. Відповідай коротко, дружньо, тією ж мовою, якою пише користувач.",
-    "Якщо задають кроки/інструкції — структуруй відповідь списком.",
-    "Уникай надто пафосних фраз. Будь корисним і конкретним.",
-    "",
-    `Користувач (${name}) написав: "${userText}"`,
-  ].join("\n");
-}
-
-/** Виклик Workers AI через Cloudflare AI Gateway */
-async function runWorkersAIThroughGateway(env, prompt) {
-  const base = env.CF_AI_GATEWAY_BASE; // напр. https://gateway.ai.cloudflare.com/v1/<account>/<gateway>
-  if (!base) throw new Error("CF_AI_GATEWAY_BASE is not set");
-  if (!env.CF_API_TOKEN) throw new Error("CF_API_TOKEN is not set");
-
-  const endpoint = `${base}/workers-ai/run/${WORKERS_AI_MODEL}`;
-
-  const body = {
-    // Workers AI очікує поле `prompt`
-    prompt,
-    // Можна налаштувати temperature / max_tokens, якщо модель підтримує
-    // temperature: 0.3,
-  };
-
-  const res = await fetch(endpoint, {
+async function tg(env, method, payload) {
+  const url = `https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/${method}`;
+  const r = await fetch(url, {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${env.CF_API_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
   });
-
-  if (!res.ok) {
-    const text = await safeText(res);
-    console.error("AI Gateway error:", res.status, text);
-    return null;
-  }
-
-  // Формат відповіді Workers AI:
-  // { result: { response: "..." }, ... }
-  const data = await res.json().catch(() => null);
-  const text = data?.result?.response ?? data?.response ?? null;
-  return text;
+  const txt = await r.text().catch(() => "");
+  let data = {};
+  try { data = txt ? JSON.parse(txt) : {}; } catch {}
+  if (!r.ok || data?.ok === false) throw new Error(`TG ${method} ${r.status}: ${txt}`);
+  return data;
 }
+const tgTyping = (env, chat_id) => tg(env, "sendChatAction", { chat_id, action: "typing" }).catch(() => {});
 
-/** Надіслати повідомлення у Telegram */
-async function sendMessage(env, chatId, text) {
-  // Щоб уникнути проблем з Markdown, використовуємо HTML або plain
-  const res = await fetch(`${TG_API(env.TELEGRAM_TOKEN)}/sendMessage`, {
+// ---------- Gemini (free) ----------
+async function geminiText(apiKey, prompt) {
+  if (!apiKey) throw new Error("GEMINI_API_KEY missing");
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const r = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      // parse_mode: "HTML",
-      disable_web_page_preview: true,
+      contents: [{ role: "user", parts: [{ text: prompt }]}],
+      generationConfig: { temperature: 0.6, maxOutputTokens: 900 }
     }),
   });
-  if (!res.ok) {
-    const t = await safeText(res);
-    console.error("sendMessage error:", res.status, t);
-  }
+  const data = await r.json();
+  if (!r.ok) throw new Error(`Gemini ${r.status}: ${JSON.stringify(data)}`);
+  const out =
+    data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("\n").trim() ||
+    data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  if (!out) throw new Error("Gemini empty");
+  return out.trim();
 }
 
-/** Показати індикатор набору тексту (“typing…”) */
-async function sendChatAction(env, chatId, action = "typing") {
-  const res = await fetch(`${TG_API(env.TELEGRAM_TOKEN)}/sendChatAction`, {
+async function geminiVision(apiKey, imageArrayBuffer, prompt = "Опиши зображення.") {
+  if (!apiKey) throw new Error("GEMINI_API_KEY missing");
+  const base64 = toB64(imageArrayBuffer);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const body = {
+    contents: [{
+      parts: [
+        { inline_data: { mime_type: "image/jpeg", data: base64 } },
+        { text: prompt }
+      ]
+    }],
+    generationConfig: { temperature: 0.6, maxOutputTokens: 900 }
+  };
+  const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const data = await r.json();
+  if (!r.ok) throw new Error(`Gemini ${r.status}: ${JSON.stringify(data)}`);
+  const out =
+    data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("\n").trim() ||
+    data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  if (!out) throw new Error("Gemini Vision empty");
+  return out.trim();
+}
+
+// ---------- DeepSeek (text fallback) ----------
+async function deepseekText(apiKey, prompt) {
+  if (!apiKey) throw new Error("DEEPSEEK_API_KEY missing");
+  // OpenAI-сумісний чат-ендпойнт DeepSeek
+  const r = await fetch("https://api.deepseek.com/chat/completions", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, action }),
+    headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model: "deepseek-chat",           // дешевший/швидший, без «думок» R1
+      temperature: 0.6,
+      messages: [
+        { role: "system", content: "Відповідай стисло, по суті, мовою користувача." },
+        { role: "user", content: prompt }
+      ]
+    })
   });
-  if (!res.ok) {
-    const t = await safeText(res);
-    console.warn("sendChatAction warn:", res.status, t);
-  }
+  const data = await r.json();
+  if (!r.ok) throw new Error(`DeepSeek ${r.status}: ${JSON.stringify(data)}`);
+  const out = data?.choices?.[0]?.message?.content || "";
+  if (!out) throw new Error("DeepSeek empty");
+  return out.trim();
 }
 
-async function safeText(res) {
-  try {
-    return await res.text();
-  } catch {
-    return "";
+// ---------- Workers AI (image fallback: LLaVA) ----------
+async function llavaVision(env, imageArrayBuffer, prompt = "Опиши зображення.") {
+  const models = ["@cf/llava", "@cf/llava-hf/llava-1.5-7b", "@cf/llava-1.5-13b"];
+  const image = new Uint8Array(imageArrayBuffer);
+  let lastErr;
+  for (const m of models) {
+    try {
+      const res = await env.AI.run(m, { prompt, image });
+      const text = res?.text || res?.description || res?.result ||
+        (Array.isArray(res?.results) ? res.results.map(x => x.text || x.description).join("\n") : "");
+      if (text && String(text).trim()) return String(text).trim();
+      lastErr = new Error("Empty LLaVA response");
+    } catch (e) { lastErr = e; }
   }
+  throw lastErr || new Error("LLaVA failed");
 }
+
+// ---------- utils ----------
+function toB64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = ""; for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+// ---------- main worker ----------
+export default {
+  async fetch(request, env) {
+    try {
+      const url = new URL(request.url);
+
+      // health
+      if (request.method === "GET" && url.pathname === "/") return ok("ok");
+
+      // webhook
+      if (request.method === "POST" && url.pathname === "/webhook") {
+        // секрет вебхука (якщо встановлено)
+        const expected = env.WEBHOOK_SECRET;
+        if (expected) {
+          const got = request.headers.get("x-telegram-bot-api-secret-token");
+          if (!got || got !== expected) return ok("ok"); // тихо ідемо, щоб TG не ретраїв 500
+        }
+        if (!env.TELEGRAM_TOKEN) return ok("ok"); // без токена — тихо завершуємо
+
+        // читаємо апдейт
+        const update = await request.json().catch(() => ({}));
+        const msg = update?.message;
+        if (!msg) return ok("ok");
+
+        const chatId = msg.chat?.id;
+        const textIn = (msg.text || "").trim();
+        const photos = msg.photo;
+
+        // команди
+        if (textIn === "/start") {
+          await tg(env, "sendMessage", { chat_id: chatId, text: "Привіт! Надішли текст або фото — я допоможу. ✨" });
+          return ok();
+        }
+        if (textIn === "/help") {
+          await tg(env, "sendMessage", {
+            chat_id: chatId,
+            text: "Я розумію текст і зображення.\n• Текст — відповідаю через Gemini (безкоштовно), fallback DeepSeek.\n• Фото — аналіз через Gemini, fallback LLaVA.",
+          });
+          return ok();
+        }
+
+        // фото → vision
+        if (Array.isArray(photos) && photos.length) {
+          await tgTyping(env, chatId);
+          try {
+            const largest = photos[photos.length - 1];
+            const fileId = largest.file_id;
+            const fileInfo = await tg(env, "getFile", { file_id: fileId });
+            const filePath = fileInfo?.result?.file_path;
+            if (!filePath) throw new Error("No file_path from Telegram");
+            const fileUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_TOKEN}/${filePath}`;
+            const imgRes = await fetch(fileUrl);
+            if (!imgRes.ok) throw new Error("Failed to download file");
+            const imageBuf = await imgRes.arrayBuffer();
+
+            const prompt = msg.caption || "Опиши зображення, виділи важливі деталі.";
+            let answer;
+            try {
+              answer = await geminiVision(env.GEMINI_API_KEY, imageBuf, prompt);
+            } catch (e) {
+              console.error("Gemini vision error:", e);
+              answer = await llavaVision(env, imageBuf, prompt);
+            }
+            await tg(env, "sendMessage", { chat_id: chatId, text: answer || "Не вдалося описати зображення." });
+          } catch (e) {
+            console.error("Vision error:", e);
+            await tg(env, "sendMessage", { chat_id: chatId, text: "Сталася помилка при аналізі зображення." });
+          }
+          return ok();
+        }
+
+        // текст → LLM
+        if (textIn) {
+          await tgTyping(env, chatId);
+          let reply = "";
+          try {
+            reply = await geminiText(env.GEMINI_API_KEY, textIn);
+          } catch (e1) {
+            console.error("Gemini text error:", e1);
+            try {
+              if (env.DEEPSEEK_API_KEY) {
+                reply = await deepseekText(env.DEEPSEEK_API_KEY, textIn);
+              } else {
+                reply = ""; // не заданий ключ — лишимо порожньо, піде fallback нижче
+              }
+            } catch (e2) {
+              console.error("DeepSeek error:", e2);
+            }
+          }
+          if (!reply) reply = "Зараз я перевантажений. Спробуй ще раз за хвилину 🙏";
+          await tg(env, "sendMessage", { chat_id: chatId, text: reply, disable_web_page_preview: true });
+          return ok();
+        }
+
+        return ok();
+      }
+
+      return bad(404, "not found");
+    } catch (err) {
+      console.error("Top-level error:", err);
+      return ok("ok"); // НІКОЛИ не віддаємо 500 вебхуку
+    }
+  },
+};
