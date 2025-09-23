@@ -1,232 +1,139 @@
-// src/fx.js — Fiat FX for Senti v4.0
-// AUTO: exchangerate.host → fallback open.er-api
-// NBU: official rate (trigger: "НБУ"/"nbu")
-// Cache: AUTO 12h, NBU 30m
-//
-// Exports: handleFX(env, { text, parsed, defaultFiat, replyLang })
+// src/fx.js — Senti FX v4.1.3 (ESM, stable)
 
-const AUTO_TTL = 12 * 3600;      // 12h
-const NBU_TTL  = 30 * 60;        // 30m
+const AUTO_TTL = 12 * 3600; // 12h
+const NBU_TTL  = 30 * 60;   // 30m
 
-const ISO = {
-  UAH: "UAH", USD: "USD", EUR: "EUR",
-  уах: "UAH", грн: "UAH", гривня: "UAH", гривні: "UAH", гривень: "UAH",
-  доллар: "USD", долар: "USD", usd: "USD", "$": "USD", бакс: "USD", бакси: "USD",
-  євро: "EUR", евро: "EUR", eur: "EUR", "€": "EUR",
-};
+const ISO3 = new Set([
+  "USD","EUR","UAH","GBP","PLN","CHF","CAD","AUD","JPY","CNY","TRY","CZK","SEK","NOK","DKK","HUF","RON","BGN",
+]);
 
-function i18n(replyLang) {
-  const L = {
-    uk: {
-      approx: "≈",
-      nbuTag: "(НБУ)",
-      invalid: "Не вдалося отримати курс.",
-      fmtPair: (a, aIso, b, bIso, rate, tag) => `${a} ${aIso} ${L.uk.approx} ${fmtNum(a * rate)} ${bIso}${tag ? " " + tag : ""}`,
-      rateLine: (base, quote, rate, tag) => `1 ${base} ${L.uk.approx} ${fmtNum(rate)} ${quote}${tag ? " " + tag : ""}`,
-    },
-    ru: {
-      approx: "≈",
-      nbuTag: "(НБУ)",
-      invalid: "Не удалось получить курс.",
-      fmtPair: (a, aIso, b, bIso, rate, tag) => `${a} ${aIso} ${L.ru.approx} ${fmtNum(a * rate)} ${bIso}${tag ? " " + tag : ""}`,
-      rateLine: (base, quote, rate, tag) => `1 ${base} ${L.ru.approx} ${fmtNum(rate)} ${quote}${tag ? " " + tag : ""}`,
-    },
-    de: {
-      approx: "≈",
-      nbuTag: "(NBU)",
-      invalid: "Kurs konnte nicht abgerufen werden.",
-      fmtPair: (a, aIso, b, bIso, rate, tag) => `${a} ${aIso} ${L.de.approx} ${fmtNum(a * rate)} ${bIso}${tag ? " " + tag : ""}`,
-      rateLine: (base, quote, rate, tag) => `1 ${base} ${L.de.approx} ${fmtNum(rate)} ${quote}${tag ? " " + tag : ""}`,
-    },
-    fr: {
-      approx: "≈",
-      nbuTag: "(NBU)",
-      invalid: "Impossible d’obtenir le taux.",
-      fmtPair: (a, aIso, b, bIso, rate, tag) => `${a} ${aIso} ${L.fr.approx} ${fmtNum(a * rate)} ${bIso}${tag ? " " + tag : ""}`,
-      rateLine: (base, quote, rate, tag) => `1 ${base} ${L.fr.approx} ${fmtNum(rate)} ${quote}${tag ? " " + tag : ""}`,
-    },
-    en: {
-      approx: "≈",
-      nbuTag: "(NBU)",
-      invalid: "Failed to fetch rate.",
-      fmtPair: (a, aIso, b, bIso, rate, tag) => `${a} ${aIso} ${L.en.approx} ${fmtNum(a * rate)} ${bIso}${tag ? " " + tag : ""}`,
-      rateLine: (base, quote, rate, tag) => `1 ${base} ${L.en.approx} ${fmtNum(rate)} ${quote}${tag ? " " + tag : ""}`,
-    },
-  };
-  return L[replyLang] || L.en;
-}
+const UA_WORDS = /грн|гривн|гривня|гривні|₴/i;
+const USD_WORDS = /usd|\$|долар|доллар|бакс/i;
+const EUR_WORDS = /eur|€|євро|евро/i;
 
-function normISO(s) {
-  if (!s) return null;
-  const k = s.toString().trim().toLowerCase();
-  return ISO[k] || s.toUpperCase();
-}
+function fmt(n) { return Number(n).toLocaleString("en-US", { maximumSignificantDigits: 6 }); }
 
-function fmtNum(n) {
-  if (!isFinite(n)) return String(n);
-  // Show up to 6 significant digits, remove trailing zeros
-  const s = Number(n).toLocaleString("en-US", { maximumSignificantDigits: 6 });
-  return s;
-}
-
-// Fallback parsing in case parsed is light
-function naiveParse(text) {
-  const res = { amount: 1, base: null, quote: null };
-  if (!text) return res;
-
-  // amount like "25$" or "25 $" or "0.5 btc"
-  const mAmt = text.match(/(\d+(?:[.,]\d+)?)(?=\s*[^\d\s]|(?:\s|$))/);
-  if (mAmt) res.amount = Number(mAmt[1].replace(",", "."));
-
-  // detect currencies
-  const hasUAH = /(uah|грн|гривн|гривня|гривні|₴)/i.test(text);
-  const hasUSD = /(usd|\$|долар|доларів|доллар|бакс)/i.test(text);
-  const hasEUR = /(eur|€|євро|евро)/i.test(text);
-
-  if (hasUSD && hasUAH) {
-    // phrase may imply conversion; detect direction by "в/у"
-    const toUAH = /\b(в|у)\s*(грн|uah)/i.test(text);
-    res.base = toUAH ? "USD" : "UAH";
-    res.quote = toUAH ? "UAH" : "USD";
-  } else if (hasEUR && hasUAH) {
-    const toUAH = /\b(в|у)\s*(грн|uah)/i.test(text);
-    res.base = toUAH ? "EUR" : "UAH";
-    res.quote = toUAH ? "UAH" : "EUR";
-  } else if (hasUSD) {
-    res.base = "USD";
-    res.quote = "UAH";
-  } else if (hasEUR) {
-    res.base = "EUR";
-    res.quote = "UAH";
-  } else if (hasUAH) {
-    // "курс гривні" → show vs defaultFiat (handled later)
-    res.base = "UAH";
-  }
-  return res;
+function pickIso(token, fallback=null) {
+  if (!token) return fallback;
+  const t = token.toUpperCase();
+  if (ISO3.has(t)) return t;
+  if (UA_WORDS.test(token)) return "UAH";
+  if (USD_WORDS.test(token)) return "USD";
+  if (EUR_WORDS.test(token)) return "EUR";
+  return fallback;
 }
 
 async function fetchAutoRate(base, quote) {
-  // exchangerate.host
-  const url1 = `https://api.exchangerate.host/latest?base=${encodeURIComponent(base)}&symbols=${encodeURIComponent(quote)}`;
+  // 1) exchangerate.host
   try {
-    const r1 = await fetch(url1, { cf: { cacheTtl: 300, cacheEverything: true } });
+    const u1 = `https://api.exchangerate.host/latest?base=${base}&symbols=${quote}`;
+    const r1 = await fetch(u1, { cf: { cacheTtl: 300, cacheEverything: true } });
     if (r1.ok) {
       const j = await r1.json();
-      const rate = j?.rates?.[quote];
-      if (rate) return rate;
+      const v = j?.rates?.[quote];
+      if (v && isFinite(v)) return v;
     }
   } catch {}
-  // fallback: open.er-api
-  const url2 = `https://open.er-api.com/v6/latest/${encodeURIComponent(base)}`;
+  // 2) open.er-api.com
   try {
-    const r2 = await fetch(url2, { cf: { cacheTtl: 300, cacheEverything: true } });
+    const u2 = `https://open.er-api.com/v6/latest/${base}`;
+    const r2 = await fetch(u2, { cf: { cacheTtl: 300, cacheEverything: true } });
     if (r2.ok) {
       const j = await r2.json();
-      const rate = j?.rates?.[quote];
-      if (rate) return rate;
+      const v = j?.rates?.[quote];
+      if (v && isFinite(v)) return v;
     }
   } catch {}
   return null;
 }
 
 async function fetchNbuRate(base, quote) {
-  // NBU returns UAH per foreign currency. If base === USD and quote === UAH, use one call.
-  // If base === UAH and quote === USD -> invert.
-  const mapToNBU = (c) => c.toUpperCase(); // USD, EUR, etc.
-  const isUAHperX = (b, q) => b !== "UAH" && q === "UAH";
-  const isXperUAH = (b, q) => b === "UAH" && q !== "UAH";
-
+  // NBU завжди дає курс до UAH
   let rate = null;
-
-  if (isUAHperX(base, quote)) {
-    const url = `https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode=${mapToNBU(base)}&json`;
-    const r = await fetch(url, { cf: { cacheTtl: 300, cacheEverything: true } }).catch(() => null);
-    if (r && r.ok) {
-      const j = await r.json().catch(() => null);
-      const v = Array.isArray(j) && j[0]?.rate;
-      if (v) rate = Number(v); // UAH per base
-    }
-  } else if (isXperUAH(base, quote)) {
-    // Need inverse of (UAH per quote)
-    const url = `https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode=${mapToNBU(quote)}&json`;
-    const r = await fetch(url, { cf: { cacheTtl: 300, cacheEverything: true } }).catch(() => null);
-    if (r && r.ok) {
-      const j = await r.json().catch(() => null);
-      const v = Array.isArray(j) && j[0]?.rate;
-      if (v) rate = 1 / Number(v); // quote per 1 UAH
-    }
+  if (base !== "UAH" && quote === "UAH") {
+    const u = `https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode=${base}&json`;
+    const r = await fetch(u, { cf: { cacheTtl: 300, cacheEverything: true } });
+    if (r.ok) { const j = await r.json(); rate = j?.[0]?.rate || null; }
+  } else if (base === "UAH" && quote !== "UAH") {
+    const u = `https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode=${quote}&json`;
+    const r = await fetch(u, { cf: { cacheTtl: 300, cacheEverything: true } });
+    if (r.ok) { const j = await r.json(); const q = j?.[0]?.rate; rate = q ? 1 / q : null; }
   } else if (base !== "UAH" && quote !== "UAH") {
-    // Cross via UAH (nbu has only vs UAH)
-    const uBase = await fetchNbuRate(base, "UAH");
-    const uQuote = await fetchNbuRate(quote, "UAH");
-    if (uBase && uQuote) rate = uBase / uQuote;
+    const b = await fetchNbuRate(base, "UAH");
+    const q = await fetchNbuRate(quote, "UAH");
+    if (b && q) rate = b / q;
   } else {
-    // base===quote
     rate = 1;
   }
-
   return rate;
+}
+
+function wantsNBUFlag(text) {
+  return /(?:\bNBU\b|\bНБУ\b|\bnbu\b|\bнбу\b)/i.test(text || "");
 }
 
 async function getCached(env, key) {
   try { return await env.AIMAGIC_SESS.get(key, "json"); } catch { return null; }
 }
-async function setCached(env, key, value, ttl) {
-  try { await env.AIMAGIC_SESS.put(key, JSON.stringify(value), { expirationTtl: ttl }); } catch {}
+async function putCached(env, key, val, ttl) {
+  try { await env.AIMAGIC_SESS.put(key, JSON.stringify(val), { expirationTtl: ttl }); } catch {}
 }
 
-function pickCurrencies(parsed, text, defaultFiat) {
-  const p = parsed || {};
-  let amount = Number(p.amount) || null;
-  let base = normISO(p.baseCurrency || p.base);
-  let quote = normISO(p.quoteCurrency || p.quote);
-  if (!amount) {
-    const np = naiveParse(text || "");
-    amount = np.amount || 1;
-    base = base || np.base;
-    quote = quote || np.quote;
+/**
+ * getFX(env, { text, parsed, defaultFiat, replyLang })
+ * - text: початковий запит (для визначення NBU)
+ * - parsed: { amount, base, quote } — опціонально; якщо немає, будуть підказки з тексту
+ * - defaultFiat: "UAH"/"USD"/"EUR" — дефолт котирування
+ * - replyLang: "uk"/"ru"/"en"/...
+ * return: { text, base, quote, rate, source }
+ */
+export async function getFX(env, { text = "", parsed = {}, defaultFiat = "UAH", replyLang = "uk" } = {}) {
+  const useNBU = wantsNBUFlag(text);
+
+  // amount / base / quote
+  const amt = Number(parsed?.amount) > 0 ? Number(parsed.amount) : 1;
+
+  // Вирахуємо базову валюту: з parsed, або з ключових слів
+  let base = pickIso(parsed?.base, null);
+  if (!base) {
+    if (UA_WORDS.test(text)) base = "UAH";
+    else if (USD_WORDS.test(text)) base = "USD";
+    else if (EUR_WORDS.test(text)) base = "EUR";
+    else base = "UAH";
   }
-  // Defaults: if only one specified
-  if (base && !quote) quote = defaultFiat || "UAH";
-  if (!base && quote) base = "UAH";
-  if (!base && !quote) {
-    // “курс гривні” → 1 UAH to defaultFiat
-    base = "UAH";
-    quote = defaultFiat || "USD";
-  }
+
+  // Котирування: parsed.quote або дефолт користувача (інакше UAH/USD)
+  let quote = pickIso(parsed?.quote, null);
+  if (!quote) quote = defaultFiat || (base === "UAH" ? "USD" : "UAH");
+
+  // Заборона base==quote
   if (base === quote) quote = base === "UAH" ? "USD" : "UAH";
-  return { amount: amount || 1, base, quote };
-}
 
-export async function handleFX(env, { text, parsed, defaultFiat, replyLang }) {
-  const L = i18n(replyLang);
-  const wantsNBU = /(?:\bNBU\b|\bНБУ\b|\bnbu\b|\bнбу\b)/i.test(text || "");
-
-  const { amount, base, quote } = pickCurrencies(parsed, text, defaultFiat);
-
-  if (!base || !quote) {
-    return { text: L.invalid };
-  }
-
-  const k = wantsNBU
-    ? `fx:nbu:${base}->${quote}`
-    : `fx:auto:${base}->${quote}`;
-
-  let rate = await getCached(env, k);
+  // Кеш-ключ
+  const cacheKey = `${useNBU ? "fx:nbu" : "fx:auto"}:${base}->${quote}`;
+  let rate = await getCached(env, cacheKey);
   if (!rate) {
-    rate = wantsNBU ? await fetchNbuRate(base, quote) : await fetchAutoRate(base, quote);
-    if (rate) {
-      await setCached(env, k, rate, wantsNBU ? NBU_TTL : AUTO_TTL);
-    }
+    rate = useNBU ? await fetchNbuRate(base, quote) : await fetchAutoRate(base, quote);
+    if (rate) await putCached(env, cacheKey, rate, useNBU ? NBU_TTL : AUTO_TTL);
   }
 
-  if (!rate) return { text: L.invalid };
+  // Якщо все одно нема курсу
+  if (!rate) {
+    const fail = replyLang === "uk" ? "Сталась помилка з курсом." :
+                 replyLang === "ru" ? "Произошла ошибка с курсом." :
+                 "FX error.";
+    return { text: fail, base, quote, rate: null, source: useNBU ? "NBU" : "AUTO" };
+  }
 
-  // Build response
-  const tag = wantsNBU ? (replyLang === "uk" || replyLang === "ru" ? L.nbuTag : "(NBU)") : "";
-  const out = amount && Math.abs(amount - 1) > 1e-9
-    ? L.fmtPair(amount, base, null, quote, rate, tag)
-    : L.rateLine(base, quote, rate, tag);
+  const tag = useNBU ? (replyLang === "uk" || replyLang === "ru" ? "(НБУ)" : "(NBU)") : "";
+  const line = amt !== 1
+    ? `${amt} ${base} ≈ ${fmt(amt * rate)} ${quote}${tag ? " " + tag : ""}`
+    : `1 ${base} ≈ ${fmt(rate)} ${quote}${tag ? " " + tag : ""}`;
 
-  return { text: out };
+  // На випадок старих форматерів — чистимо “(ER)”, якщо прилетить із зовнішніх шарів
+  const textOut = line.replace(/\s*\(ER\)/g, "");
+
+  return { text: textOut, base, quote, rate, source: useNBU ? "NBU" : "AUTO" };
 }
+
+export default { getFX };
