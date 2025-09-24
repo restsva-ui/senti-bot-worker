@@ -1,130 +1,141 @@
-/**
- * Провайдери ШІ.
- * Порядок: Gemini → DeepSeek → Groq (fallback).
- * Vision — лише Gemini (найстабільніше з безкоштовних).
- *
- * Потрібні змінні:
- *  GEMINI_API_KEY (secret)
- *  DEEPSEEK_API_KEY (secret, опційно)
- *  GROQ_API_KEY (secret, опційно)
- *  AI_MODEL (plaintext, наприклад "gemini-1.5-flash")
- */
+// Unified AI providers (text + vision) with fallbacks.
+// Order is controlled by AI_PROVIDERS env var:
+//   text:gemini,deepseek,groq;vision:gemini
 
-const GEMINI_TEXT_URL = (model) =>
-  `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=`;
-const GEMINI_VISION_URL = GEMINI_TEXT_URL; // той самий ендпоінт
+const G_TEXT = "gemini";
+const D_TEXT = "deepseek";
+const R_TEXT = "groq";
 
-export async function aiText({ prompt }, env) {
-  // 1) Gemini
-  if (env.GEMINI_API_KEY) {
-    const model = env.AI_MODEL || "gemini-1.5-flash";
-    try {
-      const r = await fetch(GEMINI_TEXT_URL(model) + env.GEMINI_API_KEY, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-        }),
-      });
-      const j = await r.json();
-      const text =
-        j?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ??
-        j?.candidates?.[0]?.content?.parts?.[0]?.text ??
-        "";
-      if (text) return text.trim();
-    } catch (_e) {}
-  }
-
-  // 2) DeepSeek (сумісний з OpenAI chat.completions)
-  if (env.DEEPSEEK_API_KEY) {
-    try {
-      const r = await fetch("https://api.deepseek.com/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "deepseek-chat",
-          messages: [
-            { role: "system", content: "You are a helpful assistant." },
-            { role: "user", content: prompt },
-          ],
-          temperature: 0.7,
-        }),
-      });
-      const j = await r.json();
-      const text = j?.choices?.[0]?.message?.content ?? "";
-      if (text) return text.trim();
-    } catch (_e) {}
-  }
-
-  // 3) Groq (fallback, швидко/стабільно)
-  if (env.GROQ_API_KEY) {
-    try {
-      const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${env.GROQ_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "llama-3.1-8b-instant",
-          messages: [
-            { role: "system", content: "You are a helpful assistant." },
-            { role: "user", content: prompt },
-          ],
-          temperature: 0.7,
-        }),
-      });
-      const j = await r.json();
-      const text = j?.choices?.[0]?.message?.content ?? "";
-      if (text) return text.trim();
-    } catch (_e) {}
-  }
-
-  // Якщо все впало — повернемо дружню відповідь
-  return "Вибач, зараз я перевантажений. Спробуй ще раз через хвилинку 🙏";
+export function parseProviderOrder(env) {
+  const raw = env.AI_PROVIDERS || `text:${G_TEXT},${D_TEXT},${R_TEXT};vision:${G_TEXT}`;
+  const parts = Object.fromEntries(
+    raw.split(";").map(s => {
+      const [k, v] = s.split(":");
+      return [k.trim(), v.split(",").map(x => x.trim()).filter(Boolean)];
+    })
+  );
+  return {
+    text: parts.text ?? [G_TEXT, D_TEXT, R_TEXT],
+    vision: parts.vision ?? [G_TEXT],
+  };
 }
 
-export async function aiVision({ prompt, imageUrl }, env) {
-  // Vision тільки через Gemini
-  if (!env.GEMINI_API_KEY) {
-    return "Зараз аналіз зображень недоступний (не задано GEMINI_API_KEY).";
-  }
+// ====== TEXT ======
+async function geminiText(prompt, env) {
   const model = env.AI_MODEL || "gemini-1.5-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
+  const body = {
+    contents: [{ role: "user", parts: [{ text: prompt }]}],
+  };
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`Gemini text ${r.status}`);
+  const data = await r.json();
+  return data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("")?.trim() || "🤔";
+}
 
-  // Google Gemini Vision приймає parts з text + inline_data/url_data.
-  // Через URL простіше:
-  try {
-    const r = await fetch(GEMINI_VISION_URL(model) + env.GEMINI_API_KEY, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              { text: prompt || "Опиши детально, що на фото. Додай висновки." },
-              {
-                file_data: {
-                  mime_type: "image/jpeg",
-                  file_uri: imageUrl,
-                },
-              },
-            ],
-          },
-        ],
-      }),
-    });
+async function deepseekText(prompt, env) {
+  if (!env.DEEPSEEK_API_KEY) throw new Error("NO_DEEPSEEK_KEY");
+  const url = "https://api.deepseek.com/v1/chat/completions";
+  const body = {
+    model: "deepseek-chat",
+    messages: [{ role: "user", content: prompt }],
+    temperature: 0.6,
+  };
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.DEEPSEEK_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`DeepSeek ${r.status}`);
+  const data = await r.json();
+  return data?.choices?.[0]?.message?.content?.trim() || "🤔";
+}
 
-    const j = await r.json();
-    const text =
-      j?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ??
-      j?.candidates?.[0]?.content?.parts?.[0]?.text ??
-      "";
+async function groqText(prompt, env) {
+  if (!env.GROQ_API_KEY) throw new Error("NO_GROQ_KEY");
+  const url = "https://api.groq.com/openai/v1/chat/completions";
+  const body = {
+    model: "llama-3.1-8b-instant",
+    messages: [{ role: "user", content: prompt }],
+    temperature: 0.6,
+  };
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.GROQ_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`Groq ${r.status}`);
+  const data = await r.json();
+  return data?.choices?.[0]?.message?.content?.trim() || "🤔";
+}
 
-    return text?.trim() || "Не вдалося проаналізувати зображення 😕";
-  } catch (_e) {
-    return "Сталася помилка під час аналізу зображення.";
+const TEXT_IMPL = {
+  [G_TEXT]: geminiText,
+  [D_TEXT]: deepseekText,
+  [R_TEXT]: groqText,
+};
+
+export async function generateText(prompt, env) {
+  const order = parseProviderOrder(env).text;
+  let lastErr;
+  for (const name of order) {
+    const impl = TEXT_IMPL[name];
+    if (!impl) continue;
+    try {
+      return await impl(prompt, env);
+    } catch (e) {
+      lastErr = e;
+    }
   }
+  throw lastErr ?? new Error("No text providers available");
+}
+
+// ====== VISION (image URL array) ======
+async function geminiVision(prompt, imageUrls, env) {
+  const model = env.AI_MODEL || "gemini-1.5-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
+  const parts = [{ text: prompt || "Опиши зображення і зроби висновки стисло." }];
+  for (const u of imageUrls) {
+    parts.push({ inline_data: await fetchAsPart(u) });
+  }
+  const body = { contents: [{ role: "user", parts }] };
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`Gemini vision ${r.status}`);
+  const data = await r.json();
+  return data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("")?.trim() || "🤔";
+}
+
+// helper: download bytes and convert to base64 as Gemini inline_data
+async function fetchAsPart(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Fetch image ${res.status}`);
+  const ct = res.headers.get("content-type") || "image/jpeg";
+  const ab = await res.arrayBuffer();
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(ab)));
+  return { mime_type: ct, data: b64 };
+}
+
+export async function analyzeImage(prompt, imageUrls, env) {
+  const order = parseProviderOrder(env).vision; // now only gemini
+  let lastErr;
+  for (const name of order) {
+    try {
+      if (name === G_TEXT) return await geminiVision(prompt, imageUrls, env);
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr ?? new Error("No vision providers available");
 }
