@@ -1,50 +1,63 @@
 // src/index.js
-import { handleUpdate } from "./router.js";
 import { tgSendMessage } from "./adapters/telegram.js";
+
+function extractChat(update) {
+  return (
+    update?.message?.chat?.id ??
+    update?.edited_message?.chat?.id ??
+    update?.callback_query?.message?.chat?.id ??
+    null
+  );
+}
 
 export default {
   async fetch(request, env, ctx) {
     try {
       const url = new URL(request.url);
-      const pathname = url.pathname || "/";
 
-      // Шлях вебхука: беремо з середовища або приймаємо будь-який
-      const hookPath = (env.BOT_PATH || "/senti1984").trim();
-      const match = pathname === hookPath || hookPath === "/*";
-
-      if (request.method === "POST" && match) {
-        const update = await request.json().catch(() => null);
-
-        // базове логування (видно у Tail)
-        console.log("TG update:", update && Object.keys(update));
-
-        if (!update) return new Response("bad json", { status: 400 });
-
-        // головне: ЧЕКАЄМО роутер
-        await handleUpdate(update, env);
-
-        // Telegram очікує швидку відповідь 200/“ok”
-        return new Response("ok", { status: 200 });
+      // 1) Healthcheck
+      if (request.method === "GET") {
+        if (url.pathname === "/ping") {
+          // тестове повідомлення в OWNER_ID (за наявності)
+          const owner = env.OWNER_ID;
+          if (owner) await tgSendMessage(owner, "✅ Ping від воркера", env);
+          return new Response("pong", { status: 200 });
+        }
+        return new Response("Senti worker alive", { status: 200 });
       }
 
-      // healthcheck / простий пінг
-      if (request.method === "GET") {
-        return new Response("Senti bot worker OK", { status: 200 });
+      // 2) Приймаємо POST з Telegram на БУДЬ-ЯКИЙ шлях
+      if (request.method === "POST") {
+        let update = null;
+        try {
+          update = await request.json();
+        } catch {
+          return new Response("bad json", { status: 400 });
+        }
+
+        // лог ключів апдейта у Tail
+        console.log("TG update keys:", Object.keys(update || {}));
+
+        const chatId = extractChat(update);
+        if (!chatId) {
+          console.log("No chatId in update");
+          return new Response("ok", { status: 200 });
+        }
+
+        // Миттєва відповідь користувачу (без роутера)
+        await tgSendMessage(
+          chatId,
+          "👋 Привіт! Я на звʼязку. Це технічний пінг від воркера.",
+          env
+        );
+
+        // Обовʼязково швидкий 200
+        return new Response("ok", { status: 200 });
       }
 
       return new Response("not found", { status: 404 });
     } catch (e) {
       console.error("fetch error:", e?.stack || e);
-      // Спробуємо сповістити власника, якщо в апдейті був chat_id
-      try {
-        const cached = await request.clone().json().catch(() => null);
-        const chatId =
-          cached?.message?.chat?.id ||
-          cached?.callback_query?.message?.chat?.id;
-        if (chatId && typeof tgSendMessage === "function") {
-          await tgSendMessage(chatId, "Виникла помилка на боці сервера 🛠️. Ми вже дивимось.");
-        }
-      } catch (_) {}
       return new Response("error", { status: 500 });
     }
   },
