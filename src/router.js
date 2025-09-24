@@ -1,62 +1,51 @@
-// Дуже простий роутер: команда /start і все інше як текст/медіа.
-// Пізніше докрутимо vision/documents/codegen.
+// Роутер Telegram-апдейтів: /start, звичайний текст, кнопки
 
-import { tgSendMessage, tgSendChatAction, tgGetFileUrl } from "./adapters/telegram.js";
-import { aiText, aiVision } from "./ai/providers.js";
+import { tgSendMessage, tgSendAction, tgGetFileUrl } from './adapters/telegram.js';
+import { aiText, aiVision } from './ai/providers.js';
 
-/**
- * Головний обробник апдейтів від Telegram (webhook)
- * @param {object} update - об’єкт апдейту з Telegram
- * @param {object} env    - середовище воркера (env vars, bindings)
- */
 export async function handleUpdate(update, env) {
-  // Мінімальна валідація
-  const msg = update?.message;
-  if (!msg || !msg.chat) return;
+  const msg = update.message || update.edited_message || null;
+  const cq = update.callback_query || null;
+
+  // Якщо прийшла callback_query — просто підтвердимо, щоби не висіло "годинник"
+  if (cq) {
+    // Можна додати логіку, якщо буде меню.
+    return new Response('ok');
+  }
+
+  if (!msg || !msg.chat) return new Response('ok');
 
   const chatId = msg.chat.id;
-  const text = (msg.text ?? msg.caption ?? "").trim();
+  const text = (msg.text ?? msg.caption ?? '').trim();
 
-  // 1) /start — коротке дружнє вітання (без згадки моделей)
-  if (text.startsWith("/start")) {
+  // --- /start ---
+  if (text.startsWith('/start')) {
     const hello =
-      "👋 Привіт! Я на зв’язку. Надішли текст — відповім лаконічно. " +
-      "Пришли фото/файл — опишу й допоможу з висновками.";
+      '👋 Привіт! Я Senti — твій уважний помічник.\n' +
+      '• Надішли текст — відповім коротко і по суті.\n' +
+      '• Пришли фото чи PDF — опишу і зроблю висновки.\n' +
+      'Спробуй: просто напиши думку або кинь картинку.';
     await tgSendMessage(env, chatId, hello);
-    return;
+    return new Response('ok');
   }
 
-  // Показуємо "typing..." поки обробляємо
-  await tgSendChatAction(env, chatId, "typing");
-
-  // 2) Якщо є фото — беремо найбільше за розміром
-  if (msg.photo && Array.isArray(msg.photo) && msg.photo.length > 0) {
-    const biggest = msg.photo.reduce((a, b) => (a.file_size > b.file_size ? a : b));
-    const fileUrl = await tgGetFileUrl(env, biggest.file_id);
-    const prompt = text || "Опиши це зображення, дай короткі висновки.";
-    const result = await aiVision(env, fileUrl, prompt);
-    await tgSendMessage(env, chatId, result);
-    return;
+  // --- Медія з підписом (поки що як звичайний текст) ---
+  if (msg.photo || msg.document) {
+    await tgSendAction(env, chatId, 'typing');
+    const prompt = text || 'Опиши це простими словами.';
+    const reply = await aiText({ prompt, env });
+    await tgSendMessage(env, chatId, reply);
+    return new Response('ok');
   }
 
-  // 3) Документи/файли (pdf, docx, txt, тощо) — поки просто даємо лінк і заглушку
-  if (msg.document) {
-    const fileUrl = await tgGetFileUrl(env, msg.document.file_id);
-    const prompt =
-      text ||
-      `Є файл ${msg.document.file_name ?? ""}. Зроби короткий огляд вмісту (якщо це текст/пдф).`;
-    const result = await aiVision(env, fileUrl, prompt);
-    await tgSendMessage(env, chatId, result);
-    return;
-  }
-
-  // 4) Якщо це звичайний текст — віддаємо у aiText
+  // --- Звичайний текст ---
   if (text) {
-    const result = await aiText(env, text);
-    await tgSendMessage(env, chatId, result);
-    return;
+    await tgSendAction(env, chatId, 'typing');
+    const reply = await aiText({ prompt: text, env });
+    await tgSendMessage(env, chatId, reply);
+    return new Response('ok');
   }
 
-  // 5) Інші типи — просто чемно відповімо
-  await tgSendMessage(env, chatId, "Я поки що розумію текст, фото та документи. Спробуєш одне з цього? 😊");
+  // Якщо нічого з вище — мовчки ок
+  return new Response('ok');
 }
