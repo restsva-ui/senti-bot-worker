@@ -1,21 +1,15 @@
-// src/media.js — friendly replies for stickers/gifs & media hints
+import { analyzeImage } from "./ai/providers.js";
+import { tgGetFileUrl } from "./adapters/telegram.js";
 
-export async function handleMedia(env, { chatId, replyLang, mode }) {
-  // НІЯКИХ привітань тут — щоб не дублювалося з Greeting.
-  if (mode === "hint") {
-    // index.js сам відправить підказку tgReplyMediaHint(); тут нічого не повертаємо
-    return { text: null };
-  }
+export async function handlePhotoMessage(update, env) {
+  const msg = update.message;
+  const photos = msg.photo || [];
+  if (!photos.length) return "Фото не знайдено.";
+  // Найбільший розмір — останній елемент
+  const fileId = photos[photos.length - 1].file_id;
+  const url = await tgGetFileUrl(fileId, env);
 
-  if (mode === "friendly") {
-    const msg =
-      replyLang === "uk" ? "Гарний настрій бачу 😄" :
-      replyLang === "ru" ? "Классное настроение вижу 😄" :
-      replyLang === "de" ? "Gute Stimmung sehe ich 😄" :
-      replyLang === "fr" ? "Bonne vibe, je vois 😄" :
-      "Nice vibe 😄";
-    return { text: msg };
-  }
-
-  return { text: null };
+  const caption = (msg.caption || "").trim();
+  const prompt = caption || "Опиши зображення і зроби короткі висновки як для користувача.";
+  return await analyzeImage(prompt, [url], env);
 }
