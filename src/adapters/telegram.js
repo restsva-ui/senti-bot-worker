@@ -1,41 +1,35 @@
-// Minimal Telegram adapter
-const API = (token) => `https://api.telegram.org/bot${token}`;
-
-export async function tgSendAction(chatId, action, env) {
-  await fetch(`${API(env.TELEGRAM_TOKEN)}/sendChatAction`, {
+// src/adapters/telegram.js
+export async function tgSendMessage(chatId, text, env, extra = {}) {
+  const token =
+    env?.TELEGRAM_TOKEN ||
+    (typeof TELEGRAM_TOKEN !== "undefined" ? TELEGRAM_TOKEN : "");
+  const body = { chat_id: chatId, text, parse_mode: "HTML", ...extra };
+  const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    console.error("tgSendMessage fail", r.status, t);
+  }
+  return r.ok;
+}
+
+export async function tgSendChatAction(chatId, action = "typing", env) {
+  const token =
+    env?.TELEGRAM_TOKEN ||
+    (typeof TELEGRAM_TOKEN !== "undefined" ? TELEGRAM_TOKEN : "");
+  await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, action }),
   }).catch(() => {});
 }
 
-export async function tgSendMessage(chatId, text, env, options = {}) {
-  return fetch(`${API(env.TELEGRAM_TOKEN)}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "Markdown",
-      disable_web_page_preview: true,
-      ...options
-    }),
-  });
-}
-
-export async function tgSendPhoto(chatId, url, caption, env) {
-  return fetch(`${API(env.TELEGRAM_TOKEN)}/sendPhoto`, {
-    method: "POST",
-    body: JSON.stringify({ chat_id: chatId, photo: url, caption }),
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-// get HTTPS file URL by file_id
-export async function tgGetFileUrl(fileId, env) {
-  const r = await fetch(`${API(env.TELEGRAM_TOKEN)}/getFile?file_id=${encodeURIComponent(fileId)}`);
-  const j = await r.json();
-  if (!j.ok) throw new Error("getFile failed");
-  const path = j.result.file_path;
-  return `https://api.telegram.org/file/bot${env.TELEGRAM_TOKEN}/${path}`;
+export function tgGetFileUrl(filePath, token) {
+  const t =
+    token ||
+    (typeof TELEGRAM_TOKEN !== "undefined" ? TELEGRAM_TOKEN : "");
+  return `https://api.telegram.org/file/bot${t}/${filePath}`;
 }
