@@ -1,43 +1,78 @@
-import { tgSendMessage, tgSendAction } from "./adapters/telegram.js";
-import { generateText } from "./ai/providers.js";
-import { handlePhotoMessage } from "./media.js";
-import { TXT } from "./lang.js";
-import { memGet, memSet } from "./ai/redis.js";
+// src/router.js
+// Дуже простий роутер: /start, фото, звичайний текст.
+// Пізніше сюди легко додати інші команди.
 
+/* Imports, синхронізовані з актуальними файлами */
+import { tgSendMessage, tgSendAction, tgGetFileUrl } from "./adapters/telegram.js";
+import { generateText, analyzeImage } from "./ai/providers.js";
+
+/** Головний вхід для апдейта від Telegram */
 export async function handleUpdate(update, env) {
-  const msg = update.message;
-  if (!msg || !msg.chat) return;
+  const msg = update?.message;
+  if (!msg || !msg.chat || (!msg.text && !msg.caption && !msg.photo)) return;
 
   const chatId = msg.chat.id;
   const text = (msg.text ?? msg.caption ?? "").trim();
+  const locale = (env.BOT_LOCALE || "uk").toLowerCase();
 
-  // /start
+  // 1) Команда /start — коротке дружнє вітання (без згадки моделей)
   if (text.startsWith("/start")) {
-    const name = msg.from?.first_name;
-    return tgSendMessage(chatId, TXT.hello(name), env);
+    const hello =
+      "Привіт! 🚀 Давай зробимо цей день яскравішим.\n\n" +
+      "• Надішли *текст* — відповім лаконічно.\n" +
+      "• Пришли *фото* — опишу та дам *висновки*.\n";
+    await tgSendMessage(chatId, hello, { parse_mode: "Markdown" });
+    return;
   }
 
-  // Photo
-  if (msg.photo && msg.photo.length) {
-    await tgSendAction(chatId, "typing", env);
+  // 2) Якщо є фото — беремо найякісніше і робимо vision-аналіз
+  if (msg.photo && Array.isArray(msg.photo) && msg.photo.length > 0) {
     try {
-      const answer = await handlePhotoMessage(update, env);
-      return tgSendMessage(chatId, answer, env);
-    } catch {
-      return tgSendMessage(chatId, TXT.error, env);
+      await tgSendAction(chatId, "upload_photo");
+
+      // беремо найбільший варіант (останній у масиві)
+      const fileId = msg.photo[msg.photo.length - 1].file_id;
+      const fileUrl = await tgGetFileUrl(env, fileId);
+
+      const prompt =
+        text && text.length > 0
+          ? text
+          : "Опиши зображення. Дай короткі висновки в кінці списком.";
+
+      const reply = await analyzeImage(env, {
+        imageUrl: fileUrl,
+        prompt,
+        locale,
+      });
+
+      await tgSendMessage(chatId, reply);
+    } catch (e) {
+      await tgSendMessage(
+        chatId,
+        "На жаль, не вдалося обробити зображення. Спробуй ще раз або надішли інше фото."
+      );
+      console.error("vision error:", e);
     }
+    return;
   }
 
-  // Text
+  // 3) Інакше — звичайний текст → текстова модель
   if (text) {
-    await tgSendAction(chatId, "typing", env);
     try {
-      // короткий контекст-пам'ять (останнє запитання)
-      await memSet(chatId, text, env);
-      const reply = await generateText(text, env);
-      return tgSendMessage(chatId, reply, env);
-    } catch {
-      return tgSendMessage(chatId, TXT.error, env);
+      await tgSendAction(chatId, "typing");
+
+      const reply = await generateText(env, {
+        prompt: text,
+        locale,
+      });
+
+      await tgSendMessage(chatId, reply);
+    } catch (e) {
+      await tgSendMessage(
+        chatId,
+        "Хм… не вийшло відповісти. Спробуй переформулювати повідомлення."
+      );
+      console.error("text error:", e);
     }
   }
 }
