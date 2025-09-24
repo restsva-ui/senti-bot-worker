@@ -1,28 +1,47 @@
-import { handleUpdate } from './router.js';
-import { tgSetWebhook, tgDeleteWebhook } from './adapters/telegram.js';
+import { handleUpdate } from "./router.js";
 
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
+    try {
+      // Проста перевірка методу/шляху
+      const url = new URL(request.url);
+      const isWebhookPath = url.pathname === "/senti1984";
 
-    // Простий healthcheck
-    if (request.method === 'GET') {
-      return new Response('Senti worker alive', { status: 200 });
-    }
+      if (request.method === "POST" && isWebhookPath) {
+        // TG шле JSON
+        let update = null;
+        try {
+          update = await request.json();
+        } catch (e) {
+          console.error("Bad JSON from TG:", e?.message);
+          return new Response("bad json", { status: 200 }); // 200 щоб TG не ретраїв
+        }
 
-    // Вебхук приймаємо на /:token (щоб було зручно ставити у BotFather)
-    if (request.method === 'POST') {
-      // НЕ блокуємо за секретом, якщо він не заданий (щоб не ламалось)
-      // Якщо захочеш — додамо перевірку x-telegram-bot-api-secret-token
-      let update;
-      try {
-        update = await request.json();
-      } catch {
-        return new Response('bad json', { status: 400 });
+        // Легкий heartbeat у логи — які ключі прийшли
+        try {
+          console.info("TG update keys:", ...Object.keys(update ?? {}));
+        } catch {}
+
+        // Головний роутер
+        try {
+          await handleUpdate(update, env, ctx);
+        } catch (e) {
+          console.error("handleUpdate error:", e?.message);
+        }
+
+        // TG очікує тільки 200/OK
+        return new Response("ok", { status: 200 });
       }
-      return handleUpdate(update, env);
-    }
 
-    return new Response('Not found', { status: 404 });
+      // Для GET/інших — технічний ping, щоб бачити, що воркер живий
+      if (request.method === "GET") {
+        return new Response("Senti worker is running", { status: 200 });
+      }
+
+      return new Response("not found", { status: 404 });
+    } catch (e) {
+      console.error("fetch root error:", e?.message);
+      return new Response("ok", { status: 200 });
+    }
   },
 };
