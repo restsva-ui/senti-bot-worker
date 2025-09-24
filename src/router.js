@@ -1,32 +1,69 @@
-// Дуже простий роутер: команди /start і все інше як текст.
-// Пізніше додамо vision/documents/codegen.
+import { tgSendMessage, tgSendChatAction, tgGetFileUrl } from "./adapters/telegram.js";
+import { aiText, aiVision } from "./ai/providers.js";
 
-import { tgSendMessage } from "../adapters/telegram.js";
+// Лаконічне вітання без згадки моделей
+const START_TEXT =
+  "Привіт! Надішли текст — відповім коротко й по суті. Надішли фото — опишу й додам висновки. Я поруч. 🧠";
 
 export async function handleUpdate(update, env) {
-  const msg = update.message;
-  if (!msg || !msg.chat || (!msg.text && !msg.caption)) return;
+  const msg = update?.message;
+  if (!msg) return;
 
-  const chatId = msg.chat.id;
+  const chatId = msg.chat?.id;
+  if (!chatId) return;
+
   const text = (msg.text ?? msg.caption ?? "").trim();
 
-  // Команда /start — коротке дружнє вітання (без згадки моделей)
+  // /start
   if (text.startsWith("/start")) {
-    const hello =
-      "Привіт! Я — Senti. Надішли текст або фото — допоможу швидко й по суті. 🚀";
-    await tgSendMessage(env, chatId, hello, { parse_mode: "Markdown" });
+    await tgSendMessage(env.TELEGRAM_TOKEN, chatId, START_TEXT);
+    return;
+    }
+
+  // Фото або документ-зображення
+  const photoArr = msg.photo;
+  const doc = msg.document;
+  const hasImage =
+    (Array.isArray(photoArr) && photoArr.length > 0) ||
+    (doc && typeof doc.mime_type === "string" && doc.mime_type.startsWith("image/"));
+
+  if (hasImage) {
+    await tgSendChatAction(env.TELEGRAM_TOKEN, chatId, "upload_photo");
+
+    // беремо найбільше фото або document.file_id
+    const fileId =
+      (Array.isArray(photoArr) && photoArr[photoArr.length - 1]?.file_id) ||
+      (doc && doc.file_id) ||
+      null;
+
+    if (!fileId) {
+      await tgSendMessage(env.TELEGRAM_TOKEN, chatId, "Не вдалося отримати зображення 😕");
+      return;
+    }
+
+    const fileUrl = await tgGetFileUrl(env.TELEGRAM_TOKEN, fileId);
+    if (!fileUrl) {
+      await tgSendMessage(env.TELEGRAM_TOKEN, chatId, "Не вдалося завантажити фото.");
+      return;
+    }
+
+    const prompt =
+      text ||
+      "Опиши детально, що на фото. Додай короткі висновки та можливі наступні кроки користувача.";
+
+    const answer = await aiVision({ prompt, imageUrl: fileUrl }, env);
+    await tgSendMessage(env.TELEGRAM_TOKEN, chatId, answer);
     return;
   }
 
-  // Поки що заглушка: просто повторюємо (echo-lite).
-  // Далі підключимо LLM і решту фіч.
-  await tgSendMessage(env, chatId, `Я почув: _${escapeMd(text)}_`, {
-    parse_mode: "Markdown",
-    disable_web_page_preview: true,
-  });
-}
+  // Звичайний текст
+  if (text) {
+    await tgSendChatAction(env.TELEGRAM_TOKEN, chatId, "typing");
+    const answer = await aiText({ prompt: text }, env);
+    await tgSendMessage(env.TELEGRAM_TOKEN, chatId, answer);
+    return;
+  }
 
-// Маленький хелпер для Markdown-escape
-function escapeMd(s) {
-  return s.replace(/([_*[\]()~`>#+\-=|{}.!])/g, "\\$1");
+  // Нічого корисного не прийшло
+  await tgSendMessage(env.TELEGRAM_TOKEN, chatId, "Надішли, будь ласка, текст або фото 🙂");
 }
