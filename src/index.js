@@ -3,44 +3,44 @@ import { handleUpdate } from "./router.js";
 export default {
   async fetch(request, env, ctx) {
     try {
-      // Проста перевірка методу/шляху
       const url = new URL(request.url);
-      const isWebhookPath = url.pathname === "/senti1984";
 
-      if (request.method === "POST" && isWebhookPath) {
-        // TG шле JSON
-        let update = null;
+      if (request.method === "POST" && url.pathname === "/senti1984") {
+        let raw = "";
         try {
-          update = await request.json();
+          raw = await request.text(); // читаємо як текст для логів
         } catch (e) {
-          console.error("Bad JSON from TG:", e?.message);
-          return new Response("bad json", { status: 200 }); // 200 щоб TG не ретраїв
+          console.error("Read body error:", e?.message);
         }
 
-        // Легкий heartbeat у логи — які ключі прийшли
+        let update = null;
+        try {
+          update = raw ? JSON.parse(raw) : null;
+        } catch (e) {
+          console.error("Bad JSON from TG:", e?.message, raw?.slice(0, 200));
+          return new Response("ok", { status: 200 });
+        }
+
         try {
           console.info("TG update keys:", ...Object.keys(update ?? {}));
         } catch {}
 
-        // Головний роутер
         try {
           await handleUpdate(update, env, ctx);
         } catch (e) {
           console.error("handleUpdate error:", e?.message);
         }
 
-        // TG очікує тільки 200/OK
         return new Response("ok", { status: 200 });
       }
 
-      // Для GET/інших — технічний ping, щоб бачити, що воркер живий
       if (request.method === "GET") {
         return new Response("Senti worker is running", { status: 200 });
       }
 
       return new Response("not found", { status: 404 });
     } catch (e) {
-      console.error("fetch root error:", e?.message);
+      console.error("fetch fatal:", e?.message);
       return new Response("ok", { status: 200 });
     }
   },
