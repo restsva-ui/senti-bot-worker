@@ -1,78 +1,74 @@
-// src/router.js
-// Дуже простий роутер: /start, фото, звичайний текст.
-// Пізніше сюди легко додати інші команди.
+// Дуже простий роутер: /start, текст, фото
+import { tgSendMessage, tgSendChatAction, tgGetFileUrl } from "./adapters/telegram.js";
+import { aiText, aiVision } from "./ai/providers.js";
 
-/* Imports, синхронізовані з актуальними файлами */
-import { tgSendMessage, tgSendAction, tgGetFileUrl } from "./adapters/telegram.js";
-import { generateText, analyzeImage } from "./ai/providers.js";
-
-/** Головний вхід для апдейта від Telegram */
 export async function handleUpdate(update, env) {
-  const msg = update?.message;
-  if (!msg || !msg.chat || (!msg.text && !msg.caption && !msg.photo)) return;
+  try {
+    const msg = update.message || update.edited_message;
+    const cb  = update.callback_query;
 
-  const chatId = msg.chat.id;
-  const text = (msg.text ?? msg.caption ?? "").trim();
-  const locale = (env.BOT_LOCALE || "uk").toLowerCase();
+    // Якщо callback_query — поки просто ігноруємо
+    if (!msg && !cb) return;
 
-  // 1) Команда /start — коротке дружнє вітання (без згадки моделей)
-  if (text.startsWith("/start")) {
-    const hello =
-      "Привіт! 🚀 Давай зробимо цей день яскравішим.\n\n" +
-      "• Надішли *текст* — відповім лаконічно.\n" +
-      "• Пришли *фото* — опишу та дам *висновки*.\n";
-    await tgSendMessage(chatId, hello, { parse_mode: "Markdown" });
-    return;
-  }
+    const chatId = (msg?.chat?.id) || (cb?.message?.chat?.id);
+    if (!chatId) return;
 
-  // 2) Якщо є фото — беремо найякісніше і робимо vision-аналіз
-  if (msg.photo && Array.isArray(msg.photo) && msg.photo.length > 0) {
-    try {
-      await tgSendAction(chatId, "upload_photo");
+    // Текст/підпис
+    const text = (msg?.text ?? msg?.caption ?? "").trim();
 
-      // беремо найбільший варіант (останній у масиві)
-      const fileId = msg.photo[msg.photo.length - 1].file_id;
-      const fileUrl = await tgGetFileUrl(env, fileId);
+    // 1) Команда /start
+    if (text.startsWith("/start")) {
+      const hello =
+        "👋 Привіт! Я Senti.\n" +
+        "Надішли текст — відповім лаконічно.\n" +
+        "Надішли фото — опишу й зроблю висновки.\n" +
+        "Спробуй прямо зараз.";
+      await tgSendMessage(env, chatId, hello);
+      return;
+    }
 
+    // 2) Фото → Vision
+    const photos = msg?.photo;
+    if (Array.isArray(photos) && photos.length > 0) {
+      // Telegram надсилає кілька розмірів — беремо найбільший
+      const best = photos[photos.length - 1];
+      if (!best?.file_id) return;
+
+      await tgSendChatAction(env, chatId, "typing");
+
+      const fileUrl = await tgGetFileUrl(env, best.file_id);
+      if (!fileUrl) {
+        await tgSendMessage(env, chatId, "Не вдалося отримати фото. Спробуй ще раз 🙏");
+        return;
+      }
+
+      const userHint = text ? `Користувач додав підпис: "${text}".` : "";
       const prompt =
-        text && text.length > 0
-          ? text
-          : "Опиши зображення. Дай короткі висновки в кінці списком.";
+        "Проаналізуй зображення. Коротко опиши, виділи ключові об’єкти, " +
+        "поміркуй про контекст та дай стислий висновок. " + userHint;
 
-      const reply = await analyzeImage(env, {
-        imageUrl: fileUrl,
-        prompt,
-        locale,
-      });
-
-      await tgSendMessage(chatId, reply);
-    } catch (e) {
-      await tgSendMessage(
-        chatId,
-        "На жаль, не вдалося обробити зображення. Спробуй ще раз або надішли інше фото."
-      );
-      console.error("vision error:", e);
+      const answer = await aiVision(env, fileUrl, prompt);
+      await tgSendMessage(env, chatId, answer || "Не вдалось згенерувати відповідь 😅");
+      return;
     }
-    return;
-  }
 
-  // 3) Інакше — звичайний текст → текстова модель
-  if (text) {
-    try {
-      await tgSendAction(chatId, "typing");
+    // 3) Простий текст → Text
+    if (text) {
+      await tgSendChatAction(env, chatId, "typing");
 
-      const reply = await generateText(env, {
-        prompt: text,
-        locale,
-      });
+      const system =
+        "Ти дружній помічник Senti. Відповідай стисло, корисно, без згадки внутрішніх моделей. " +
+        "Українська мова за замовчуванням.";
 
-      await tgSendMessage(chatId, reply);
-    } catch (e) {
-      await tgSendMessage(
-        chatId,
-        "Хм… не вийшло відповісти. Спробуй переформулювати повідомлення."
-      );
-      console.error("text error:", e);
+      const answer = await aiText(env, text, { system });
+      await tgSendMessage(env, chatId, answer || "Я трохи загубився 🤔 Спробуй переформулювати.");
+      return;
     }
+
+    // Інакше — мовчимо
+  } catch (e) {
+    // Фейл-сейф: не падаємо
+    // Можеш вмикати логування, якщо потрібно:
+    // console.log("router error", e?.message);
   }
 }
