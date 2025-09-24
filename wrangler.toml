@@ -1,10 +1,25 @@
+# wrangler.toml — конфіг Cloudflare Worker
+
 name = "senti-bot-worker"
 main = "src/index.js"
-compatibility_date = "2024-09-20"
-compatibility_flags = []
+compatibility_date = "2025-09-01"
+workers_dev = true
+minify = true
 
-# !!! Увімкнено логування — корисно поки налагоджуємо
-[observability]
-enabled = true
+# Увімкнути Workers AI як binding "AI"
+[ai]
+binding = "AI"
 
-# Якщо будеш використовувати Durable Objects / D1 / KV — додамо сюди bindings
+# Небезпечні значення (токени) тут НЕ зберігаємо.
+# TELEGRAM_TOKEN, WEBHOOK_SECRET, REDIS_URL, REDIS_TOKEN, PREMIUM_CODE
+# мають лишатися Secret'ами в Dashboard / wrangler secret.
+[vars]
+# Шлях вебхука, який ти використовуєш в Telegram (в API був /senti1984)
+TELEGRAM_WEBHOOK_PATH = "senti1984"
+
+# Якщо колись додаш custom domain/route — вкажеш тут:
+# [routes]
+# patterns = ["https://bot.yourdomain.com/*"]
+
+# Якщо будеш підключати KV/Durable/Queues — секції додаси нижче.
+# Зараз не потрібно, все працює без них.
