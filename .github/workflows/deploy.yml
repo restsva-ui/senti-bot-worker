@@ -1,40 +1,25 @@
-name: Deploy to Cloudflare Worker
+name: Cloudflare Worker / deploy
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      # ⚠️ Більше НІЯКИХ "wrangler secret put" — секрети вже існують у воркері
+
+      - name: Deploy with Wrangler
+        uses: cloudflare/wrangler-action@v3
         with:
-          node-version: 20
-
-      - name: Install Wrangler
-        run: npm i -g wrangler@4
-
-      # Завантажуємо/оновлюємо секрети воркера (НЕ вебхук!)
-      - name: Upload Worker secrets
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
-        run: |
-          set -euo pipefail
-          echo "$TELEGRAM_TOKEN"  | wrangler secret put TELEGRAM_TOKEN  --config wrangler.toml
-          echo "$WEBHOOK_SECRET"  | wrangler secret put WEBHOOK_SECRET  --config wrangler.toml
-
-      - name: Deploy Worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-        run: wrangler deploy --config wrangler.toml --minify
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy --config wrangler.toml
