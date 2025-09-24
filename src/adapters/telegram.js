@@ -1,69 +1,65 @@
-// Адаптер Telegram: тільки базові виклики API.
-// ЗАЛИШАЄ сигнатури/імена, які вже імпортуються у router.js:
-//
-//   import { tgSendMessage, tgSendAction, tgGetFileUrl } from "./adapters/telegram.js";
-//
-// Потрібні ENV:
-//   - TG_BOT_TOKEN  (обов'язково)
+// Мінімальний і стабільний Telegram-адаптер з детальними логами.
 
-const TG_API_BASE = "https://api.telegram.org";
+const BASE = "https://api.telegram.org";
 
-function tgApiUrl(env, method) {
+async function callTG(method, payload, env) {
   const token = env?.TG_BOT_TOKEN;
-  if (!token) throw new Error("TG_BOT_TOKEN is not set");
-  return `${TG_API_BASE}/bot${token}/${method}`;
-}
+  if (!token) throw new Error("TG_BOT_TOKEN is missing in environment");
+  const url = `${BASE}/bot${token}/${method}`;
 
-async function tgFetchJson(url, payload) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload ?? {}),
-  });
-  let data = null;
-  try { data = await res.json(); } catch (_) {}
-  if (!res.ok || !data?.ok) {
-    throw new Error(`TG API error: ${url.split("/").pop()} ${JSON.stringify(data ?? {status: res.status})}`);
+  let res;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch (e) {
+    console.error(`TG fetch ${method} failed:`, e?.message);
+    throw e;
   }
-  return data.result;
+
+  const txt = await res.text();
+  let json = null;
+  try { json = JSON.parse(txt); } catch { /* залишимо сирий текст */ }
+
+  if (!res.ok || !json?.ok) {
+    console.error(`TG API error: ${method}`, txt);
+    throw new Error(`TG ${method} failed`);
+  }
+
+  return json.result;
 }
 
-/** Надіслати 'action' (typing, upload_photo, etc.) */
-export async function tgSendAction(chatId, action = "typing", env) {
-  const url = tgApiUrl(env, "sendChatAction");
-  await tgFetchJson(url, { chat_id: chatId, action });
+export async function tgSendMessage(chat_id, text, extra = {}, env) {
+  return callTG("sendMessage", { chat_id, text, parse_mode: "HTML", ...extra }, env);
 }
 
-/** Надіслати текстове повідомлення */
-export async function tgSendMessage(chatId, text, options = {}, env) {
-  const url = tgApiUrl(env, "sendMessage");
-  const payload = {
-    chat_id: chatId,
-    text: text ?? "",
-    parse_mode: options.parse_mode ?? "Markdown",
-    reply_to_message_id: options.reply_to_message_id,
-    disable_web_page_preview: true,
-  };
-  return await tgFetchJson(url, payload);
+export async function tgSendAction(chat_id, action = "typing", env) {
+  return callTG("sendChatAction", { chat_id, action }, env);
 }
 
-/** Отримати прямий URL файлу за file_id */
-export async function tgGetFileUrl(fileId, env) {
-  if (!fileId) return null;
+export async function tgGetFileUrl(file_id, env) {
   const token = env?.TG_BOT_TOKEN;
-  if (!token) throw new Error("TG_BOT_TOKEN is not set");
+  if (!token) throw new Error("TG_BOT_TOKEN is missing in environment");
 
-  // 1) getFile -> file_path
-  const getFileUrl = tgApiUrl(env, "getFile");
+  const getFileUrl = `${BASE}/bot${token}/getFile`;
   const res = await fetch(getFileUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ file_id: fileId }),
+    body: JSON.stringify({ file_id }),
   });
-  const data = await res.json().catch(() => null);
-  if (!res.ok || !data?.ok || !data.result?.file_path) return null;
 
-  // 2) сформувати прямий URL
-  const path = data.result.file_path;
-  return `${TG_API_BASE}/file/bot${token}/${path}`;
+  const txt = await res.text();
+  let json = null;
+  try { json = JSON.parse(txt); } catch {}
+  if (!res.ok || !json?.ok) {
+    console.error("TG API error: getFile", txt);
+    return null;
+  }
+
+  const path = json.result?.file_path;
+  if (!path) return null;
+  // Пряме посилання на файл
+  return `${BASE}/file/bot${token}/${path}`;
 }
