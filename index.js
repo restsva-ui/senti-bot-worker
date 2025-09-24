@@ -1,364 +1,400 @@
-// Senti — Cloudflare Worker (Telegram bot) with memory + multimodel routing
-// TEXT: Gemini -> DeepSeek -> Workers AI (AI binding or Gateway)
-// VISION: Gemini -> Workers AI LLaVA
-// Memory: Upstash Redis (last 10 pairs)
+// Senti Telegram Bot for Cloudflare Workers
+// Text fallback: Gemini -> DeepSeek -> Groq
+// Vision: Gemini
+// Memory: Upstash Redis (REST)
 
-// ───────────────────────────────── CONFIG ─────────────────────────────────
-const TG_API = (t) => `https://api.telegram.org/bot${t}`;
-const TG_FILE = (t) => `https://api.telegram.org/file/bot${t}`;
+const TG_API = "https://api.telegram.org";
 
-const GEMINI_TEXT_MODEL = "gemini-1.5-flash";
-const GEMINI_VISION_MODEL = "gemini-1.5-flash";
-const TIMEOUT_GEMINI_MS = 5000;   // 5s -> switch to DeepSeek/fallback
-const TIMEOUT_DEEPSEEK_MS = 6000; // 6s
+const TIMEOUT_MS = 25000;                 // таймаут на один провайдер
+const MAX_HISTORY_CHARS = 4000;           // обрізання історії для пам'яті
+const REDIS_PREFIX = "senti:history:";    // ключі в Redis
 
-const MEMORY_TURNS = 10; // keep last 10 user/assistant pairs
+// ---------------------- УТИЛІТИ ----------------------
 
-const SYSTEM_TEXT = "Ти — Senti: лаконічний, дружній, точний. Відповідай українською, списками коли доречно.";
-const SYSTEM_VISION = "Ти — Senti. Опиши зображення однією фразою, далі 3–5 спостережень, потім короткі висновки.";
-
-const CF_TEXT_FALLBACK_MODEL = "@cf/meta/llama-3.1-8b-instruct";
-const CF_VISION_FALLBACK_MODEL = "@cf/llava-1.5-7b";
-
-// ──────────────────────────────── UTILS ──────────────────────────────────
-const json = (st, data) => new Response(JSON.stringify(data), {
-  status: st,
-  headers: { "content-type": "application/json; charset=utf-8" },
-});
-const nowISO = () => new Date().toISOString();
-const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
-
-async function withTimeout(promise, ms, label = "op") {
-  const to = new Promise((_, rej) => setTimeout(() => rej(new Error(`${label}-timeout`)), ms));
-  return Promise.race([promise, to]);
+function withTimeout(ms, fetchPromise) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort("timeout"), ms);
+  return fetchPromise(ctrl.signal).finally(() => clearTimeout(t));
 }
 
-// ────────────────────────────── REDIS (Upstash) ──────────────────────────
-async function rGet(env, key) {
+async function sendTyping(env, chatId) {
+  try {
+    await fetch(`${TG_API}/bot${env.TELEGRAM_TOKEN}/sendChatAction`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, action: "typing" }),
+    });
+  } catch {}
+}
+
+async function sendMessage(env, chatId, text, replyToMessageId) {
+  return fetch(`${TG_API}/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      reply_to_message_id: replyToMessageId,
+      parse_mode: "Markdown",
+    }),
+  });
+}
+
+async function getFileLink(env, fileId) {
+  const r = await fetch(`${TG_API}/bot${env.TELEGRAM_TOKEN}/getFile?file_id=${fileId}`);
+  const j = await r.json();
+  if (!j.ok) throw new Error("getFile failed");
+  const path = j.result.file_path;
+  return `${TG_API}/file/bot${env.TELEGRAM_TOKEN}/${path}`;
+}
+
+async function fetchAsBase64(url) {
+  const r = await fetch(url);
+  const buf = await r.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  // base64
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+// ---------------------- REDIS (Upstash REST) ----------------------
+
+async function redisGet(env, key) {
   const r = await fetch(`${env.REDIS_URL}/get/${encodeURIComponent(key)}`, {
     headers: { Authorization: `Bearer ${env.REDIS_TOKEN}` },
   });
   if (!r.ok) return null;
-  const j = await r.json().catch(() => null);
-  if (!j || j.result == null) return null;
-  try { return JSON.parse(j.result); } catch { return j.result; }
-}
-async function rSet(env, key, val, ttlSec = 3 * 24 * 60 * 60) {
-  const r = await fetch(`${env.REDIS_URL}/set/${encodeURIComponent(key)}?EX=${ttlSec}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${env.REDIS_TOKEN}`, "content-type": "application/json" },
-    body: JSON.stringify(val),
-  });
-  if (!r.ok) throw new Error(`redis-set ${r.status}`);
-}
-async function loadHist(env, chatId) {
-  return (await rGet(env, `chat:${chatId}:hist`)) || [];
-}
-async function pushHist(env, chatId, role, content) {
-  const key = `chat:${chatId}:hist`;
-  const arr = await loadHist(env, chatId);
-  arr.push({ role, content, ts: nowISO() });
-  while (arr.length > MEMORY_TURNS * 2) arr.shift();
-  await rSet(env, key, arr);
-  return arr;
-}
-
-// ───────────────────────────── TELEGRAM API ──────────────────────────────
-async function tgAction(env, chatId, action = "typing") {
-  await fetch(`${TG_API(env.TELEGRAM_TOKEN)}/sendChatAction`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, action }),
-  }).catch(() => {});
-}
-async function tgSend(env, chatId, text, replyTo) {
-  return fetch(`${TG_API(env.TELEGRAM_TOKEN)}/sendMessage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "Markdown",
-      reply_to_message_id: replyTo,
-      disable_web_page_preview: true,
-    }),
-  });
-}
-async function tgEdit(env, chatId, messageId, text) {
-  return fetch(`${TG_API(env.TELEGRAM_TOKEN)}/editMessageText`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      message_id: messageId,
-      text,
-      parse_mode: "Markdown",
-      disable_web_page_preview: true,
-    }),
-  });
-}
-async function tgGetFileUrl(env, fileId) {
-  const meta = await fetch(`${TG_API(env.TELEGRAM_TOKEN)}/getFile?file_id=${fileId}`).then(r => r.json());
-  if (!meta?.ok) throw new Error("getFile failed");
-  return `${TG_FILE(env.TELEGRAM_TOKEN)}/${meta.result.file_path}`;
-}
-
-// ──────────────────────────────── AI: GEMINI ─────────────────────────────
-async function geminiText(env, messages) {
-  if (!env.GEMINI_API_KEY) throw new Error("gemini-no-key");
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TEXT_MODEL}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
-
-  const contents = messages.map(m => ({
-    role: m.role === "system" ? "user" : m.role, // Gemini не використовує 'system' у contents
-    parts: [{ text: m.content }],
-  }));
-
-  const body = {
-    system_instruction: { role: "system", parts: [{ text: SYSTEM_TEXT }] },
-    contents,
-  };
-
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error(`gemini-http-${r.status}`);
   const j = await r.json();
-  const parts = j?.candidates?.[0]?.content?.parts || [];
-  const text = parts.map(p => p?.text || "").join("").trim();
-  if (!text) throw new Error("gemini-empty");
-  return text;
+  return j.result ?? null;
 }
 
-async function geminiVision(env, prompt, imageBytes, mime = "image/jpeg") {
-  if (!env.GEMINI_API_KEY) throw new Error("gemini-no-key");
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_VISION_MODEL}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
-
-  const body = {
-    system_instruction: { role: "system", parts: [{ text: SYSTEM_VISION }] },
-    contents: [{
-      role: "user",
-      parts: [
-        { text: (prompt || "").trim() || "Проаналізуй фото за правилами вище." },
-        { inline_data: { mime_type: mime, data: b64(imageBytes) } },
-      ],
-    }],
-  };
-
-  const r = await fetch(url, {
+async function redisSet(env, key, value, ttlSeconds = 86400) {
+  await fetch(`${env.REDIS_URL}/set/${encodeURIComponent(key)}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    headers: {
+      Authorization: `Bearer ${env.REDIS_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ value, EX: ttlSeconds }),
   });
-  if (!r.ok) throw new Error(`gemini-vis-http-${r.status}`);
-  const j = await r.json();
-  const parts = j?.candidates?.[0]?.content?.parts || [];
-  const text = parts.map(p => p?.text || "").join("").trim();
-  if (!text) throw new Error("gemini-vis-empty");
-  return text;
 }
 
-// ─────────────────────────────── AI: DEEPSEEK ────────────────────────────
-async function deepseekText(env, messages) {
-  if (!env.DEEPSEEK_API_KEY) throw new Error("deepseek-no-key");
-  const url = "https://api.deepseek.com/chat/completions";
-  const body = {
-    model: "deepseek-chat",
-    messages: messages.map(m => ({ role: m.role === "system" ? "system" : m.role, content: m.content })),
-    stream: false,
-  };
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json", Authorization: `Bearer ${env.DEEPSEEK_API_KEY}` },
-    body: JSON.stringify(body),
+// обмежуємо довжину історії
+function clampHistory(str, maxChars) {
+  if (!str) return "";
+  if (str.length <= maxChars) return str;
+  return str.slice(-maxChars);
+}
+
+// ---------------------- ВИБІР МОДЕЛЕЙ ----------------------
+
+function parseProviders(env) {
+  // приклад: "text:gemini,deepseek,groq;vision:gemini"
+  const value = env.AI_PROVIDERS || "text:gemini,deepseek,groq;vision:gemini";
+  const out = { text: ["gemini", "deepseek", "groq"], vision: ["gemini"] };
+  value.split(";").forEach((seg) => {
+    const [k, v] = seg.split(":");
+    if (k && v) out[k.trim()] = v.split(",").map((s) => s.trim()).filter(Boolean);
   });
-  if (!r.ok) throw new Error(`deepseek-http-${r.status}`);
-  const j = await r.json();
-  const out = j?.choices?.[0]?.message?.content?.trim();
-  if (!out) throw new Error("deepseek-empty");
   return out;
 }
 
-// ─────────────────────── Workers AI fallback (AI or Gateway) ─────────────
-async function aiGateway(env, model, payload) {
-  if (!env.CF_AI_GATEWAY_BASE) throw new Error("no-gateway");
-  const url = `${env.CF_AI_GATEWAY_BASE}/workers-ai/${encodeURIComponent(model)}`;
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(env.CF_API_TOKEN ? { Authorization: `Bearer ${env.CF_API_TOKEN}` } : {}),
-    },
-    body: JSON.stringify(payload),
-  });
-  if (!r.ok) throw new Error(`gateway-${model}-${r.status}`);
-  return r.json();
-}
+// ---------------------- ЗАПИТИ ДО МОДЕЛЕЙ ----------------------
 
-async function workersTextFallback(env, messages) {
-  // 1) Prefer local binding (faster)
-  if (env.AI) {
-    const res = await env.AI.run(CF_TEXT_FALLBACK_MODEL, { messages });
-    const out = res?.response || res?.result || res?.output_text || "";
-    if (out) return String(out).trim();
+// Gemini (text + vision) — Google Generative Language API
+async function askGemini(env, { prompt, history, imageBase64 }) {
+  const model = env.AI_MODEL || "gemini-1.5-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
+
+  const contents = [];
+
+  if (history) {
+    contents.push({ role: "user", parts: [{ text: `Контекст: ${history}` }] });
   }
-  // 2) Fallback via Gateway (if configured)
-  const j = await aiGateway(env, CF_TEXT_FALLBACK_MODEL, { messages });
-  const out = j?.response || j?.result || j?.output_text || j?.choices?.[0]?.message?.content || "";
-  if (!out) throw new Error("workers-text-empty");
-  return String(out).trim();
-}
-
-async function workersVisionFallback(env, prompt, imageBytes) {
-  const content = [
-    { type: "input_text", text: (prompt || "Опиши зображення українською.") },
-    { type: "input_image", image: b64(imageBytes) },
-  ];
-  if (env.AI) {
-    const res = await env.AI.run(CF_VISION_FALLBACK_MODEL, {
-      messages: [{ role: "user", content }],
+  if (imageBase64) {
+    contents.push({
+      role: "user",
+      parts: [
+        { text: prompt || "Опиши зображення українською, додай короткі висновки." },
+        {
+          inline_data: {
+            mime_type: "image/jpeg",
+            data: imageBase64,
+          },
+        },
+      ],
     });
-    const out = res?.response || res?.result || res?.output_text || "";
-    if (out) return String(out).trim();
+  } else {
+    contents.push({ role: "user", parts: [{ text: prompt }] });
   }
-  const j = await aiGateway(env, CF_VISION_FALLBACK_MODEL, {
-    messages: [{ role: "user", content }],
-  });
-  const out = j?.response || j?.result || j?.output_text || j?.choices?.[0]?.message?.content || "";
-  if (!out) throw new Error("workers-vis-empty");
-  return String(out).trim();
+
+  const body = { contents, generationConfig: { temperature: 0.7 } };
+
+  const req = (signal) =>
+    fetch(url, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  const resp = await withTimeout(TIMEOUT_MS, req);
+  if (!resp.ok) throw new Error("Gemini HTTP " + resp.status);
+  const data = await resp.json();
+
+  const txt = data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
+  if (!txt) throw new Error("Gemini empty");
+  return txt.trim();
 }
 
-// ─────────────────── High-level: askText/askVision with fallbacks ─────────
-async function askTextLLM(env, messages) {
-  // 1) Gemini (5s)
-  try {
-    return await withTimeout(geminiText(env, messages), TIMEOUT_GEMINI_MS, "gemini-text");
-  } catch (_) {}
-  // 2) DeepSeek (6s)
-  try {
-    return await withTimeout(deepseekText(env, messages), TIMEOUT_DEEPSEEK_MS, "deepseek-text");
-  } catch (_) {}
-  // 3) Workers AI (final fallback)
-  try {
-    return await workersTextFallback(env, messages);
-  } catch (_) {}
-  return "Вибач, я тимчасово недоступний. Спробуй ще раз пізніше.";
+// DeepSeek (text) — Chat Completions API
+async function askDeepSeek(env, { prompt, history }) {
+  const url = "https://api.deepseek.com/v1/chat/completions";
+  const messages = [];
+
+  if (history) {
+    messages.push({
+      role: "system",
+      content:
+        "Короткий контекст попередньої розмови (українською): " +
+        clampHistory(history, 1000),
+    });
+  }
+  messages.push({ role: "user", content: prompt });
+
+  const body = {
+    model: "deepseek-chat",
+    messages,
+    temperature: 0.7,
+  };
+
+  const req = (signal) =>
+    fetch(url, {
+      method: "POST",
+      signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+  const resp = await withTimeout(TIMEOUT_MS, req);
+  if (!resp.ok) throw new Error("DeepSeek HTTP " + resp.status);
+  const data = await resp.json();
+  const txt = data?.choices?.[0]?.message?.content || "";
+  if (!txt) throw new Error("DeepSeek empty");
+  return txt.trim();
 }
 
-async function askVisionLLM(env, prompt, imageBytes) {
-  // 1) Gemini Vision
-  try {
-    return await withTimeout(geminiVision(env, prompt, imageBytes), TIMEOUT_GEMINI_MS, "gemini-vision");
-  } catch (_) {}
-  // 2) Workers AI LLaVA (final)
-  try {
-    return await workersVisionFallback(env, prompt, imageBytes);
-  } catch (_) {}
-  return "Я отримав фото, але наразі не можу його розпізнати. Спробуй, будь ласка, ще раз.";
+// Groq (text) — OpenAI-сумісний Chat Completions
+async function askGroq(env, { prompt, history }) {
+  const url = "https://api.groq.com/openai/v1/chat/completions";
+  const model = "llama-3.1-70b-versatile";
+
+  const messages = [];
+  if (history) {
+    messages.push({
+      role: "system",
+      content:
+        "Короткий контекст попередньої розмови (українською): " +
+        clampHistory(history, 1000),
+    });
+  }
+  messages.push({ role: "user", content: prompt });
+
+  const body = {
+    model,
+    messages,
+    temperature: 0.7,
+  };
+
+  const req = (signal) =>
+    fetch(url, {
+      method: "POST",
+      signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.GROQ_API_KEY}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+  const resp = await withTimeout(TIMEOUT_MS, req);
+  if (!resp.ok) throw new Error("Groq HTTP " + resp.status);
+  const data = await resp.json();
+  const txt = data?.choices?.[0]?.message?.content || "";
+  if (!txt) throw new Error("Groq empty");
+  return txt.trim();
 }
 
-// ─────────────────────────── Telegram update handler ─────────────────────
+// ---------------------- ДІАЛОГОВА ЛОГІКА ----------------------
+
+async function answerText(env, chatId, text, replyToMessageId) {
+  const historyKey = `${REDIS_PREFIX}${chatId}`;
+  const history = await redisGet(env, historyKey);
+
+  const providers = parseProviders(env).text; // порядок пріоритетів
+  let lastErr;
+  await sendTyping(env, chatId);
+
+  for (const p of providers) {
+    try {
+      let out;
+      if (p === "gemini") out = await askGemini(env, { prompt: text, history });
+      else if (p === "deepseek") out = await askDeepSeek(env, { prompt: text, history });
+      else if (p === "groq") out = await askGroq(env, { prompt: text, history });
+      else continue;
+
+      // зберегти пам'ять (простий конкат)
+      const newHistory = clampHistory(`${history || ""}\nQ: ${text}\nA: ${out}\n`, MAX_HISTORY_CHARS);
+      await redisSet(env, historyKey, newHistory);
+
+      await sendMessage(env, chatId, out, replyToMessageId);
+      return;
+    } catch (e) {
+      lastErr = e;
+      // пробуємо наступного
+    }
+  }
+
+  // якщо всі впали
+  await sendMessage(
+    env,
+    chatId,
+    "Вибач, зараз я перевантажений. Спробуй ще раз трохи пізніше 🙏",
+    replyToMessageId
+  );
+  if (env.DEBUG_LOGS === "1") console.log("All providers failed:", lastErr);
+}
+
+async function answerPhoto(env, chatId, photoSizes, caption, replyToMessageId) {
+  const best = photoSizes[photoSizes.length - 1]; // найбільша
+  const fileLink = await getFileLink(env, best.file_id);
+  const b64 = await fetchAsBase64(fileLink);
+
+  const historyKey = `${REDIS_PREFIX}${chatId}`;
+  const history = await redisGet(env, historyKey);
+
+  const prompt =
+    (caption && caption.trim()) ||
+    "Опиши зображення українською й додай стислі висновки списком.";
+
+  await sendTyping(env, chatId);
+
+  // для зображень — лише Gemini (за конфігом vision:gemini)
+  let out;
+  try {
+    out = await askGemini(env, { prompt, history, imageBase64: b64 });
+  } catch (e) {
+    await sendMessage(
+      env,
+      chatId,
+      "Не вдалося обробити фото зараз. Спробуй ще раз пізніше 🙏",
+      replyToMessageId
+    );
+    if (env.DEBUG_LOGS === "1") console.log("Vision failed:", e);
+    return;
+  }
+
+  const newHistory = clampHistory(
+    `${history || ""}\n[Фото] ${caption || ""}\nA: ${out}\n`,
+    MAX_HISTORY_CHARS
+  );
+  await redisSet(env, historyKey, newHistory);
+
+  await sendMessage(env, chatId, out, replyToMessageId);
+}
+
+// ---------------------- WEBHOOK/HANDLER ----------------------
+
 async function handleUpdate(env, update) {
-  const msg = update.message || update.edited_message;
-  if (!msg) return;
+  const msg = update.message;
+  if (!msg) return new Response("ok");
 
   const chatId = msg.chat.id;
   const replyTo = msg.message_id;
 
-  // typing…
-  tgAction(env, chatId, "typing").catch(() => {});
-
-  // /start — живе привітання (6 варіантів + ім'я)
-  if (msg.text && /^\/start\b/i.test(msg.text)) {
-    const firstName = msg.from?.first_name || msg.from?.username || "друже";
-    const variants = [
-      `Привіт, ${firstName}! 🚀 Давай зробимо цей день трошки яскравішим.`,
-      `Хей, ${firstName}! 😎 Я Senti. Що підкинути корисного?`,
-      `Радий бачити, ${firstName}! ✨ Пиши, з чого почнемо.`,
-      `Привіт-привіт, ${firstName}! 🙌 Я поруч. Текст чи фото — і поїхали.`,
-      `${firstName}, привіт! 🧠 Готовий допомогти. Що в пріоритеті?`,
-      `Вітаю, ${firstName}! 🔧 Сформуємо план або розберемо питання?`,
-    ];
-    const hi = variants[Math.floor(Math.random() * variants.length)]
-      + `\n\n• Надішли текст — відповім лаконічно.\n• Пришли фото — опишу та дам висновки.`;
-    await tgSend(env, chatId, hi, replyTo);
-    return;
-  }
-
-  // Photo
-  if (msg.photo && msg.photo.length) {
-    const best = msg.photo[msg.photo.length - 1];
-    try {
-      const fileUrl = await tgGetFileUrl(env, best.file_id);
-      const imgResp = await fetch(fileUrl);
-      const bytes = new Uint8Array(await imgResp.arrayBuffer());
-      const prompt = (msg.caption || "").trim();
-
-      const hist = await loadHist(env, chatId);
-      const sys = "Ти — Senti. Опиши зображення стисло, потім 2–4 висновки списком.";
-      const answer = await askVisionLLM(env, `${sys}\n\n${prompt}`, bytes);
-
-      await pushHist(env, chatId, "user", "[image]" + (prompt ? ` ${prompt}` : ""));
-      await pushHist(env, chatId, "assistant", answer);
-      await tgSend(env, chatId, answer, replyTo);
-    } catch {
-      await tgSend(env, chatId, "Не вдалося завантажити фото 😅", replyTo);
-    }
-    return;
-  }
-
-  // Text
+  // простий роутер команд
   if (msg.text) {
-    const userText = msg.text.trim();
+    const text = msg.text.trim();
 
-    // простий гард на live-дані
-    if (/курс\s+долара/i.test(userText)) {
-      await tgSend(env, chatId, "Я не маю live-доступу до курсів. Перевір у банку або на сайті НБУ.", replyTo);
-      return;
+    if (text === "/start") {
+      const hello =
+        `Привіт, ${msg.from?.first_name || "друже"}! 🚀 Давай зробимо цей день яскравішим.\n\n` +
+        `• Надішли *текст* — відповім лаконічно.\n` +
+        `• Пришли *фото* — опишу і дам *висновки*.\n\n` +
+        `_Під капотом: Gemini → DeepSeek → Groq (fallback), пам’ять у Redis._`;
+      await sendMessage(env, chatId, hello, replyTo);
+      return new Response("ok");
     }
 
-    const hist = await loadHist(env, chatId);
-    const system = "Ти — Senti, дружній і практичний асистент. Відповідай стисло, українською, по суті. Де доречно — 3–5 булітів.";
-    const messages = [
-      { role: "system", content: system },
-      ...hist.map(h => ({ role: h.role, content: h.content })),
-      { role: "user", content: userText },
-    ];
-
-    const answer = await askTextLLM(env, messages);
-    await pushHist(env, chatId, "user", userText);
-    await pushHist(env, chatId, "assistant", answer);
-    await tgSend(env, chatId, answer, replyTo);
-    return;
+    // звичайний текст
+    await answerText(env, chatId, text, replyTo);
+    return new Response("ok");
   }
 
-  await tgSend(env, chatId, "Надішли, будь ласка, текст або фото 🙌", replyTo);
+  if (msg.photo && msg.photo.length) {
+    await answerPhoto(env, chatId, msg.photo, msg.caption || "", replyTo);
+    return new Response("ok");
+  }
+
+  // інші типи — ввічлива відповідь
+  await sendMessage(
+    env,
+    chatId,
+    "Надішли, будь ласка, текст або фото 📷 — і я допоможу!",
+    replyTo
+  );
+  return new Response("ok");
 }
 
-// ─────────────────────────────── Worker entry ────────────────────────────
+// ---------------------- WORKER ENTRY ----------------------
+
 export default {
   async fetch(request, env) {
-    const { pathname } = new URL(request.url);
+    const url = new URL(request.url);
 
-    // Health
-    if (request.method === "GET" && (pathname === "/" || pathname === "/health")) {
-      return json(200, { ok: true, service: "senti", time: nowISO() });
+    // Ping/health
+    if (url.pathname === "/") return new Response("ok", { status: 200 });
+
+    // Одноразове ручне встановлення webhook (за потреби)
+    if (url.pathname === "/setwebhook") {
+      const secret = url.searchParams.get("secret");
+      if (secret !== env.WEBHOOK_SECRET) return new Response("forbidden", { status: 403 });
+
+      const hookUrl = `${url.origin}/webhook?secret=${env.WEBHOOK_SECRET}`;
+      const r = await fetch(`${TG_API}/bot${env.TELEGRAM_TOKEN}/setWebhook`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: hookUrl,
+          secret_token: env.WEBHOOK_SECRET,
+          allowed_updates: ["message"],
+        }),
+      });
+      const j = await r.json();
+      return new Response(JSON.stringify(j), { status: 200, headers: { "Content-Type": "application/json" } });
     }
 
-    // Telegram webhook (any path) with secret header
-    if (request.method === "POST") {
-      const sec = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
-      if (!sec || sec !== env.WEBHOOK_SECRET) return json(401, { ok: false, error: "unauthorized" });
+    // Вебхук
+    if (url.pathname === "/webhook") {
+      const secretHeader = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
+      if (secretHeader !== env.WEBHOOK_SECRET) return new Response("forbidden", { status: 403 });
 
-      let update;
-      try { update = await request.json(); } catch { return json(400, { ok: false, error: "bad json" }); }
+      const update = await request.json();
+      // захист від дублікатів простим idempotency ключем (опційно)
+      // можна використати Redis SETNX, але тримаємо мінімалізм
 
-      try { await handleUpdate(env, update); } catch (_) {}
-      return json(200, { ok: true });
+      try {
+        return await handleUpdate(env, update);
+      } catch (e) {
+        if (env.DEBUG_LOGS === "1") console.log("handleUpdate error", e);
+        return new Response("ok"); // не провалюємо вебхук
+      }
     }
 
-    return json(404, { ok: false, error: "not found" });
+    return new Response("not found", { status: 404 });
   },
 };
