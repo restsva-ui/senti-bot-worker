@@ -1,42 +1,40 @@
-// Точка входу Worker. Мінімум логіки — перевірка секрету і делегування в router.
+// src/index.js
+// Єдина точка входу: приймає Telegram webhook і прості службові GET-и.
 
-import { handleUpdate } from "./core/router.js";
-
-function ok(text = "ok") {
-  return new Response(text, { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
-}
-function bad(status = 400, text = "bad request") {
-  return new Response(text, { status, headers: { "content-type": "text/plain; charset=utf-8" } });
-}
+import { handleTelegramUpdate } from "./router.js";
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Healthchecks / браузером відкрили воркера
-    if (request.method === "GET") return ok("ok");
-
-    // Приймаємо Telegram webhook (POST)
-    if (request.method !== "POST") return bad(405, "method not allowed");
-
-    // Перевірка секрету Telegram (X-Telegram-Bot-Api-Secret-Token)
-    const got = request.headers.get("x-telegram-bot-api-secret-token");
-    const need = env.WEBHOOK_SECRET;
-    if (!need) return bad(500, "WEBHOOK_SECRET is not set");
-    if (got !== need) return bad(403, "forbidden");
-
-    // Читаємо апдейт
-    let update;
-    try {
-      update = await request.json();
-    } catch {
-      return bad(400, "invalid json");
+    // Проста перевірка "живий/готовий"
+    if (request.method === "GET") {
+      if (url.pathname === "/") return new Response("ok");
+      if (url.pathname === "/health") {
+        return Response.json({ ok: true, ts: Date.now() });
+      }
     }
 
-    // Обробляємо апдейт (не блокуємо відповідь Telegram — fire-and-forget)
-    ctx.waitUntil(handleUpdate(update, env).catch(console.error));
+    // Прийом Telegram webhook
+    if (request.method === "POST") {
+      // 1) Перевіряємо секрет, якщо заданий
+      if (env.WEBHOOK_SECRET) {
+        const got = request.headers.get("x-telegram-bot-api-secret-token");
+        if (!got || got !== env.WEBHOOK_SECRET) {
+          return new Response("Forbidden (bad secret)", { status: 403 });
+        }
+      }
 
-    // Telegram очікує 200 швидко
-    return ok();
+      try {
+        const update = await request.json();
+        await handleTelegramUpdate(update, env, ctx);
+        return new Response("ok");
+      } catch (err) {
+        console.error("update error:", err);
+        return new Response("Internal error", { status: 500 });
+      }
+    }
+
+    return new Response("Not found", { status: 404 });
   },
 };
