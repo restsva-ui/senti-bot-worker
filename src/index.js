@@ -1,64 +1,34 @@
-// src/index.js
-import { tgSendMessage } from "./adapters/telegram.js";
-
-function extractChat(update) {
-  return (
-    update?.message?.chat?.id ??
-    update?.edited_message?.chat?.id ??
-    update?.callback_query?.message?.chat?.id ??
-    null
-  );
-}
+// Lightweight entry for Telegram webhook on /senti1984
+import { handleUpdate } from "./router.js";
 
 export default {
   async fetch(request, env, ctx) {
     try {
-      const url = new URL(request.url);
+      const { pathname } = new URL(request.url);
 
-      // 1) Healthcheck
-      if (request.method === "GET") {
-        if (url.pathname === "/ping") {
-          // тестове повідомлення в OWNER_ID (за наявності)
-          const owner = env.OWNER_ID;
-          if (owner) await tgSendMessage(owner, "✅ Ping від воркера", env);
-          return new Response("pong", { status: 200 });
-        }
-        return new Response("Senti worker alive", { status: 200 });
-      }
-
-      // 2) Приймаємо POST з Telegram на БУДЬ-ЯКИЙ шлях
-      if (request.method === "POST") {
+      // Telegram webhook
+      if (request.method === "POST" && pathname === "/senti1984") {
+        // Безпечно парсимо апдейт
         let update = null;
-        try {
-          update = await request.json();
-        } catch {
-          return new Response("bad json", { status: 400 });
+        try { update = await request.json(); } catch (_) {}
+
+        if (update) {
+          // Обробляємо у бекграунді, щоб швидко відповісти Telegram
+          ctx.waitUntil(handleUpdate(update, env));
         }
-
-        // лог ключів апдейта у Tail
-        console.log("TG update keys:", Object.keys(update || {}));
-
-        const chatId = extractChat(update);
-        if (!chatId) {
-          console.log("No chatId in update");
-          return new Response("ok", { status: 200 });
-        }
-
-        // Миттєва відповідь користувачу (без роутера)
-        await tgSendMessage(
-          chatId,
-          "👋 Привіт! Я на звʼязку. Це технічний пінг від воркера.",
-          env
-        );
-
-        // Обовʼязково швидкий 200
-        return new Response("ok", { status: 200 });
+        // миттєва відповідь для Telegram
+        return new Response("ok");
       }
 
-      return new Response("not found", { status: 404 });
-    } catch (e) {
-      console.error("fetch error:", e?.stack || e);
-      return new Response("error", { status: 500 });
+      // Healthcheck / простий GET
+      if (request.method === "GET") {
+        return new Response("Senti bot worker is up ✅", { status: 200 });
+      }
+
+      return new Response("Not found", { status: 404 });
+    } catch (err) {
+      // Ніколи не завалюємо вебхук
+      return new Response("ok");
     }
   },
 };
