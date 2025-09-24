@@ -1,29 +1,51 @@
-// Cloudflare Worker entry
+// src/index.js
 import { handleUpdate } from "./router.js";
+import { tgSendMessage } from "./adapters/telegram.js";
 
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
+    try {
+      const url = new URL(request.url);
+      const pathname = url.pathname || "/";
 
-    if (request.method === "GET" && url.pathname === "/health") {
-      return new Response("ok", { status: 200 });
-    }
+      // Шлях вебхука: беремо з середовища або приймаємо будь-який
+      const hookPath = (env.BOT_PATH || "/senti1984").trim();
+      const match = pathname === hookPath || hookPath === "/*";
 
-    if (request.method === "POST" && url.pathname === "/senti1984") {
-      // Verify secret header
-      const secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
-      if (!secret || secret !== env.WEBHOOK_SECRET) {
-        return new Response("forbidden", { status: 403 });
+      if (request.method === "POST" && match) {
+        const update = await request.json().catch(() => null);
+
+        // базове логування (видно у Tail)
+        console.log("TG update:", update && Object.keys(update));
+
+        if (!update) return new Response("bad json", { status: 400 });
+
+        // головне: ЧЕКАЄМО роутер
+        await handleUpdate(update, env);
+
+        // Telegram очікує швидку відповідь 200/“ok”
+        return new Response("ok", { status: 200 });
       }
 
-      const update = await request.json().catch(() => null);
-      if (!update) return new Response("bad request", { status: 400 });
+      // healthcheck / простий пінг
+      if (request.method === "GET") {
+        return new Response("Senti bot worker OK", { status: 200 });
+      }
 
-      // Fire & forget
-      ctx.waitUntil(handleUpdate(update, env));
-      return new Response("ok", { status: 200 });
+      return new Response("not found", { status: 404 });
+    } catch (e) {
+      console.error("fetch error:", e?.stack || e);
+      // Спробуємо сповістити власника, якщо в апдейті був chat_id
+      try {
+        const cached = await request.clone().json().catch(() => null);
+        const chatId =
+          cached?.message?.chat?.id ||
+          cached?.callback_query?.message?.chat?.id;
+        if (chatId && typeof tgSendMessage === "function") {
+          await tgSendMessage(chatId, "Виникла помилка на боці сервера 🛠️. Ми вже дивимось.");
+        }
+      } catch (_) {}
+      return new Response("error", { status: 500 });
     }
-
-    return new Response("not found", { status: 404 });
   },
 };
