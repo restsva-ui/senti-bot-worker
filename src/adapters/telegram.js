@@ -1,10 +1,17 @@
+// src/adapters/telegram.js
 // Мінімальний і стабільний Telegram-адаптер з детальними логами.
 
 const BASE = "https://api.telegram.org";
 
+function getToken(env) {
+  // Підтримуємо дві назви змінної середовища
+  return env?.TELEGRAM_TOKEN || env?.TG_BOT_TOKEN;
+}
+
 async function callTG(method, payload, env) {
-  const token = env?.TG_BOT_TOKEN;
-  if (!token) throw new Error("TG_BOT_TOKEN is missing in environment");
+  const token = getToken(env);
+  if (!token) throw new Error("Telegram bot token is missing (TELEGRAM_TOKEN / TG_BOT_TOKEN)");
+
   const url = `${BASE}/bot${token}/${method}`;
 
   let res;
@@ -40,8 +47,8 @@ export async function tgSendAction(chat_id, action = "typing", env) {
 }
 
 export async function tgGetFileUrl(file_id, env) {
-  const token = env?.TG_BOT_TOKEN;
-  if (!token) throw new Error("TG_BOT_TOKEN is missing in environment");
+  const token = getToken(env);
+  if (!token) throw new Error("Telegram bot token is missing (TELEGRAM_TOKEN / TG_BOT_TOKEN)");
 
   const getFileUrl = `${BASE}/bot${token}/getFile`;
   const res = await fetch(getFileUrl, {
@@ -60,6 +67,5 @@ export async function tgGetFileUrl(file_id, env) {
 
   const path = json.result?.file_path;
   if (!path) return null;
-  // Пряме посилання на файл
   return `${BASE}/file/bot${token}/${path}`;
 }
