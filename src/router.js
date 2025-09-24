@@ -3,163 +3,150 @@
 import { tgSendMessage, tgSendChatAction, tgGetFileUrl } from "./adapters/telegram.js";
 import { aiText, aiVision } from "./ai/providers.js";
 
-/** Простий словник для трьох мов */
-function t(key, lang = "uk") {
-  const L = (lang || "uk").startsWith("ru") ? "ru"
-        : (lang || "uk").startsWith("uk") ? "uk"
-        : "en";
-
-  const dict = {
-    uk: {
-      hello: "👋 Привіт! Я Senti — твій уважний помічник.\n• Надішли текст — відповім коротко і по суті.\n• Пришли фото чи PDF — опишу і зроблю висновки.\nСпробуй: просто напиши думку або кинь картинку.",
-      empty: "Готово! Я отримав твій запит і відповім простими словами:\n\n• (порожній запит)",
-      typing: "Думаю над відповіддю…",
-      seenNoUrl: "Бачу зображення, але не отримав його URL для аналізу.",
-      docSaved: "Завантажив файл. Спробую проаналізувати…",
-      oops: "Вибач, сталась помилка. Спробуй ще раз.",
-    },
-    ru: {
-      hello: "👋 Привет! Я Senti — твой внимательный помощник.\n• Пришли текст — отвечу кратко и по делу.\n• Отправь фото или PDF — опишу и сделаю выводы.\nПопробуй: просто напиши мысль или пришли картинку.",
-      empty: "Готово! Я получил твой запрос и отвечу простыми словами:\n\n• (пустой запрос)",
-      typing: "Думаю над ответом…",
-      seenNoUrl: "Вижу изображение, но не получил его URL для анализа.",
-      docSaved: "Загрузил файл. Попробую проанализировать…",
-      oops: "Прости, произошла ошибка. Попробуй ещё раз.",
-    },
-    en: {
-      hello: "👋 Hi! I’m Senti — your concise assistant.\n• Send text — I’ll answer briefly.\n• Send a photo or PDF — I’ll describe it and summarize.\nTry it: just type a thought or drop an image.",
-      empty: "Got it! I received your request and will reply in simple words:\n\n• (empty request)",
-      typing: "Thinking…",
-      seenNoUrl: "I see an image, but didn’t get its URL for analysis.",
-      docSaved: "File received. Let me analyze…",
-      oops: "Sorry, something went wrong. Please try again.",
-    },
-  };
-
-  return dict[L][key];
+/**
+ * Перевірка секрету вебхука:
+ *  - шлях типу /<WEBHOOK_SECRET>
+ *  - та/або заголовок X-Telegram-Bot-Api-Secret-Token
+ */
+function isFromTelegram(request, env, pathname) {
+  const headerSecret = request.headers.get("x-telegram-bot-api-secret-token");
+  const pathOk =
+    pathname === `/${env.WEBHOOK_SECRET}` ||
+    pathname === `/${env.WEBHOOK_SECRET}/`;
+  const headerOk = headerSecret && headerSecret === env.WEBHOOK_SECRET;
+  return pathOk || headerOk;
 }
 
-function pickLang(update) {
-  // Telegram зазвичай передає language_code у from.language_code
-  return update?.message?.from?.language_code || "uk";
+function pickLargestPhoto(photos = []) {
+  if (!Array.isArray(photos) || photos.length === 0) return null;
+  return photos.reduce((a, b) => (a.file_size > b.file_size ? a : b));
 }
 
-function getText(m) {
-  if (!m) return "";
-  if (typeof m.text === "string") return m.text.trim();
-  if (m.caption) return String(m.caption).trim();
-  return "";
+function getLangFromMessage(msg) {
+  // Якщо Telegram не дав language_code — повернемо 'uk' як дефолт
+  return (msg?.from?.language_code || "uk").toLowerCase();
+}
+
+async function handleTextMessage(env, msg, text) {
+  const chatId = msg.chat.id;
+
+  if (text === "/start") {
+    const hello =
+      "👋 Привіт! Я Senti — твій уважний помічник.\n" +
+      "• Надішли текст — відповім коротко і по суті.\n" +
+      "• Пришли фото чи PDF — опишу і зроблю висновки.\n" +
+      "Спробуй: просто напиши думку або кинь картинку.";
+    return tgSendMessage(env.TELEGRAM_TOKEN, chatId, hello);
+  }
+
+  // Індикація "typing…"
+  await tgSendChatAction(env.TELEGRAM_TOKEN, chatId, "typing");
+
+  const lang = getLangFromMessage(msg);
+  const result = await aiText(env, text, { lang, userId: String(msg.from?.id || "") });
+
+  const reply =
+    result?.text?.trim() ||
+    "Готово! Я отримав твій запит і відповім простими словами:\n\n• (порожній запит)";
+  return tgSendMessage(env.TELEGRAM_TOKEN, chatId, reply);
+}
+
+async function handleMediaMessage(env, msg) {
+  const chatId = msg.chat.id;
+
+  // Індикація "upload_photo" / "typing"
+  await tgSendChatAction(env.TELEGRAM_TOKEN, chatId, "upload_photo");
+
+  let fileId = null;
+  let mediaKind = null;
+  let caption = msg.caption || "";
+
+  if (msg.photo && msg.photo.length) {
+    const best = pickLargestPhoto(msg.photo);
+    fileId = best?.file_id || msg.photo[msg.photo.length - 1]?.file_id;
+    mediaKind = "photo";
+  } else if (msg.document) {
+    fileId = msg.document.file_id;
+    mediaKind = "document";
+  } else if (msg.sticker) {
+    fileId = msg.sticker.file_id;
+    mediaKind = "sticker";
+  }
+
+  if (!fileId) {
+    return tgSendMessage(
+      env.TELEGRAM_TOKEN,
+      chatId,
+      "Бачу зображення, але не отримав його URL для аналізу."
+    );
+  }
+
+  const url = await tgGetFileUrl(env.TELEGRAM_TOKEN, fileId);
+  if (!url) {
+    return tgSendMessage(
+      env.TELEGRAM_TOKEN,
+      chatId,
+      "Не вдалося отримати файл Telegram для аналізу."
+    );
+  }
+
+  // Попросимо модель подивитися на зображення/док і дати стислий висновок
+  const lang = getLangFromMessage(msg);
+  const result = await aiVision(env, { url, caption, kind: mediaKind, lang });
+
+  const reply =
+    result?.text?.trim() ||
+    "Завантажив файл. Скажи, що саме потрібно: виписати текст, знайти числа/дати, зробити короткий висновок тощо.";
+  return tgSendMessage(env.TELEGRAM_TOKEN, chatId, reply);
+}
+
+async function handleUpdate(env, update) {
+  try {
+    const msg = update.message || update.edited_message;
+    if (!msg) return;
+
+    if (typeof msg.text === "string" && msg.text.trim().length > 0) {
+      return await handleTextMessage(env, msg, msg.text.trim());
+    }
+
+    if (msg.photo || msg.document || msg.sticker) {
+      return await handleMediaMessage(env, msg);
+    }
+  } catch (err) {
+    console.error("router: handleUpdate error:", err);
+  }
 }
 
 export default {
-  async fetch(request, env) {
-    try {
-      // (Опційно) перевірка секрету вебхука
-      const secret = env.WEBHOOK_SECRET;
-      if (secret) {
-        const got = request.headers.get("x-telegram-bot-api-secret-token");
-        if (got !== secret) {
-          return new Response("Forbidden", { status: 403 });
-        }
-      }
+  /**
+   * Cloudflare Worker entry
+   */
+  async fetch(request, env, ctx) {
+    const { pathname } = new URL(request.url);
 
-      if (request.method !== "POST") {
-        return new Response("ok", { status: 200 });
-      }
-
-      const update = await request.json().catch(() => ({}));
-      const msg = update.message || update.edited_message || null;
-      if (!msg) return new Response("ok", { status: 200 });
-
-      const chatId = msg.chat?.id;
-      const lang = pickLang({ message: msg });
-
-      // /start
-      const text = getText(msg);
-      if (text?.startsWith("/start")) {
-        await tgSendMessage(env, chatId, t("hello", lang));
-        return new Response("ok", { status: 200 });
-      }
-
-      // PHOTO
-      if (msg.photo && Array.isArray(msg.photo) && msg.photo.length) {
-        // беремо найбільше фото (останній елемент)
-        const best = msg.photo[msg.photo.length - 1];
-        const fileId = best.file_id;
-        const url = await tgGetFileUrl(env, fileId);
-
-        if (!url) {
-          await tgSendMessage(env, chatId, t("seenNoUrl", lang), { reply_to_message_id: msg.message_id });
-          return new Response("ok", { status: 200 });
-        }
-
-        await tgSendChatAction(env, chatId, "typing");
-        const prompt = getText(msg) || "Опиши зображення";
-
-        try {
-          const result = await aiVision(url, env, { prompt, lang });
-          const reply = (result && (result.summary || result.text || result.caption)) || t("oops", lang);
-          await tgSendMessage(env, chatId, reply, { reply_to_message_id: msg.message_id });
-        } catch (e) {
-          console.error("aiVision error:", e);
-          await tgSendMessage(env, chatId, t("oops", lang), { reply_to_message_id: msg.message_id });
-        }
-
-        return new Response("ok", { status: 200 });
-      }
-
-      // DOCUMENT (PDF / images)
-      if (msg.document) {
-        const fileId = msg.document.file_id;
-        const mime = msg.document.mime_type || "";
-        const url = await tgGetFileUrl(env, fileId);
-
-        if (!url) {
-          await tgSendMessage(env, chatId, t("seenNoUrl", lang), { reply_to_message_id: msg.message_id });
-          return new Response("ok", { status: 200 });
-        }
-
-        await tgSendChatAction(env, chatId, "typing");
-
-        // Для PDF та image/* запускаємо aiVision
-        if (mime === "application/pdf" || mime.startsWith("image/")) {
-          const prompt = getText(msg) || "Зроби короткий висновок";
-          try {
-            const result = await aiVision(url, env, { prompt, lang });
-            const reply = (result && (result.summary || result.text || result.caption)) || t("oops", lang);
-            await tgSendMessage(env, chatId, reply, { reply_to_message_id: msg.message_id });
-          } catch (e) {
-            console.error("aiVision error:", e);
-            await tgSendMessage(env, chatId, t("oops", lang), { reply_to_message_id: msg.message_id });
-          }
-        } else {
-          // інші типи документів поки не обробляємо
-          await tgSendMessage(env, chatId, t("docSaved", lang), { reply_to_message_id: msg.message_id });
-        }
-
-        return new Response("ok", { status: 200 });
-      }
-
-      // TEXT (звичайний діалог)
-      if (text && !text.startsWith("/")) {
-        await tgSendChatAction(env, chatId, "typing");
-        try {
-          const out = await aiText(text, env, { lang });
-          const reply = (out && (out.answer || out.text || out.summary)) || t("empty", lang);
-          await tgSendMessage(env, chatId, reply, { reply_to_message_id: msg.message_id });
-        } catch (e) {
-          console.error("aiText error:", e);
-          await tgSendMessage(env, chatId, t("oops", lang), { reply_to_message_id: msg.message_id });
-        }
-        return new Response("ok", { status: 200 });
-      }
-
-      // Якщо нічого не підійшло
-      await tgSendMessage(env, chatId, t("empty", lang), { reply_to_message_id: msg?.message_id });
-      return new Response("ok", { status: 200 });
-    } catch (e) {
-      console.error("router fatal:", e);
+    // Пінг для швидкої діагностики
+    if (request.method === "GET" && pathname === "/") {
       return new Response("ok", { status: 200 });
     }
+
+    if (request.method !== "POST") {
+      return new Response("Not Found", { status: 404 });
+    }
+
+    // Приймаємо лише виклики Telegram на секретному маршруті
+    if (!isFromTelegram(request, env, pathname)) {
+      return new Response("Not Found", { status: 404 });
+    }
+
+    let update = null;
+    try {
+      update = await request.json();
+    } catch {
+      return new Response("Bad Request", { status: 400 });
+    }
+
+    // Обробляємо оновлення
+    ctx.waitUntil(handleUpdate(env, update));
+    return new Response("OK", { status: 200 });
   },
 };
