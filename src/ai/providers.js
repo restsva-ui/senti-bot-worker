@@ -1,12 +1,67 @@
-// Плейсхолдери AI, щоб білд не падав. Потім підкинемо реальні провайдери (Gemini/DeepSeek/Groq).
+// Локальні (без зовнішніх API) заглушки для text/vision,
+// щоб бот стабільно відповідав і не падав.
+// ЗАЛИШАЄ сигнатури/експорти:
+//   export async function aiText(text, env) {}
+//   export async function aiVision({ bytes, mime, caption }, env) {}
 
-export async function aiText({ prompt, system, env }) {
-  // Тут може бути виклик до будь-якого LLM. Поки повертаємо просту відповідь.
-  const prefix = system ? `${system}\n\n` : '';
-  return `${prefix}Готово! Я отримав твій запит і відповім простими словами:\n\n${prompt ? `• ${prompt}` : '• (порожній запит)'}`;
+function normalizeText(s) {
+  return (s ?? "").toString().trim();
 }
 
-export async function aiVision({ imageUrl, prompt, env }) {
-  // Заглушка для vision — повертаємо опис того, що нам передали.
-  return `Бачу зображення (${imageUrl ? imageUrl : 'без URL'}). ${prompt ? `Підказка: ${prompt}` : ''}`;
+export async function aiText(text, env) {
+  const q = normalizeText(text);
+
+  // Якщо таки порожній рядок — дружній фолбек
+  if (!q) {
+    return "Я отримав твоє повідомлення, але там немає тексту. Напиши думку або питання, і відповім простими словами.";
+  }
+
+  // Дуже легка логіка, щоб показати користь без зовнішніх моделей
+  // (нічого не ламаємо — просто повертаємо стислу відповідь)
+  const lower = q.toLowerCase();
+
+  // Приклад простого роутінгу по ключових словах (без зовнішніх API)
+  if (/(курс|долар|usd)/i.test(lower)) {
+    return [
+      "Про курс долара: я не маю прямого доступу до біржових API у цьому воркері.",
+      "Уточни, будь ласка, який банк/ринок і валюта (НБУ, Моно, Приват, готівка тощо) — підкажу, де подивитись актуальний курс.",
+    ].join("\n");
+  }
+
+  // Узагальнена «спрощена» відповідь
+  if (q.length <= 120) {
+    return `Готово! Я отримав твій запит і відповім простими словами:\n\n• ${q}`;
+  }
+
+  // Для довших — короткий «компактний переказ»
+  const firstSentence = q.split(/(?<=[.!?])\s+/)[0];
+  const approxLen = q.length;
+  return [
+    "Коротко переказую зміст твоєго повідомлення:",
+    `• ${firstSentence}`,
+    "",
+    `Твій текст довжиною ~${approxLen} символів. Якщо хочеш — розбий на підпункти, і я відповім по кожному.`,
+  ].join("\n");
+}
+
+export async function aiVision({ bytes, mime, caption }, env) {
+  // Ми не виконуємо реальне CV-розпізнавання (без зовнішніх сервісів),
+  // але даємо корисну відповідь-фолбек, щоб UX був стабільним.
+  const hasImage = bytes instanceof ArrayBuffer && bytes.byteLength > 0;
+  const cap = normalizeText(caption);
+
+  if (!hasImage) {
+    return "Я бачу, що прийшло зображення, але не отримав самі байти. Спробуй надіслати фото без стиснення або як файл.";
+  }
+
+  const parts = [];
+  parts.push("✅ Отримав зображення.");
+  if (mime) parts.push(`Формат: \`${mime}\`.`);
+  if (cap) parts.push(`Твій підпис: ${cap}`);
+
+  parts.push("");
+  parts.push("Зараз я працюю у локальному режимі без сервісів комп’ютерного зору,");
+  parts.push("тому дам базову відповідь. Якщо хочеш – можу описати зображення за твоїми підказками (що саме шукати).");
+
+  return parts.join("\n");
 }
