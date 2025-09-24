@@ -1,68 +1,10 @@
-# === БАЗА ПРОЄКТУ ===
 name = "senti-bot-worker"
-main = "src/index.js"                  # переносимо точку входу в /src
-workers_dev = true
+main = "src/index.js"
 compatibility_date = "2024-09-20"
-compatibility_flags = ["nodejs_compat"]  # зручно для TextDecoder та ін. Node-сумісностей
+compatibility_flags = []
 
-# === ВАРІАНТИ/КОНФІГ (НЕ СЕКРЕТИ) ===
-[vars]
-# Мова інтерфейсу за замовчуванням (бот все одно підлаштовується під користувача)
-BOT_LOCALE = "uk"
+# !!! Увімкнено логування — корисно поки налагоджуємо
+[observability]
+enabled = true
 
-# Базова модель для Gemini (можеш змінити на 1.5-pro, якщо буде ключ/ліміти)
-AI_MODEL = "gemini-1.5-flash"
-
-# Маршрутизація моделей: текст і віжн. Порядок важливий (зліва направо).
-# Текст: Gemini -> DeepSeek -> Groq
-# Віжн:  Gemini
-AI_PROVIDERS = "text:gemini,deepseek,groq;vision:gemini"
-
-# Увімкнути короткі внутрішні логи (0/1). Залиш 0 у проді.
-DEBUG_LOGS = "0"
-
-# === WORKERS AI (локальний фолбек для тексту/візії) ===
-# Не обов’язково, але РЕКОМЕНДОВАНО: пришвидшує fallback без Gateway.
-[ai]
-binding = "AI"   # у коді звертаємося як env.AI.run(...)
-
-# === ПРОД/ПРЕВ’Ю (опційно) ===
-# Можеш задати різні змінні для середовищ, якщо треба.
-# [env.preview.vars]
-# DEBUG_LOGS = "1"
-# [env.production.vars]
-# DEBUG_LOGS = "0"
-
-# === РОУТИ (якщо прив’язуєш до домену; інакше не потрібно) ===
-# [[routes]]
-# pattern = "bot.yourdomain.com/webhook"
-# script = "senti-bot-worker"
-
-# === ПРИМІТКИ ===
-# 1) Секрети додаємо тільки в Dashboard → Worker → Settings → Variables & Secrets:
-#    - TELEGRAM_TOKEN
-#    - WEBHOOK_SECRET
-#    - GEMINI_API_KEY
-#    - DEEPSEEK_API_KEY
-#    - GROQ_API_KEY
-#    - REDIS_URL
-#    - REDIS_TOKEN
-#
-# 2) Вебхук Telegram:
-#    GET https://api.telegram.org/bot<TELEGRAM_TOKEN>/setWebhook
-#      ?url=https://<your-worker>.workers.dev/webhook
-#      &secret_token=<WEBHOOK_SECRET>
-#      &allowed_updates=["message","edited_message","photo","document"]
-#
-# 3) Якщо використовуєш Cloudflare AI Gateway як додатковий шлях (не обов’язково),
-#    додай у Secrets:
-#    - CF_AI_GATEWAY_BASE
-#    - CF_API_TOKEN
-#
-# 4) Файлова структура:
-#    /src/index.js        — тонкий вхід (fetch + перевірка секрету)
-#    /src/core/router.js  — роутинг повідомлень (start/text/photo/doc …)
-#    /src/adapters/telegram.js — усі виклики Telegram API
-#    /src/core/llm.js     — маршрутизація LLM (Gemini→DeepSeek→Groq), таймаути
-#    /src/core/memory.js  — Redis (Upstash)
-#    /src/features/*      — text/vision/documents/codegen та інше
+# Якщо будеш використовувати Durable Objects / D1 / KV — додамо сюди bindings
