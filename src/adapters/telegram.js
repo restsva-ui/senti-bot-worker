@@ -1,49 +1,70 @@
-// Легка обгортка над Telegram Bot API, без змін існуючих імен
-// Експорти залишені стабільними.
+// src/adapters/telegram.js
 
-const TG_API = (token) => `https://api.telegram.org/bot${token}`;
-const TG_FILE = (token) => `https://api.telegram.org/file/bot${token}`;
+/**
+ * Невеличкий SDK для Telegram Bot API
+ * Використовуємо лише три методи: sendMessage, sendChatAction, getFile
+ */
 
-async function tgApiCall(env, method, payload) {
-  const url = `${TG_API(env.TELEGRAM_TOKEN)}/${method}`;
-  const res = await fetch(url, {
+const tgApi = (token, method) => `https://api.telegram.org/bot${token}/${method}`;
+
+async function tgSendMessage(env, chatId, text, options = {}) {
+  const token = env.TELEGRAM_TOKEN;
+  if (!token) throw new Error("Missing TELEGRAM_TOKEN in env");
+
+  const body = {
+    chat_id: chatId,
+    text,
+    parse_mode: options.parse_mode || "Markdown",
+    disable_web_page_preview: options.disable_web_page_preview ?? true,
+    reply_to_message_id: options.reply_to_message_id || undefined,
+  };
+
+  const res = await fetch(tgApi(token, "sendMessage"), {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
-  let data;
-  try { data = await res.json(); } catch { data = { ok: false }; }
+
+  const data = await res.json();
   if (!data.ok) {
-    console.error(`TG API error: ${method} ${JSON.stringify(data)}`);
+    console.error("TG API error: sendMessage", JSON.stringify(data));
   }
   return data;
 }
 
-export async function tgSendMessage(chat_id, text, env, extra = {}) {
-  return tgApiCall(env, "sendMessage", {
-    chat_id,
-    text,
-    parse_mode: extra.parse_mode || "HTML",
-    disable_web_page_preview: true,
-    ...extra,
+async function tgSendChatAction(env, chatId, action = "typing") {
+  const token = env.TELEGRAM_TOKEN;
+  if (!token) throw new Error("Missing TELEGRAM_TOKEN in env");
+
+  const res = await fetch(tgApi(token, "sendChatAction"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, action }),
   });
+
+  const data = await res.json();
+  if (!data.ok) {
+    console.error("TG API error: sendChatAction", JSON.stringify(data));
+  }
+  return data;
 }
 
-// залишаю і tgSendAction (попередньо збірка падала, коли його не було)
-export async function tgSendAction(chat_id, action, env) {
-  // typing | upload_photo | upload_document ...
-  return tgApiCall(env, "sendChatAction", { chat_id, action });
+/**
+ * Повертає ПРЯМИЙ URL файлу у Telegram CDN:
+ * https://api.telegram.org/file/bot<token>/<file_path>
+ */
+async function tgGetFileUrl(env, fileId) {
+  const token = env.TELEGRAM_TOKEN;
+  if (!token) throw new Error("Missing TELEGRAM_TOKEN in env");
+
+  const res = await fetch(tgApi(token, `getFile?file_id=${encodeURIComponent(fileId)}`));
+  const data = await res.json();
+  if (!data.ok || !data.result?.file_path) {
+    console.error("TG API error: getFile", JSON.stringify(data));
+    return null;
+  }
+  const filePath = data.result.file_path;
+  return `https://api.telegram.org/file/bot${token}/${filePath}`;
 }
 
-export async function tgGetFileUrl(file_id, env) {
-  // 1) getFile -> file_path
-  const data = await tgApiCall(env, "getFile", { file_id });
-  if (!data?.ok || !data.result?.file_path) return null;
-  // 2) побудувати прямий URL завантаження
-  return `${TG_FILE(env.TELEGRAM_TOKEN)}/${data.result.file_path}`;
-}
-
-// (не обов’язково, але хай буде утиліта відповіді)
-export async function tgReply(chat_id, reply_to_message_id, text, env, extra = {}) {
-  return tgSendMessage(chat_id, text, env, { reply_to_message_id, ...extra });
-}
+export { tgSendMessage, tgSendChatAction, tgGetFileUrl };
