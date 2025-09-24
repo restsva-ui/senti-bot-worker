@@ -1,43 +1,69 @@
-// src/adapters/telegram.js
+// Адаптер Telegram: тільки базові виклики API.
+// ЗАЛИШАЄ сигнатури/імена, які вже імпортуються у router.js:
+//
+//   import { tgSendMessage, tgSendAction, tgGetFileUrl } from "./adapters/telegram.js";
+//
+// Потрібні ENV:
+//   - TG_BOT_TOKEN  (обов'язково)
 
-const BASE = "https://api.telegram.org";
+const TG_API_BASE = "https://api.telegram.org";
 
-/**
- * Виклик до Telegram API
- */
-async function tgCall(env, method, params) {
-  const url = `${BASE}/bot${env.TELEGRAM_TOKEN}/${method}`;
+function tgApiUrl(env, method) {
+  const token = env?.TG_BOT_TOKEN;
+  if (!token) throw new Error("TG_BOT_TOKEN is not set");
+  return `${TG_API_BASE}/bot${token}/${method}`;
+}
+
+async function tgFetchJson(url, payload) {
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(params),
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload ?? {}),
   });
-
-  const data = await res.json();
-  if (!data.ok) {
-    throw new Error(`TG API error: ${method} ${JSON.stringify(data)}`);
+  let data = null;
+  try { data = await res.json(); } catch (_) {}
+  if (!res.ok || !data?.ok) {
+    throw new Error(`TG API error: ${url.split("/").pop()} ${JSON.stringify(data ?? {status: res.status})}`);
   }
   return data.result;
 }
 
-/**
- * Надіслати повідомлення
- */
-export async function tgSendMessage(env, chat_id, text, extra = {}) {
-  return tgCall(env, "sendMessage", { chat_id, text, ...extra });
+/** Надіслати 'action' (typing, upload_photo, etc.) */
+export async function tgSendAction(chatId, action = "typing", env) {
+  const url = tgApiUrl(env, "sendChatAction");
+  await tgFetchJson(url, { chat_id: chatId, action });
 }
 
-/**
- * Надіслати action (наприклад, "typing")
- */
-export async function tgSendAction(env, chat_id, action = "typing") {
-  return tgCall(env, "sendChatAction", { chat_id, action });
+/** Надіслати текстове повідомлення */
+export async function tgSendMessage(chatId, text, options = {}, env) {
+  const url = tgApiUrl(env, "sendMessage");
+  const payload = {
+    chat_id: chatId,
+    text: text ?? "",
+    parse_mode: options.parse_mode ?? "Markdown",
+    reply_to_message_id: options.reply_to_message_id,
+    disable_web_page_preview: true,
+  };
+  return await tgFetchJson(url, payload);
 }
 
-/**
- * Отримати URL для файлу
- */
-export async function tgGetFileUrl(env, file_id) {
-  const file = await tgCall(env, "getFile", { file_id });
-  return `${BASE}/file/bot${env.TELEGRAM_TOKEN}/${file.file_path}`;
+/** Отримати прямий URL файлу за file_id */
+export async function tgGetFileUrl(fileId, env) {
+  if (!fileId) return null;
+  const token = env?.TG_BOT_TOKEN;
+  if (!token) throw new Error("TG_BOT_TOKEN is not set");
+
+  // 1) getFile -> file_path
+  const getFileUrl = tgApiUrl(env, "getFile");
+  const res = await fetch(getFileUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ file_id: fileId }),
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data?.ok || !data.result?.file_path) return null;
+
+  // 2) сформувати прямий URL
+  const path = data.result.file_path;
+  return `${TG_API_BASE}/file/bot${token}/${path}`;
 }
