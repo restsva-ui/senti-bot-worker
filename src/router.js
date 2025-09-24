@@ -1,98 +1,88 @@
+// Маршрутизатор апдейтів Telegram.
+// Мінімальні зміни: для photo/document дістаємо file_url і передаємо в aiVision.
+
 import { tgSendMessage, tgSendAction, tgGetFileUrl } from "./adapters/telegram.js";
 import { aiText, aiVision } from "./ai/providers.js";
 
-export async function handleUpdate(update, env, ctx) {
-  try {
-    const msg = update?.message || update?.edited_message || update?.channel_post || null;
-    if (!msg?.chat?.id) {
-      console.info("No message/chat in update");
-      return;
-    }
-
-    const chatId = msg.chat.id;
-    const textIn = (msg.text ?? "").trim();
-    const captionIn = (msg.caption ?? "").trim();
-    const hasPhoto = Array.isArray(msg.photo) && msg.photo.length > 0;
-    const hasDoc = !!msg.document;
-
-    // індикатор «друкує»
-    try { await tgSendAction(chatId, "typing", env); } catch (e) { console.error("tgSendAction:", e?.message); }
-
-    // /start
-    if (textIn.startsWith("/start")) {
-      const hello = [
-        "👋 Привіт! Я Senti — твій уважний помічник.",
-        "• Надішли текст — відповім коротко і по суті.",
-        "• Пришли фото чи PDF — опишу і зроблю висновки.",
-        "Спробуй: просто напиши думку або кинь картинку.",
-      ].join("\n");
-      await safeSend(chatId, hello, env, msg);
-      return;
-    }
-
-    // Фото/документ
-    if (hasPhoto || hasDoc) {
-      let fileId = null;
-      let mime = null;
-
-      if (hasPhoto) {
-        fileId = msg.photo[msg.photo.length - 1]?.file_id; // найбільша
-        mime = "image/jpeg";
-      } else {
-        fileId = msg.document.file_id;
-        mime = msg.document.mime_type || "application/octet-stream";
-      }
-
-      let fileUrl = null;
-      try {
-        fileUrl = await tgGetFileUrl(fileId, env);
-        console.info("fileUrl:", fileUrl ? "ok" : "null");
-      } catch (e) {
-        console.error("tgGetFileUrl:", e?.message);
-      }
-
-      let bytes = null;
-      if (fileUrl) {
-        try {
-          const res = await fetch(fileUrl);
-          if (res.ok) bytes = await res.arrayBuffer();
-          else console.error("download file status:", res.status);
-        } catch (e) {
-          console.error("download file:", e?.message);
-        }
-      }
-
-      const answer = await aiVision(
-        { bytes, mime, caption: captionIn || textIn || "" },
-        env
-      );
-      await safeSend(chatId, answer, env, msg);
-      return;
-    }
-
-    // Текст
-    if (textIn.length > 0) {
-      const answer = await aiText(textIn, env);
-      await safeSend(chatId, answer, env, msg);
-      return;
-    }
-
-    // Порожній апдейт
-    await safeSend(
-      chatId,
-      "Я бачу апдейт без тексту й без файлу. Напиши повідомлення або пришли фото/документ.",
-      env,
-      msg
-    );
-  } catch (e) {
-    console.error("handleUpdate fatal:", e?.message);
-  }
+function pickLargestPhoto(photos) {
+  if (!Array.isArray(photos) || photos.length === 0) return null;
+  return photos[photos.length - 1]; // найбільша роздільна
 }
 
-async function safeSend(chatId, text, env, msg) {
-  try {
-    await tgSendMessage(chatId, text || "😅 Відповідь порожня, але я на зв’язку.", { reply_to_message_id: msg?.message_id }, env);
-  } catch (e) {
-    console.error("tgSendMessage:", e?.message);
+function trimOrNull(s) {
+  if (typeof s !== "string") return null;
+  const t = s.trim();
+  return t.length ? t : null;
+}
+
+export async function handleUpdate(update, env) {
+  const msg = update?.message || update?.edited_message;
+  if (!msg) return;
+
+  const chatId = msg.chat.id;
+  const userText = trimOrNull(msg.text ?? msg.caption ?? "");
+
+  // 1) Фото
+  if (msg.photo && msg.photo.length) {
+    const largest = pickLargestPhoto(msg.photo);
+    await tgSendAction(chatId, "upload_photo", env);
+
+    const fileUrl = await tgGetFileUrl(largest.file_id, env);
+    if (!fileUrl) {
+      await tgSendMessage(chatId, "⚠️ Бачу зображення, але не зміг отримати URL для аналізу.", env);
+      return;
+    }
+
+    // Підказка до зображення = caption або текст попереднього повідомлення
+    const visionHint = userText || "Опиши головне на фото коротко і по суті.";
+    const result = await aiVision(fileUrl, env, { hint: visionHint, source: "photo" });
+
+    const safe = result?.trim() || "Не вдалося зробити висновок з цього зображення.";
+    await tgSendMessage(chatId, safe, env);
+    return;
   }
+
+  // 2) Документ (зображення/PDF)
+  if (msg.document) {
+    await tgSendAction(chatId, "upload_document", env);
+
+    const doc = msg.document;
+    const mime = doc.mime_type || "";
+    const fileUrl = await tgGetFileUrl(doc.file_id, env);
+
+    if (!fileUrl) {
+      await tgSendMessage(chatId, "⚠️ Бачу документ, але не зміг отримати URL для аналізу.", env);
+      return;
+    }
+
+    if (mime.startsWith("image/") || mime === "application/pdf") {
+      const visionHint = userText || (mime === "application/pdf"
+        ? "Зроби стислий конспект вмісту PDF."
+        : "Опиши головне на зображенні.");
+      const result = await aiVision(fileUrl, env, { hint: visionHint, source: mime });
+      const safe = result?.trim() || "Не вдалося зробити висновок з цього файлу.";
+      await tgSendMessage(chatId, safe, env);
+      return;
+    }
+
+    // Інші типи доків — просто скажемо, що поки не обробляємо
+    await tgSendMessage(chatId, `Отримав документ (${mime}). Поки що вмію працювати із зображеннями та PDF.`, env);
+    return;
+  }
+
+  // 3) Чистий текст
+  if (userText) {
+    await tgSendAction(chatId, "typing", env);
+    const answer = await aiText(userText, env);
+    const safe = answer?.trim() || "Готово! Я отримав твій запит і відповім простими словами:\n\n• (порожній запит)";
+    await tgSendMessage(chatId, safe, env);
+    return;
+  }
+
+  // 4) Фолбек
+  await tgSendMessage(
+    chatId,
+    "👋 Надішли текст, фото чи PDF — опишу, витягну факти або зроблю короткий висновок.",
+    env
+  );
 }
