@@ -25,7 +25,7 @@ export default {
         return new Response('bad json', { status: 400 });
       }
 
-      // --- НОВЕ: обробка /start ---
+      // /start вітання з урахуванням мови
       if (update?.message?.text === '/start') {
         const chatId = update.message.chat.id;
         const lang = update.message.from?.language_code || 'en';
@@ -40,9 +40,8 @@ export default {
         await tgSendMessage(env, chatId, greeting);
         return new Response('ok', { status: 200 });
       }
-      // --- END ---
 
-      // Якщо є твій router.js — пробуємо делегувати
+      // Якщо є твій router.js — делегуємо
       try {
         if (typeof Router.handleUpdate === 'function') {
           const res = await Router.handleUpdate({ update, env, ctx, req });
