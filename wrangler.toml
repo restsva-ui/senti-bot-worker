@@ -4,18 +4,15 @@ workers_dev = true
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
 compatibility_date = "2024-12-01"
 
-# Увімкнені логи з головним семплінгом 100%
 [observability]
 enabled = true
-head_sampling_rate = 100
+# 1.0 = 100% семплінг, старий Wrangler не приймає 100
+head_sampling_rate = 1.0
 
-# Базові змінні середовища, без секретів
 [vars]
 API_BASE_URL = "https://api.telegram.org"
 WEBHOOK_SECRET = "senti1984"
 
-# Прив'язка KV (твій namespace "senti-state")
-# id узято з твоїх скрінів; для preview дублюємо той самий
 [[kv_namespaces]]
 binding = "STATE"
 id = "7b32e2d1f60846ddb1c653eb52180bf7"
