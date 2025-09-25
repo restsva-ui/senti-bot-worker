@@ -1,110 +1,227 @@
 // src/router.js
-import { sendMessage, answerCallbackQuery, editMessageText } from "./lib/tg.js";
-
-// Команди — підключаємо без жорсткої прив'язки до назв експортів,
-// щоб не зламатися, якщо файл тимчасово не має потрібної функції.
-import * as Menu from "./commands/menu.js";
-import * as Stats from "./commands/stats.js";
-import * as LikePanel from "./commands/likepanel.js";
 
 /**
- * Головний роутер апдейта від Telegram
+ * Роутер для нових команд і кнопок:
+ *  - /menu        — показати кнопки
+ *  - /likepanel   — створити панель з лайком/дислайком
+ *  - /stats       — звести статистику по всіх панелях у чаті
+ *  - callback_query: "like", "dislike", "cmd:likepanel", "cmd:stats"
+ *
+ * Працює разом із src/index.js (де handleBasic обробляє /start, /ping, kv, echo).
+ */
+
+import {
+  sendMessage,
+  editMessageText,
+  answerCallbackQuery,
+} from "./lib/tg.js";
+
+/** @typedef {import('@cloudflare/workers-types').KVNamespace} KVNamespace */
+
+/**
+ * Головний вхід: отримує update, оточує try/catch і роутить.
+ * Викликається fire-and-forget з index.js
  * @param {Env} env
- * @param {*} update
+ * @param {any} update
  */
 export async function routeUpdate(env, update) {
-  // 1) callback_query (натискання інлайн-кнопок)
-  if (update.callback_query) {
-    const cq = update.callback_query;
-    const data = cq.data || "";
-    const chatId = cq.message?.chat?.id;
-    const messageId = cq.message?.message_id;
-
-    // лайки — делегуємо, якщо є обробник
-    if (data.startsWith("like:")) {
-      if (typeof LikePanel.onLikePanelCallback === "function") {
-        return LikePanel.onLikePanelCallback(env, update);
-      }
-      // fallback: просто підтвердимо натискання
-      await answerCallbackQuery(env, cq.id, { text: "👍" });
+  try {
+    if (update.callback_query) {
+      await handleCallback(env, update.callback_query);
       return;
     }
-
-    // відкриття панелі лайків з кнопки
-    if (data === "likepanel") {
-      if (typeof LikePanel.onLikePanel === "function") {
-        return LikePanel.onLikePanel(env, update);
-      }
-      await answerCallbackQuery(env, cq.id, { text: "Панель лайків недоступна" });
+    if (update.message) {
+      await handleMessage(env, update.message);
       return;
     }
+  } catch (e) {
+    console.error("routeUpdate:", e?.stack || e);
+  }
+}
 
-    // статистика
-    if (data === "stats") {
-      if (typeof Stats.onStats === "function") {
-        return Stats.onStats(env, update);
-      }
-      await answerCallbackQuery(env, cq.id, { text: "Статистика недоступна" });
-      return;
-    }
+/**
+ * Обробка звичайних повідомлень (тільки наші нові команди)
+ * @param {Env} env
+ * @param {any} msg
+ */
+async function handleMessage(env, msg) {
+  const chatId = msg.chat?.id;
+  const text = (msg.text || "").trim();
 
-    // about
-    if (data === "about") {
-      await editMessageText(
-        env,
-        chatId,
-        messageId,
-        "🤖 Senti — бот на Cloudflare Workers. Команди: /menu, /stats, /likepanel"
-      );
-      await answerCallbackQuery(env, cq.id);
-      return;
-    }
+  if (!chatId || !text) return;
 
-    // за замовчуванням — просто підтвердити клік
-    await answerCallbackQuery(env, cq.id);
+  if (text === "/menu") {
+    await showMenu(env, chatId);
     return;
   }
 
-  // 2) звичайні повідомлення
-  const msg = update.message || update.edited_message;
-  if (!msg) return;
-
-  const text = (msg.text || "").trim();
-  const chatId = msg.chat?.id;
-
-  // Команди через слеш
-  if (text.startsWith("/")) {
-    const [cmd] = text.split(/\s+/, 1);
-    switch (cmd) {
-      case "/menu":
-        if (typeof Menu.onMenu === "function") {
-          return Menu.onMenu(env, update);
-        }
-        return sendMessage(env, chatId, "📋 Меню тимчасово недоступне.");
-
-      case "/stats":
-        if (typeof Stats.onStats === "function") {
-          return Stats.onStats(env, update);
-        }
-        return sendMessage(env, chatId, "📊 Статистика тимчасово недоступна.");
-
-      case "/likepanel":
-        if (typeof LikePanel.onLikePanel === "function") {
-          return LikePanel.onLikePanel(env, update);
-        }
-        return sendMessage(env, chatId, "👍 Панель лайків тимчасово недоступна.");
-
-      // інші ваші існуючі команди (/start, /ping, /kvset, /kvget)
-      // обробляються у вашому поточному index.js — тут нічого не змінюємо.
-      default:
-        // Нехай базова логіка з index.js опрацює це як звичайний текст
-        return; // нічого не робимо в роутері
-    }
+  if (text === "/likepanel") {
+    await createLikePanel(env, chatId);
+    return;
   }
 
-  // Якщо це просто текст — теж нічого не робимо:
-  // поточна “ехо/старт” логіка лишається у вашому index.js.
-  return;
+  if (text === "/stats") {
+    await sendStats(env, chatId);
+    return;
+  }
+
+  // Інші команди/тексти обробляє базова логіка у handleBasic (index.js)
 }
 
-export default { routeUpdate };
+/**
+ * Обробка callback-кнопок
+ * @param {Env} env
+ * @param {any} cb
+ */
+async function handleCallback(env, cb) {
+  const data = cb.data || "";
+  const chatId = cb.message?.chat?.id;
+  const msgId = cb.message?.message_id;
+  const cbId = cb.id;
+
+  // Безпечне ACK, щоб у користувача не крутилось "годинничок"
+  const ack = (text = "✅") =>
+    answerCallbackQuery(env, cbId, { text, show_alert: false }).catch(() => {});
+
+  if (!chatId) {
+    await ack();
+    return;
+  }
+
+  // Меню: натиснули кнопку
+  if (data === "cmd:likepanel") {
+    await ack("Створюю панель…");
+    await createLikePanel(env, chatId);
+    return;
+  }
+  if (data === "cmd:stats") {
+    await ack("Готую статистику…");
+    await sendStats(env, chatId);
+    return;
+  }
+
+  // Лайки
+  if ((data === "like" || data === "dislike") && msgId) {
+    await ack("Дякую!");
+    await updateLikes(env, chatId, msgId, data);
+    return;
+  }
+
+  await ack();
+}
+
+/**
+ * Показати меню з кнопками
+ */
+async function showMenu(env, chatId) {
+  const reply_markup = {
+    inline_keyboard: [
+      [{ text: "👍 Панель лайків", callback_data: "cmd:likepanel" }],
+      [{ text: "📊 Статистика", callback_data: "cmd:stats" }],
+    ],
+  };
+
+  await sendMessage(env, {
+    chat_id: chatId,
+    text: "Оберіть дію:",
+    reply_markup,
+  });
+}
+
+/**
+ * Створити панель лайків (кнопки)
+ */
+async function createLikePanel(env, chatId) {
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: "👍", callback_data: "like" },
+        { text: "👎", callback_data: "dislike" },
+      ],
+    ],
+  };
+
+  await sendMessage(env, {
+    chat_id: chatId,
+    text: "Натисни, щоб проголосувати:",
+    reply_markup,
+  });
+}
+
+/**
+ * Оновити лічильники лайків у KV та відредагувати текст повідомлення
+ */
+async function updateLikes(env, chatId, messageId, kind /* 'like'|'dislike' */) {
+  const kv = env.STATE;
+  if (!kv) return;
+
+  const key = `likes:${chatId}:${messageId}`;
+  let obj = { like: 0, dislike: 0 };
+
+  try {
+    const raw = await kv.get(key);
+    if (raw) obj = JSON.parse(raw);
+  } catch (_) {}
+
+  obj[kind] = (obj[kind] || 0) + 1;
+
+  await kv.put(key, JSON.stringify(obj));
+
+  // Оновлюємо текст повідомлення (кнопки залишаються)
+  const text = `Результат голосування:\n👍 ${obj.like}   👎 ${obj.dislike}`;
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: "👍", callback_data: "like" },
+        { text: "👎", callback_data: "dislike" },
+      ],
+    ],
+  };
+
+  await editMessageText(env, {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    reply_markup,
+  });
+}
+
+/**
+ * Звести просту статистику по всіх панелях лайків у конкретному чаті
+ */
+async function sendStats(env, chatId) {
+  const kv = env.STATE;
+  if (!kv) {
+    await sendMessage(env, {
+      chat_id: chatId,
+      text: "❌ KV (STATE) не прив'язано — статистика недоступна.",
+    });
+    return;
+  }
+
+  const prefix = `likes:${chatId}:`;
+  let totalLike = 0;
+  let totalDislike = 0;
+
+  try {
+    let cursor = undefined;
+    do {
+      const { keys, cursor: next } = await kv.list({ prefix, cursor });
+      for (const k of keys) {
+        const raw = await kv.get(k.name);
+        if (!raw) continue;
+        try {
+          const obj = JSON.parse(raw);
+          totalLike += obj.like || 0;
+          totalDislike += obj.dislike || 0;
+        } catch {}
+      }
+      cursor = next;
+    } while (cursor);
+  } catch (e) {
+    console.error("stats list error:", e?.stack || e);
+  }
+
+  const text = `📊 Статистика чату:\n\n👍 Вподобайок: ${totalLike}\n👎 Дизлайків: ${totalDislike}`;
+  await sendMessage(env, { chat_id: chatId, text });
+}
