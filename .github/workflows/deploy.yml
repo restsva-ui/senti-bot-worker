@@ -21,26 +21,18 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Verify Cloudflare API token (sanity check)
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-               https://api.cloudflare.com/client/v4/user/tokens/verify | jq .
-
       - name: Install wrangler
         run: |
           npm i -g wrangler@3
           wrangler --version
 
-      # опціонально: побачити на кого залогінились
-      - name: wrangler whoami
+      - name: Verify Cloudflare token
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: |
-          wrangler whoami --verbose || true
+          set -euo pipefail
+          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            https://api.cloudflare.com/client/v4/user/tokens/verify | jq .
 
       - name: Deploy
         env:
@@ -48,4 +40,5 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          wrangler deploy --config wrangler.toml --account-id "$CLOUDFLARE_ACCOUNT_ID" --verbose
+          # за бажанням: додай --log-level debug
+          wrangler deploy --config wrangler.toml
