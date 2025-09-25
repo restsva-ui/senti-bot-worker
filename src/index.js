@@ -13,6 +13,7 @@ import { routeUpdate } from "./router.js";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
+/** Виклик Bot API напряму */
 async function tg(env, method, body) {
   const base = (env.API_BASE_URL || "https://api.telegram.org").replace(/\/+$/, "");
   const url = `${base}/bot${env.BOT_TOKEN}/${method}`;
@@ -27,12 +28,16 @@ async function readJson(req) {
   try { return await req.json(); } catch { return null; }
 }
 
-const ok  = (data = {}) => new Response(JSON.stringify({ ok: true, ...data }), { headers: JSON_HEADERS });
+const ok  = (data = {}) =>
+  new Response(JSON.stringify({ ok: true, ...data }), { headers: JSON_HEADERS });
 const err = (message, status = 200) =>
-  new Response(JSON.stringify({ ok: false, error: String(message) }), { headers: JSON_HEADERS, status });
+  new Response(JSON.stringify({ ok: false, error: String(message) }), {
+    headers: JSON_HEADERS,
+    status,
+  });
 
 /**
- * Базова (вже працююча) логіка бота: /start, /ping, /kvset, /kvget, echo
+ * Базова (вже працююча) логіка: /start, /ping, /kvset, /kvget, echo
  */
 async function handleBasic(update, env) {
   const msg = update.message || update.edited_message || update.callback_query?.message;
@@ -89,7 +94,7 @@ async function handleBasic(update, env) {
     return;
   }
 
-  // Фото/документи — підтвердження
+  // Фото/документи
   if (msg?.photo || msg?.document) {
     await tg(env, "sendMessage", {
       chat_id: chatId,
@@ -99,7 +104,7 @@ async function handleBasic(update, env) {
     return;
   }
 
-  // Ехо для будь-якого іншого тексту
+  // Ехо
   if (text) {
     await tg(env, "sendMessage", {
       chat_id: chatId,
@@ -109,7 +114,6 @@ async function handleBasic(update, env) {
     return;
   }
 
-  // Фолбек
   await tg(env, "sendMessage", { chat_id: chatId, text: "✅ Отримав оновлення." });
 }
 
@@ -117,28 +121,28 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Health
+    // Health check
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/healthz")) {
       return ok({ service: "senti-bot-worker", env: "ok" });
     }
 
-    // Webhook endpoint: /webhook/<WEBHOOK_SECRET>
+    // Webhook
     if (url.pathname === `/webhook/${env.WEBHOOK_SECRET}`) {
       if (request.method !== "POST") return err("Method must be POST");
       const update = await readJson(request);
       if (!update) return err("Invalid JSON");
 
-      // 1) делегуємо нові кнопки/команди у роутер (fire-and-forget)
+      // 🔹 Делегуємо в router.js (нові кнопки/команди)
       routeUpdate(env, update).catch((e) =>
         console.error("routeUpdate error:", e?.stack || e)
       );
 
-      // 2) базова логіка — окремо (fire-and-forget), щоб не ламати існуючу поведінку
+      // 🔹 Базова логіка
       handleBasic(update, env).catch((e) =>
         console.error("handleBasic error:", e?.stack || e)
       );
 
-      // Відповідаємо Telegram миттєво, щоб не було таймаутів/повторів
+      // Миттєво відповідаємо Telegram
       return ok({ received: true });
     }
 
