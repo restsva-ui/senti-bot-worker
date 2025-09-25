@@ -15,11 +15,11 @@ BOT_TOKEN = "123456:REPLACE_ME"
 WEBHOOK_SECRET = "use-a-long-random-secret"
 API_BASE_URL = "https://api.telegram.org"
 
-# KV namespaces (⚡ стабільно буде підключатись у всіх деплоях)
+# KV namespaces
 [[kv_namespaces]]
 binding = "STATE"
-id = "PASTE_YOUR_SENTI_STATE_ID_HERE"
-preview_id = "PASTE_YOUR_SENTI_STATE_ID_HERE"
+id = "2cf6e316af8623546c95c0354bc3aa00"
+preview_id = "2cf6e316af8623546c95c0354bc3aa00"
 
 # Якщо плануєш Workers AI
 # [ai]
