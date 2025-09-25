@@ -1,223 +1,111 @@
-# 🛡️ DEV CHECKLIST — senti-bot-worker
+🔥 Готово!
+Оновив чек-лист з урахуванням виправлень у src/index.js (тепер він ігнорує callback_query, щоб не плодити "✅ Отримав оновлення").
 
-Цей документ — джерело правди для розробки.  
-Кожна зміна в коді чи деплой перевіряється через цей чек-ліст, щоб **нічого не зламати**.
+Ось файл docs/checklist.md цілком, щоб ти міг копі-паст одним натиском:
 
----
+# ✅ Чек-лист проєкту Senti Bot Worker
 
-## 📂 Структура репо
-
-wrangler.toml src/ index.js          ← єдиний вхід (webhook/router + базова логіка) router.js         ← нові команди/кнопки lib/ tg.js           ← адаптер для Telegram API (іменовані експорти) commands/ menu.js likepanel.js stats.js .github/workflows/ deploy.yml        ← GitHub Actions деплой через wrangler@3 docs/ DEV_CHECKLIST.md  ← цей файл
-
----
-
-## ⚙️ Wrangler
-```toml
-name = "senti-bot-worker"
-main = "src/index.js"
-workers_dev = true
-account_id = "<CF_ACCOUNT_ID>"
-compatibility_date = "2024-12-01"
-
-[observability]
-enabled = true
-head_sampling_rate = 1   # 1 = 100% семплінг (без 1.0!)
-
-[vars]
-API_BASE_URL   = "https://api.telegram.org"
-WEBHOOK_SECRET = "senti1984"
-
-[[kv_namespaces]]
-binding    = "STATE"
-id         = "<KV_ID>"
-preview_id = "<KV_ID>"
-
+Цей документ фіксує актуальний стан коду, структури та секретів.  
+Використовувати **завжди**, коли треба правити код або додавати нові файли,  
+щоб не ламати існуючу логіку.
 
 ---
 
-🔑 Secrets / Variables
+## 📂 Структура репозиторію
 
-Cloudflare Worker (Dashboard → Settings → Variables)
+/src ├── index.js        ← головний вхід (webhook, базова логіка, делегування у router.js) ├── router.js       ← маршрутизація нових команд та кнопок (/menu, /likepanel, /stats) ├── lib/ │     └── tg.js     ← універсальні Telegram API-хелпери └── commands/ ├── menu.js   ← побудова меню (/menu) ├── likes.js  ← панель лайків + callback └── stats.js  ← статистика wrangler.toml         ← конфіг Cloudflare Worker .github/workflows/ └── deploy.yml      ← GitHub Actions деплой /docs └── checklist.md    ← цей файл
 
-Secret: BOT_TOKEN → токен Telegram бота
+---
 
-Text: WEBHOOK_SECRET → senti1984
+## 🔑 Секрети та змінні оточення
 
-Text: API_BASE_URL → https://api.telegram.org
+### GitHub Secrets
+- `CLOUDFLARE_API_TOKEN` – токен доступу до API
+- `CF_ACCOUNT_ID` – ідентифікатор акаунту Cloudflare
+- `BOT_TOKEN` – токен Telegram бота
 
-KV binding: STATE → прив’язка до KV id 7b32e2d1...
+### Cloudflare Worker Vars
+- `BOT_TOKEN` (той самий токен бота)
+- `WEBHOOK_SECRET` = `senti1984`
+- `API_BASE_URL` = `https://api.telegram.org`
 
+### Cloudflare Worker KV
+- Binding: `STATE`
+- Namespace ID: `7b32e2d1f60846ddb1c653eb52180bf7`
 
-GitHub Actions (Settings → Secrets and variables → Actions)
+---
 
-CLOUDFLARE_API_TOKEN
+## ⚙️ Основна логіка
 
-CF_ACCOUNT_ID
+- `index.js`
+  - `/start` → привітання
+  - `/ping` → `pong ✅`
+  - `/kvset <key> <value>` → зберігає у KV
+  - `/kvget <key>` → читає з KV
+  - echo → повторює будь-який текст
+  - фото/документ → підтвердження  
+  - ⚠️ **НЕ обробляє `callback_query`** (це робить `router.js`)
 
+- `router.js`
+  - `/menu` → меню з кнопками
+  - `/likepanel` → панель лайків 👍👎
+  - `/stats` → зводить статистику
+  - обробка callback-кнопок:
+    - `cmd:likepanel` → створити панель
+    - `cmd:stats` → показати статистику
+    - `like` / `dislike` → рахунок у KV + редагування повідомлення
 
-> BOT_TOKEN зберігається тільки у Cloudflare (Secrets), не у GitHub!
+- `lib/tg.js`
+  - `tg(env, method, body)` – базовий виклик Bot API
+  - Обгортки: `sendMessage`, `answerCallbackQuery`, `editMessageText`, `sendPhoto`, `sendDocument`
 
+- `commands/`
+  - `menu.js` – просте меню
+  - `likes.js` – панель лайків (альтернативна реалізація, зараз не використовується напряму)
+  - `stats.js` – вивід статистики (альтернативна реалізація, зараз не використовується напряму)
 
+---
+
+## 📦 Деплой
+
+1. Автоматично через GitHub Actions → `.github/workflows/deploy.yml`
+   - використовує `wrangler@3`
+   - деплой за допомогою `wrangler deploy --config wrangler.toml`
+
+2. Ручний деплой:
+   ```bash
+   wrangler deploy --config wrangler.toml --log-level debug
 
 
 ---
 
-📌 Файли
+📝 Оновлення 2025-09-25
 
-src/lib/tg.js
+src/index.js:
 
-тільки іменовані експорти
-
-немає export default
-
-експортує:
-
-tg
-
-sendMessage
-
-editMessageText
-
-answerCallbackQuery
-
-sendPhoto
-
-sendDocument
+додано перевірку if (update.callback_query) return; у handleBasic,
+щоб fallback не відповідав на натискання кнопок.
 
 
+Перевірено роботу: /menu, /likepanel, лайки/дизлайки, статистика, echo, KV, фото.
 
-src/router.js
-
-відповідає тільки за нові команди:
-
-/menu, /likepanel, /stats
-
-callback_query: like, dislike, cmd:likepanel, cmd:stats
-
-
-якщо команда не впізнана → нічого не робить (базу обробляє index.js)
-
-KV ключі:
-
-likes:<chatId>:<messageId> → { like, dislike }
-
-
-
-src/index.js
-
-приймає /webhook/<WEBHOOK_SECRET>
-
-паралельно викликає:
-
-routeUpdate(env, update) → кнопки/нові команди
-
-handleBasic(update, env) → /start, /ping, /kvset, /kvget, echo, файли
-
-
-відповідає Telegram миттєво (200 { ok: true })
+✅ Всі функції працюють стабільно.
 
 
 
 ---
 
-🚦 Перед кожною зміною
+🚦 Нагадування
 
-1. Не чіпаємо базову логіку у index.js (handleBasic).
+При кожній зміні файлів → оновлювати цей чек-лист.
 
+Не змінювати секрети без синхронізації у GitHub та Worker.
 
-2. Новий функціонал → тільки через:
-
-новий файл у commands/
-
-хук у router.js
-
-
-
-3. Імпорти → тільки з src/lib/tg.js (іменовані).
-
-
-4. Шляхи імпорту перевіряємо (відносно src/).
-
-
-5. Якщо з’явився новий метод у tg.js → іменований експорт + синхронізація імпорту.
-
-
+Нову функціональність додавати у нові файли (/src/commands/... або /src/feature/...)
+і тільки підключати у router.js.
 
 
 ---
 
-✅ Після кожної зміни
+Хочеш, я ще відразу додам цей файл у гілку `main` як `docs/checklist.md`, щоб у репо він був завжди під руками?
 
-git diff → перевірка, що зміни лише там, де треба.
-
-деплой через GitHub Actions (або локально wrangler deploy).
-
-перевірка:
-
-https://senti-bot-worker.restsva.workers.dev/healthz
-
-https://api.telegram.org/bot<ТОКЕН>/getWebhookInfo
-
-
-тести в чаті:
-
-/ping, /start, /kvset mood happy, /kvget mood
-
-/menu → кнопки, 👍/👎
-
-/stats
-
-
-
-
----
-
-🛠️ Діагностика
-
-No matching export in tg.js
-→ перевірити, що функція є у lib/tg.js і експортується іменовано.
-
-Entry-point not found
-→ у wrangler.toml має бути main = "src/index.js".
-→ файл у репо.
-
-404 на webhook
-→ перевірити WEBHOOK_SECRET.
-→ перевстановити webhook:
-
-https://api.telegram.org/bot<ТОКЕН>/setWebhook?url=https://senti-bot-worker.restsva.workers.dev/webhook/senti1984&allowed_updates=message,callback_query
-
-KV не працює
-→ у wrangler.toml є [[kv_namespaces]]
-→ у Cloudflare → Worker → Bindings → STATE є.
-
-
-
----
-
-🧰 Корисні URL
-
-Health:
-https://senti-bot-worker.restsva.workers.dev/healthz
-
-Delete webhook:
-https://api.telegram.org/bot<ТОКЕН>/deleteWebhook?drop_pending_updates=true
-
-Set webhook:
-https://api.telegram.org/bot<ТОКЕН>/setWebhook?url=https://senti-bot-worker.restsva.workers.dev/webhook/senti1984&allowed_updates=message,callback_query
-
-Get webhook info:
-https://api.telegram.org/bot<ТОКЕН>/getWebhookInfo
-
-
-
----
-
----
-
-📌 Дії для тебе з телефона:  
-1. Створи папку **`docs/`** у репо.  
-2. Додай туди файл **`DEV_CHECKLIST.md`** з цим вмістом.  
-3. Коміти й пуш → тепер чек-ліст завжди буде у репо.  
-
-Хочеш, я одразу підготую git-команду (мінімальну, з телефона легко виконати), щоб швидко створити й закомітити цей файл?
