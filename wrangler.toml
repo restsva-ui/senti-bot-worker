@@ -1,20 +1,14 @@
 name = "senti-bot-worker"
 main = "src/index.ts"
-compatibility_date = "2023-12-01"
+compatibility_date = "2025-09-25"
 workers_dev = true
 
 [vars]
-# Секрети краще не тримати тут, а додавати через `wrangler secret put`
-# Наприклад:
-# wrangler secret put TELEGRAM_TOKEN
-# wrangler secret put WEBHOOK_SECRET
+API_BASE_URL = "https://api.telegram.org"
+# Інші змінні/секрети (BOT_TOKEN, WEBHOOK_SECRET, OWNER_ID) тримай у Dashboard як Secrets/Variables
+# або додай їх тут ТІЛЬКИ якщо вони не секректні.
 
-[build]
-command = "npm install && npm run build"
-
-[build.upload]
-format = "modules"
-main = "./src/index.ts"
-
-[env.production]
-main = "src/index.ts"
+# Якщо у тебе були routes/zones — додай їх знову тут:
+# routes = [
+#   { pattern = "senti-bot.your-domain.com/*", zone_name = "your-domain.com" }
+# ]
