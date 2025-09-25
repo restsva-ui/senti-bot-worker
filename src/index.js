@@ -35,7 +35,10 @@ const err = (message, status = 200) =>
  * Базова (вже працююча) логіка бота: /start, /ping, /kvset, /kvget, echo
  */
 async function handleBasic(update, env) {
-  const msg = update.message || update.edited_message || update.callback_query?.message;
+  // ⚠️ Не обробляти callback_query тут — вони йдуть у router.js
+  if (update.callback_query) return;
+
+  const msg = update.message || update.edited_message;
   const chatId = msg?.chat?.id;
   if (!chatId) return;
 
@@ -89,6 +92,7 @@ async function handleBasic(update, env) {
     return;
   }
 
+  // Фото/документи — підтвердження
   if (msg?.photo || msg?.document) {
     await tg(env, "sendMessage", {
       chat_id: chatId,
@@ -98,6 +102,7 @@ async function handleBasic(update, env) {
     return;
   }
 
+  // Ехо для будь-якого іншого тексту
   if (text) {
     await tg(env, "sendMessage", {
       chat_id: chatId,
@@ -106,16 +111,10 @@ async function handleBasic(update, env) {
     });
     return;
   }
-
-  await tg(env, "sendMessage", { chat_id: chatId, text: "✅ Отримав оновлення." });
 }
 
 export default {
-  /**
-   * ВАЖЛИВО: додаємо третій аргумент `ctx` і використовуємо ctx.waitUntil(...)
-   * щоб воркер не згортали до завершення наших асинхронних задач.
-   */
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
 
     // Health
@@ -129,18 +128,17 @@ export default {
       const update = await readJson(request);
       if (!update) return err("Invalid JSON");
 
-      // Запускаємо обробку в бекграунді і НЕ даємо їй згортатися
-      const p1 = routeUpdate(env, update).catch((e) =>
+      // 1) делегуємо нові кнопки/команди у роутер (fire-and-forget)
+      routeUpdate(env, update).catch((e) =>
         console.error("routeUpdate error:", e?.stack || e)
       );
-      const p2 = handleBasic(update, env).catch((e) =>
+
+      // 2) базова логіка (без callback_query)
+      handleBasic(update, env).catch((e) =>
         console.error("handleBasic error:", e?.stack || e)
       );
 
-      // чекаємо у фоновому режимі
-      ctx.waitUntil(Promise.allSettled([p1, p2]));
-
-      // миттєво відповідаємо Telegram
+      // Відповідаємо Telegram миттєво
       return ok({ received: true });
     }
 
