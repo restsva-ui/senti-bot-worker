@@ -1,15 +1,17 @@
 // src/commands/menu.js
-
 import { sendMessage } from "../lib/tg.js";
 
-export async function onMenu(env, chat_id) {
-  const text = "📋 Меню:\n\nОберіть опцію нижче 👇";
+export async function onMenu(env, update) {
+  if (!update.message) return;
 
+  const chat_id = update.message.chat.id;
+
+  // просте меню з inline-кнопками
   const keyboard = {
     inline_keyboard: [
       [
+        { text: "📊 Статистика", callback_data: "stats" },
         { text: "👍 Лайки", callback_data: "likepanel" },
-        { text: "📊 Статистика", callback_data: "stats" }
       ],
       [
         { text: "ℹ️ Про бота", callback_data: "about" }
@@ -17,5 +19,5 @@ export async function onMenu(env, chat_id) {
     ]
   };
 
-  return await sendMessage(env, chat_id, text, keyboard);
+  await sendMessage(env, chat_id, "📋 Обери опцію з меню:", keyboard);
 }
