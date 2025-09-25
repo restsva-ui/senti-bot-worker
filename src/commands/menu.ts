@@ -1,11 +1,13 @@
-import { sendMessage } from "../telegram/api";
-export async function cmdMenu(chatId: string|number) {
-  await sendMessage(chatId, "Оберіть дію:", {
+import { sendMessage } from "../telegram";
+
+export async function menu(chatId: number) {
+  await sendMessage(chatId, "Головне меню:", {
     reply_markup: {
       inline_keyboard: [
-        [{ text: "👍 Панель лайків", callback_data: "likepanel" }],
-        [{ text: "📊 Статистика", callback_data: "stats" }],
-      ]
-    }
+        [{ text: "🔄 Ping", callback_data: "cb_ping" }],
+        [{ text: "👍 Лайки", callback_data: "cb_likepanel" }],
+        [{ text: "ℹ️ Допомога", callback_data: "cb_help" }],
+      ],
+    },
   });
 }
