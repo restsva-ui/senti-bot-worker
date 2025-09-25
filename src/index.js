@@ -22,7 +22,6 @@ async function tg(env, method, body) {
       headers: JSON_HEADERS,
       body: JSON.stringify(body),
     });
-    // Лише лог статусу (без тіла), щоб не гальмувати Worker:
     if (!res.ok) {
       console.error(`TG ${method} HTTP ${res.status}`);
     }
@@ -42,14 +41,17 @@ const err = (message, status = 200) =>
   new Response(JSON.stringify({ ok: false, error: String(message) }), { headers: JSON_HEADERS, status });
 
 /**
- * Базова (вже працююча) логіка бота: /start, /ping, /kvset, /kvget, echo
+ * Базова логіка бота: /start, /ping, /kvset, /kvget, echo
+ * (callback_query тут НЕ обробляємо — це робить router.js)
  */
 async function handleBasic(update, env) {
   try {
-    const msg = update.message || update.edited_message || update.callback_query?.message;
+    if (update.callback_query) return;
+
+    const msg = update.message || update.edited_message;
     const chatId = msg?.chat?.id;
     if (!chatId) {
-      console.log("handleBasic: немає chatId — пропускаю");
+      console.log("handleBasic: no chatId");
       return;
     }
 
@@ -107,7 +109,6 @@ async function handleBasic(update, env) {
       return;
     }
 
-    // Фото/документи — підтвердження
     if (msg?.photo || msg?.document) {
       console.log("handleBasic: file/photo");
       await tg(env, "sendMessage", {
@@ -118,7 +119,6 @@ async function handleBasic(update, env) {
       return;
     }
 
-    // Ехо для будь-якого іншого тексту
     if (text) {
       console.log("handleBasic: echo");
       await tg(env, "sendMessage", {
@@ -128,17 +128,17 @@ async function handleBasic(update, env) {
       });
       return;
     }
-
-    // Фолбек
-    console.log("handleBasic: fallback");
-    await tg(env, "sendMessage", { chat_id: chatId, text: "✅ Отримав оновлення." });
   } catch (e) {
     console.error("handleBasic error:", e?.stack || e);
   }
 }
 
 export default {
-  async fetch(request, env) {
+  /**
+   * ВАЖЛИВО: використовуємо ctx.waitUntil(...) щоб фонові задачі (відповіді в TG)
+   * гарантовано виконались навіть після миттєвої 200-відповіді Telegram'у.
+   */
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     // Health
@@ -152,22 +152,18 @@ export default {
       const update = await readJson(request);
       if (!update) return err("Invalid JSON");
 
-      // головний лог апдейта
-      try {
-        console.log("🔔 Update received:", JSON.stringify(update));
-      } catch {}
+      try { console.log("🔔 Update:", JSON.stringify(update)); } catch {}
 
-      // 1) делегуємо нові кнопки/команди у роутер (fire-and-forget)
-      routeUpdate(env, update).catch((e) =>
+      const p1 = routeUpdate(env, update).catch((e) =>
         console.error("routeUpdate error:", e?.stack || e)
       );
-
-      // 2) базова логіка — окремо (fire-and-forget), щоб не ламати існуючу поведінку
-      handleBasic(update, env).catch((e) =>
+      const p2 = handleBasic(update, env).catch((e) =>
         console.error("handleBasic error (outer):", e?.stack || e)
       );
 
-      // Відповідаємо Telegram миттєво, щоб не було таймаутів/повторів
+      // не даємо згорнутись фоновим обіцянкам
+      ctx.waitUntil(Promise.allSettled([p1, p2]));
+
       return ok({ received: true });
     }
 
