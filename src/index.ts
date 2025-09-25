@@ -1,56 +1,26 @@
-// src/telegram/index.ts
+// src/index.ts
+import { makeRouter } from "./router";
 
-export interface TgEnv {
+export interface Env {
   BOT_TOKEN: string;
-  API_BASE_URL?: string; // дефолт https://api.telegram.org
+  // обов'язково
+  WEBHOOK_SECRET?: string;          // опційно
+  API_BASE_URL?: string;            // опційно, дефолт https://api.telegram.org
+  OWNER_ID?: string;                // опційно, для /test
 }
 
-function baseUrl(env: TgEnv): string {
-  const api = env.API_BASE_URL ?? "https://api.telegram.org";
-  return `${api}/bot${env.BOT_TOKEN}`;
-}
+const router = makeRouter();
 
-async function callTelegram<T = any>(
-  env: TgEnv,
-  method: string,
-  payload: Record<string, any>
-): Promise<T> {
-  const res = await fetch(`${baseUrl(env)}/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Telegram ${method} failed: ${res.status} ${text}`);
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    try {
+      return await router.handle(request, env, ctx);
+    } catch (err: any) {
+      console.error("UNHANDLED_ERROR", { message: err?.message, stack: err?.stack });
+      return new Response(
+        JSON.stringify({ error: "Internal Error" }),
+        { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    }
   }
-
-  return (await res.json()) as T;
-}
-
-/**
- * Надіслати текстове повідомлення
- */
-export async function sendMessage(
-  env: TgEnv,
-  chat_id: number | string,
-  text: string,
-  extra: Record<string, any> = {}
-) {
-  return callTelegram(env, "sendMessage", { chat_id, text, ...extra });
-}
-
-/**
- * Відповісти на callback_query (натискання інлайн-кнопок)
- */
-export async function answerCallbackQuery(
-  env: TgEnv,
-  callback_query_id: string,
-  extra: Record<string, any> = {}
-) {
-  return callTelegram(env, "answerCallbackQuery", {
-    callback_query_id,
-    ...extra,
-  });
-}
+};
