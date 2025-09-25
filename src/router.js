@@ -6,8 +6,6 @@
  *  - /likepanel   — створити панель з лайком/дислайком
  *  - /stats       — звести статистику по всіх панелях у чаті
  *  - callback_query: "like", "dislike", "cmd:likepanel", "cmd:stats"
- *
- * Працює разом із src/index.js (де handleBasic обробляє /start, /ping, kv, echo).
  */
 
 import {
@@ -19,10 +17,8 @@ import {
 /** @typedef {import('@cloudflare/workers-types').KVNamespace} KVNamespace */
 
 /**
- * Головний вхід: отримує update, оточує try/catch і роутить.
+ * Головний вхід: отримує update і роутить.
  * Викликається fire-and-forget з index.js
- * @param {Env} env
- * @param {any} update
  */
 export async function routeUpdate(env, update) {
   try {
@@ -41,8 +37,6 @@ export async function routeUpdate(env, update) {
 
 /**
  * Обробка звичайних повідомлень (тільки наші нові команди)
- * @param {Env} env
- * @param {any} msg
  */
 async function handleMessage(env, msg) {
   const chatId = msg.chat?.id;
@@ -70,8 +64,6 @@ async function handleMessage(env, msg) {
 
 /**
  * Обробка callback-кнопок
- * @param {Env} env
- * @param {any} cb
  */
 async function handleCallback(env, cb) {
   const data = cb.data || "";
@@ -79,16 +71,16 @@ async function handleCallback(env, cb) {
   const msgId = cb.message?.message_id;
   const cbId = cb.id;
 
-  // Безпечне ACK, щоб у користувача не крутилось "годинничок"
+  // ACK (щоб не висів "годинничок")
   const ack = (text = "✅") =>
-    answerCallbackQuery(env, cbId, { text, show_alert: false }).catch(() => {});
+    answerCallbackQuery(env, { callback_query_id: cbId, text, show_alert: false }).catch(() => {});
 
   if (!chatId) {
     await ack();
     return;
   }
 
-  // Меню: натиснули кнопку
+  // Меню
   if (data === "cmd:likepanel") {
     await ack("Створюю панель…");
     await createLikePanel(env, chatId);
@@ -111,7 +103,7 @@ async function handleCallback(env, cb) {
 }
 
 /**
- * Показати меню з кнопками
+ * Показати меню
  */
 async function showMenu(env, chatId) {
   const reply_markup = {
@@ -129,7 +121,7 @@ async function showMenu(env, chatId) {
 }
 
 /**
- * Створити панель лайків (кнопки)
+ * Створити панель лайків
  */
 async function createLikePanel(env, chatId) {
   const reply_markup = {
@@ -149,7 +141,7 @@ async function createLikePanel(env, chatId) {
 }
 
 /**
- * Оновити лічильники лайків у KV та відредагувати текст повідомлення
+ * Оновити лічильники лайків
  */
 async function updateLikes(env, chatId, messageId, kind /* 'like'|'dislike' */) {
   const kv = env.STATE;
@@ -167,7 +159,6 @@ async function updateLikes(env, chatId, messageId, kind /* 'like'|'dislike' */) 
 
   await kv.put(key, JSON.stringify(obj));
 
-  // Оновлюємо текст повідомлення (кнопки залишаються)
   const text = `Результат голосування:\n👍 ${obj.like}   👎 ${obj.dislike}`;
   const reply_markup = {
     inline_keyboard: [
@@ -187,7 +178,7 @@ async function updateLikes(env, chatId, messageId, kind /* 'like'|'dislike' */) 
 }
 
 /**
- * Звести просту статистику по всіх панелях лайків у конкретному чаті
+ * Показати статистику
  */
 async function sendStats(env, chatId) {
   const kv = env.STATE;
