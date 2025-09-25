@@ -1,10 +1,22 @@
-export const CFG = {
-  API_BASE_URL: "https://api.telegram.org",
-  BOT_TOKEN: TELEGRAM_BOT_TOKEN,              // з Env
-  WEBHOOK_SECRET: WEBHOOK_SECRET || "",
-  OWNER_ID: "784869835",
-  DEFAULT_CHAT_ID: "784869835",
-};
-export const TG = {
-  base: (t = CFG.BOT_TOKEN) => `${CFG.API_BASE_URL}/bot${t}`,
-};
+// Конфіг через Env — ЖОДНИХ глобальних змінних на рівні модуля
+export interface Env {
+  BOT_TOKEN: string;              // обовʼязково
+  API_BASE_URL?: string;          // опц., дефолт — офіц. телеграм
+  OWNER_ID?: string;              // опц.
+  STATE?: KVNamespace;            // якщо є KV
+}
+
+const DEFAULT_API_BASE_URL = "https://api.telegram.org";
+
+export function loadConfig(env: Env) {
+  const BOT_TOKEN = env.BOT_TOKEN;
+  if (!BOT_TOKEN) {
+    // явна й зрозуміла помилка, якщо змінну не передали
+    throw new ReferenceError("BOT_TOKEN env var is required");
+  }
+  const API_BASE_URL = env.API_BASE_URL || DEFAULT_API_BASE_URL;
+  const OWNER_ID = env.OWNER_ID;
+  return { BOT_TOKEN, API_BASE_URL, OWNER_ID };
+}
+
+export type { Env as WorkerEnv };
