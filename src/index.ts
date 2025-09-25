@@ -1,25 +1,56 @@
-// src/index.ts
-import { makeRouter } from "./router";
+// src/telegram/index.ts
 
-export interface Env {
+export interface TgEnv {
   BOT_TOKEN: string;
-  // обов'язково
-  WEBHOOK_SECRET: string;
-  // обов'язково
-  API_BASE_URL?: string; // опц., дефолт https://api.telegram.org
-  OWNER_ID?: string;     // опц. для /test
+  API_BASE_URL?: string; // дефолт https://api.telegram.org
 }
 
-const router = makeRouter();
+function baseUrl(env: TgEnv): string {
+  const api = env.API_BASE_URL ?? "https://api.telegram.org";
+  return `${api}/bot${env.BOT_TOKEN}`;
+}
 
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    try {
-      // Всі секрети/константи береться з env (env.BOT_TOKEN, env.WEBHOOK_SECRET, env.API_BASE_URL ...)
-      return await router.handle(request, env, ctx);
-    } catch (err: any) {
-      console.error("UNHANDLED_ERROR", { message: err?.message, stack: err?.stack });
-      return new Response("Internal Error", { status: 500 });
-    }
-  },
-};
+async function callTelegram<T = any>(
+  env: TgEnv,
+  method: string,
+  payload: Record<string, any>
+): Promise<T> {
+  const res = await fetch(`${baseUrl(env)}/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Telegram ${method} failed: ${res.status} ${text}`);
+  }
+
+  return (await res.json()) as T;
+}
+
+/**
+ * Надіслати текстове повідомлення
+ */
+export async function sendMessage(
+  env: TgEnv,
+  chat_id: number | string,
+  text: string,
+  extra: Record<string, any> = {}
+) {
+  return callTelegram(env, "sendMessage", { chat_id, text, ...extra });
+}
+
+/**
+ * Відповісти на callback_query (натискання інлайн-кнопок)
+ */
+export async function answerCallbackQuery(
+  env: TgEnv,
+  callback_query_id: string,
+  extra: Record<string, any> = {}
+) {
+  return callTelegram(env, "answerCallbackQuery", {
+    callback_query_id,
+    ...extra,
+  });
+}
