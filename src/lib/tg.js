@@ -1,63 +1,57 @@
 // src/lib/tg.js
+// Універсальні хелпери для Telegram Bot API (Cloudflare Workers)
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
-function apiBase(env) {
-  return (env.API_BASE_URL || "https://api.telegram.org").replace(/\/+$/, "");
+/** Побудова базового URL до Bot API */
+function apiUrl(env, method) {
+  const base = (env.API_BASE_URL || "https://api.telegram.org").replace(/\/+$/, "");
+  return `${base}/bot${env.BOT_TOKEN}/${method}`;
 }
 
-async function call(env, method, body) {
-  const url = `${apiBase(env)}/bot${env.BOT_TOKEN}/${method}`;
-  const res = await fetch(url, {
+/**
+ * Базовий виклик API: tg(env, "sendMessage", {...})
+ * Зручно, коли потрібен будь-який метод без окремої обгортки.
+ */
+export async function tg(env, method, body) {
+  return fetch(apiUrl(env, method), {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(body),
   });
-
-  if (!res.ok) {
-    let text = "";
-    try { text = await res.text(); } catch {}
-    console.error("Telegram API error:", method, res.status, text);
-  }
-  return res;
 }
 
-// ---- функції ----
-async function sendMessage(env, chat_id, text, reply_markup = undefined, extra = {}) {
-  return call(env, "sendMessage", {
-    chat_id,
-    text,
-    parse_mode: "HTML",
-    disable_web_page_preview: true,
-    reply_markup,
-    ...extra,
-  });
+/** Найпоширеніші методи як зручні обгортки */
+export async function sendMessage(env, body) {
+  return tg(env, "sendMessage", body);
 }
 
-async function editMessageReplyMarkup(env, chat_id, message_id, reply_markup) {
-  return call(env, "editMessageReplyMarkup", { chat_id, message_id, reply_markup });
+export async function answerCallbackQuery(env, body) {
+  return tg(env, "answerCallbackQuery", body);
 }
 
-async function answerCallbackQuery(env, callback_query_id, text = "", show_alert = false) {
-  return call(env, "answerCallbackQuery", { callback_query_id, text, show_alert });
+export async function editMessageText(env, body) {
+  // приклади body:
+  // { chat_id, message_id, text, parse_mode, reply_markup }
+  // або { inline_message_id, text, ... }
+  return tg(env, "editMessageText", body);
 }
 
-async function setMyCommands(env, commands) {
-  return call(env, "setMyCommands", { commands });
+/** Додаткові корисні (можуть згодитись далі) */
+export async function sendPhoto(env, body) {
+  return tg(env, "sendPhoto", body);
 }
 
-// ---- експорт ----
-export {
+export async function sendDocument(env, body) {
+  return tg(env, "sendDocument", body);
+}
+
+/** На випадок імпорту за замовчуванням */
+export default {
+  tg,
   sendMessage,
-  editMessageReplyMarkup,
   answerCallbackQuery,
-  setMyCommands,
-};
-
-// також старий формат
-export const tg = {
-  sendMessage,
-  editMessageReplyMarkup,
-  answerCallbackQuery,
-  setMyCommands,
+  editMessageText,
+  sendPhoto,
+  sendDocument,
 };
