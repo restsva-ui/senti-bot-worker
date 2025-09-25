@@ -10,5 +10,5 @@ WEBHOOK_SECRET = "use-a-long-random-secret"
 
 [[kv_namespaces]]
 binding = "STATE"
-id = "2cf6e316af8623546c95c0354bc3aa00"
-preview_id = "2cf6e316af8623546c95c0354bc3aa00"
+id = "7b32e2d1f60846ddb1c653eb52180bf7"
+preview_id = "7b32e2d1f60846ddb1c653eb52180bf7"
