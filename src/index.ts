@@ -1,29 +1,22 @@
-import { routeUpdate } from "./router";
-import { CFG } from "./config";
+// src/index.ts
+import { makeRouter } from "./router";
+
+export interface Env {
+  BOT_TOKEN: string;                // обов'язково
+  WEBHOOK_SECRET: string;           // обов'язково
+  API_BASE_URL?: string;            // опц., дефолт https://api.telegram.org
+  OWNER_ID?: string;                // опц. для /test
+}
+
+const router = makeRouter();
 
 export default {
-  async fetch(req: Request): Promise<Response> {
-    // Healthcheck
-    if (new URL(req.url).pathname === "/") {
-      return new Response("OK");
-    }
-
-    // Верифікація секрету (опційно)
-    if (CFG.WEBHOOK_SECRET) {
-      const secret = new URL(req.url).searchParams.get("secret");
-      if (secret !== CFG.WEBHOOK_SECRET) return new Response("Forbidden", { status: 403 });
-    }
-
-    if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
-
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     try {
-      const update = await req.json();
-      await routeUpdate(update);
-      return new Response("OK");
-    } catch (e:any) {
-      // простий лог
-      console.error("ERR:", e?.message || e);
+      return await router.handle(request, env, ctx);
+    } catch (err: any) {
+      console.error("UNHANDLED_ERROR", { message: err?.message, stack: err?.stack });
       return new Response("Internal Error", { status: 500 });
     }
-  }
-} satisfies ExportedHandler;
+  },
+};
