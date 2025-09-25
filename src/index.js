@@ -5,16 +5,15 @@ export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
 
-    // 0) DEBUG: подивитись, що є у env
+    // 0) DEBUG: показати, що є в env (секрети редагуються)
     if (url.pathname === '/debug-env') {
       const keys = Object.keys(env || {}).sort();
-      // не показуємо секрети повністю
       const redacted = {};
       for (const k of keys) {
         const v = env[k];
         redacted[k] = typeof v === 'string'
           ? (v.length > 6 ? v.slice(0,3) + '…' + v.slice(-3) : '***')
-          : typeof v; // для KV буде "object"
+          : typeof v;
       }
       return json({ ok: true, env_keys: keys, env_preview: redacted });
     }
@@ -24,7 +23,7 @@ export default {
       return new Response('ok', { status: 200 });
     }
 
-    // 2) KV test routes (GET/POST/DELETE)
+    // 2) KV test routes
     if (url.pathname === '/kv-test') {
       return handleKvTest(req, env);
     }
@@ -51,7 +50,6 @@ export default {
           ? 'Привіт 👋! Я — Senti Bot. Я допоможу тобі працювати з AI та файлами.'
           : 'Hello 👋! I am Senti Bot. I will help you work with AI and files.';
 
-        // збереження у KV (якщо STATE підʼєднано)
         try {
           if (env.STATE && typeof env.STATE.put === 'function') {
             const key = `user:${user.id}`;
@@ -116,27 +114,59 @@ export default {
   }
 };
 
-// ---- Helpers ----
+// ---------- Helpers ----------
 async function handleKvTest(req, env) {
   const url = new URL(req.url);
-  const key = url.searchParams.get('key');
 
   if (!env.STATE || typeof env.STATE.get !== 'function') {
     return json({ ok: false, error: 'No KV binding STATE. Add it in Settings – Bindings.' }, 400);
   }
 
+  // GET: або читання конкретного ключа, або list
   if (req.method === 'GET') {
-    if (!key) return json({ ok: false, error: 'Missing ?key' }, 400);
-    const value = await env.STATE.get(key);
-    return json({ ok: true, key, value }, 200);
+    const key = url.searchParams.get('key');
+    if (key) {
+      const value = await env.STATE.get(key);
+      return json({ ok: true, key, value }, 200);
+    }
+    // list режим
+    const prefix = url.searchParams.get('prefix') || '';
+    const limit = clampInt(url.searchParams.get('limit'), 100, 1, 1000);
+    const cursor = url.searchParams.get('cursor') || undefined;
+    const includeValues = url.searchParams.get('values') === '1';
+
+    const list = await env.STATE.list({ prefix, limit, cursor });
+    let items = list.keys.map(k => ({ name: k.name, expiration: k.expiration || null }));
+
+    if (includeValues && items.length) {
+      // обережно: по одному, щоб не лімітувати запит
+      const out = [];
+      for (const it of items) {
+        const v = await env.STATE.get(it.name);
+        out.push({ ...it, value: v });
+      }
+      items = out;
+    }
+
+    return json({
+      ok: true,
+      prefix,
+      limit,
+      count: items.length,
+      list: items,
+      cursor: list.list_complete ? null : list.cursor
+    }, 200);
   }
 
+  // DELETE: видалення ключа
   if (req.method === 'DELETE') {
+    const key = url.searchParams.get('key');
     if (!key) return json({ ok: false, error: 'Missing ?key' }, 400);
     await env.STATE.delete(key);
     return json({ ok: true, deleted: key }, 200);
   }
 
+  // POST: запис
   if (req.method === 'POST') {
     let body;
     try { body = await req.json(); } catch { return json({ ok: false, error: 'Bad JSON' }, 400); }
@@ -155,6 +185,11 @@ function json(data, status = 200) {
     status,
     headers: { 'content-type': 'application/json; charset=utf-8' }
   });
+}
+function clampInt(n, def, min, max) {
+  const x = parseInt(n, 10);
+  if (Number.isFinite(x)) return Math.min(Math.max(x, min), max);
+  return def;
 }
 
 async function tgSendMessage(env, chat_id, text, extra = {}) {
