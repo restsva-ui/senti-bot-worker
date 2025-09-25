@@ -1,30 +1,14 @@
-# Мінімальна базова конфігурація для воркера
 name = "senti-bot-worker"
 main = "src/index.js"
 compatibility_date = "2025-09-24"
 workers_dev = true
 
-# Якщо маєш власний домен, можна вимкнути workers_dev і додати routes:
-# routes = [
-#   { pattern = "bot.example.com/*", zone_id = "REPLACE_ME" }
-# ]
-
 [vars]
-# ⚠️ Токени краще зберігати у Secrets (Cloudflare Dashboard → Settings → Variables)
+API_BASE_URL = "https://api.telegram.org"
 BOT_TOKEN = "123456:REPLACE_ME"
 WEBHOOK_SECRET = "use-a-long-random-secret"
-API_BASE_URL = "https://api.telegram.org"
 
-# KV namespaces
 [[kv_namespaces]]
 binding = "STATE"
 id = "2cf6e316af8623546c95c0354bc3aa00"
 preview_id = "2cf6e316af8623546c95c0354bc3aa00"
-
-# Якщо плануєш Workers AI
-# [ai]
-# binding = "AI"
-
-# Якщо потрібен логінг/трейсинг
-# [observability]
-# enabled = true
