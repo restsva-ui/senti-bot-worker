@@ -1,209 +1,181 @@
-// src/index.js
-import * as Router from './router.js';
+/**
+ * Cloudflare Workers — Telegram bot webhook.
+ * Env vars (set in Wrangler / Dashboard):
+ * - BOT_TOKEN         (string, required)
+ * - WEBHOOK_SECRET    (string, required)
+ * - API_BASE_URL      (string, optional, default "https://api.telegram.org")
+ * - STATE             (KV Namespace, optional)
+ */
+
+/** @typedef {import('@cloudflare/workers-types').KVNamespace} KVNamespace */
+
+const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
+
+/**
+ * Send a request to Telegram Bot API
+ * @param {Env} env
+ * @param {string} method e.g. "sendMessage"
+ * @param {any} body
+ */
+async function tg(env, method, body) {
+  const base = (env.API_BASE_URL || "https://api.telegram.org").replace(/\/+$/, "");
+  const url = `${base}/bot${env.BOT_TOKEN}/${method}`;
+  return fetch(url, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Safely parse request JSON
+ * @param {Request} req
+ */
+async function readJson(req) {
+  try {
+    return await req.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Small helpers
+ */
+const ok = (data = {}) => new Response(JSON.stringify({ ok: true, ...data }), { headers: JSON_HEADERS });
+const err = (message, status = 200) =>
+  // 200: щоб Telegram не ретраїв. У логах буде видно помилку.
+  new Response(JSON.stringify({ ok: false, error: String(message) }), {
+    headers: JSON_HEADERS,
+    status,
+  });
+
+/**
+ * Handle Telegram update
+ * @param {any} update
+ * @param {Env} env
+ */
+async function handleUpdate(update, env) {
+  const msg = update.message || update.edited_message || update.callback_query?.message;
+  const chatId = msg?.chat?.id;
+
+  // No chat — nothing to do
+  if (!chatId) return;
+
+  // Text commands
+  const text = (update.message?.text || "").trim();
+
+  // KV helpers (optional, if STATE is bound)
+  const kv = env.STATE;
+
+  if (text === "/start") {
+    await tg(env, "sendMessage", {
+      chat_id: chatId,
+      text: "👋 Привіт! Бот підключено до Cloudflare Workers.\nСпробуй: /ping, просто напиши текст, або /kvset ключ значення, /kvget ключ",
+    });
+    return;
+  }
+
+  if (text === "/ping") {
+    await tg(env, "sendMessage", { chat_id: chatId, text: "pong ✅" });
+    return;
+  }
+
+  if (text.startsWith("/kvset")) {
+    const [, key, ...rest] = text.split(/\s+/);
+    const value = rest.join(" ");
+    if (!kv) {
+      await tg(env, "sendMessage", { chat_id: chatId, text: "❌ KV не прив'язано (STATE)." });
+      return;
+    }
+    if (!key || !value) {
+      await tg(env, "sendMessage", { chat_id: chatId, text: "Використання: /kvset <key> <value>" });
+      return;
+    }
+    await kv.put(key, value);
+    await tg(env, "sendMessage", { chat_id: chatId, text: `✅ Збережено: ${key} = ${value}` });
+    return;
+  }
+
+  if (text.startsWith("/kvget")) {
+    const [, key] = text.split(/\s+/);
+    if (!kv) {
+      await tg(env, "sendMessage", { chat_id: chatId, text: "❌ KV не прив'язано (STATE)." });
+      return;
+    }
+    if (!key) {
+      await tg(env, "sendMessage", { chat_id: chatId, text: "Використання: /kvget <key>" });
+      return;
+    }
+    const value = await kv.get(key);
+    await tg(env, "sendMessage", {
+      chat_id: chatId,
+      text: value != null ? `🗄 ${key} = ${value}` : `😕 Не знайдено ключ: ${key}`,
+    });
+    return;
+  }
+
+  // Photo / Document acknowledgment
+  if (msg?.photo || msg?.document) {
+    await tg(env, "sendMessage", {
+      chat_id: chatId,
+      text: "📸 Дякую! Отримав файл.",
+      reply_to_message_id: msg.message_id,
+    });
+    return;
+  }
+
+  // Echo for any other text
+  if (text) {
+    await tg(env, "sendMessage", {
+      chat_id: chatId,
+      text: `Ти написав: ${text}`,
+      reply_to_message_id: msg.message_id,
+    });
+    return;
+  }
+
+  // Fallback: acknowledge update
+  await tg(env, "sendMessage", { chat_id: chatId, text: "✅ Отримав оновлення." });
+}
+
+/**
+ * @typedef {Object} Env
+ * @property {string} BOT_TOKEN
+ * @property {string} WEBHOOK_SECRET
+ * @property {string} [API_BASE_URL]
+ * @property {KVNamespace} [STATE]
+ */
 
 export default {
-  async fetch(req, env, ctx) {
-    const url = new URL(req.url);
+  /**
+   * @param {Request} request
+   * @param {Env} env
+   */
+  async fetch(request, env) {
+    const url = new URL(request.url);
 
-    // 0) DEBUG: показати, що є в env (секрети редагуються)
-    if (url.pathname === '/debug-env') {
-      const keys = Object.keys(env || {}).sort();
-      const redacted = {};
-      for (const k of keys) {
-        const v = env[k];
-        redacted[k] = typeof v === 'string'
-          ? (v.length > 6 ? v.slice(0,3) + '…' + v.slice(-3) : '***')
-          : typeof v;
-      }
-      return json({ ok: true, env_keys: keys, env_preview: redacted });
+    // Health
+    if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/healthz")) {
+      return ok({ service: "senti-bot-worker", env: "ok" });
     }
 
-    // 1) Healthcheck
-    if (url.pathname === '/healthz') {
-      return new Response('ok', { status: 200 });
+    // Webhook endpoint: /webhook/<WEBHOOK_SECRET>
+    if (url.pathname === `/webhook/${env.WEBHOOK_SECRET}`) {
+      if (request.method !== "POST") return err("Method must be POST");
+      const update = await readJson(request);
+      if (!update) return err("Invalid JSON");
+
+      // Handle in background; відповідаємо Telegram миттєво
+      // щоб не ловити таймаути та 404
+      // (Cloudflare дозволяє fire-and-forget без await)
+      handleUpdate(update, env).catch((e) =>
+        console.error("handleUpdate error:", e?.stack || e)
+      );
+
+      return ok({ received: true });
     }
 
-    // 2) KV test routes
-    if (url.pathname === '/kv-test') {
-      return handleKvTest(req, env);
-    }
-
-    // 3) Telegram webhook
-    if (url.pathname === '/webhook' && req.method === 'POST') {
-      const want = env.WEBHOOK_SECRET || '';
-      const got = req.headers.get('x-telegram-bot-api-secret-token') || '';
-      if (want && got !== want) {
-        return new Response('unauthorized', { status: 401 });
-      }
-
-      let update = null;
-      try { update = await req.json(); } catch { return new Response('bad json', { status: 400 }); }
-
-      // /start — привітання + запис у KV
-      if (update?.message?.text === '/start') {
-        const msg = update.message;
-        const chatId = msg.chat.id;
-        const user = msg.from || {};
-        const lang = user.language_code || 'en';
-
-        const greeting = lang.startsWith('uk')
-          ? 'Привіт 👋! Я — Senti Bot. Я допоможу тобі працювати з AI та файлами.'
-          : 'Hello 👋! I am Senti Bot. I will help you work with AI and files.';
-
-        try {
-          if (env.STATE && typeof env.STATE.put === 'function') {
-            const key = `user:${user.id}`;
-            const payload = {
-              id: user.id,
-              username: user.username || null,
-              first_name: user.first_name || null,
-              language_code: lang,
-              started_at: new Date().toISOString()
-            };
-            await env.STATE.put(key, JSON.stringify(payload));
-          }
-        } catch (e) { console.error('kv put failed', e); }
-
-        await tgSendMessage(env, chatId, greeting);
-        return new Response('ok', { status: 200 });
-      }
-
-      // /me — показати, що збережено в KV
-      if (update?.message?.text === '/me') {
-        const msg = update.message;
-        const chatId = msg.chat.id;
-        const userId = msg.from?.id;
-
-        let txt = 'No KV bound. Add KV binding STATE to enable memory.';
-        if (env.STATE && typeof env.STATE.get === 'function') {
-          try {
-            const raw = await env.STATE.get(`user:${userId}`);
-            if (raw) {
-              const data = JSON.parse(raw);
-              txt = `Ваш профіль:\n• id: ${data.id}\n• імʼя: ${data.first_name || '—'}\n• мова: ${data.language_code}\n• start: ${data.started_at}`;
-            } else {
-              txt = 'Поки що даних немає. Надішли /start, щоб зберегти.';
-            }
-          } catch (e) { console.error('kv get failed', e); txt = 'Помилка читання KV.'; }
-        }
-        await tgSendMessage(env, chatId, txt);
-        return new Response('ok', { status: 200 });
-      }
-
-      // Якщо є твій router.js — делегуємо
-      try {
-        if (typeof Router.handleUpdate === 'function') {
-          const res = await Router.handleUpdate({ update, env, ctx, req });
-          if (res instanceof Response) return res;
-        } else if (typeof Router.default === 'function') {
-          const res = await Router.default({ update, env, ctx, req });
-          if (res instanceof Response) return res;
-        }
-      } catch (e) { console.error('router error', e); }
-
-      // Fallback: echo
-      if (update?.message?.text) {
-        await tgSendMessage(env, update.message.chat.id, `Ти написав: ${update.message.text}`);
-      }
-
-      return new Response('ok', { status: 200 });
-    }
-
-    // 4) 404
-    return new Response('not found', { status: 404 });
-  }
+    return new Response("Not found", { status: 404, headers: { "content-type": "text/plain" } });
+  },
 };
-
-// ---------- Helpers ----------
-async function handleKvTest(req, env) {
-  const url = new URL(req.url);
-
-  if (!env.STATE || typeof env.STATE.get !== 'function') {
-    return json({ ok: false, error: 'No KV binding STATE. Add it in Settings – Bindings.' }, 400);
-  }
-
-  // GET: або читання конкретного ключа, або list
-  if (req.method === 'GET') {
-    const key = url.searchParams.get('key');
-    if (key) {
-      const value = await env.STATE.get(key);
-      return json({ ok: true, key, value }, 200);
-    }
-    // list режим
-    const prefix = url.searchParams.get('prefix') || '';
-    const limit = clampInt(url.searchParams.get('limit'), 100, 1, 1000);
-    const cursor = url.searchParams.get('cursor') || undefined;
-    const includeValues = url.searchParams.get('values') === '1';
-
-    const list = await env.STATE.list({ prefix, limit, cursor });
-    let items = list.keys.map(k => ({ name: k.name, expiration: k.expiration || null }));
-
-    if (includeValues && items.length) {
-      // обережно: по одному, щоб не лімітувати запит
-      const out = [];
-      for (const it of items) {
-        const v = await env.STATE.get(it.name);
-        out.push({ ...it, value: v });
-      }
-      items = out;
-    }
-
-    return json({
-      ok: true,
-      prefix,
-      limit,
-      count: items.length,
-      list: items,
-      cursor: list.list_complete ? null : list.cursor
-    }, 200);
-  }
-
-  // DELETE: видалення ключа
-  if (req.method === 'DELETE') {
-    const key = url.searchParams.get('key');
-    if (!key) return json({ ok: false, error: 'Missing ?key' }, 400);
-    await env.STATE.delete(key);
-    return json({ ok: true, deleted: key }, 200);
-  }
-
-  // POST: запис
-  if (req.method === 'POST') {
-    let body;
-    try { body = await req.json(); } catch { return json({ ok: false, error: 'Bad JSON' }, 400); }
-    const k = body?.key;
-    const v = body?.value;
-    if (!k) return json({ ok: false, error: 'Body.key required' }, 400);
-    await env.STATE.put(k, typeof v === 'string' ? v : JSON.stringify(v ?? null));
-    return json({ ok: true, saved: k }, 200);
-  }
-
-  return json({ ok: false, error: 'Method not allowed' }, 405);
-}
-
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8' }
-  });
-}
-function clampInt(n, def, min, max) {
-  const x = parseInt(n, 10);
-  if (Number.isFinite(x)) return Math.min(Math.max(x, min), max);
-  return def;
-}
-
-async function tgSendMessage(env, chat_id, text, extra = {}) {
-  const base = env.API_BASE_URL || 'https://api.telegram.org';
-  const url = `${base}/bot${env.BOT_TOKEN}/sendMessage`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ chat_id, text, ...extra })
-  });
-  if (!res.ok) {
-    const body = await safeText(res);
-    console.error(JSON.stringify({ msg: 'telegram send failed', status: res.status, body }));
-  }
-  return res;
-}
-async function safeText(res) { try { return await res.text(); } catch { return ''; } }
