@@ -1,96 +1,51 @@
 /**
- * Cloudflare Workers — Telegram bot webhook (стабільний, модульний).
+ * Cloudflare Workers — Telegram bot webhook (з роутером кнопок/команд).
  * Env:
- *  - BOT_TOKEN (required)
- *  - WEBHOOK_SECRET (required)
- *  - API_BASE_URL (optional, default https://api.telegram.org)
- *  - STATE (KV, optional)
+ *  BOT_TOKEN (string)
+ *  WEBHOOK_SECRET (string)
+ *  API_BASE_URL (optional, default https://api.telegram.org)
+ *  STATE (KV Namespace, optional)
  */
 
-// === Нові модулі з кнопками/меню (ти їх додав у src/commands/...) ===
-import { onMenu } from "./commands/menu.js";
-import { handleLikeCallback } from "./commands/likepanel.js";
-import { showStats } from "./commands/stats.js";
+import { routeUpdate } from "./router.js";
 
 /** @typedef {import('@cloudflare/workers-types').KVNamespace} KVNamespace */
-/** @typedef {{BOT_TOKEN:string, WEBHOOK_SECRET:string, API_BASE_URL?:string, STATE?:KVNamespace}} Env */
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
-const ok  = (data={}) =>
-  new Response(JSON.stringify({ ok: true, ...data }), { headers: JSON_HEADERS });
-
-const err = (message, status = 200) =>
-  // 200 — щоб Telegram не ретраїв; помилку видно в логах
-  new Response(JSON.stringify({ ok: false, error: String(message) }), {
-    headers: JSON_HEADERS, status
-  });
-
-function apiBase(env) {
-  return (env.API_BASE_URL || "https://api.telegram.org").replace(/\/+$/, "");
-}
-
-/** Виклик Telegram Bot API (НЕ чіпаємо naming: BOT_TOKEN) */
 async function tg(env, method, body) {
-  const token = env.BOT_TOKEN;
-  if (!token) {
-    console.error("BOT_TOKEN is missing");
-    return new Response(null, { status: 500 });
-  }
-  const url = `${apiBase(env)}/bot${token}/${method}`;
-  const res = await fetch(url, {
+  const base = (env.API_BASE_URL || "https://api.telegram.org").replace(/\/+$/, "");
+  const url = `${base}/bot${env.BOT_TOKEN}/${method}`;
+  return fetch(url, {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "<no body>");
-    console.error("TG API error:", method, res.status, text);
-  }
-  return res;
 }
 
-/** Безпечний JSON */
 async function readJson(req) {
   try { return await req.json(); } catch { return null; }
 }
 
-/** === Основна логіка апдейта — зберігаємо твою структуру === */
-async function handleUpdate(update, env) {
-  // ➊ Callback-кнопки (нове): якщо є callback_query — віддаємо його модулю і ВИХОДИМО
-  if (update?.callback_query?.data) {
-    try { await handleLikeCallback(env, update); } catch (e) { console.error("handleLikeCallback", e); }
-    return;
-  }
+const ok  = (data = {}) => new Response(JSON.stringify({ ok: true, ...data }), { headers: JSON_HEADERS });
+const err = (message, status = 200) =>
+  new Response(JSON.stringify({ ok: false, error: String(message) }), { headers: JSON_HEADERS, status });
 
+/**
+ * Базова (вже працююча) логіка бота: /start, /ping, /kvset, /kvget, echo
+ */
+async function handleBasic(update, env) {
   const msg = update.message || update.edited_message || update.callback_query?.message;
   const chatId = msg?.chat?.id;
   if (!chatId) return;
 
-  // Оригінальна логіка: текст, KV тощо
   const text = (update.message?.text || "").trim();
   const kv = env.STATE;
-
-  // ➋ Команда меню (нове) — окремий модуль, не чіпаємо базу
-  if (text === "/menu") {
-    await onMenu(env, chatId);
-    return;
-  }
-
-  // ➌ Команда статистики (нове)
-  if (text === "/stats") {
-    await showStats(env, chatId);
-    return;
-  }
-
-  // ==== ДАЛІ — ТВОЇ ПРАЦЮЮЧІ КОМАНДИ (без змін) ====
 
   if (text === "/start") {
     await tg(env, "sendMessage", {
       chat_id: chatId,
-      text:
-        "👋 Привіт! Бот підключено до Cloudflare Workers.\n" +
-        "Спробуй: /ping, просто напиши текст, або /kvset <key> <value>, /kvget <key>",
+      text: "👋 Привіт! Бот підключено до Cloudflare Workers.\nСпробуй: /ping, просто напиши текст, або /kvset ключ значення, /kvget ключ",
     });
     return;
   }
@@ -134,7 +89,7 @@ async function handleUpdate(update, env) {
     return;
   }
 
-  // Файли/фото — як було
+  // Фото/документи — підтвердження
   if (msg?.photo || msg?.document) {
     await tg(env, "sendMessage", {
       chat_id: chatId,
@@ -144,39 +99,46 @@ async function handleUpdate(update, env) {
     return;
   }
 
-  // Echo — як було
+  // Ехо для будь-якого іншого тексту
   if (text) {
     await tg(env, "sendMessage", {
       chat_id: chatId,
       text: `Ти написав: ${text}`,
       reply_to_message_id: msg.message_id,
     });
+    return;
   }
+
+  // Фолбек
+  await tg(env, "sendMessage", { chat_id: chatId, text: "✅ Отримав оновлення." });
 }
 
 export default {
-  /**
-   * @param {Request} request
-   * @param {Env} env
-   * @param {ExecutionContext} ctx
-   */
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Health — як було
+    // Health
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/healthz")) {
       return ok({ service: "senti-bot-worker", env: "ok" });
     }
 
-    // Webhook — як було, плюс гарантія завершення handleUpdate через waitUntil
+    // Webhook endpoint: /webhook/<WEBHOOK_SECRET>
     if (url.pathname === `/webhook/${env.WEBHOOK_SECRET}`) {
       if (request.method !== "POST") return err("Method must be POST");
       const update = await readJson(request);
       if (!update) return err("Invalid JSON");
 
-      // НЕ міняємо твою модель: відповідаємо 200 миттєво, роботу — у фон (але гарантовано через waitUntil)
-      ctx.waitUntil(handleUpdate(update, env));
+      // 1) делегуємо нові кнопки/команди у роутер (fire-and-forget)
+      routeUpdate(env, update).catch((e) =>
+        console.error("routeUpdate error:", e?.stack || e)
+      );
 
+      // 2) базова логіка — окремо (fire-and-forget), щоб не ламати існуючу поведінку
+      handleBasic(update, env).catch((e) =>
+        console.error("handleBasic error:", e?.stack || e)
+      );
+
+      // Відповідаємо Telegram миттєво, щоб не було таймаутів/повторів
       return ok({ received: true });
     }
 
