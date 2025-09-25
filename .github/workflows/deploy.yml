@@ -1,4 +1,4 @@
-name: Cloudflare Worker / deploy
+name: Cloudflare Worker / deploy (manual wrangler)
 
 on:
   push:
@@ -11,14 +11,41 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    name: Deploy to Cloudflare
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Publish with Wrangler
-        uses: cloudflare/wrangler-action@v3
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          command: deploy --config wrangler.toml
+          node-version: '20'
+
+      - name: Verify Cloudflare API token (sanity check)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+               https://api.cloudflare.com/client/v4/user/tokens/verify | jq .
+
+      - name: Install wrangler
+        run: |
+          npm i -g wrangler@3
+          wrangler --version
+
+      # опціонально: побачити на кого залогінились
+      - name: wrangler whoami
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          wrangler whoami --verbose || true
+
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          wrangler deploy --config wrangler.toml --account-id "$CLOUDFLARE_ACCOUNT_ID" --verbose
