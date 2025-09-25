@@ -10,14 +10,30 @@ function apiUrl(env, method) {
 }
 
 /**
- * Базовий виклик API: tg(env, "sendMessage", {...})
+ * Базовий виклик API з детальним логуванням помилок.
  */
 export async function tg(env, method, body) {
-  return fetch(apiUrl(env, method), {
-    method: "POST",
-    headers: JSON_HEADERS,
-    body: JSON.stringify(body),
-  });
+  try {
+    const res = await fetch(apiUrl(env, method), {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      // Пробуємо прочитати помилку від Telegram, щоб зрозуміти причину (401, 400 тощо)
+      let errorText = "";
+      try { errorText = await res.text(); } catch {}
+      console.error(
+        "[TG API ERROR]",
+        JSON.stringify({ method, status: res.status, body, errorText })
+      );
+    }
+    return res;
+  } catch (e) {
+    console.error("[TG API FETCH FAILED]", method, e?.stack || e);
+    throw e;
+  }
 }
 
 /** Найпоширеніші методи як зручні обгортки */
@@ -30,12 +46,11 @@ export async function answerCallbackQuery(env, body) {
 }
 
 export async function editMessageText(env, body) {
-  // приклади body:
-  // { chat_id, message_id, text, parse_mode, reply_markup }
-  // або { inline_message_id, text, ... }
+  // { chat_id, message_id, text, reply_markup } або { inline_message_id, text, ... }
   return tg(env, "editMessageText", body);
 }
 
+/** Додаткові корисні (можуть згодитись далі) */
 export async function sendPhoto(env, body) {
   return tg(env, "sendPhoto", body);
 }
@@ -44,4 +59,11 @@ export async function sendDocument(env, body) {
   return tg(env, "sendDocument", body);
 }
 
-/** Експортуємо тільки іменовані (без default!) */
+export default {
+  tg,
+  sendMessage,
+  answerCallbackQuery,
+  editMessageText,
+  sendPhoto,
+  sendDocument,
+};
