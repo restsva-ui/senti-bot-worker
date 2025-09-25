@@ -1,28 +1,30 @@
-# wrangler.toml — базовий, мінімально потрібний для нашого воркера
+# Мінімальна базова конфігурація для воркера
 name = "senti-bot-worker"
 main = "src/index.js"
 compatibility_date = "2025-09-24"
 workers_dev = true
-# Якщо маєш власний домен/роут — залиш workers_dev=false і додай routes нижче
+
+# Якщо маєш власний домен, можна вимкнути workers_dev і додати routes:
 # routes = [
 #   { pattern = "bot.example.com/*", zone_id = "REPLACE_ME" }
 # ]
 
 [vars]
-# !!! Заміни ці значення на свої (або задай їх як Secrets у Cloudflare)
+# ⚠️ Токени краще зберігати у Secrets (Cloudflare Dashboard → Settings → Variables)
 BOT_TOKEN = "123456:REPLACE_ME"
 WEBHOOK_SECRET = "use-a-long-random-secret"
 API_BASE_URL = "https://api.telegram.org"
 
-# Якщо плануєш KV для стейту/лімітів — розкоментуй і підстав ID зі сторінки KV Namespaces
-# [[kv_namespaces]]
-# binding = "STATE"
-# id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+# KV namespaces (⚡ стабільно буде підключатись у всіх деплоях)
+[[kv_namespaces]]
+binding = "STATE"
+id = "PASTE_YOUR_SENTI_STATE_ID_HERE"
+preview_id = "PASTE_YOUR_SENTI_STATE_ID_HERE"
 
-# Якщо користуватимешся Workers AI — розкоментуй
+# Якщо плануєш Workers AI
 # [ai]
 # binding = "AI"
 
-# Якщо потрібен логінг/трейсинг від Cloudflare — опціонально
+# Якщо потрібен логінг/трейсинг
 # [observability]
 # enabled = true
