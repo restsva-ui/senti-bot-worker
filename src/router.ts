@@ -1,11 +1,14 @@
-// Центральний роутер апдейта Telegram
-// Зберігає існуючу логіку команд і додає: /help + callback_query
+// src/router.ts
+// Центральний роутер апдейта Telegram.
+// Підтримує команди /start, /ping, /menu, /likepanel, /help і callback_query.
 
 import { sendMessage, answerCallbackQuery } from "./telegram";
-import { start } from "./commands/start";
-import { ping } from "./commands/ping";
+
+// ⚠️ Імпортуємо з урахуванням реальних назв експортів у файлах команд:
+import { cmdStart as start } from "./commands/start";
+import { cmdPing as ping } from "./commands/ping";
 import { menu } from "./commands/menu";
-import { likepanel } from "./commands/likepanel";
+import { openLikePanel as likepanel, handleLikeCallback } from "./commands/likepanel";
 import { help } from "./commands/help";
 
 type TGUser = { id: number };
@@ -62,16 +65,21 @@ export async function handleUpdate(update: TGUpdate): Promise<Response> {
       const chatId = cq.message?.chat.id;
       const data = cq.data;
 
-      // Завжди відповідаємо на callback, щоб прибрати "loading..."
-      await answerCallbackQuery(cq.id).catch(() => { /* no-op */ });
+      // Прибираємо "loading…" у клієнті
+      await answerCallbackQuery(cq.id).catch(() => {});
 
       if (chatId && data) {
+        // твої старі кнопки з меню
         if (data === "cb_ping") {
           await ping(chatId);
         } else if (data === "cb_likepanel") {
           await likepanel(chatId);
         } else if (data === "cb_help") {
           await help(chatId);
+        }
+        // нові callback-и з likepanel.ts: "like:up"/"like:down"/"like:panel"
+        else if (data.startsWith("like:")) {
+          await handleLikeCallback({} as any, update); // env не потрібен для answer/edit у твоїй реалізації tg()
         } else {
           await sendMessage(chatId, "🤷‍♂️ Невідома дія кнопки.");
         }
@@ -83,16 +91,9 @@ export async function handleUpdate(update: TGUpdate): Promise<Response> {
       status: 200,
     });
   } catch (err: any) {
-    // Базове безпечне логування
-    await (async () => {
-      try {
-        const e = typeof err?.message === "string" ? err.message : String(err);
-        // якщо маєте ADMIN_CHAT_ID у конфігу — можна дублювати в адмін-чат
-        // await sendMessage(ADMIN_CHAT_ID, `⚠️ Помилка: ${e}`);
-        console.error("Router error:", e);
-      } catch { /* ignore */ }
-    })();
-
+    try {
+      console.error("Router error:", typeof err?.message === "string" ? err.message : String(err));
+    } catch {}
     return new Response(JSON.stringify({ ok: false, error: "internal" }), {
       headers: { "content-type": "application/json" },
       status: 500,
