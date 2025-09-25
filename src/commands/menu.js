@@ -1,21 +1,21 @@
 // src/commands/menu.js
-import { sendMessage } from "../adapters/telegram.js";
 
-export default async function menu(env, chat_id) {
-  return sendMessage(env, chat_id, "📋 Меню бота:", {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "👍 Лайк", callback_data: "like" },
-          { text: "👎 Дизлайк", callback_data: "dislike" },
-        ],
-        [
-          { text: "📊 Статистика", callback_data: "stats" },
-        ],
-        [
-          { text: "ℹ️ Інфо", callback_data: "info" },
-        ],
+import { sendMessage } from "../lib/tg.js";
+
+export async function onMenu(env, chat_id) {
+  const text = "📋 Меню:\n\nОберіть опцію нижче 👇";
+
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "👍 Лайки", callback_data: "likepanel" },
+        { text: "📊 Статистика", callback_data: "stats" }
       ],
-    },
-  });
+      [
+        { text: "ℹ️ Про бота", callback_data: "about" }
+      ]
+    ]
+  };
+
+  return await sendMessage(env, chat_id, text, keyboard);
 }
