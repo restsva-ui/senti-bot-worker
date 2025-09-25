@@ -1,19 +1,20 @@
 name = "senti-bot-worker"
-main = "src/index.js"
+main = "src/index.ts"
+compatibility_date = "2023-12-01"
 workers_dev = true
-account_id = "2cf6e316af8623546c95c0354bc3aa00"
-compatibility_date = "2024-12-01"
-
-[observability]
-enabled = true
-# 100% семплінг; для wrangler@3 безпечніше як ціле число 0..1
-head_sampling_rate = 1
 
 [vars]
-API_BASE_URL   = "https://api.telegram.org"
-WEBHOOK_SECRET = "senti1984"
+# Секрети краще не тримати тут, а додавати через `wrangler secret put`
+# Наприклад:
+# wrangler secret put TELEGRAM_TOKEN
+# wrangler secret put WEBHOOK_SECRET
 
-[[kv_namespaces]]
-binding    = "STATE"
-id         = "7b32e2d1f60846ddb1c653eb52180bf7"
-preview_id = "7b32e2d1f60846ddb1c653eb52180bf7"
+[build]
+command = "npm install && npm run build"
+
+[build.upload]
+format = "modules"
+main = "./src/index.ts"
+
+[env.production]
+main = "src/index.ts"
