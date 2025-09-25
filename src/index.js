@@ -1,172 +1,136 @@
-/**
- * Cloudflare Workers — Telegram bot webhook (з роутером кнопок/команд).
- * Env:
- *  BOT_TOKEN (string)
- *  WEBHOOK_SECRET (string)
- *  API_BASE_URL (optional, default https://api.telegram.org)
- *  STATE (KV Namespace, optional)
- */
-
-import { routeUpdate } from "./router.js";
-
-/** @typedef {import('@cloudflare/workers-types').KVNamespace} KVNamespace */
-
-const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
-
-async function tg(env, method, body) {
-  const base = (env.API_BASE_URL || "https://api.telegram.org").replace(/\/+$/, "");
-  const url = `${base}/bot${env.BOT_TOKEN}/${method}`;
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: JSON_HEADERS,
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      console.error(`TG ${method} HTTP ${res.status}`);
-    }
-    return res;
-  } catch (e) {
-    console.error(`TG ${method} fetch error:`, e?.stack || e);
-    throw e;
-  }
-}
-
-async function readJson(req) {
-  try { return await req.json(); } catch { return null; }
-}
-
-const ok  = (data = {}) => new Response(JSON.stringify({ ok: true, ...data }), { headers: JSON_HEADERS });
-const err = (message, status = 200) =>
-  new Response(JSON.stringify({ ok: false, error: String(message) }), { headers: JSON_HEADERS, status });
-
-/**
- * Базова логіка бота: /start, /ping, /kvset, /kvget, echo
- * (callback_query тут НЕ обробляємо — це робить router.js)
- */
-async function handleBasic(update, env) {
-  try {
-    if (update.callback_query) return;
-
-    const msg = update.message || update.edited_message;
-    const chatId = msg?.chat?.id;
-    if (!chatId) {
-      console.log("handleBasic: no chatId");
-      return;
-    }
-
-    const text = (update.message?.text || "").trim();
-    const kv = env.STATE;
-
-    if (text === "/start") {
-      console.log("handleBasic: /start");
-      await tg(env, "sendMessage", {
-        chat_id: chatId,
-        text: "👋 Привіт! Бот підключено до Cloudflare Workers.\nСпробуй: /ping, просто напиши текст, або /kvset ключ значення, /kvget ключ",
-      });
-      return;
-    }
-
-    if (text === "/ping") {
-      console.log("handleBasic: /ping");
-      await tg(env, "sendMessage", { chat_id: chatId, text: "pong ✅" });
-      return;
-    }
-
-    if (text.startsWith("/kvset")) {
-      console.log("handleBasic: /kvset");
-      const [, key, ...rest] = text.split(/\s+/);
-      const value = rest.join(" ");
-      if (!kv) {
-        await tg(env, "sendMessage", { chat_id: chatId, text: "❌ KV не прив'язано (STATE)." });
-        return;
-      }
-      if (!key || !value) {
-        await tg(env, "sendMessage", { chat_id: chatId, text: "Використання: /kvset <key> <value>" });
-        return;
-      }
-      await kv.put(key, value);
-      await tg(env, "sendMessage", { chat_id: chatId, text: `✅ Збережено: ${key} = ${value}` });
-      return;
-    }
-
-    if (text.startsWith("/kvget")) {
-      console.log("handleBasic: /kvget");
-      const [, key] = text.split(/\s+/);
-      if (!kv) {
-        await tg(env, "sendMessage", { chat_id: chatId, text: "❌ KV не прив'язано (STATE)." });
-        return;
-      }
-      if (!key) {
-        await tg(env, "sendMessage", { chat_id: chatId, text: "Використання: /kvget <key>" });
-        return;
-      }
-      const value = await kv.get(key);
-      await tg(env, "sendMessage", {
-        chat_id: chatId,
-        text: value != null ? `🗄 ${key} = ${value}` : `😕 Не знайдено ключ: ${key}`,
-      });
-      return;
-    }
-
-    if (msg?.photo || msg?.document) {
-      console.log("handleBasic: file/photo");
-      await tg(env, "sendMessage", {
-        chat_id: chatId,
-        text: "📸 Дякую! Отримав файл.",
-        reply_to_message_id: msg.message_id,
-      });
-      return;
-    }
-
-    if (text) {
-      console.log("handleBasic: echo");
-      await tg(env, "sendMessage", {
-        chat_id: chatId,
-        text: `Ти написав: ${text}`,
-        reply_to_message_id: msg.message_id,
-      });
-      return;
-    }
-  } catch (e) {
-    console.error("handleBasic error:", e?.stack || e);
-  }
-}
-
 export default {
-  /**
-   * ВАЖЛИВО: використовуємо ctx.waitUntil(...) щоб фонові задачі (відповіді в TG)
-   * гарантовано виконались навіть після миттєвої 200-відповіді Telegram'у.
-   */
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
+    if (request.method === "POST") {
+      const update = await request.json();
 
-    // Health
-    if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/healthz")) {
-      return ok({ service: "senti-bot-worker", env: "ok" });
+      if (update.message) {
+        const chatId = update.message.chat.id;
+        const text = update.message.text || "";
+
+        // ---- /start ----
+        if (text === "/start") {
+          return sendMessage(
+            chatId,
+            "👋 Привіт! Бот підключено до Cloudflare Workers.\n" +
+            "Спробуй: /ping, напиши текст, або /kvset ключ значення, /kvget ключ"
+          );
+        }
+
+        // ---- /ping ----
+        if (text === "/ping") {
+          return sendMessage(chatId, "pong ✅");
+        }
+
+        // ---- /menu ----
+        if (text === "/menu") {
+          const keyboard = {
+            inline_keyboard: [
+              [{ text: "👍 Панель лайків", callback_data: "likepanel" }],
+              [{ text: "📊 Статистика", callback_data: "stats" }]
+            ]
+          };
+          return sendMessage(chatId, "Оберіть дію:", keyboard);
+        }
+
+        // ---- /likepanel ----
+        if (text === "/likepanel") {
+          const keyboard = {
+            inline_keyboard: [
+              [{ text: "👍", callback_data: "like" }, { text: "👎", callback_data: "dislike" }]
+            ]
+          };
+          return sendMessage(chatId, "Результат голосування:", keyboard);
+        }
+
+        // ---- /stats ----
+        if (text === "/stats") {
+          const likes = await env.KV.get("likes") || 0;
+          const dislikes = await env.KV.get("dislikes") || 0;
+          return sendMessage(
+            chatId,
+            `📊 Статистика чату:\n👍 Вподобайок: ${likes}\n👎 Дизлайків: ${dislikes}`
+          );
+        }
+
+        // ---- /kvset ----
+        if (text.startsWith("/kvset")) {
+          const parts = text.split(" ");
+          if (parts.length < 3) {
+            return sendMessage(chatId, "Використання: /kvset <ключ> <значення>");
+          }
+          const key = parts[1];
+          const value = parts.slice(2).join(" ");
+          await env.KV.put(key, value);
+          return sendMessage(chatId, `✅ Збережено: ${key} = ${value}`);
+        }
+
+        // ---- /kvget ----
+        if (text.startsWith("/kvget")) {
+          const parts = text.split(" ");
+          if (parts.length < 2) {
+            return sendMessage(chatId, "Використання: /kvget <ключ>");
+          }
+          const key = parts[1];
+          const value = await env.KV.get(key);
+          if (value === null) {
+            return sendMessage(chatId, `❌ Немає даних для ключа: ${key}`);
+          }
+          return sendMessage(chatId, `📦 ${key} = ${value}`);
+        }
+      }
+
+      // ---- callback_query ----
+      if (update.callback_query) {
+        const chatId = update.callback_query.message.chat.id;
+        const data = update.callback_query.data;
+
+        if (data === "like") {
+          let likes = parseInt(await env.KV.get("likes") || "0", 10);
+          likes++;
+          await env.KV.put("likes", likes.toString());
+          return sendMessage(chatId, "✅ Отримав оновлення.");
+        }
+
+        if (data === "dislike") {
+          let dislikes = parseInt(await env.KV.get("dislikes") || "0", 10);
+          dislikes++;
+          await env.KV.put("dislikes", dislikes.toString());
+          return sendMessage(chatId, "✅ Отримав оновлення.");
+        }
+
+        if (data === "stats") {
+          const likes = await env.KV.get("likes") || 0;
+          const dislikes = await env.KV.get("dislikes") || 0;
+          return sendMessage(
+            chatId,
+            `📊 Статистика чату:\n👍 Вподобайок: ${likes}\n👎 Дизлайків: ${dislikes}`
+          );
+        }
+      }
+
+      return new Response("ok");
     }
 
-    // Webhook endpoint: /webhook/<WEBHOOK_SECRET>
-    if (url.pathname === `/webhook/${env.WEBHOOK_SECRET}`) {
-      if (request.method !== "POST") return err("Method must be POST");
-      const update = await readJson(request);
-      if (!update) return err("Invalid JSON");
-
-      try { console.log("🔔 Update:", JSON.stringify(update)); } catch {}
-
-      const p1 = routeUpdate(env, update).catch((e) =>
-        console.error("routeUpdate error:", e?.stack || e)
-      );
-      const p2 = handleBasic(update, env).catch((e) =>
-        console.error("handleBasic error (outer):", e?.stack || e)
-      );
-
-      // не даємо згорнутись фоновим обіцянкам
-      ctx.waitUntil(Promise.allSettled([p1, p2]));
-
-      return ok({ received: true });
-    }
-
-    return new Response("Not found", { status: 404, headers: { "content-type": "text/plain" } });
-  },
+    return new Response("Hello from Worker!");
+  }
 };
+
+// ---- Helper для надсилання повідомлень ----
+async function sendMessage(chatId, text, keyboard) {
+  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+  const body = {
+    chat_id: chatId,
+    text: text,
+    parse_mode: "HTML"
+  };
+  if (keyboard) {
+    body.reply_markup = keyboard;
+  }
+
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  return new Response("ok");
+}
