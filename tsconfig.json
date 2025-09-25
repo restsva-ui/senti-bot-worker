@@ -1,16 +1,16 @@
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "baseUrl": "./src",
-    "paths": {
-      "*": ["./*"]
-    }
-  },
-  "include": ["src/**/*"]
-}
+// src/config.ts
+// ВАЖЛИВО: не використовуємо "TELEGRAM_BOT_TOKEN" як голий ідентифікатор на топ-рівні,
+// інакше під час білду отримаємо ReferenceError. Беремо значення з globalThis.
+
+type G = Record<string, unknown>;
+const g = (globalThis as unknown as G);
+
+export const API_BASE_URL: string =
+  (typeof g.API_BASE_URL === "string" && g.API_BASE_URL) || "https://api.telegram.org";
+
+export const BOT_TOKEN: string =
+  (typeof g.TELEGRAM_BOT_TOKEN === "string" && g.TELEGRAM_BOT_TOKEN as string) || "";
+
+// Опційно
+export const OWNER_ID: string | undefined =
+  (typeof g.OWNER_ID === "string" ? (g.OWNER_ID as string) : undefined);
