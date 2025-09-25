@@ -1,110 +1,101 @@
-// src/router.ts
-import type { Env } from "./index";
-import { handleStart } from "./commands/start";
-import { handlePing } from "./commands/ping";
-import { handleMenu } from "./commands/menu";
-import { handleLikePanel } from "./commands/likepanel";
+// Центральний роутер апдейта Telegram
+// Зберігає існуючу логіку команд і додає: /help + callback_query
 
-// невеличкий util для Telegram API
-async function tgCall(env: Env, method: string, payload: any) {
-  const base = env.API_BASE_URL || "https://api.telegram.org";
-  const url = `${base}/bot${env.BOT_TOKEN}/${method}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    console.error("TG_API_ERROR", { method, status: res.status, text });
-    throw new Error(`Telegram API ${method} failed`);
-  }
-  return res.json();
+import { sendMessage, answerCallbackQuery } from "./telegram";
+import { start } from "./commands/start";
+import { ping } from "./commands/ping";
+import { menu } from "./commands/menu";
+import { likepanel } from "./commands/likepanel";
+import { help } from "./commands/help";
+
+type TGUser = { id: number };
+type TGChat = { id: number };
+type TGMessage = { message_id: number; from?: TGUser; chat: TGChat; text?: string };
+type TGCallbackQuery = { id: string; from: TGUser; message?: TGMessage; data?: string };
+
+type TGUpdate = {
+  update_id: number;
+  message?: TGMessage;
+  callback_query?: TGCallbackQuery;
+};
+
+function extractCommand(text: string | undefined): string | null {
+  if (!text) return null;
+  if (!text.startsWith("/")) return null;
+  const cmd = text.trim().split(/\s+/)[0].toLowerCase();
+  return cmd;
 }
 
-async function sendText(env: Env, chat_id: number | string, text: string) {
-  return tgCall(env, "sendMessage", { chat_id, text, parse_mode: "HTML" });
-}
-
-function getPathname(req: Request) {
+export async function handleUpdate(update: TGUpdate): Promise<Response> {
   try {
-    return new URL(req.url).pathname;
-  } catch {
-    return "/";
+    // 1) Повідомлення з командами
+    if (update.message) {
+      const chatId = update.message.chat.id;
+      const cmd = extractCommand(update.message.text);
+
+      if (cmd) {
+        switch (cmd) {
+          case "/start":
+            await start(chatId);
+            break;
+          case "/ping":
+            await ping(chatId);
+            break;
+          case "/menu":
+            await menu(chatId);
+            break;
+          case "/likepanel":
+            await likepanel(chatId);
+            break;
+          case "/help":
+            await help(chatId);
+            break;
+          default:
+            await sendMessage(chatId, "Невідома команда. Напишіть /help");
+        }
+      }
+    }
+
+    // 2) Обробка натискань інлайн-кнопок
+    if (update.callback_query) {
+      const cq = update.callback_query;
+      const chatId = cq.message?.chat.id;
+      const data = cq.data;
+
+      // Завжди відповідаємо на callback, щоб прибрати "loading..."
+      await answerCallbackQuery(cq.id).catch(() => { /* no-op */ });
+
+      if (chatId && data) {
+        if (data === "cb_ping") {
+          await ping(chatId);
+        } else if (data === "cb_likepanel") {
+          await likepanel(chatId);
+        } else if (data === "cb_help") {
+          await help(chatId);
+        } else {
+          await sendMessage(chatId, "🤷‍♂️ Невідома дія кнопки.");
+        }
+      }
+    }
+
+    return new Response(JSON.stringify({ ok: true }), {
+      headers: { "content-type": "application/json" },
+      status: 200,
+    });
+  } catch (err: any) {
+    // Базове безпечне логування
+    await (async () => {
+      try {
+        const e = typeof err?.message === "string" ? err.message : String(err);
+        // якщо маєте ADMIN_CHAT_ID у конфігу — можна дублювати в адмін-чат
+        // await sendMessage(ADMIN_CHAT_ID, `⚠️ Помилка: ${e}`);
+        console.error("Router error:", e);
+      } catch { /* ignore */ }
+    })();
+
+    return new Response(JSON.stringify({ ok: false, error: "internal" }), {
+      headers: { "content-type": "application/json" },
+      status: 500,
+    });
   }
-}
-
-function json(data: unknown, init?: ResponseInit) {
-  return new Response(JSON.stringify(data), {
-    status: 200,
-    headers: { "content-type": "application/json; charset=utf-8" },
-    ...init,
-  });
-}
-
-export function makeRouter() {
-  return {
-    async handle(req: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
-      const url = new URL(req.url);
-      const path = url.pathname;
-      const method = req.method.toUpperCase();
-
-      // 1) root / health
-      if (method === "GET" && (path === "/" || path === "/health")) {
-        return new Response("Hello from Worker!", { status: 200 });
-      }
-
-      // 2) тестове повідомлення: /test?chat_id=...&text=...
-      if (method === "GET" && path === "/test") {
-        const chatId = url.searchParams.get("chat_id");
-        const text = url.searchParams.get("text") || "Test OK ✅";
-        if (!chatId) return json({ ok: false, error: "chat_id required" }, { status: 400 });
-        try {
-          const r = await sendText(env, chatId, text);
-          return json({ ok: true, result: r });
-        } catch (e: any) {
-          return json({ ok: false, error: e?.message || "send failed" }, { status: 500 });
-        }
-      }
-
-      // 3) Telegram webhook: /webhook/<WEBHOOK_SECRET>
-      if (method === "POST" && path === `/webhook/${env.WEBHOOK_SECRET}`) {
-        let update: any;
-        try {
-          update = await req.json();
-        } catch {
-          return json({ ok: false, error: "invalid JSON" }, { status: 400 });
-        }
-
-        // базове розгалуження на команди
-        try {
-          const msg = update?.message;
-          const text: string | undefined = msg?.text;
-          const chatId = msg?.chat?.id;
-
-          if (text?.startsWith("/start")) {
-            await handleStart(update, env, { sendText, tgCall });
-          } else if (text?.startsWith("/ping")) {
-            await handlePing(update, env, { sendText, tgCall });
-          } else if (text?.startsWith("/menu")) {
-            await handleMenu(update, env, { sendText, tgCall });
-          } else if (text?.startsWith("/likepanel")) {
-            await handleLikePanel(update, env, { sendText, tgCall });
-          } else if (chatId && text) {
-            // дефолтна відповідь на звичайний текст
-            await sendText(env, chatId, "👋 Привіт! Бот підключено до Cloudflare Workers.");
-          }
-
-          return json({ ok: true });
-        } catch (err: any) {
-          console.error("WEBHOOK_HANDLER_ERROR", { message: err?.message, stack: err?.stack });
-          // важливо: Telegram очікує 200, щоб не ретраїв безкінечно
-          return json({ ok: true });
-        }
-      }
-
-      // 4) 404
-      return new Response("Not Found", { status: 404 });
-    },
-  };
 }
