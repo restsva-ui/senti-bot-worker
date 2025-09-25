@@ -6,14 +6,14 @@ compatibility_date = "2024-12-01"
 
 [observability]
 enabled = true
-# 1.0 = 100% семплінг, старий Wrangler не приймає 100
-head_sampling_rate = 1.0
+# 100% семплінг; для wrangler@3 безпечніше як ціле число 0..1
+head_sampling_rate = 1
 
 [vars]
-API_BASE_URL = "https://api.telegram.org"
+API_BASE_URL   = "https://api.telegram.org"
 WEBHOOK_SECRET = "senti1984"
 
 [[kv_namespaces]]
-binding = "STATE"
-id = "7b32e2d1f60846ddb1c653eb52180bf7"
+binding    = "STATE"
+id         = "7b32e2d1f60846ddb1c653eb52180bf7"
 preview_id = "7b32e2d1f60846ddb1c653eb52180bf7"
