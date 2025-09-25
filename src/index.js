@@ -1,121 +1,89 @@
-export default {
-  async fetch(request, env) {
-    if (request.method === "POST") {
-      const update = await request.json();
-      if (update.message) {
-        const chatId = update.message.chat.id;
-        const text = update.message.text || "";
+// src/index.js — DIAG MINIMAL (safe test)
+// Не чіпаємо решту структури. Після тесту повернемо повний index.
 
-        switch (true) {
-          case text === "/start":
-            await sendMessage(chatId, "👋 Привіт! Бот підключено до Cloudflare Workers.\nСпробуй: /ping, /likepanel, /stats, /menu");
-            break;
+const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
-          case text === "/ping":
-            await sendMessage(chatId, "pong ✅");
-            break;
+function ok(data = {}) {
+  return new Response(JSON.stringify({ ok: true, ...data }), { headers: JSON_HEADERS });
+}
+function err(message, status = 500) {
+  return new Response(JSON.stringify({ ok: false, error: String(message) }), {
+    headers: JSON_HEADERS, status
+  });
+}
 
-          case text.startsWith("/kvset"):
-            {
-              const parts = text.split(" ");
-              if (parts.length >= 3) {
-                const key = parts[1];
-                const value = parts.slice(2).join(" ");
-                await env.BOT_KV.put(key, value);
-                await sendMessage(chatId, `✅ Збережено: ${key} = ${value}`);
-              } else {
-                await sendMessage(chatId, "Використання: /kvset <key> <value>");
-              }
-            }
-            break;
+function apiBase(env) {
+  // Дозволяємо міняти базу через змінну (у тебе вже є API_BASE_URL = https://api.telegram.org)
+  return (env.API_BASE_URL || "https://api.telegram.org").replace(/\/+$/, "");
+}
 
-          case text.startsWith("/kvget"):
-            {
-              const parts = text.split(" ");
-              if (parts.length === 2) {
-                const key = parts[1];
-                const value = await env.BOT_KV.get(key);
-                if (value) {
-                  await sendMessage(chatId, `📦 ${key} = ${value}`);
-                } else {
-                  await sendMessage(chatId, `❌ Ключ '${key}' не знайдено`);
-                }
-              } else {
-                await sendMessage(chatId, "Використання: /kvget <key>");
-              }
-            }
-            break;
-
-          case text === "/kvtest":
-            await sendMessage(chatId, "⚡ KV тест працює!");
-            break;
-
-          case text === "/likepanel":
-            await sendMessage(chatId, "👍👎 Голосуйте:", {
-              reply_markup: {
-                inline_keyboard: [
-                  [{ text: "👍", callback_data: "like" }, { text: "👎", callback_data: "dislike" }]
-                ]
-              }
-            });
-            break;
-
-          case text === "/stats":
-            {
-              const likes = (await env.BOT_KV.get("likes")) || 0;
-              const dislikes = (await env.BOT_KV.get("dislikes")) || 0;
-              await sendMessage(chatId, `📊 Статистика чату:\n👍 Вподобайок: ${likes}\n👎 Дизлайків: ${dislikes}`);
-            }
-            break;
-
-          case text === "/menu":
-            await sendMessage(chatId, "Оберіть дію:", {
-              reply_markup: {
-                keyboard: [
-                  [{ text: "/likepanel" }, { text: "/stats" }]
-                ],
-                resize_keyboard: true,
-                one_time_keyboard: true
-              }
-            });
-            break;
-
-          default:
-            await sendMessage(chatId, "❔ Невідома команда. Використай /menu");
-            break;
-        }
-      } else if (update.callback_query) {
-        const chatId = update.callback_query.message.chat.id;
-        const data = update.callback_query.data;
-
-        if (data === "like") {
-          let likes = parseInt((await env.BOT_KV.get("likes")) || "0") + 1;
-          await env.BOT_KV.put("likes", likes);
-          await sendMessage(chatId, `Результат голосування:\n👍 ${likes} 👎 ${(await env.BOT_KV.get("dislikes")) || 0}`);
-        } else if (data === "dislike") {
-          let dislikes = parseInt((await env.BOT_KV.get("dislikes")) || "0") + 1;
-          await env.BOT_KV.put("dislikes", dislikes);
-          await sendMessage(chatId, `Результат голосування:\n👍 ${(await env.BOT_KV.get("likes")) || 0} 👎 ${dislikes}`);
-        }
-      }
-
-      return new Response("OK", { status: 200 });
-    }
-
-    return new Response("Hello from Worker!");
-  },
-};
-
-async function sendMessage(chatId, text, extra = {}) {
-  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-  const body = {
-    chat_id: chatId,
-    text: text,
-    ...extra,
-  };
-  await fetch(url, {
+/** Мінімальний клієнт до Telegram Bot API (POST JSON) */
+async function tg(env, method, body) {
+  const base = apiBase(env);
+  if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN is missing");
+  const url = `${base}/bot${env.BOT_TOKEN}/${method}`;
+  return fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: JSON_HEADERS,
     body: JSON.stringify(body),
   });
 }
+
+/** Безпечне читання JSON */
+async function readJson(req) {
+  try { return await req.json(); } catch { return null; }
+}
+
+/** Відіслати простий тестовий меседж у вказаний chat_id */
+async function sendTest(env, chatId, text = "Test OK ✅") {
+  if (!chatId) return;
+  try {
+    await tg(env, "sendMessage", { chat_id: chatId, text });
+  } catch (e) {
+    console.error("sendTest error:", e?.stack || e);
+  }
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    // Health / root
+    if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/healthz")) {
+      // Лишаємо знайоме повідомлення на корені (видно у тебе на скріні)
+      if (url.pathname === "/") {
+        return new Response("Hello from Worker!", { status: 200 });
+      }
+      return ok({ service: "senti-bot-worker", env: "ok" });
+    }
+
+    // Webhook endpoint: /webhook/<WEBHOOK_SECRET>
+    if (url.pathname === `/webhook/${env.WEBHOOK_SECRET}`) {
+      if (request.method !== "POST") return err("Method must be POST", 405);
+
+      const update = await readJson(request);
+      if (!update) return err("Invalid JSON", 400);
+
+      // Витягуємо chat_id з різних типів апдейтів
+      const chatId =
+        update.message?.chat?.id ||
+        update.edited_message?.chat?.id ||
+        update.callback_query?.message?.chat?.id ||
+        null;
+
+      // Мінімальна перевірка /ping → "pong ✅", інакше — "Test OK ✅"
+      const textIn = (update.message?.text || "").trim();
+      const out = textIn === "/ping" ? "pong ✅" : "Test OK ✅";
+
+      // Відправляємо тест
+      await sendTest(env, chatId, out).catch((e) =>
+        console.error("sendTest fail:", e?.stack || e)
+      );
+
+      // Миттєва відповідь Telegram, щоб не було ретраїв
+      return ok({ received: true });
+    }
+
+    return new Response("Not found", { status: 404, headers: { "content-type": "text/plain" } });
+  },
+};
