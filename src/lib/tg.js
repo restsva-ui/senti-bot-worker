@@ -14,7 +14,6 @@ async function call(env, method, body) {
     body: JSON.stringify(body),
   });
 
-  // не падаємо — логнемо, і нехай код далі працює
   if (!res.ok) {
     let text = "";
     try { text = await res.text(); } catch {}
@@ -23,32 +22,42 @@ async function call(env, method, body) {
   return res;
 }
 
-/** ВІДКРИТІ ЕКСПОРТИ — їх імпортують команди */
-
-// просте надсилання повідомлення
-export async function sendMessage(env, chat_id, text, reply_markup = undefined, extra = {}) {
-  const payload = {
+// ---- функції ----
+async function sendMessage(env, chat_id, text, reply_markup = undefined, extra = {}) {
+  return call(env, "sendMessage", {
     chat_id,
     text,
     parse_mode: "HTML",
     disable_web_page_preview: true,
     reply_markup,
     ...extra,
-  };
-  return call(env, "sendMessage", payload);
+  });
 }
 
-// редагування кнопок під повідомленням
-export async function editMessageReplyMarkup(env, chat_id, message_id, reply_markup) {
+async function editMessageReplyMarkup(env, chat_id, message_id, reply_markup) {
   return call(env, "editMessageReplyMarkup", { chat_id, message_id, reply_markup });
 }
 
-// відповісти на натискання інлайн-кнопки
-export async function answerCallbackQuery(env, callback_query_id, text = "", show_alert = false) {
+async function answerCallbackQuery(env, callback_query_id, text = "", show_alert = false) {
   return call(env, "answerCallbackQuery", { callback_query_id, text, show_alert });
 }
 
-// опціонально: реєстрація /команд бота
-export async function setMyCommands(env, commands) {
+async function setMyCommands(env, commands) {
   return call(env, "setMyCommands", { commands });
 }
+
+// ---- експорт ----
+export {
+  sendMessage,
+  editMessageReplyMarkup,
+  answerCallbackQuery,
+  setMyCommands,
+};
+
+// також старий формат
+export const tg = {
+  sendMessage,
+  editMessageReplyMarkup,
+  answerCallbackQuery,
+  setMyCommands,
+};
