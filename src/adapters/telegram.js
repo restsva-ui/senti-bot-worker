@@ -1,70 +1,67 @@
 // src/adapters/telegram.js
 
-/**
- * Невеличкий SDK для Telegram Bot API
- * Використовуємо лише три методи: sendMessage, sendChatAction, getFile
- */
-
-const tgApi = (token, method) => `https://api.telegram.org/bot${token}/${method}`;
-
-async function tgSendMessage(env, chatId, text, options = {}) {
-  const token = env.TELEGRAM_TOKEN;
-  if (!token) throw new Error("Missing TELEGRAM_TOKEN in env");
-
-  const body = {
-    chat_id: chatId,
-    text,
-    parse_mode: options.parse_mode || "Markdown",
-    disable_web_page_preview: options.disable_web_page_preview ?? true,
-    reply_to_message_id: options.reply_to_message_id || undefined,
-  };
-
-  const res = await fetch(tgApi(token, "sendMessage"), {
+// Базова функція для виклику Telegram API
+export async function tg(env, method, body) {
+  const url = `https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/${method}`;
+  const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "content-type": "application/json;charset=UTF-8" },
     body: JSON.stringify(body),
   });
-
-  const data = await res.json();
-  if (!data.ok) {
-    console.error("TG API error: sendMessage", JSON.stringify(data));
+  if (!res.ok) {
+    console.error(`Telegram API error [${method}]:`, await res.text());
   }
-  return data;
+  return res.json();
 }
 
-async function tgSendChatAction(env, chatId, action = "typing") {
-  const token = env.TELEGRAM_TOKEN;
-  if (!token) throw new Error("Missing TELEGRAM_TOKEN in env");
-
-  const res = await fetch(tgApi(token, "sendChatAction"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, action }),
+// Відправка текстового повідомлення
+export async function sendMessage(env, chat_id, text, extra = {}) {
+  return tg(env, "sendMessage", {
+    chat_id,
+    text,
+    parse_mode: "HTML", // можна писати <b>жирний</b>, <i>курсив</i>
+    ...extra,
   });
-
-  const data = await res.json();
-  if (!data.ok) {
-    console.error("TG API error: sendChatAction", JSON.stringify(data));
-  }
-  return data;
 }
 
-/**
- * Повертає ПРЯМИЙ URL файлу у Telegram CDN:
- * https://api.telegram.org/file/bot<token>/<file_path>
- */
-async function tgGetFileUrl(env, fileId) {
-  const token = env.TELEGRAM_TOKEN;
-  if (!token) throw new Error("Missing TELEGRAM_TOKEN in env");
-
-  const res = await fetch(tgApi(token, `getFile?file_id=${encodeURIComponent(fileId)}`));
-  const data = await res.json();
-  if (!data.ok || !data.result?.file_path) {
-    console.error("TG API error: getFile", JSON.stringify(data));
-    return null;
-  }
-  const filePath = data.result.file_path;
-  return `https://api.telegram.org/file/bot${token}/${filePath}`;
+// Відправка фото
+export async function sendPhoto(env, chat_id, photo, caption = "", extra = {}) {
+  return tg(env, "sendPhoto", {
+    chat_id,
+    photo,
+    caption,
+    parse_mode: "HTML",
+    ...extra,
+  });
 }
 
-export { tgSendMessage, tgSendChatAction, tgGetFileUrl };
+// Відправка документа
+export async function sendDocument(env, chat_id, file_id, caption = "", extra = {}) {
+  return tg(env, "sendDocument", {
+    chat_id,
+    document: file_id,
+    caption,
+    parse_mode: "HTML",
+    ...extra,
+  });
+}
+
+// Редагування тексту повідомлення
+export async function editMessageText(env, chat_id, message_id, text, extra = {}) {
+  return tg(env, "editMessageText", {
+    chat_id,
+    message_id,
+    text,
+    parse_mode: "HTML",
+    ...extra,
+  });
+}
+
+// Відповідь на callback (кнопки)
+export async function answerCallbackQuery(env, callback_query_id, text = "", show_alert = false) {
+  return tg(env, "answerCallbackQuery", {
+    callback_query_id,
+    text,
+    show_alert,
+  });
+}
