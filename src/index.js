@@ -1,5 +1,5 @@
 /**
- * Cloudflare Workers — Telegram bot webhook (стабільний).
+ * Cloudflare Workers — Telegram bot webhook (стабільний, модульний).
  * Env:
  *  - BOT_TOKEN (required)
  *  - WEBHOOK_SECRET (required)
@@ -7,7 +7,13 @@
  *  - STATE (KV, optional)
  */
 
+// === Нові модулі з кнопками/меню (ти їх додав у src/commands/...) ===
+import { onMenu } from "./commands/menu.js";
+import { handleLikeCallback } from "./commands/likepanel.js";
+import { showStats } from "./commands/stats.js";
+
 /** @typedef {import('@cloudflare/workers-types').KVNamespace} KVNamespace */
+/** @typedef {{BOT_TOKEN:string, WEBHOOK_SECRET:string, API_BASE_URL?:string, STATE?:KVNamespace}} Env */
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
@@ -15,23 +21,16 @@ const ok  = (data={}) =>
   new Response(JSON.stringify({ ok: true, ...data }), { headers: JSON_HEADERS });
 
 const err = (message, status = 200) =>
-  // 200 щоб Telegram не ретраїв — але у логах помилку видно
+  // 200 — щоб Telegram не ретраїв; помилку видно в логах
   new Response(JSON.stringify({ ok: false, error: String(message) }), {
     headers: JSON_HEADERS, status
   });
-
-/** @typedef {{BOT_TOKEN:string, WEBHOOK_SECRET:string, API_BASE_URL?:string, STATE?:KVNamespace}} Env */
 
 function apiBase(env) {
   return (env.API_BASE_URL || "https://api.telegram.org").replace(/\/+$/, "");
 }
 
-/**
- * Виклик Telegram Bot API
- * @param {Env} env
- * @param {string} method
- * @param {any} body
- */
+/** Виклик Telegram Bot API (НЕ чіпаємо naming: BOT_TOKEN) */
 async function tg(env, method, body) {
   const token = env.BOT_TOKEN;
   if (!token) {
@@ -51,19 +50,40 @@ async function tg(env, method, body) {
   return res;
 }
 
-/** Безпечно читаємо JSON */
+/** Безпечний JSON */
 async function readJson(req) {
   try { return await req.json(); } catch { return null; }
 }
 
-/** Основна логіка обробки апдейта */
+/** === Основна логіка апдейта — зберігаємо твою структуру === */
 async function handleUpdate(update, env) {
+  // ➊ Callback-кнопки (нове): якщо є callback_query — віддаємо його модулю і ВИХОДИМО
+  if (update?.callback_query?.data) {
+    try { await handleLikeCallback(env, update); } catch (e) { console.error("handleLikeCallback", e); }
+    return;
+  }
+
   const msg = update.message || update.edited_message || update.callback_query?.message;
   const chatId = msg?.chat?.id;
   if (!chatId) return;
 
+  // Оригінальна логіка: текст, KV тощо
   const text = (update.message?.text || "").trim();
   const kv = env.STATE;
+
+  // ➋ Команда меню (нове) — окремий модуль, не чіпаємо базу
+  if (text === "/menu") {
+    await onMenu(env, chatId);
+    return;
+  }
+
+  // ➌ Команда статистики (нове)
+  if (text === "/stats") {
+    await showStats(env, chatId);
+    return;
+  }
+
+  // ==== ДАЛІ — ТВОЇ ПРАЦЮЮЧІ КОМАНДИ (без змін) ====
 
   if (text === "/start") {
     await tg(env, "sendMessage", {
@@ -114,6 +134,7 @@ async function handleUpdate(update, env) {
     return;
   }
 
+  // Файли/фото — як було
   if (msg?.photo || msg?.document) {
     await tg(env, "sendMessage", {
       chat_id: chatId,
@@ -123,6 +144,7 @@ async function handleUpdate(update, env) {
     return;
   }
 
+  // Echo — як було
   if (text) {
     await tg(env, "sendMessage", {
       chat_id: chatId,
@@ -141,20 +163,19 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Health
+    // Health — як було
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/healthz")) {
       return ok({ service: "senti-bot-worker", env: "ok" });
     }
 
-    // Webhook
+    // Webhook — як було, плюс гарантія завершення handleUpdate через waitUntil
     if (url.pathname === `/webhook/${env.WEBHOOK_SECRET}`) {
       if (request.method !== "POST") return err("Method must be POST");
       const update = await readJson(request);
       if (!update) return err("Invalid JSON");
 
-      // Надійно: не обривати обробку
+      // НЕ міняємо твою модель: відповідаємо 200 миттєво, роботу — у фон (але гарантовано через waitUntil)
       ctx.waitUntil(handleUpdate(update, env));
-      // Або замість waitUntil можна було б: await handleUpdate(update, env);
 
       return ok({ received: true });
     }
