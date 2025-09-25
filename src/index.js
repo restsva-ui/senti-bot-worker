@@ -5,6 +5,20 @@ export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
 
+    // 0) DEBUG: подивитись, що є у env
+    if (url.pathname === '/debug-env') {
+      const keys = Object.keys(env || {}).sort();
+      // не показуємо секрети повністю
+      const redacted = {};
+      for (const k of keys) {
+        const v = env[k];
+        redacted[k] = typeof v === 'string'
+          ? (v.length > 6 ? v.slice(0,3) + '…' + v.slice(-3) : '***')
+          : typeof v; // для KV буде "object"
+      }
+      return json({ ok: true, env_keys: keys, env_preview: redacted });
+    }
+
     // 1) Healthcheck
     if (url.pathname === '/healthz') {
       return new Response('ok', { status: 200 });
@@ -107,9 +121,8 @@ async function handleKvTest(req, env) {
   const url = new URL(req.url);
   const key = url.searchParams.get('key');
 
-  // перевіряємо, що KV підʼєднаний
   if (!env.STATE || typeof env.STATE.get !== 'function') {
-    return json({ ok: false, error: 'No KV binding STATE. Add it in Settings → Bindings.' }, 400);
+    return json({ ok: false, error: 'No KV binding STATE. Add it in Settings – Bindings.' }, 400);
   }
 
   if (req.method === 'GET') {
