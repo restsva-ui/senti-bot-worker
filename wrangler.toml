@@ -1,14 +1,35 @@
+# wrangler.toml — мінімальна й стабільна конфігурація для воркера Telegram
 name = "senti-bot-worker"
 main = "src/index.js"
 compatibility_date = "2025-09-24"
 workers_dev = true
 
+# Якщо маєш власний домен/роути — вимкни workers_dev і додай routes:
+# routes = [
+#   { pattern = "bot.example.com/*", zone_id = "REPLACE_ME" }
+# ]
+
+# ---------- ENV VARS ----------
+# РЕКОМЕНДАЦІЯ: зберігай секрети як Secrets у Cloudflare Dashboard або GitHub Actions.
+# Поля нижче залиш пустими/коментуй — вони будуть перекриті Secrets під час деплою.
 [vars]
 API_BASE_URL = "https://api.telegram.org"
-BOT_TOKEN = "123456:REPLACE_ME"
-WEBHOOK_SECRET = "use-a-long-random-secret"
+# BOT_TOKEN не задаємо тут (секрет!).
+# WEBHOOK_SECRET не задаємо тут (секрет!).
+# TELEGRAM_TOKEN не задаємо тут (секрет!).
+# інші ключі/URLs залиш як є або додай за потреби.
 
+# ---------- KV ----------
+# Зв'язуємо вже створений KV namespace "senti-state" під біндінгом STATE
 [[kv_namespaces]]
 binding = "STATE"
-id = "7b32e2d1f60846ddb1c653eb52180bf7"
-preview_id = "7b32e2d1f60846ddb1c653eb52180bf7"
+id = "7b32e2d1f60846ddb1c653eb52180bf7"  # <- твій реальний ID "senti-state"
+
+# ---------- Observability / Workers Logs ----------
+[observability]
+enabled = true          # увімкнути Workers Logs (Invocation logs теж будуть)
+head_sampling_rate = 1  # 1 = 100% запитів логуються (можеш зменшити до 0.1)
+
+# ---------- (необов'язково) Workers AI / інше ----------
+# [ai]
+# binding = "AI"
