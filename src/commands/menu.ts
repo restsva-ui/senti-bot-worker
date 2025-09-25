@@ -1,23 +1,11 @@
-// src/commands/menu.js
-import { sendMessage } from "../lib/tg.js";
-
-export async function onMenu(env, update) {
-  if (!update.message) return;
-
-  const chat_id = update.message.chat.id;
-
-  // просте меню з inline-кнопками
-  const keyboard = {
-    inline_keyboard: [
-      [
-        { text: "📊 Статистика", callback_data: "stats" },
-        { text: "👍 Лайки", callback_data: "likepanel" },
-      ],
-      [
-        { text: "ℹ️ Про бота", callback_data: "about" }
+import { sendMessage } from "../telegram/api";
+export async function cmdMenu(chatId: string|number) {
+  await sendMessage(chatId, "Оберіть дію:", {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "👍 Панель лайків", callback_data: "likepanel" }],
+        [{ text: "📊 Статистика", callback_data: "stats" }],
       ]
-    ]
-  };
-
-  await sendMessage(env, chat_id, "📋 Обери опцію з меню:", keyboard);
+    }
+  });
 }
