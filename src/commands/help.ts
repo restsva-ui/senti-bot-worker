@@ -1,14 +1,12 @@
-// src/commands/help.ts
 import { sendMessage } from "../telegram/api";
 
-export async function help(chatId: number | string) {
-  const text = [
-    "🧾 Доступні команди:",
-    "/start — запуск і привітання",
-    "/ping — перевірка живості бота",
-    "/menu — головне меню",
-    "/likepanel — панель лайків",
-    "/help — довідка",
-  ].join("\n");
-  await sendMessage(chatId, text);
+export async function help(chatId: number) {
+  const txt =
+    "🧾 Доступні команди:\n" +
+    "/start — запуск і привітання\n" +
+    "/ping — перевірка живості бота\n" +
+    "/menu — головне меню\n" +
+    "/likepanel — панель лайків\n" +
+    "/help — довідка";
+  await sendMessage(chatId, txt);
 }
