@@ -1,20 +1,28 @@
 // src/commands/kvdebug.ts
-import { getEnv } from "../config";
+import { type Env } from "../config";
 import { sendMessage } from "../telegram/api";
 
-export async function cmdKvList(chatId: number) {
-  const env = getEnv();
-  if (!env.KV) return sendMessage(chatId, "❌ KV не прив'язаний");
-  const list = await env.KV.list({ limit: 20 });
-  const text = list.keys.length
-    ? "🔑 Ключі:\n" + list.keys.map(k => `• ${k.name}`).join("\n")
-    : "📭 KV порожній";
-  return sendMessage(chatId, text);
-}
+/**
+ * Показати кілька ключів з KV (для діагностики).
+ * Не обов'язковий для продакшену, але корисний під час тесту.
+ */
+export async function cmdKvList(env: Env, chatId: number) {
+  if (!env.LIKES_KV) {
+    await sendMessage(env, chatId, "❌ KV не прив'язаний");
+    return;
+  }
 
-export async function cmdKvGet(chatId: number, key: string) {
-  const env = getEnv();
-  if (!env.KV) return sendMessage(chatId, "❌ KV не прив'язаний");
-  const v = await env.KV.get(key);
-  return sendMessage(chatId, v ? `📦 ${key} = ${v}` : `❓ Ключ "${key}" не знайдено`);
+  // Спробуємо прочитати агрегатні лічильники та 1-2 юзерські голоси
+  const counts = await env.LIKES_KV.get("likes:counts");
+  const someUser1 = await env.LIKES_KV.get("likes:user:sample1");
+  const someUser2 = await env.LIKES_KV.get("likes:user:sample2");
+
+  const lines = [
+    "<b>KV debug</b>",
+    `counts: <code>${counts ?? "null"}</code>`,
+    `user:sample1: <code>${someUser1 ?? "null"}</code>`,
+    `user:sample2: <code>${someUser2 ?? "null"}</code>`,
+  ].join("\n");
+
+  await sendMessage(env, chatId, lines, { parse_mode: "HTML" });
 }
