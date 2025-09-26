@@ -1,46 +1,44 @@
 // src/telegram/api.ts
 import { CFG } from "../config";
 
-// Базовий виклик до Telegram
-async function call(method: string, body: unknown) {
-  const url = `${CFG.apiBase()}/bot${CFG.botToken()}/${method}`;
+type ReplyMarkup =
+  | { inline_keyboard: { text: string; callback_data: string }[][] }
+  | { keyboard: { text: string }[][]; resize_keyboard?: boolean; one_time_keyboard?: boolean }
+  | undefined;
+
+async function tgFetch(method: string, body: Record<string, unknown>) {
+  const url = `${CFG.apiBase}/bot${CFG.botToken}/${method}`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body ?? {}),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Telegram API ${method} failed: ${res.status} ${text}`);
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Telegram ${method} failed: ${res.status} ${txt}`);
   }
-  return res.json().catch(() => ({}));
+  return (await res.json()) as unknown;
 }
 
 export async function sendMessage(
-  chatId: number | string,
+  chat_id: number,
   text: string,
-  extra?: Record<string, unknown>
+  replyMarkup?: ReplyMarkup
 ) {
-  return call("sendMessage", { chat_id: chatId, text, ...(extra || {}) });
+  const body: any = {
+    chat_id,
+    text,
+    disable_web_page_preview: true,
+  };
+  if (replyMarkup) body.reply_markup = replyMarkup; // ← гарантія, що markup піде у запит
+  return await tgFetch("sendMessage", body);
 }
 
 export async function answerCallbackQuery(
-  callbackQueryId: string,
-  extra?: Record<string, unknown>
+  callback_query_id: string,
+  text?: string
 ) {
-  return call("answerCallbackQuery", { callback_query_id: callbackQueryId, ...(extra || {}) });
-}
-
-export async function editMessageText(
-  chatId: number | string,
-  messageId: number,
-  text: string,
-  extra?: Record<string, unknown>
-) {
-  return call("editMessageText", {
-    chat_id: chatId,
-    message_id: messageId,
-    text,
-    ...(extra || {}),
-  });
+  const body: any = { callback_query_id };
+  if (text) body.text = text;
+  return await tgFetch("answerCallbackQuery", body);
 }
