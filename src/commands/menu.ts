@@ -1,12 +1,14 @@
-// src/commands/menu.ts
+// Просте інлайн-меню — без сторонніх імпортів
 import { sendMessage } from "../telegram/api";
 
 export async function menu(chatId: number) {
-  await sendMessage(chatId, "Головне меню:", {
+  const replyMarkup = {
     inline_keyboard: [
       [{ text: "🔁 Ping", callback_data: "cb_ping" }],
-      [{ text: "👍 Лайки", callback_data: "cb_likepanel" }],
+      [{ text: "👍 Лайки", callback_data: "cb_menu_likepanel" }],
       [{ text: "ℹ️ Допомога", callback_data: "cb_help" }],
     ],
-  });
+  };
+
+  await sendMessage(chatId, "Головне меню:", replyMarkup);
 }
