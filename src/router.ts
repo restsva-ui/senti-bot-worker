@@ -221,4 +221,3 @@ export async function handleUpdate(update: any) {
     console.error("handleUpdate fatal:", (err as Error).message || err);
   }
 }
-```0
