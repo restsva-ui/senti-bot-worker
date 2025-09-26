@@ -1,4 +1,4 @@
-// Телеграм API: тільки те, що нам потрібно зараз
+// Телеграм API: sendMessage + editMessageText + answerCallbackQuery
 import { CFG } from "../config";
 
 type ReplyMarkup = {
@@ -14,6 +14,30 @@ export async function sendMessage(
   const url = `${cfg.apiBase}/bot${cfg.botToken}/sendMessage`;
   const body: any = {
     chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+  };
+  if (replyMarkup) body.reply_markup = replyMarkup;
+
+  await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}
+
+export async function editMessageText(
+  chatId: number,
+  messageId: number,
+  text: string,
+  replyMarkup?: ReplyMarkup
+) {
+  const cfg = CFG();
+  const url = `${cfg.apiBase}/bot${cfg.botToken}/editMessageText`;
+  const body: any = {
+    chat_id: chatId,
+    message_id: messageId,
     text,
     parse_mode: "HTML",
     disable_web_page_preview: true,
