@@ -1,64 +1,56 @@
 // src/telegram/api.ts
-import { CFG, type Env } from "../config";
+import { getEnv } from "../config";
 
-async function tgFetch<T>(
-  env: Env,
-  method: string,
-  body: Record<string, unknown>
-): Promise<T> {
-  const url = `${CFG.apiBase(env)}/bot${CFG.botToken(env)}/${method}`;
+function apiBase(): string {
+  const env = getEnv();
+  const base = env.API_BASE_URL || "https://api.telegram.org";
+  // гарантуємо один слеш у кінці
+  return base.replace(/\/+$/, "");
+}
+
+function botToken(): string {
+  return getEnv().BOT_TOKEN;
+}
+
+async function tgFetch<T>(method: string, body: unknown): Promise<T> {
+  const url = `${apiBase()}/bot${botToken()}/${method}`;
   const res = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-
-  const data = await res.json<any>().catch(() => ({}));
-  if (!data?.ok) {
-    throw new Error(`Telegram ${method} failed: ${res.status} ${JSON.stringify(data)}`);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Telegram API ${method} failed: ${res.status} ${txt}`);
   }
+  const data = (await res.json()) as { ok: boolean; result?: T; description?: string };
+  if (!data.ok) throw new Error(`Telegram API ${method} error: ${data.description}`);
   return data.result as T;
 }
 
-export function sendMessage(
-  env: Env,
+export async function sendMessage(
   chat_id: number,
   text: string,
-  extra: Record<string, unknown> = {}
+  extra?: Record<string, unknown>
 ) {
-  return tgFetch(env, "sendMessage", {
-    chat_id,
-    text,
-    parse_mode: "HTML",
-    ...extra,
-  });
+  return tgFetch("sendMessage", { chat_id, text, parse_mode: "Markdown", ...extra });
 }
 
-export function editMessageText(
-  env: Env,
+export async function editMessageText(
   chat_id: number,
   message_id: number,
   text: string,
-  extra: Record<string, unknown> = {}
+  extra?: Record<string, unknown>
 ) {
-  return tgFetch(env, "editMessageText", {
+  return tgFetch("editMessageText", {
     chat_id,
     message_id,
     text,
-    parse_mode: "HTML",
+    parse_mode: "Markdown",
     ...extra,
   });
 }
 
-export function answerCallbackQuery(
-  env: Env,
-  callback_query_id: string,
-  text?: string,
-  show_alert = false
-) {
-  return tgFetch(env, "answerCallbackQuery", {
-    callback_query_id,
-    ...(text ? { text } : {}),
-    show_alert,
-  });
+export async function answerCallbackQuery(text?: string, show_alert = false) {
+  return tgFetch("answerCallbackQuery", { text, show_alert });
 }
