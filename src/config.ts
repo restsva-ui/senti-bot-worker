@@ -1,50 +1,32 @@
 // src/config.ts
 
-export type RuntimeEnv = {
-  LIKES_KV: KVNamespace;
-  API_BASE_URL?: string;
-  OWNER_ID?: string | number;
+/**
+ * Глобальна конфігурація, яку встановлюємо в src/index.ts
+ * через setEnv(env). Потім у будь-якому місці коду використовуємо getEnv().
+ */
+
+export type Env = {
   BOT_TOKEN: string;
+  API_BASE_URL?: string;      // за замовчуванням https://api.telegram.org
+  OWNER_ID?: string;
+  LIKES_KV?: KVNamespace;     // binding з wrangler.toml: LIKES_KV
 };
 
-export type AppEnv = {
-  /** alias під твій namespace з чек-листа */
-  kv: KVNamespace;
-  /** https://api.telegram.org за замовчуванням */
-  API_BASE_URL: string;
-  /** numeric owner id з чек-листа */
-  OWNER_ID: number;
-  /** секретний токен бота */
-  BOT_TOKEN: string;
-};
+let ENV_REF: Env | undefined;
 
-let _env: AppEnv | null = null;
-
-/** Викликаємо з index.ts на кожен запрос */
-export function setEnv(e: RuntimeEnv) {
-  if (!e || !e.LIKES_KV) {
-    throw new Error("LIKES_KV binding is missing");
-  }
-  if (!e.BOT_TOKEN) {
-    throw new Error("BOT_TOKEN secret is missing");
-  }
-  _env = {
-    kv: e.LIKES_KV,
-    API_BASE_URL: e.API_BASE_URL || "https://api.telegram.org",
-    OWNER_ID: Number(e.OWNER_ID ?? 784869835),
-    BOT_TOKEN: e.BOT_TOKEN,
-  };
+/** Викликай один раз у entrypoint (src/index.ts) */
+export function setEnv(env: Env) {
+  ENV_REF = env;
 }
 
-/** Дістаємо сконфігуроване оточення в будь-якому місці */
-export function getEnv(): AppEnv {
-  if (!_env) throw new Error("Env not initialized. Call setEnv(...) first.");
-  return _env;
+/** Отримати конфіг з дефолтами, не ламаючи існуючу логіку */
+export function getEnv(): Env & Required<Pick<Env, "BOT_TOKEN">> {
+  if (!ENV_REF) {
+    throw new Error("Env is not initialized. Call setEnv(env) in src/index.ts first.");
+  }
+  // дефолтна база для Telegram
+  return {
+    API_BASE_URL: "https://api.telegram.org",
+    ...ENV_REF,
+  } as Env & Required<Pick<Env, "BOT_TOKEN">>;
 }
-
-/** Зручний проксі (сумісний із існуючим кодом типу CFG.kv.get/put) */
-export const CFG = new Proxy({} as AppEnv, {
-  get(_t, p: keyof AppEnv) {
-    return (getEnv() as any)[p];
-  },
-}) as AppEnv;
