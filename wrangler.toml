@@ -1,24 +1,38 @@
-name        = "senti-bot-worker"
-account_id  = "2cf6e316af8623546c95c0354bc3aa00"
+name = "senti-bot-worker"
+account_id = "2cf6e316af8623546c95c0354bc3aa00"
 workers_dev = true
-main        = "src/index.ts"
+main = "src/index.ts"
 
+# стабільна дата
 compatibility_date = "2024-09-01"
 
+# зручно дебажити
 minify = false
-# logpush = true   # вимкнено, бо викликає помилку 10023
 
+# ===== KV namespaces =====
 [[kv_namespaces]]
-binding = "LIKES_KV"
-id      = "7b32e2d1f60846ddb1c653eb52180bf7"
+binding = "LIKES_KV"                           # має збігатися з env.LIKES_KV у коді
+id = "7b32e2d1f60846ddb1c653eb52180bf7"        # <- твій реальний KV ID (senti-state)
 
+# ===== Vars (змінні оточення) =====
 [vars]
 API_BASE_URL = "https://api.telegram.org"
-OWNER_ID     = "784869835"
+OWNER_ID = "784869835"                          # твій чат/юзер id
 
+# ===== Секрети =====
+# Додано окремо: wrangler secret put BOT_TOKEN
+# значення з чек-листа: 8405753130:AAGrDrmi-cXMU6A_H_Y0-a9p-gDowMYu2xw
+
+# ===== Observability (щоб не ловити 10023 на free плані) =====
 [observability]
-enabled = true
+enabled = false
 
+# ===== Dev (локально/preview, опційно) =====
 [dev]
-port           = 8787
+port = 8787
 local_protocol = "https"
+
+# ===== (опційно) маршрути під свою зону =====
+# [routes]
+# pattern = "bot.your-domain.com/webhook/*"
+# zone_id = "<your-zone-id>"
