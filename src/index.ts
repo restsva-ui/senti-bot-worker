@@ -1,22 +1,24 @@
-import { setEnv, type Env } from "./config";
 import { handleUpdate } from "./router";
+import type { Env } from "./config";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    setEnv(env); // <- критично: ініціалізуємо CFG.kv, BOT_TOKEN тощо
-
     const url = new URL(request.url);
 
-    if (request.method === "POST" && url.pathname === "/webhook/senti1984") {
-      const update = await request.json();
-      await handleUpdate(update);
-      return new Response("ok");
+    if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/healthz")) {
+      return new Response(JSON.stringify({ ok: true, service: "senti-bot-worker" }), {
+        headers: { "content-type": "application/json; charset=utf-8" },
+      });
     }
 
-    if (url.pathname === "/ping") {
-      return new Response("ok");
+    if (request.method === "POST" && url.pathname === "/webhook/senti1984") {
+      const update = await request.json().catch(() => ({}));
+      handleUpdate(update, env).catch(() => {});
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { "content-type": "application/json; charset=utf-8" },
+      });
     }
 
     return new Response("Not found", { status: 404 });
   },
-};
+} satisfies ExportedHandler<Env>;
