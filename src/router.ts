@@ -4,7 +4,8 @@ import { CFG } from "./config";
 import {
   sendMessage,
   editMessageText,
-  answerCallbackQuery, // експорт має бути в src/telegram/api.ts
+  answerCallbackQuery,
+  primeCallbackQueryId,
 } from "./telegram/api";
 
 // ===================== KV & Likes =====================
@@ -79,7 +80,7 @@ function likesKeyboard() {
 }
 
 function likesCaption(c: Counts) {
-  return "Оцінки: 👍 " + c.like + " | 👎 " + c.dislike;
+  return `Оцінки: 👍 ${c.like} | 👎 ${c.dislike}`;
 }
 
 // ===================== Commands =====================
@@ -171,7 +172,7 @@ async function cbVote(
 
 export async function handleUpdate(update: any) {
   try {
-    // повідомлення / команди
+    // Повідомлення / команди
     if (update.message) {
       const msg = update.message;
       const chatId: number = msg.chat?.id;
@@ -186,9 +187,12 @@ export async function handleUpdate(update: any) {
       return cmdHelp(chatId);
     }
 
-    // callback_query
+    // Callback query
     if (update.callback_query) {
       const cb = update.callback_query;
+      // важливо для answerCallbackQuery
+      if (cb?.id) primeCallbackQueryId(cb.id);
+
       const fromId: number = cb.from?.id;
       const data: string = cb.data || "";
       const chatId: number | undefined = cb.message?.chat?.id;
@@ -217,3 +221,4 @@ export async function handleUpdate(update: any) {
     console.error("handleUpdate fatal:", (err as Error).message || err);
   }
 }
+```0
