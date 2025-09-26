@@ -1,6 +1,4 @@
-// src/commands/ping.ts
 import { sendMessage } from "../telegram/api";
-
-export async function cmdPing(chatId: number | string) {
+export async function cmdPing(chatId: number) {
   await sendMessage(chatId, "pong ✅");
 }
