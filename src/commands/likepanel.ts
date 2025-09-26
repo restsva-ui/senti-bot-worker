@@ -1,81 +1,65 @@
-import { tg } from "../lib/tg.js";
+// src/commands/likepanel.ts
+import { answerCallbackQuery, editMessageText, sendMessage } from "../telegram/api";
+import { getEnv } from "../config"; // якщо є KV для лічильників
 
-// Ключі KV: likes:<chatId>:up / likes:<chatId>:down
-async function getCount(kv, key) {
+// Спрощена реалізація: якщо є KV (env.STATE), рахуємо; якщо ні — просто показуємо кнопки
+async function readKV(key: string): Promise<number> {
+  const kv = getEnv().STATE;
   if (!kv) return 0;
   const v = await kv.get(key);
   return v ? Number(v) || 0 : 0;
 }
-async function setCount(kv, key, val) {
+async function writeKV(key: string, val: number) {
+  const kv = getEnv().STATE;
   if (!kv) return;
   await kv.put(key, String(val));
 }
 
-export async function openLikePanel(env, chatId) {
-  const kv = env.STATE;
+export async function likepanel(chatId: number | string) {
   const upKey = `likes:${chatId}:up`;
   const downKey = `likes:${chatId}:down`;
-  const [up, down] = await Promise.all([getCount(kv, upKey), getCount(kv, downKey)]);
+  const [up, down] = await Promise.all([readKV(upKey), readKV(downKey)]);
 
-  await tg(env, "sendMessage", {
-    chat_id: chatId,
-    text: `Оцінки: 👍 ${up}  |  👎 ${down}`,
+  await sendMessage(chatId, `Оцінки: 👍 ${up}  |  👎 ${down}`, {
     reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "👍", callback_data: "like:up" },
-          { text: "👎", callback_data: "like:down" }
-        ],
-      ],
+      inline_keyboard: [[{ text: "👍", callback_data: "like:up" }, { text: "👎", callback_data: "like:down" }]],
     },
   });
 }
 
-export async function handleLikeCallback(env, update) {
-  const data = update.callback_query?.data;
-  const chatId = update.callback_query?.message?.chat?.id;
-  const messageId = update.callback_query?.message?.message_id;
-  if (!data || !chatId) return;
+// Хендлер для callback'ів лайків
+export async function handleLikeCallback(update: any) {
+  const data: string | undefined = update?.callback_query?.data;
+  const cqId: string | undefined = update?.callback_query?.id;
+  const chatId: number | string | undefined = update?.callback_query?.message?.chat?.id;
+  const messageId: number | undefined = update?.callback_query?.message?.message_id;
+  if (!data || !chatId) return false;
 
-  // відкриття панелі
-  if (data === "like:panel") {
-    return openLikePanel(env, chatId);
+  if (data === "cb_likepanel" || data === "like:panel") {
+    await likepanel(chatId);
+    if (cqId) await answerCallbackQuery(cqId);
+    return true;
   }
 
-  // натискання 👍/👎
   if (data === "like:up" || data === "like:down") {
-    const kv = env.STATE;
+    const isUp = data.endsWith("up");
     const upKey = `likes:${chatId}:up`;
     const downKey = `likes:${chatId}:down`;
-    const isUp = data.endsWith("up");
-
-    const curUp = await getCount(kv, upKey);
-    const curDown = await getCount(kv, downKey);
+    const curUp = await readKV(upKey);
+    const curDown = await readKV(downKey);
     const newUp = isUp ? curUp + 1 : curUp;
     const newDown = isUp ? curDown : curDown + 1;
-
-    await Promise.all([
-      setCount(kv, upKey, newUp),
-      setCount(kv, downKey, newDown),
-      tg(env, "answerCallbackQuery", {
-        callback_query_id: update.callback_query.id,
-        text: isUp ? "Дякую за 👍" : "Дякую за 👎",
-        show_alert: false
-      }),
-      // Оновлюємо текст та клавіатуру в тому ж повідомленні
-      tg(env, "editMessageText", {
-        chat_id: chatId,
-        message_id: messageId,
-        text: `Оцінки: 👍 ${newUp}  |  👎 ${newDown}`,
+    await Promise.all([writeKV(upKey, newUp), writeKV(downKey, newDown)]);
+    if (cqId) await answerCallbackQuery(cqId, { text: isUp ? "Дякую за 👍" : "Дякую за 👎" });
+    if (messageId) {
+      await editMessageText(chatId, messageId, `Оцінки: 👍 ${newUp}  |  👎 ${newDown}`, {
         reply_markup: {
-          inline_keyboard: [
-            [
-              { text: "👍", callback_data: "like:up" },
-              { text: "👎", callback_data: "like:down" }
-            ],
-          ],
+          inline_keyboard: [[{ text: "👍", callback_data: "like:up" }, { text: "👎", callback_data: "like:down" }]],
         },
-      }),
-    ]);
+      });
+    }
+    return true;
   }
+
+  return false;
 }
