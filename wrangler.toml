@@ -1,51 +1,30 @@
 # wrangler.toml — повна конфігурація
 
-name = "senti-bot-worker"
-account_id = "2cf6e316af8623546c95c0354bc3aa00"
-workers_dev = true
-main = "src/index.ts"
-
-# дата сумісності (свіжа і стабільна)
+name         = "senti-bot-worker"
+account_id   = "2cf6e316af8623546c95c0354bc3aa00"
+workers_dev  = true
+main         = "src/index.ts"
 compatibility_date = "2024-09-01"
-
-# якщо у проекті є будь-які node-пакети, зручно вмикати
-#compatibility_flags = ["nodejs_compat"]
-
-# спростити дебаг
-minify = false
-logpush = true
+minify       = false
+logpush      = true
 
 # ===== KV namespaces =====
-# ВАЖЛИВО: впиши свій реальний KV id (див. Cloudflare Dashboard → Workers KV → Namespace → Details)
+# ВАЖЛИВО: сюди ВСТАВ свій реальний KV namespace ID (UUID)
 [[kv_namespaces]]
-binding = "LIKES_KV"                 # має збігатися з Env.LIKES_KV у src/config.ts
-id = "<PUT-YOUR-KV-ID-HERE>"         # ⚠️ заміни на справжній UUID
-#preview_id = "<опційно: той самий id>"
+binding = "LIKES_KV"                # має збігатися з Env.LIKES_KV у коді
+id      = "<ВСТАВ-СВІЙ-REAL-KV-ID>"
 
 # ===== Змінні оточення (vars) =====
-# BOT_TOKEN задаємо як secret (щоб не світити у репо).
 [vars]
 API_BASE_URL = "https://api.telegram.org"
-OWNER_ID = "784869835"               # твій чат/юзер id (за чек-листом тримаємо в конфі)
-# Можеш додати інші змінні за потреби
+OWNER_ID     = "784869835"
 
-# ===== Секрети =====
-# Додавай через команду:
-# wrangler secret put BOT_TOKEN
-# і вставляй:
+# BOT_TOKEN зберігаємо як secret (через Dashboard або wrangler secret put)
 # 8405753130:AAGrDrmi-cXMU6A_H_Y0-a9p-gDowMYu2xw
 
-# ===== Розгортання (опційно: роут для production) =====
-# Якщо захочеш прив’язати до своєї доменної зони:
-#[routes]
-#pattern = "bot.your-domain.com/webhook/*"
-#zone_id = "<your-zone-id>"
-
-# ===== Спостереження (нові логи у дашборді) =====
 [observability]
 enabled = true
 
-# ===== Dev налаштування (локально / preview) =====
 [dev]
 port = 8787
 local_protocol = "https"
