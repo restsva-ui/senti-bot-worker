@@ -1,31 +1,22 @@
-// src/index.ts
-import { setEnv } from "./config";
+import { setEnv, type Env } from "./config";
 import { handleUpdate } from "./router";
 
 export default {
-  async fetch(request: Request, env: any): Promise<Response> {
-    try {
-      // ініціалізація оточення на кожний запит
-      setEnv(env);
+  async fetch(request: Request, env: Env): Promise<Response> {
+    setEnv(env); // <- критично: ініціалізуємо CFG.kv, BOT_TOKEN тощо
 
-      const url = new URL(request.url);
+    const url = new URL(request.url);
 
-      // простий health-check
-      if (request.method === "GET" && url.pathname === "/") {
-        return new Response("OK", { status: 200 });
-      }
-
-      // Webhook від Telegram
-      if (request.method === "POST" && url.pathname.startsWith("/webhook")) {
-        const update = await request.json<any>();
-        await handleUpdate(update);
-        return new Response("ok", { status: 200 });
-      }
-
-      return new Response("Not found", { status: 404 });
-    } catch (err: any) {
-      console.error("Worker fatal error:", err);
-      return new Response("Internal error", { status: 500 });
+    if (request.method === "POST" && url.pathname === "/webhook/senti1984") {
+      const update = await request.json();
+      await handleUpdate(update);
+      return new Response("ok");
     }
+
+    if (url.pathname === "/ping") {
+      return new Response("ok");
+    }
+
+    return new Response("Not found", { status: 404 });
   },
-} satisfies ExportedHandler;
+};
