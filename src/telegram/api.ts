@@ -1,76 +1,53 @@
-// src/telegram/api.ts
+// Telegram API helpers (Cloudflare Workers, TypeScript)
 
 import { getEnv } from "../config";
 
-type SendOpts = {
-  reply_markup?: any;
-  parse_mode?: "Markdown" | "MarkdownV2" | "HTML";
-  disable_web_page_preview?: boolean;
-  reply_to_message_id?: number;
-};
-
-function tgUrl(method: string): string {
-  const { API_BASE_URL, BOT_TOKEN } = getEnv();
-  // приклад: https://api.telegram.org/bot<token>/sendMessage
-  return `${API_BASE_URL}/bot${BOT_TOKEN}/${method}`;
+/** Базовий URL типу: https://api.telegram.org/bot<token> */
+function apiBase(): string {
+  const base = getEnv().API_BASE_URL || "https://api.telegram.org";
+  const token = getEnv().BOT_TOKEN;
+  if (!token) throw new Error("BOT_TOKEN missing");
+  return `${base.replace(/\/+$/, "")}/bot${token}`;
 }
 
-async function tgPost<T = any>(method: string, payload: Record<string, any>): Promise<T> {
-  const url = tgUrl(method);
+async function tgFetch<T>(method: string, body: Record<string, unknown>): Promise<T> {
+  const url = `${apiBase()}/${method}`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Telegram ${method} failed: ${res.status} ${txt}`);
+  const data = await res.json<any>();
+  if (!data?.ok) {
+    throw new Error(`Telegram ${method} failed: ${res.status} ${JSON.stringify(data)}`);
   }
-  const json = (await res.json()) as { ok: boolean; result: T };
-  if (!json.ok) throw new Error(`Telegram ${method} responded ok=false`);
-  return json.result;
+  return data.result as T;
 }
 
-// ───────── public API ─────────
-
-export async function sendMessage(
-  chat_id: number,
-  text: string,
-  opts: SendOpts = {}
-) {
-  return tgPost("sendMessage", { chat_id, text, ...opts });
+export async function sendMessage(chat_id: number, text: string, extra: Record<string, unknown> = {}) {
+  return tgFetch("sendMessage", { chat_id, text, parse_mode: "HTML", ...extra });
 }
 
 export async function editMessageText(
   chat_id: number,
   message_id: number,
   text: string,
-  opts: SendOpts = {}
+  extra: Record<string, unknown> = {}
 ) {
-  return tgPost("editMessageText", { chat_id, message_id, text, ...opts });
+  return tgFetch("editMessageText", {
+    chat_id,
+    message_id,
+    text,
+    parse_mode: "HTML",
+    ...extra,
+  });
 }
 
-export async function answerCallbackQuery(
-  text?: string,
-  show_alert = false
-) {
-  // заувага: інлайн-ід ми передаємо з router через update.callback_query.id
-  // але щоб не тягнути весь update сюди, читаємо його з опцій у виклику:
-  // ми домовилися викликати без id — тоді воркер просто проігнорує,
-  // або ж ти можеш додати поле "callback_query_id" коли потрібно.
-  // Для сумісності робимо два варіанти підпису:
-  const payload: Record<string, any> = (globalThis as any).__cbqPayload__ || {};
-  if (!payload.callback_query_id) {
-    // м’яко ігноруємо, щоб не роняти запит
-    return { skipped: true };
-  }
-  if (text) payload.text = text;
-  if (show_alert) payload.show_alert = true;
-  return tgPost("answerCallbackQuery", payload);
-}
-
-// допоміжний хелпер для router.ts: перед викликом answerCallbackQuery
-// виставляємо ID з апдейта (щоб не тягнути залежності сюди)
-export function primeCallbackQueryId(id: string) {
-  (globalThis as any).__cbqPayload__ = { callback_query_id: id };
+/** Обов'язково передаємо callback_query_id */
+export async function answerCallbackQuery(callback_query_id: string, text?: string, show_alert = false) {
+  return tgFetch("answerCallbackQuery", {
+    callback_query_id,
+    ...(text ? { text } : {}),
+    show_alert,
+  });
 }
