@@ -1,78 +1,73 @@
-// src/telegram/api.ts
-import { getEnv } from "../config";
+import { CFG } from "../config";
 
-/** Побудова бази виду https://api.telegram.org/bot<token> */
 function apiBase(): string {
-  const env = getEnv();
-  const base = (env.API_BASE_URL || "https://api.telegram.org").replace(/\/+$/, "");
-  const token = env.BOT_TOKEN;
-  return `${base}/bot${token}`;
+  return CFG.apiBase.replace(/\/+$/, "");
 }
 
-async function tgFetch<T>(method: string, payload: Record<string, unknown>): Promise<T> {
-  const url = `${apiBase()}/${method}`;
+function bot(): string {
+  return `bot${CFG.botToken}`;
+}
+
+async function tgPost(method: string, body: unknown) {
+  const url = `${apiBase()}/${bot()}/${method}`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
   });
-
-  let data: any;
-  try {
-    data = await res.json();
-  } catch {
-    throw new Error(`Telegram ${method}: invalid JSON (${res.status})`);
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Telegram API ${method} failed: ${res.status} ${text}`);
   }
-
-  if (!data.ok) {
-    // не падаємо тихо — лог у воркері допоможе дебажити
-    console.error("Telegram API error", method, data);
-    throw new Error(`Telegram ${method} failed: ${data.description || res.status}`);
-  }
-  return data.result as T;
+  return res.json();
 }
 
-/** Надіслати повідомлення */
 export async function sendMessage(
-  chatId: number,
+  chat_id: number,
   text: string,
-  extra?: Partial<{
-    parse_mode: "Markdown" | "MarkdownV2" | "HTML";
-    reply_markup: unknown;
-    disable_web_page_preview: boolean;
-    disable_notification: boolean;
-  }>
+  extra?: Record<string, unknown>
 ) {
-  const payload = { chat_id: chatId, text, ...(extra || {}) };
-  return tgFetch("sendMessage", payload);
+  return tgPost("sendMessage", { chat_id, text, parse_mode: "HTML", ...extra });
 }
 
-/** Редагувати текст повідомлення */
 export async function editMessageText(
-  chatId: number,
-  messageId: number,
+  chat_id: number,
+  message_id: number,
   text: string,
-  extra?: Partial<{
-    parse_mode: "Markdown" | "MarkdownV2" | "HTML";
-    reply_markup: unknown;
-    disable_web_page_preview: boolean;
-  }>
+  extra?: Record<string, unknown>
 ) {
-  const payload = { chat_id: chatId, message_id: messageId, text, ...(extra || {}) };
-  return tgFetch("editMessageText", payload);
+  return tgPost("editMessageText", {
+    chat_id,
+    message_id,
+    text,
+    parse_mode: "HTML",
+    ...extra,
+  });
 }
 
-/**
- * answerCallbackQuery — «best-effort»:
- * якщо id не передано (твоя поточна router-логіка інколи не має його під рукою),
- * просто нічого не робимо, щоб не ламати потік.
- */
-export async function answerCallbackQuery(text?: string, callbackQueryId?: string) {
-  if (!callbackQueryId) {
-    // Немає id — безпечний no-op
-    return;
-  }
-  const payload: Record<string, unknown> = { callback_query_id: callbackQueryId };
-  if (text) payload.text = text;
-  return tgFetch("answerCallbackQuery", payload);
+export async function answerCallbackQuery(
+  text?: string,
+  show_alert = false
+) {
+  return tgPost("answerCallbackQuery", {
+    // telegram сам підставляє callback_query_id через webhook, але
+    // у Workers ми передаємо його з router (див. handleUpdate)
+    callback_query_id: (globalThis as any).__cb_id,
+    text,
+    show_alert,
+  });
+}
+
+export async function setMyCommands() {
+  // не обов'язково, але корисно
+  const commands = [
+    { command: "start", description: "Запуск і привітання" },
+    { command: "ping", description: "Перевірка живості бота" },
+    { command: "menu", description: "Головне меню" },
+    { command: "likepanel", description: "Панель лайків" },
+    { command: "help", description: "Довідка" },
+    { command: "kvtest", description: "Діагностика KV" },
+    { command: "resetlikes", description: "Скинути лічильники лайків" },
+  ];
+  return tgPost("setMyCommands", { commands });
 }
