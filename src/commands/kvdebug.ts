@@ -1,73 +1,107 @@
 // src/commands/kvdebug.ts
+
 import { getEnv } from "../config";
 import { sendMessage } from "../telegram/api";
 
-/** /kvtest — діагностика KV */
+const COUNTS_KEY = "likes:counts";
+const USER_PREFIX = "likes:user:";
+
+type Counts = { like: number; dislike: number };
+
+// Допоміжне: безпечно прочитати лічильники
+async function readCounts(kv: KVNamespace): Promise<Counts> {
+  try {
+    const raw = await kv.get(COUNTS_KEY);
+    if (!raw) return { like: 0, dislike: 0 };
+    const j = JSON.parse(raw) as Partial<Counts>;
+    return {
+      like: Number(j.like ?? 0),
+      dislike: Number(j.dislike ?? 0),
+    };
+  } catch {
+    return { like: 0, dislike: 0 };
+  }
+}
+
+// Допоміжне: записати лічильники
+async function writeCounts(kv: KVNamespace, c: Counts) {
+  await kv.put(COUNTS_KEY, JSON.stringify(c));
+}
+
+/**
+ * /kvtest — показує статус прив’язки LIKES_KV, поточні лічильники
+ * та приклади ключів користувачів, що голосували
+ */
 export async function cmdKvTest(chatId: number) {
   const env = getEnv();
 
-  if (!env.KV) {
-    await sendMessage(chatId, "❌ KV не прив'язаний");
+  if (!env.LIKES_KV) {
+    await sendMessage(chatId, "❌ KV не прив'язаний (LIKES_KV)");
     return;
   }
 
-  // статус
-  let status = "LIKES_KV: OK";
-  try {
-    await env.KV.put("test_key", "hello from kv");
-  } catch {
-    status = "LIKES_KV: ❌";
-  }
+  const kv = env.LIKES_KV;
+  const counts = await readCounts(kv);
 
-  // лічильники
-  let like = 0, dislike = 0;
-  try {
-    const raw = await env.KV.get("likes:counts");
-    if (raw) {
-      const parsed = JSON.parse(raw) as { like?: number; dislike?: number };
-      like = Number(parsed.like ?? 0);
-      dislike = Number(parsed.dislike ?? 0);
+  // Зберемо кілька прикладів ключів користувачів
+  const examples: string[] = [];
+  let cursor: string | undefined = undefined;
+  do {
+    const page = await kv.list({ prefix: USER_PREFIX, cursor });
+    for (const k of page.keys) {
+      if (examples.length < 3) examples.push(k.name);
     }
-  } catch {}
+    cursor = page.list_complete ? undefined : page.cursor;
+    // досить однієї-двох сторінок для прев’ю
+  } while (cursor && examples.length < 3);
 
-  // скільки ключів користувачів
-  let usersExample = "—";
-  let totalUserKeys = 0;
-  try {
-    const list = await env.KV.list({ prefix: "likes:user:" });
-    totalUserKeys = list.keys.length;
-    if (list.keys[0]) usersExample = list.keys[0].name;
-  } catch {}
+  const votersInfo =
+    examples.length === 0
+      ? "нема прикладів"
+      : examples.map((k) => k.replace(USER_PREFIX, "")).join(", ");
 
   const text =
     `KV статус\n` +
-    `${status}\n\n` +
+    `LIKES_KV: OK\n\n` +
     `Лічильники\n` +
-    `👍 like: ${like}\n` +
-    `👎 dislike: ${dislike}\n\n` +
-    `Користувачі з голосом\n` +
-    `всього ключів: ${totalUserKeys}\n` +
-    `приклади:\n` +
-    `${usersExample}`;
+    `👍 like: ${counts.like}\n` +
+    `👎 dislike: ${counts.dislike}\n\n` +
+    `Користувачі з голосом (приклади): ${votersInfo}`;
 
   await sendMessage(chatId, text);
 }
 
-/** /resetlikes — скинути сумарні лічильники (тільки OWNER) */
+/**
+ * /resetlikes — скидає лічильники та всі індивідуальні голоси
+ * (видаляє ключі з префіксом likes:user:)
+ */
 export async function cmdResetLikes(chatId: number) {
   const env = getEnv();
-  const isOwner = String(chatId) === String(env.OWNER_ID);
 
-  if (!isOwner) {
-    await sendMessage(chatId, "⛔ Лише власник може виконати цю команду.");
-    return;
-  }
-  if (!env.KV) {
-    await sendMessage(chatId, "❌ KV не прив'язаний");
+  if (!env.LIKES_KV) {
+    await sendMessage(chatId, "❌ KV не прив'язаний (LIKES_KV)");
     return;
   }
 
-  // Скидаємо лише агрегований лічильник, юзерські голоси не чіпаємо
-  await env.KV.delete("likes:counts");
-  await sendMessage(chatId, "🔄 Лічильники скинуто: 👍 0 | 👎 0");
+  const kv = env.LIKES_KV;
+
+  // 1) Скинути загальні лічильники
+  await writeCounts(kv, { like: 0, dislike: 0 });
+
+  // 2) Видалити усі голоси користувачів (пагінація)
+  let deleted = 0;
+  let cursor: string | undefined = undefined;
+  do {
+    const page = await kv.list({ prefix: USER_PREFIX, cursor });
+    for (const k of page.keys) {
+      await kv.delete(k.name);
+      deleted++;
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+
+  await sendMessage(
+    chatId,
+    `✅ Скинуто лічильники (👍0 | 👎0) та видалено голосів: ${deleted}`
+  );
 }
