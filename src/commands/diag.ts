@@ -1,27 +1,46 @@
-import { sendMessage } from "../telegram/api";
+// src/commands/diag.ts
 import { CFG } from "../config";
-
-function flag(ok: boolean | undefined) {
-  return ok ? "✅" : "❌";
-}
+import { sendMessage } from "../telegram/api";
 
 export async function diag(chatId: number) {
-  const lines = [
-    "🧪 Діагностика Senti",
-    "",
-    `Telegram API base: ${CFG.API_BASE_URL}`,
-    `BOT_TOKEN: ${flag(!!CFG.BOT_TOKEN)}`,
-    "",
-    "🔌 Моделі:",
-    `OpenRouter key: ${flag(!!CFG.OPENROUTER_API_KEY)}`,
-    `OpenRouter model: ${CFG.OPENROUTER_MODEL ?? "–"}`,
-    `OpenRouter vision: ${CFG.OPENROUTER_MODEL_VISION ?? "–"}`,
-    "",
-    "⚙️ Інше:",
-    `CF AI Gateway: ${flag(!!CFG.CF_AI_GATEWAY_BASE)}`,
-    `OWNER_ID: ${CFG.OWNER_ID ?? "–"}`,
-    `KV STATE: ${flag(!!CFG.STATE)}`,
-  ].join("\n");
+  const lines: string[] = [];
 
-  await sendMessage(chatId, lines);
+  lines.push("🧪 *Діагностика Senti*");
+
+  // TG
+  lines.push("");
+  lines.push(`Telegram API base: ${CFG.apiBase()}`);
+  lines.push(`BOT_TOKEN: ${CFG.botToken() ? "✅" : "❌"}`);
+
+  // Models
+  lines.push("");
+  lines.push("🎙 *Моделі:*");
+  const orKeyOk = !!CFG.openrouterKey();
+  lines.push(`OpenRouter key: ${orKeyOk ? "✅" : "❌"}`);
+  lines.push(`OpenRouter model: ${CFG.openrouterModel()}`);
+  lines.push(`OpenRouter vision: ${CFG.openrouterVisionModel()}`);
+
+  // Other
+  lines.push("");
+  lines.push("⚙️ *Інше:*");
+  lines.push(`CF AI Gateway: ${CFG.cfAIGatewayBase() ? "✅" : "❌"}`);
+  lines.push(`OWNER_ID: ${CFG.ownerId() ?? "—"}`);
+
+  // --- KV healthcheck (robust) ---
+  let kvState = "❌";
+  try {
+    const kv = CFG.kv();
+    if (kv) {
+      const testKey = "__senti_kv_health__";
+      const stamp = Date.now().toString();
+      await kv.put(testKey, stamp, { expirationTtl: 60 });
+      const got = await kv.get(testKey);
+      if (got === stamp) kvState = "✅";
+    }
+  } catch (_e) {
+    kvState = "❌";
+  }
+  lines.push(`KV STATE: ${kvState}`);
+
+  await sendMessage(chatId, lines.join("\n"), { parse_mode: "Markdown" });
 }
