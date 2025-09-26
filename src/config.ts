@@ -1,93 +1,63 @@
-// src/config.ts
-
-/**
- * Централізоване читання ENV у Cloudflare Worker.
- * router.ts викликає setEnv(env) на кожен запит.
- */
+// Централізована робота з ENV + сумісність зі старими викликами CFG.apiBase()
 
 export type Env = {
-  // Telegram
-  API_BASE_URL: string;   // напр. "https://api.telegram.org"
+  API_BASE_URL: string;           // наприклад: https://api.telegram.org
   BOT_TOKEN: string;
 
-  // Контроль доступу
-  OWNER_ID?: string;
-  PREMIUM_CODE?: string;
+  // опційні інтеграції
+  CF_AI_GATEWAY_BASE?: string;
 
-  // LLM провайдери (опційні)
-  AI_PROVIDER?: "auto" | "groq" | "deepseek" | "gemini" | "openrouter";
-  GROQ_API_KEY?: string;
-  DEEPSEEK_API_KEY?: string;
-  GEMINI_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
   OPENROUTER_MODEL?: string;
   OPENROUTER_MODEL_VISION?: string;
-  CF_AI_GATEWAY_BASE?: string;
 
-  // Інші сервіси (за бажанням)
-  REDIS_URL?: string;
-  REDIS_TOKEN?: string;
-  CLOUDFLARE_API_TOKEN?: string; // виправлена назва
+  OWNER_ID?: string;
+  PREMIUM_CODE?: string;
+
+  // опційно для лічильників/стану
+  STATE?: KVNamespace;
 };
 
-// Поточний ENV (в модулі)
-let CURRENT_ENV: Env | null = null;
+let _env: Env | null = null;
 
 export function setEnv(env: Env) {
-  CURRENT_ENV = env;
-  (globalThis as any).__ENV = env; // для доступу з інших модулів
+  _env = env;
 }
 
-export function env(): Env {
-  if (!CURRENT_ENV) {
-    const g = (globalThis as any).__ENV as Env | undefined;
-    if (g) CURRENT_ENV = g;
-    else throw new Error("ENV is not initialized. Call setEnv(env) first.");
+function need(name: keyof Env): string {
+  const v = (_env as any)?.[name];
+  if (!v || typeof v !== "string") {
+    throw new Error(`Missing required env: ${String(name)}`);
   }
-  return CURRENT_ENV!;
+  return v;
 }
 
-/** СУМІСНІСТЬ: старі модулі можуть імпортувати getEnv() */
-export function getEnv(): Env {
-  return env();
+function opt(name: keyof Env): string | undefined {
+  const v = (_env as any)?.[name];
+  return typeof v === "string" && v.length ? v : undefined;
 }
 
-/** Утиліти */
-export type TG = { token: string; apiBase: string };
+// Основний об'єкт конфігурації (getters читають із збереженого env)
+export const CFG: any = {
+  get API_BASE_URL(): string { return need("API_BASE_URL"); },
+  get BOT_TOKEN(): string { return need("BOT_TOKEN"); },
 
-export const CFG = {
-  get tg(): TG {
-    const e = env();
-    const token = e.BOT_TOKEN;
-    if (!token) throw new Error("BOT_TOKEN is missing");
-    const apiBase = e.API_BASE_URL || "https://api.telegram.org";
-    return { token, apiBase };
-  },
+  get CF_AI_GATEWAY_BASE(): string | undefined { return opt("CF_AI_GATEWAY_BASE"); },
 
-  get ownerId(): string | undefined {
-    const id = env().OWNER_ID;
-    return id ? String(id) : undefined;
-  },
+  get OPENROUTER_API_KEY(): string | undefined { return opt("OPENROUTER_API_KEY"); },
+  get OPENROUTER_MODEL(): string | undefined { return opt("OPENROUTER_MODEL"); },
+  get OPENROUTER_MODEL_VISION(): string | undefined { return opt("OPENROUTER_MODEL_VISION"); },
 
-  get premiumCode(): string | undefined {
-    return env().PREMIUM_CODE;
-  },
+  get OWNER_ID(): string | undefined { return opt("OWNER_ID"); },
+  get PREMIUM_CODE(): string | undefined { return opt("PREMIUM_CODE"); },
 
-  get llm() {
-    const e = env();
-    return {
-      provider: (e.AI_PROVIDER || "auto") as NonNullable<Env["AI_PROVIDER"]>,
-      groqKey: e.GROQ_API_KEY,
-      deepseekKey: e.DEEPSEEK_API_KEY,
-      geminiKey: e.GEMINI_API_KEY,
-      openrouterKey: e.OPENROUTER_API_KEY,
-      openrouterModel: e.OPENROUTER_MODEL,
-      openrouterVisionModel: e.OPENROUTER_MODEL_VISION,
-      gatewayBase: e.CF_AI_GATEWAY_BASE,
-    };
-  },
-
-  get raw(): Env {
-    return env();
-  },
+  get STATE(): KVNamespace | undefined { return (_env as any)?.STATE as KVNamespace | undefined },
 };
+
+// ❗️Сумісність зі старою логікою: деінде могли викликати CFG.apiBase()
+CFG.apiBase = () => CFG.API_BASE_URL;
+
+// на випадок, якщо десь потрібен сирий env
+export function getEnv(): Env | null {
+  return _env;
+}
