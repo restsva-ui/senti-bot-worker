@@ -4,10 +4,10 @@ import { CFG } from "./config";
 import {
   sendMessage,
   editMessageText,
-  answerCallbackQuery, // має існувати в src/telegram/api.ts
+  answerCallbackQuery, // експорт має бути в src/telegram/api.ts
 } from "./telegram/api";
 
-// ================= KV & Likes =================
+// ===================== KV & Likes =====================
 
 type Counts = { like: number; dislike: number };
 
@@ -19,7 +19,10 @@ async function getCounts(): Promise<Counts> {
     const raw = await CFG.kv.get(COUNTS_KEY);
     if (!raw) return { like: 0, dislike: 0 };
     const parsed = JSON.parse(raw) as Partial<Counts>;
-    return { like: Number(parsed.like ?? 0), dislike: Number(parsed.dislike ?? 0) };
+    return {
+      like: Number(parsed.like ?? 0),
+      dislike: Number(parsed.dislike ?? 0),
+    };
   } catch {
     return { like: 0, dislike: 0 };
   }
@@ -30,13 +33,16 @@ async function setCounts(c: Counts) {
 }
 
 /** Один голос від користувача з можливістю перемикати 👍↔️👎 */
-async function registerVote(userId: number, choice: "like" | "dislike"): Promise<Counts> {
+async function registerVote(
+  userId: number,
+  choice: "like" | "dislike"
+): Promise<Counts> {
   const prev = await CFG.kv.get(USER_KEY(userId));
   const counts = await getCounts();
 
   if (prev === choice) return counts;
 
-  // зняти попередній
+  // зняти попередній голос
   if (prev === "like") counts.like = Math.max(0, counts.like - 1);
   if (prev === "dislike") counts.dislike = Math.max(0, counts.dislike - 1);
 
@@ -49,7 +55,7 @@ async function registerVote(userId: number, choice: "like" | "dislike"): Promise
   return counts;
 }
 
-// ================= UI helpers =================
+// ===================== UI helpers =====================
 
 function mainMenuKeyboard() {
   return {
@@ -63,15 +69,20 @@ function mainMenuKeyboard() {
 
 function likesKeyboard() {
   return {
-    inline_keyboard: [[{ text: "👍", callback_data: "vote:like" }, { text: "👎", callback_data: "vote:dislike" }]],
+    inline_keyboard: [
+      [
+        { text: "👍", callback_data: "vote:like" },
+        { text: "👎", callback_data: "vote:dislike" },
+      ],
+    ],
   };
 }
 
 function likesCaption(c: Counts) {
-  return `Оцінки: 👍 ${c.like} | 👎 ${c.dislike}`;
+  return "Оцінки: 👍 " + c.like + " | 👎 " + c.dislike;
 }
 
-// ================= Commands =================
+// ===================== Commands =====================
 
 async function cmdStart(chatId: number) {
   await sendMessage(
@@ -96,19 +107,25 @@ async function cmdPing(chatId: number) {
 }
 
 async function cmdMenu(chatId: number) {
-  await sendMessage(chatId, "Головне меню:", { reply_markup: mainMenuKeyboard() });
+  await sendMessage(chatId, "Головне меню:", {
+    reply_markup: mainMenuKeyboard(),
+  });
 }
 
 async function cmdLikePanel(chatId: number) {
   const counts = await getCounts();
-  await sendMessage(chatId, likesCaption(counts), { reply_markup: likesKeyboard() });
+  await sendMessage(chatId, likesCaption(counts), {
+    reply_markup: likesKeyboard(),
+  });
 }
 
-// ================= Callback handlers =================
+// ===================== Callback handlers =====================
 
 async function cbMenu(chatId: number, messageId: number, data: string) {
   if (data === "menu:ping") {
-    await editMessageText(chatId, messageId, "pong ✅", { reply_markup: mainMenuKeyboard() });
+    await editMessageText(chatId, messageId, "pong ✅", {
+      reply_markup: mainMenuKeyboard(),
+    });
     return;
   }
   if (data === "menu:likepanel") {
@@ -126,7 +143,9 @@ async function cbMenu(chatId: number, messageId: number, data: string) {
       "/menu — головне меню\n" +
       "/likepanel — панель лайків\n" +
       "/help — довідка";
-    await editMessageText(chatId, messageId, text, { reply_markup: mainMenuKeyboard() });
+    await editMessageText(chatId, messageId, text, {
+      reply_markup: mainMenuKeyboard(),
+    });
     return;
   }
   await editMessageText(chatId, messageId, "🤷‍♂️ Невідома дія кнопки.", {
@@ -142,15 +161,17 @@ async function cbVote(
 ) {
   const choice = data === "vote:like" ? "like" : "dislike";
   const counts = await registerVote(fromId, choice);
-  await answerCallbackQuery("✅ Зараховано"); // сигнатура має бути в api.ts
-  await editMessageText(chatId, messageId, likesCaption(counts), { reply_markup: likesKeyboard() });
+  await answerCallbackQuery("✅ Зараховано");
+  await editMessageText(chatId, messageId, likesCaption(counts), {
+    reply_markup: likesKeyboard(),
+  });
 }
 
-// ================= Entry =================
+// ===================== Entry point =====================
 
 export async function handleUpdate(update: any) {
   try {
-    // команди
+    // повідомлення / команди
     if (update.message) {
       const msg = update.message;
       const chatId: number = msg.chat?.id;
@@ -165,7 +186,7 @@ export async function handleUpdate(update: any) {
       return cmdHelp(chatId);
     }
 
-    // колбеки
+    // callback_query
     if (update.callback_query) {
       const cb = update.callback_query;
       const fromId: number = cb.from?.id;
@@ -180,11 +201,13 @@ export async function handleUpdate(update: any) {
 
       if (data.startsWith("menu:")) {
         await answerCallbackQuery();
-        return cbMenu(chatId, messageId, data);
+        await cbMenu(chatId, messageId, data);
+        return;
       }
 
       if (data === "vote:like" || data === "vote:dislike") {
-        return cbVote(fromId, chatId, messageId, data as "vote:like" | "vote:dislike");
+        await cbVote(fromId, chatId, messageId, data);
+        return;
       }
 
       await answerCallbackQuery("🤷‍♂️ Невідома дія");
@@ -194,4 +217,3 @@ export async function handleUpdate(update: any) {
     console.error("handleUpdate fatal:", (err as Error).message || err);
   }
 }
-```0
