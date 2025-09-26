@@ -1,128 +1,199 @@
 // src/router.ts
-import { setEnv, type Env } from "./config";
-import { sendMessage, answerCallbackQuery } from "./telegram/api";
+import { CFG, getEnv } from "./config";
+import { sendMessage, editMessageText, answerCallback } from "./telegram/api";
 
-import { cmdStart as start } from "./commands/start";
-import { cmdPing as ping } from "./commands/ping";
-import { menu } from "./commands/menu";
-import { likepanel, handleLikeCallback } from "./commands/likepanel";
-import { help } from "./commands/help";
-import { diag } from "./commands/diag";              // ⚙️ діагностика
-import { handleKVGet, handleKVList } from "./commands/kvdebug"; // 🧰 KV debug
+// простий тип апдейту (достатньо для цих команд)
+type TgUpdate = {
+  message?: {
+    message_id: number;
+    chat: { id: number };
+    text?: string;
+    from?: { id: number; username?: string };
+  };
+  callback_query?: {
+    id: string;
+    data?: string;
+    message?: {
+      message_id: number;
+      chat: { id: number };
+    };
+    from: { id: number; username?: string };
+  };
+};
 
-// --- Мінімальні типи Telegram --------------------------
-type TGUser = { id: number };
-type TGChat = { id: number };
-type TGMessage = { message_id: number; from?: TGUser; chat: TGChat; text?: string };
-type TGCallbackQuery = { id: string; from: TGUser; message?: TGMessage; data?: string };
-type TGUpdate = { update_id: number; message?: TGMessage; callback_query?: TGCallbackQuery };
-
-// --- Хелпер для виділення команди ----------------------
-function extractCommand(text?: string): string | null {
-  if (!text || !text.startsWith("/")) return null;
-  return text.trim().split(/\s+/)[0].toLowerCase();
+function likeKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "👍", callback_data: "like" }, { text: "👎", callback_data: "dislike" }],
+    ],
+  };
 }
 
-// --- Основний обробник оновлень ------------------------
-async function handleUpdate(update: TGUpdate): Promise<Response> {
-  try {
-    // 1) Команди в текстових повідомленнях
-    if (update.message) {
-      const chatId = update.message.chat.id;
-      const text = update.message.text ?? "";
-      const cmd = extractCommand(text);
+async function readCounters() {
+  const kv = CFG.kv();
+  if (!kv) return { likes: 0, dislikes: 0 };
+  const [l, d] = await Promise.all([
+    kv.get("likes_total"),
+    kv.get("dislikes_total"),
+  ]);
+  return {
+    likes: Number(l ?? 0),
+    dislikes: Number(d ?? 0),
+  };
+}
 
-      if (cmd) {
-        switch (cmd) {
-          case "/start":
-            await start(chatId);
-            break;
-          case "/ping":
-            await ping(chatId);
-            break;
-          case "/menu":
-            await menu(chatId);
-            break;
-          case "/likepanel":
-            await likepanel(chatId);
-            break;
-          case "/help":
-            await help(chatId);
-            break;
-          case "/diag":
-            await diag(chatId);
-            break;
+async function writeCounters(likes: number, dislikes: number) {
+  const kv = CFG.kv();
+  if (!kv) return;
+  await kv.put("likes_total", String(likes));
+  await kv.put("dislikes_total", String(dislikes));
+}
 
-          // 🧰 Службові команди для перевірки KV (з чек-листа)
-          case "/kvlist":
-            await handleKVList(chatId);
-            break;
-          case "/kvget": {
-            const [, key] = text.split(/\s+/, 2);
-            if (!key) {
-              await sendMessage(chatId, "❗ Використання: /kvget <ключ>");
-            } else {
-              await handleKVGet(chatId, key);
-            }
-            break;
-          }
+async function getUserVote(userId: number): Promise<"like" | "dislike" | null> {
+  const kv = CFG.kv();
+  if (!kv) return null;
+  return (await kv.get(`vote_${userId}`)) as any;
+}
 
-          default:
-            // Невідома команда — підкажемо /help
-            await sendMessage(chatId, "Невідома команда. Напишіть /help");
-        }
-      }
-    }
+async function setUserVote(userId: number, v: "like" | "dislike" | null) {
+  const kv = CFG.kv();
+  if (!kv) return;
+  const key = `vote_${userId}`;
+  if (v) await kv.put(key, v);
+  else await kv.delete(key);
+}
 
-    // 2) Обробка callback-кнопок
-    if (update.callback_query) {
-      const cq = update.callback_query;
+async function statsLine() {
+  const { likes, dislikes } = await readCounters();
+  return `Оцінки: 👍 ${likes} | 👎 ${dislikes}`;
+}
 
-      // прибрати «loading…» у Telegram
-      await answerCallbackQuery(cq.id).catch(() => {});
+async function handleStart(chatId: number) {
+  await sendMessage(chatId, "👋 Привіт! Бот підключено до Cloudflare Workers. Напишіть /help для довідки.");
+}
 
-      // Лайки/дизлайки (повертає true, якщо оброблено)
-      if (await handleLikeCallback(update)) {
-        return new Response(JSON.stringify({ ok: true }), {
-          headers: { "content-type": "application/json" },
-          status: 200,
-        });
-      }
+async function handlePing(chatId: number) {
+  await sendMessage(chatId, "pong ✅");
+}
 
-      // Якщо дійшли сюди — невідома дія кнопки
-      const chatId = cq.message?.chat.id;
-      if (chatId) {
-        await sendMessage(chatId, "🤷‍♂️ Невідома дія кнопки.");
-      }
-    }
+async function handleHelp(chatId: number) {
+  await sendMessage(
+    chatId,
+    [
+      "📑 Доступні команди:",
+      "/start — запуск і привітання",
+      "/ping — перевірка живості бота",
+      "/menu — головне меню",
+      "/likepanel — панель лайків",
+      "/help — довідка",
+    ].join("\n"),
+  );
+}
 
-    return new Response(JSON.stringify({ ok: true }), {
-      headers: { "content-type": "application/json" },
-      status: 200,
-    });
-  } catch (err) {
-    // fail-safe, щоб Telegram не відключив вебхук
-    console.error("handleUpdate fatal:", err);
-    return new Response(JSON.stringify({ ok: false }), {
-      headers: { "content-type": "application/json" },
-      status: 200,
-    });
+async function handleMenu(chatId: number) {
+  await sendMessage(chatId, "Головне меню:", {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🔁 Ping", callback_data: "menu_ping" }],
+        [{ text: "👍 Лайки", callback_data: "menu_likepanel" }],
+        [{ text: "ℹ️ Допомога", callback_data: "menu_help" }],
+      ],
+    },
+  });
+}
+
+async function handleLikePanel(chatId: number) {
+  const line = await statsLine();
+  await sendMessage(chatId, line, { reply_markup: likeKeyboard() });
+}
+
+async function handleMenuCallback(data: string, q: TgUpdate["callback_query"]) {
+  if (!q?.message) return;
+  const chatId = q.message.chat.id;
+  switch (data) {
+    case "menu_ping":
+      await answerCallback(q.id);
+      await handlePing(chatId);
+      break;
+    case "menu_likepanel":
+      await answerCallback(q.id);
+      await handleLikePanel(chatId);
+      break;
+    case "menu_help":
+      await answerCallback(q.id);
+      await handleHelp(chatId);
+      break;
   }
 }
 
-// --- Фабрика для src/index.ts --------------------------
-export function makeRouter() {
-  return {
-    async handle(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
-      setEnv(env); // ініціалізуємо ENV для всього коду
+async function handleVote(action: "like" | "dislike", q: TgUpdate["callback_query"]) {
+  if (!q?.message) return;
+  const chatId = q.message.chat.id;
+  const msgId = q.message.message_id;
+  const userId = q.from.id;
 
-      if (request.method === "POST") {
-        const update = (await request.json().catch(() => ({}))) as TGUpdate;
-        return handleUpdate(update);
-      }
+  let { likes, dislikes } = await readCounters();
+  const prev = await getUserVote(userId);
 
-      // Простий healthcheck на GET
-      return new Response("OK", { status: 200 });
-    },
-  };
+  // політика: від 1 користувача лише 1 голос.
+  if (prev === action) {
+    await answerCallback(q.id, "Ви вже проголосували так само 🙂");
+    return;
+  }
+
+  // якщо міняє сторони — віднімаємо попередній голос
+  if (prev === "like") likes = Math.max(0, likes - 1);
+  if (prev === "dislike") dislikes = Math.max(0, dislikes - 1);
+
+  // ставимо новий голос
+  if (action === "like") likes += 1;
+  else dislikes += 1;
+
+  await setUserVote(userId, action);
+  await writeCounters(likes, dislikes);
+
+  const text = `Оцінки: 👍 ${likes} | 👎 ${dislikes}`;
+  await editMessageText(chatId, msgId, text, { reply_markup: likeKeyboard() });
+  await answerCallback(q.id, "Дякую за оцінку!");
+}
+
+export async function handleUpdate(update: TgUpdate) {
+  // гарантуємо, що env ініціалізований
+  getEnv();
+
+  if (update.message?.text) {
+    const chatId = update.message.chat.id;
+    const text = update.message.text.trim();
+
+    if (text.startsWith("/start")) return handleStart(chatId);
+    if (text.startsWith("/ping")) return handlePing(chatId);
+    if (text.startsWith("/help")) return handleHelp(chatId);
+    if (text.startsWith("/menu")) return handleMenu(chatId);
+    if (text.startsWith("/likepanel")) return handleLikePanel(chatId);
+
+    // службова: перевірка KV-стану
+    if (text.startsWith("/kv_state")) {
+      const kv = CFG.kv();
+      await sendMessage(chatId, `KV STATE: ${kv ? "✅" : "❌"}`);
+      return;
+    }
+
+    // службова: список ключів
+    if (text.startsWith("/kv_list")) {
+      const kv = CFG.kv();
+      if (!kv) return sendMessage(chatId, "❌ KV не прив'язаний");
+      const list = await kv.list({ limit: 20 });
+      const out = list.keys.length
+        ? "🔑 Ключі:\n" + list.keys.map(k => `• ${k.name}`).join("\n")
+        : "📭 KV порожній";
+      return sendMessage(chatId, out);
+    }
+  }
+
+  if (update.callback_query) {
+    const data = update.callback_query.data || "";
+    if (data.startsWith("menu_")) return handleMenuCallback(data, update.callback_query);
+    if (data === "like" || data === "dislike")
+      return handleVote(data, update.callback_query);
+  }
 }
