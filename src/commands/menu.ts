@@ -1,4 +1,3 @@
-// Просте інлайн-меню — без сторонніх імпортів
 import { sendMessage } from "../telegram/api";
 
 export async function menu(chatId: number) {
@@ -9,6 +8,5 @@ export async function menu(chatId: number) {
       [{ text: "ℹ️ Допомога", callback_data: "cb_help" }],
     ],
   };
-
   await sendMessage(chatId, "Головне меню:", replyMarkup);
 }
