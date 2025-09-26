@@ -1,107 +1,148 @@
 // src/commands/kvdebug.ts
+// Усі службові команди з KV: /kvtest, /resetlikes, /stats, /export
 
-import { getEnv } from "../config";
+import { getEnv, type Env } from "../config";
 import { sendMessage } from "../telegram/api";
+
+type Counts = { like: number; dislike: number };
 
 const COUNTS_KEY = "likes:counts";
 const USER_PREFIX = "likes:user:";
 
-type Counts = { like: number; dislike: number };
-
-// Допоміжне: безпечно прочитати лічильники
 async function readCounts(kv: KVNamespace): Promise<Counts> {
   try {
     const raw = await kv.get(COUNTS_KEY);
     if (!raw) return { like: 0, dislike: 0 };
-    const j = JSON.parse(raw) as Partial<Counts>;
+    const parsed = JSON.parse(raw) as Partial<Counts>;
     return {
-      like: Number(j.like ?? 0),
-      dislike: Number(j.dislike ?? 0),
+      like: Number(parsed.like ?? 0),
+      dislike: Number(parsed.dislike ?? 0),
     };
   } catch {
     return { like: 0, dislike: 0 };
   }
 }
 
-// Допоміжне: записати лічильники
-async function writeCounts(kv: KVNamespace, c: Counts) {
-  await kv.put(COUNTS_KEY, JSON.stringify(c));
-}
-
-/**
- * /kvtest — показує статус прив’язки LIKES_KV, поточні лічильники
- * та приклади ключів користувачів, що голосували
- */
-export async function cmdKvTest(chatId: number) {
+export async function cmdKvList(chatId: number) {
   const env = getEnv();
-
-  if (!env.LIKES_KV) {
-    await sendMessage(chatId, "❌ KV не прив'язаний (LIKES_KV)");
+  const kv = env.KV;
+  if (!kv) {
+    await sendMessage(chatId, "❌ KV не прив'язаний");
     return;
   }
 
-  const kv = env.LIKES_KV;
   const counts = await readCounts(kv);
+  const users = await kv.list({ prefix: USER_PREFIX });
 
-  // Зберемо кілька прикладів ключів користувачів
-  const examples: string[] = [];
-  let cursor: string | undefined = undefined;
-  do {
-    const page = await kv.list({ prefix: USER_PREFIX, cursor });
-    for (const k of page.keys) {
-      if (examples.length < 3) examples.push(k.name);
-    }
-    cursor = page.list_complete ? undefined : page.cursor;
-    // досить однієї-двох сторінок для прев’ю
-  } while (cursor && examples.length < 3);
-
-  const votersInfo =
-    examples.length === 0
-      ? "нема прикладів"
-      : examples.map((k) => k.replace(USER_PREFIX, "")).join(", ");
+  const examples =
+    users.keys
+      .slice(0, 5)
+      .map((k) => k.name.replace(USER_PREFIX, "likes:user:"))
+      .join("\n") || "—";
 
   const text =
-    `KV статус\n` +
-    `LIKES_KV: OK\n\n` +
-    `Лічильники\n` +
-    `👍 like: ${counts.like}\n` +
-    `👎 dislike: ${counts.dislike}\n\n` +
-    `Користувачі з голосом (приклади): ${votersInfo}`;
+    `KV статус\nLIKES_KV: OK\n\n` +
+    `Лічильники\n👍 like: ${counts.like}\n👎 dislike: ${counts.dislike}\n\n` +
+    `Користувачі з голосом (приклади):\n${examples}`;
 
   await sendMessage(chatId, text);
 }
 
-/**
- * /resetlikes — скидає лічильники та всі індивідуальні голоси
- * (видаляє ключі з префіксом likes:user:)
- */
 export async function cmdResetLikes(chatId: number) {
   const env = getEnv();
-
-  if (!env.LIKES_KV) {
-    await sendMessage(chatId, "❌ KV не прив'язаний (LIKES_KV)");
+  const kv = env.KV;
+  if (!kv) {
+    await sendMessage(chatId, "❌ KV не прив'язаний");
     return;
   }
 
-  const kv = env.LIKES_KV;
+  // видалити підсумки
+  await kv.delete(COUNTS_KEY);
 
-  // 1) Скинути загальні лічильники
-  await writeCounts(kv, { like: 0, dislike: 0 });
-
-  // 2) Видалити усі голоси користувачів (пагінація)
+  // видалити голоси користувачів
+  const users = await kv.list({ prefix: USER_PREFIX });
   let deleted = 0;
-  let cursor: string | undefined = undefined;
-  do {
-    const page = await kv.list({ prefix: USER_PREFIX, cursor });
-    for (const k of page.keys) {
-      await kv.delete(k.name);
-      deleted++;
-    }
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
+  for (const k of users.keys) {
+    await kv.delete(k.name);
+    deleted++;
+  }
 
   await sendMessage(
     chatId,
     `✅ Скинуто лічильники (👍0 | 👎0) та видалено голосів: ${deleted}`
   );
+}
+
+// ===== Нові команди: /stats і /export (лише OWNER) =====
+
+/** Коротка статистика */
+export async function cmdStats(chatId: number) {
+  const env = getEnv();
+  const kv = env.KV;
+  if (!kv) {
+    await sendMessage(chatId, "❌ KV не прив'язаний");
+    return;
+  }
+
+  const counts = await readCounts(kv);
+  const users = await kv.list({ prefix: USER_PREFIX });
+  const voters = users.keys.length;
+
+  const text =
+    "📊 Статистика лайків\n" +
+    `Усього користувачів з голосом: ${voters}\n` +
+    `👍: ${counts.like} | 👎: ${counts.dislike}\n` +
+    (voters > 0
+      ? `Приклади ключів:\n` +
+        users.keys
+          .slice(0, 5)
+          .map((k) => k.name.replace(USER_PREFIX, "likes:user:"))
+          .join("\n")
+      : "");
+
+  await sendMessage(chatId, text || "Поки що даних немає.");
+}
+
+/** Експорт у компактний JSON (з підрізанням, якщо дуже великий) */
+export async function cmdExport(chatId: number) {
+  const env = getEnv();
+  const kv = env.KV;
+  if (!kv) {
+    await sendMessage(chatId, "❌ KV не прив'язаний");
+    return;
+  }
+
+  const counts = await readCounts(kv);
+  const users = await kv.list({ prefix: USER_PREFIX });
+
+  // Зберемо простий список користувачів і їхній голос
+  const voters: Record<string, "like" | "dislike"> = {};
+  for (const k of users.keys) {
+    const userId = k.name.replace(USER_PREFIX, "");
+    const v = await kv.get(k.name);
+    if (v === "like" || v === "dislike") voters[userId] = v;
+  }
+
+  const payload = {
+    counts,
+    voters_total: Object.keys(voters).length,
+    voters, // може бути великим
+  };
+
+  let json = JSON.stringify(payload);
+  // Telegram обмежує ~4096 символів у повідомленні — залишимо запас
+  const LIMIT = 3800;
+  if (json.length > LIMIT) {
+    // якщо забагато — відріжемо деталі, але залишимо підсумки
+    json = JSON.stringify({
+      counts,
+      voters_total: Object.keys(voters).length,
+      note:
+        "payload скорочено для повідомлення (надто великий). Для повного дампу доведеться надсилати файлом.",
+    });
+  }
+
+  await sendMessage(chatId, "📤 Експорт JSON:\n<pre>" + json + "</pre>", {
+    parse_mode: "HTML",
+  });
 }
