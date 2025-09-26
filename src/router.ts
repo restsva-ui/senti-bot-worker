@@ -5,45 +5,48 @@ import {
   sendMessage,
   editMessageText,
   answerCallbackQuery,
-  primeCallbackQueryId,
 } from "./telegram/api";
 
-// ===================== KV & Likes =====================
-
+// ============ Типи та ключі KV ============
 type Counts = { like: number; dislike: number };
 
 const COUNTS_KEY = "likes:counts";
 const USER_KEY = (id: number) => `likes:user:${id}`;
 
+// ============ Робота з KV ============
 async function getCounts(): Promise<Counts> {
   try {
     const raw = await CFG.kv.get(COUNTS_KEY);
     if (!raw) return { like: 0, dislike: 0 };
-    const parsed = JSON.parse(raw) as Partial<Counts>;
+    const obj = JSON.parse(raw) as Partial<Counts>;
     return {
-      like: Number(parsed.like ?? 0),
-      dislike: Number(parsed.dislike ?? 0),
+      like: Number.isFinite(obj.like as number) ? Number(obj.like) : 0,
+      dislike: Number.isFinite(obj.dislike as number) ? Number(obj.dislike) : 0,
     };
   } catch {
     return { like: 0, dislike: 0 };
   }
 }
 
-async function setCounts(c: Counts) {
+async function setCounts(c: Counts): Promise<void> {
   await CFG.kv.put(COUNTS_KEY, JSON.stringify(c));
 }
 
-/** Один голос від користувача з можливістю перемикати 👍↔️👎 */
+/** Один голос на користувача, з можливістю перемикати 👍↔️👎 */
 async function registerVote(
   userId: number,
   choice: "like" | "dislike"
 ): Promise<Counts> {
-  const prev = await CFG.kv.get(USER_KEY(userId));
+  // читаємо попередній стан користувача
+  const prev = await CFG.kv.get(USER_KEY(userId)); // "like" | "dislike" | null
+
+  // поточні лічильники
   const counts = await getCounts();
 
+  // якщо повторний той же клік — нічого не міняємо
   if (prev === choice) return counts;
 
-  // зняти попередній голос
+  // зняти попередній голос (якщо був)
   if (prev === "like") counts.like = Math.max(0, counts.like - 1);
   if (prev === "dislike") counts.dislike = Math.max(0, counts.dislike - 1);
 
@@ -51,13 +54,14 @@ async function registerVote(
   if (choice === "like") counts.like += 1;
   else counts.dislike += 1;
 
+  // зберегти стан користувача та підсумкові лічильники
   await CFG.kv.put(USER_KEY(userId), choice);
   await setCounts(counts);
+
   return counts;
 }
 
-// ===================== UI helpers =====================
-
+// ============ UI-помічники ============
 function mainMenuKeyboard() {
   return {
     inline_keyboard: [
@@ -83,8 +87,7 @@ function likesCaption(c: Counts) {
   return `Оцінки: 👍 ${c.like} | 👎 ${c.dislike}`;
 }
 
-// ===================== Commands =====================
-
+// ============ Команди ============
 async function cmdStart(chatId: number) {
   await sendMessage(
     chatId,
@@ -120,22 +123,30 @@ async function cmdLikePanel(chatId: number) {
   });
 }
 
-// ===================== Callback handlers =====================
-
-async function cbMenu(chatId: number, messageId: number, data: string) {
+// ============ Обробники callback ============
+async function cbMenu(
+  cbId: string,
+  chatId: number,
+  messageId: number,
+  data: string
+) {
   if (data === "menu:ping") {
+    await answerCallbackQuery(cbId);
     await editMessageText(chatId, messageId, "pong ✅", {
       reply_markup: mainMenuKeyboard(),
     });
     return;
   }
+
   if (data === "menu:likepanel") {
     const counts = await getCounts();
+    await answerCallbackQuery(cbId);
     await editMessageText(chatId, messageId, likesCaption(counts), {
       reply_markup: likesKeyboard(),
     });
     return;
   }
+
   if (data === "menu:help") {
     const text =
       "🧾 Доступні команди:\n" +
@@ -144,17 +155,18 @@ async function cbMenu(chatId: number, messageId: number, data: string) {
       "/menu — головне меню\n" +
       "/likepanel — панель лайків\n" +
       "/help — довідка";
+    await answerCallbackQuery(cbId);
     await editMessageText(chatId, messageId, text, {
       reply_markup: mainMenuKeyboard(),
     });
     return;
   }
-  await editMessageText(chatId, messageId, "🤷‍♂️ Невідома дія кнопки.", {
-    reply_markup: mainMenuKeyboard(),
-  });
+
+  await answerCallbackQuery(cbId, "🤷‍♂️ Невідома дія");
 }
 
 async function cbVote(
+  cbId: string,
   fromId: number,
   chatId: number,
   messageId: number,
@@ -162,17 +174,16 @@ async function cbVote(
 ) {
   const choice = data === "vote:like" ? "like" : "dislike";
   const counts = await registerVote(fromId, choice);
-  await answerCallbackQuery("✅ Зараховано");
+  await answerCallbackQuery(cbId, "✅ Зараховано");
   await editMessageText(chatId, messageId, likesCaption(counts), {
     reply_markup: likesKeyboard(),
   });
 }
 
-// ===================== Entry point =====================
-
+// ============ Точка входу ============
 export async function handleUpdate(update: any) {
   try {
-    // Повідомлення / команди
+    // Текстові повідомлення та команди
     if (update.message) {
       const msg = update.message;
       const chatId: number = msg.chat?.id;
@@ -187,34 +198,31 @@ export async function handleUpdate(update: any) {
       return cmdHelp(chatId);
     }
 
-    // Callback query
+    // Натискання інлайн-кнопок
     if (update.callback_query) {
       const cb = update.callback_query;
-      // важливо для answerCallbackQuery
-      if (cb?.id) primeCallbackQueryId(cb.id);
-
+      const cbId: string = cb.id;
       const fromId: number = cb.from?.id;
       const data: string = cb.data || "";
       const chatId: number | undefined = cb.message?.chat?.id;
       const messageId: number | undefined = cb.message?.message_id;
 
       if (!chatId || !messageId) {
-        await answerCallbackQuery();
+        await answerCallbackQuery(cbId);
         return;
       }
 
       if (data.startsWith("menu:")) {
-        await answerCallbackQuery();
-        await cbMenu(chatId, messageId, data);
+        await cbMenu(cbId, chatId, messageId, data);
         return;
       }
 
       if (data === "vote:like" || data === "vote:dislike") {
-        await cbVote(fromId, chatId, messageId, data);
+        await cbVote(cbId, fromId, chatId, messageId, data);
         return;
       }
 
-      await answerCallbackQuery("🤷‍♂️ Невідома дія");
+      await answerCallbackQuery(cbId, "🤷‍♂️ Невідома дія");
       return;
     }
   } catch (err) {
