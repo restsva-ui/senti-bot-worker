@@ -1,13 +1,18 @@
 // src/router.ts
+
 import { setEnv, type Env } from "./config";
 import { sendMessage, answerCallbackQuery } from "./telegram/api";
+
 import { cmdStart as start } from "./commands/start";
 import { cmdPing as ping } from "./commands/ping";
 import { menu } from "./commands/menu";
 import { likepanel, handleLikeCallback } from "./commands/likepanel";
 import { help } from "./commands/help";
 
-// Типи Telegram (мінімально потрібні)
+// Якщо додаватимеш /ask — просто розкоментуй імпорт і гілку нижче
+// import { cmdAsk } from "./commands/ask";
+
+// Мінімальні типи Telegram
 type TGUser = { id: number };
 type TGChat = { id: number };
 type TGMessage = { message_id: number; from?: TGUser; chat: TGChat; text?: string };
@@ -20,7 +25,7 @@ function extractCommand(text?: string): string | null {
 }
 
 async function handleUpdate(update: TGUpdate): Promise<Response> {
-  // 1) Команди (повідомлення)
+  // 1) Команди (текстові повідомлення)
   if (update.message) {
     const chatId = update.message.chat.id;
     const cmd = extractCommand(update.message.text);
@@ -30,34 +35,42 @@ async function handleUpdate(update: TGUpdate): Promise<Response> {
         case "/start":
           await start(chatId);
           break;
+
         case "/ping":
           await ping(chatId);
           break;
+
         case "/menu":
           await menu(chatId);
           break;
+
         case "/likepanel":
           await likepanel(chatId);
           break;
+
         case "/help":
           await help(chatId);
           break;
+
+        // Для підключення /ask:
+        // case "/ask":
+        //   await cmdAsk((globalThis as any).__ENV as Env, chatId, update.message.text, update.message.from?.id);
+        //   break;
+
         default:
           await sendMessage(chatId, "Невідома команда. Напишіть /help");
       }
     }
   }
 
-  // 2) callback-кнопки
+  // 2) Натискання інлайн-кнопок
   if (update.callback_query) {
     const cq = update.callback_query;
-    const chatId = cq.message?.chat.id;
-    const data = cq.data;
 
-    // перш за все прибираємо "loading…"
+    // прибираємо "loading…" у Telegram
     await answerCallbackQuery(cq.id).catch(() => {});
 
-    // лайки (повертає true, якщо оброблено)
+    // лайки: якщо оброблено — завершуємо
     if (await handleLikeCallback(update)) {
       return new Response(JSON.stringify({ ok: true }), {
         headers: { "content-type": "application/json" },
@@ -65,10 +78,17 @@ async function handleUpdate(update: TGUpdate): Promise<Response> {
       });
     }
 
+    // інші колбеки (за потреби)
+    const chatId = cq.message?.chat.id;
+    const data = cq.data;
     if (chatId && data) {
-      if (data === "cb_ping") await ping(chatId);
-      else if (data === "cb_help") await help(chatId);
-      else await sendMessage(chatId, "🤷‍♂️ Невідома дія кнопки.");
+      if (data === "cb_ping") {
+        await ping(chatId);
+      } else if (data === "cb_help") {
+        await help(chatId);
+      } else {
+        await sendMessage(chatId, "🤷‍♂️ Невідома дія кнопки.");
+      }
     }
   }
 
@@ -78,18 +98,19 @@ async function handleUpdate(update: TGUpdate): Promise<Response> {
   });
 }
 
-// Публічний фабричний метод, якого очікує src/index.ts
+// Публічний фабричний метод — очікується з src/index.ts
 export function makeRouter() {
   return {
     async handle(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
-      setEnv(env); // ініціалізуємо доступ до ENV для всього коду
+      // ініціалізуємо ENV для всієї програми
+      setEnv(env);
 
       if (request.method === "POST") {
         const update = (await request.json().catch(() => ({}))) as TGUpdate;
         return handleUpdate(update);
       }
 
-      // Простий healthcheck на GET
+      // простий healthcheck
       return new Response("OK", { status: 200 });
     },
   };
