@@ -1,14 +1,16 @@
+# wrangler.toml — повний файл
+
 name = "senti-bot-worker"
 main = "src/index.ts"
-compatibility_date = "2025-09-25"
-workers_dev = true
+compatibility_date = "2024-06-20"
+logpush = true
 
+# Публічні константи (секрети тут НЕ зберігаємо)
 [vars]
 API_BASE_URL = "https://api.telegram.org"
-# Інші змінні/секрети (BOT_TOKEN, WEBHOOK_SECRET, OWNER_ID) тримай у Dashboard як Secrets/Variables
-# або додай їх тут ТІЛЬКИ якщо вони не секректні.
 
-# Якщо у тебе були routes/zones — додай їх знову тут:
-# routes = [
-#   { pattern = "senti-bot.your-domain.com/*", zone_name = "your-domain.com" }
-# ]
+# ⬇️ ГОЛОВНЕ: прив’язка KV через код (не зникне після деплою)
+[[kv_namespaces]]
+binding = "KV"                                    # має збігатися з env.KV у коді
+id = "7b32e2d1f60846ddb1c653eb52180bf7"           # твій реальний Namespace ID (senti-state)
+# preview_id = "..."                               # (не обов’язково)
