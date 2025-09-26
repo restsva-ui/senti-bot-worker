@@ -1,39 +1,62 @@
-import { getEnv } from "../config";
+// src/telegram/api.ts
+import { CFG, type Env } from "../config";
 
-function apiBase(): string {
-  const env = getEnv();
-  const base = env.API_BASE_URL || "https://api.telegram.org";
-  const token = env.BOT_TOKEN;
-  return `${base.replace(/\/+$/, "")}/bot${token}`;
-}
-
-async function tgFetch<T>(method: string, body: Record<string, unknown>): Promise<T> {
-  const url = `${apiBase()}/${method}`;
+async function tgFetch<T>(
+  env: Env,
+  method: string,
+  body: Record<string, unknown>
+): Promise<T> {
+  const url = `${CFG.apiBase(env)}/bot${CFG.botToken(env)}/${method}`;
   const res = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify(body),
   });
-  const data = await res.json<any>();
-  if (!data?.ok) throw new Error(`Telegram ${method} failed: ${res.status} ${JSON.stringify(data)}`);
+
+  const data = await res.json<any>().catch(() => ({}));
+  if (!data?.ok) {
+    throw new Error(`Telegram ${method} failed: ${res.status} ${JSON.stringify(data)}`);
+  }
   return data.result as T;
 }
 
-export async function sendMessage(chat_id: number, text: string, extra: Record<string, unknown> = {}) {
-  return tgFetch("sendMessage", { chat_id, text, parse_mode: "HTML", ...extra });
+export function sendMessage(
+  env: Env,
+  chat_id: number,
+  text: string,
+  extra: Record<string, unknown> = {}
+) {
+  return tgFetch(env, "sendMessage", {
+    chat_id,
+    text,
+    parse_mode: "HTML",
+    ...extra,
+  });
 }
 
-export async function editMessageText(
+export function editMessageText(
+  env: Env,
   chat_id: number,
   message_id: number,
   text: string,
   extra: Record<string, unknown> = {}
 ) {
-  return tgFetch("editMessageText", { chat_id, message_id, text, parse_mode: "HTML", ...extra });
+  return tgFetch(env, "editMessageText", {
+    chat_id,
+    message_id,
+    text,
+    parse_mode: "HTML",
+    ...extra,
+  });
 }
 
-export async function answerCallbackQuery(callback_query_id: string, text?: string, show_alert = false) {
-  return tgFetch("answerCallbackQuery", {
+export function answerCallbackQuery(
+  env: Env,
+  callback_query_id: string,
+  text?: string,
+  show_alert = false
+) {
+  return tgFetch(env, "answerCallbackQuery", {
     callback_query_id,
     ...(text ? { text } : {}),
     show_alert,
