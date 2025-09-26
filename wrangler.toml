@@ -1,38 +1,24 @@
-# wrangler.toml — повна конфігурація
-
 name        = "senti-bot-worker"
 account_id  = "2cf6e316af8623546c95c0354bc3aa00"
 workers_dev = true
 main        = "src/index.ts"
 
-# дата сумісності
 compatibility_date = "2024-09-01"
 
-# дебаг і спрощення
-minify  = false
-logpush = true
+minify = false
+# logpush = true   # вимкнено, бо викликає помилку 10023
 
-# ===== KV namespaces =====
 [[kv_namespaces]]
-binding = "LIKES_KV"   # має збігатися з Env.LIKES_KV у коді
+binding = "LIKES_KV"
 id      = "7b32e2d1f60846ddb1c653eb52180bf7"
 
-# ===== Змінні оточення (vars) =====
 [vars]
 API_BASE_URL = "https://api.telegram.org"
 OWNER_ID     = "784869835"
 
-# ===== Секрети =====
-# Задавай окремо (не в цьому файлі):
-# wrangler secret put BOT_TOKEN
-# і вставляй свій токен:
-# 8405753130:AAGrDrmi-cXMU6A_H_Y0-a9p-gDowMYu2xw
-
-# ===== Спостереження =====
 [observability]
 enabled = true
 
-# ===== Dev =====
 [dev]
 port           = 8787
 local_protocol = "https"
