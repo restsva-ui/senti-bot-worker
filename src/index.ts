@@ -1,24 +1,38 @@
+// src/index.ts
+import { setEnv } from "./config";
 import { handleUpdate } from "./router";
-import type { Env } from "./config";
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
+  async fetch(request: Request, env: any, ctx: ExecutionContext): Promise<Response> {
+    try {
+      // Ініціалізуємо конфіг середовища (KV, токен, baseUrl тощо)
+      setEnv(env);
 
-    if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/healthz")) {
-      return new Response(JSON.stringify({ ok: true, service: "senti-bot-worker" }), {
-        headers: { "content-type": "application/json; charset=utf-8" },
-      });
+      const url = new URL(request.url);
+
+      // Головна сторінка для перевірки, що воркер живий
+      if (url.pathname === "/") {
+        return new Response("Senti bot online 🚀", {
+          headers: { "content-type": "text/plain; charset=UTF-8" },
+        });
+      }
+
+      // Обробка Telegram webhook
+      if (url.pathname.startsWith("/webhook")) {
+        if (request.method !== "POST") {
+          return new Response("Method Not Allowed", { status: 405 });
+        }
+
+        const update = await request.json<any>();
+        // делегуємо роутеру
+        await handleUpdate(update, ctx);
+        return new Response("OK");
+      }
+
+      return new Response("Not found", { status: 404 });
+    } catch (err: any) {
+      console.error("Worker error:", err);
+      return new Response("Internal Error: " + (err?.message || err), { status: 500 });
     }
-
-    if (request.method === "POST" && url.pathname === "/webhook/senti1984") {
-      const update = await request.json().catch(() => ({}));
-      handleUpdate(update, env).catch(() => {});
-      return new Response(JSON.stringify({ ok: true }), {
-        headers: { "content-type": "application/json; charset=utf-8" },
-      });
-    }
-
-    return new Response("Not found", { status: 404 });
   },
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler;
