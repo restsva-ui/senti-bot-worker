@@ -13,6 +13,7 @@ type Counts = { like: number; dislike: number };
 
 const COUNTS_KEY = "likes:counts";
 const USER_KEY = (id: number) => `likes:user:${id}`;
+const USER_PREFIX = "likes:user:";
 
 function getKv(): KVNamespace | undefined {
   const env = getEnv();
@@ -68,6 +69,29 @@ async function registerVote(
   return counts;
 }
 
+/** Підрахунок кількості user-ключів (для діагностики) */
+async function countUserVotes(): Promise<{ totalUsers: number; sample: string[] }> {
+  const kv = getKv();
+  if (!kv) return { totalUsers: 0, sample: [] };
+
+  let cursor: string | undefined = undefined;
+  let total = 0;
+  const sample: string[] = [];
+
+  do {
+    const { keys, cursor: next } = await kv.list({ prefix: USER_PREFIX, cursor });
+    total += keys.length;
+    // зберемо кілька прикладів (до 5)
+    for (const k of keys) {
+      if (sample.length < 5) sample.push(k.name);
+      else break;
+    }
+    cursor = next;
+  } while (cursor);
+
+  return { totalUsers: total, sample };
+}
+
 // ===================== UI helpers =====================
 
 function mainMenuKeyboard() {
@@ -111,6 +135,7 @@ async function cmdHelp(chatId: number) {
     "/ping — перевірка живості бота\n" +
     "/menu — головне меню\n" +
     "/likepanel — панель лайків\n" +
+    "/kvtest — перевірити KV-статус і ключі\n" +
     "/help — довідка";
   await sendMessage(chatId, text);
 }
@@ -137,6 +162,33 @@ async function cmdLikePanel(chatId: number) {
   });
 }
 
+/** Діагностика KV: показує загальний стан і кілька ключів */
+async function cmdKvTest(chatId: number) {
+  const kv = getKv();
+  if (!kv) {
+    await sendMessage(chatId, "❌ KV (LIKES_KV) не прив'язано у воркері.");
+    return;
+  }
+
+  const counts = await getCounts();
+  const { totalUsers, sample } = await countUserVotes();
+
+  const lines = [
+    "<b>KV статус</b>",
+    `LIKES_KV: <code>OK</code>`,
+    "",
+    "<b>Лічильники</b>",
+    `👍 like: <b>${counts.like}</b>`,
+    `👎 dislike: <b>${counts.dislike}</b>`,
+    "",
+    "<b>Користувачі з голосом</b>",
+    `всього ключів: <b>${totalUsers}</b>`,
+    ...(sample.length ? ["приклади:", ...sample.map((s) => `<code>${s}</code>`)] : []),
+  ].join("\n");
+
+  await sendMessage(chatId, lines, { parse_mode: "HTML" });
+}
+
 // ===================== Callback handlers =====================
 
 async function cbMenu(chatId: number, messageId: number, data: string) {
@@ -160,6 +212,7 @@ async function cbMenu(chatId: number, messageId: number, data: string) {
       "/ping — перевірка живості бота\n" +
       "/menu — головне меню\n" +
       "/likepanel — панель лайків\n" +
+      "/kvtest — перевірити KV-статус і ключі\n" +
       "/help — довідка";
     await editMessageText(chatId, messageId, text, {
       reply_markup: mainMenuKeyboard(),
@@ -205,6 +258,7 @@ export async function handleUpdate(update: any, _ctx?: ExecutionContext) {
       if (text.startsWith("/ping")) return cmdPing(chatId);
       if (text.startsWith("/menu")) return cmdMenu(chatId);
       if (text.startsWith("/likepanel")) return cmdLikePanel(chatId);
+      if (text.startsWith("/kvtest")) return cmdKvTest(chatId);
 
       return cmdHelp(chatId);
     }
@@ -218,6 +272,7 @@ export async function handleUpdate(update: any, _ctx?: ExecutionContext) {
       const messageId: number | undefined = cb.message?.message_id;
 
       if (!chatId || !messageId) {
+        // безпечний no-op (див. реалізацію answerCallbackQuery у telegram/api.ts)
         await answerCallbackQuery();
         return;
       }
