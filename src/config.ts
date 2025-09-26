@@ -1,10 +1,10 @@
-// Централізовані типи та доступ до ENV/KV
+// Уніфікована конфігурація/типи/ключі KV
 
 export type Env = {
-  BOT_TOKEN: string;         // secret у Cloudflare
-  API_BASE_URL?: string;     // vars → "https://api.telegram.org"
-  OWNER_ID?: string;         // vars → "784869835"
-  LIKES_KV: KVNamespace;     // binding у wrangler.toml
+  BOT_TOKEN: string;          // secret у Cloudflare
+  API_BASE_URL?: string;      // vars → "https://api.telegram.org"
+  OWNER_ID?: string;          // vars → "784869835"
+  LIKES_KV: KVNamespace;      // binding у wrangler.toml
 };
 
 export const CFG = {
@@ -14,28 +14,21 @@ export const CFG = {
   kv:       (env: Env) => env.LIKES_KV,
 };
 
-// Ключі KV
 export const KV_KEYS = {
-  COUNTS: "likes:counts",                 // {"like":number,"dislike":number}
-  USER:   (id: number) => `likes:user:${id}`, // "like" | "dislike"
-  ERRORS: "errors:rolling",               // JSON-масив останніх помилок
+  COUNTS: "likes:counts",
+  USER:   (id: number) => `likes:user:${id}`,
+  ERRORS: "errors:rolling",
 } as const;
 
-// Допоміжний логер у KV (кільце на N записів)
 export async function pushError(env: Env, tag: string, payload: unknown, limit = 50) {
   try {
     const kv = CFG.kv(env);
     const raw = (await kv.get(KV_KEYS.ERRORS)) || "[]";
     const arr = JSON.parse(raw) as any[];
-    const item = {
-      t: new Date().toISOString(),
-      tag,
-      payload,
-    };
-    arr.push(item);
+    arr.push({ t: new Date().toISOString(), tag, payload });
     while (arr.length > limit) arr.shift();
     await kv.put(KV_KEYS.ERRORS, JSON.stringify(arr));
   } catch {
-    // у крайніх випадках ковтаємо помилку логера
+    // ковтаємо помилку логера
   }
 }
