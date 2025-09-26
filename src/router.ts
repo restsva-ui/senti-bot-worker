@@ -1,199 +1,200 @@
 // src/router.ts
-import { CFG, getEnv } from "./config";
-import { sendMessage, editMessageText, answerCallback } from "./telegram/api";
+import { CFG } from "./config";
+import {
+  sendMessage,
+  editMessageText,
+  answerCallbackQuery, // ← існує в api.ts
+} from "./telegram/api";
 
-// простий тип апдейту (достатньо для цих команд)
-type TgUpdate = {
-  message?: {
-    message_id: number;
-    chat: { id: number };
-    text?: string;
-    from?: { id: number; username?: string };
-  };
-  callback_query?: {
-    id: string;
-    data?: string;
-    message?: {
-      message_id: number;
-      chat: { id: number };
+// --------- KV helpers ---------
+type Counts = { like: number; dislike: number };
+
+const COUNTS_KEY = "likes:counts";
+const USER_KEY = (id: number) => `likes:user:${id}`;
+
+async function getCounts(): Promise<Counts> {
+  try {
+    const raw = await CFG.kv.get(COUNTS_KEY);
+    if (!raw) return { like: 0, dislike: 0 };
+    const parsed = JSON.parse(raw) as Counts;
+    return {
+      like: Number(parsed.like || 0),
+      dislike: Number(parsed.dislike || 0),
     };
-    from: { id: number; username?: string };
-  };
-};
+  } catch {
+    return { like: 0, dislike: 0 };
+  }
+}
 
-function likeKeyboard() {
+async function setCounts(c: Counts) {
+  await CFG.kv.put(COUNTS_KEY, JSON.stringify(c));
+}
+
+/**
+ * Реєструє голос користувача.
+ * - якщо натиснув те саме — нічого не змінюємо
+ * - якщо змінив 👍↔️👎 — перераховуємо
+ */
+async function registerVote(userId: number, choice: "like" | "dislike"): Promise<Counts> {
+  const prev = await CFG.kv.get(USER_KEY(userId));
+  const counts = await getCounts();
+
+  if (prev === choice) {
+    // без змін
+    return counts;
+  }
+
+  // зняти попередній голос (якщо був)
+  if (prev === "like") counts.like = Math.max(0, counts.like - 1);
+  if (prev === "dislike") counts.dislike = Math.max(0, counts.dislike - 1);
+
+  // додати новий голос
+  if (choice === "like") counts.like += 1;
+  else counts.dislike += 1;
+
+  // зберегти
+  await CFG.kv.put(USER_KEY(userId), choice);
+  await setCounts(counts);
+  return counts;
+}
+
+// --------- UI helpers ---------
+function mainMenuKeyboard() {
   return {
     inline_keyboard: [
-      [{ text: "👍", callback_data: "like" }, { text: "👎", callback_data: "dislike" }],
+      [{ text: "🔁 Ping", callback_data: "menu:ping" }],
+      [{ text: "👍 Лайки", callback_data: "menu:likepanel" }],
+      [{ text: "ℹ️ Допомога", callback_data: "menu:help" }],
     ],
   };
 }
 
-async function readCounters() {
-  const kv = CFG.kv();
-  if (!kv) return { likes: 0, dislikes: 0 };
-  const [l, d] = await Promise.all([
-    kv.get("likes_total"),
-    kv.get("dislikes_total"),
-  ]);
+function likesKeyboard() {
   return {
-    likes: Number(l ?? 0),
-    dislikes: Number(d ?? 0),
+    inline_keyboard: [
+      [{ text: "👍", callback_data: "vote:like" }, { text: "👎", callback_data: "vote:dislike" }],
+    ],
   };
 }
 
-async function writeCounters(likes: number, dislikes: number) {
-  const kv = CFG.kv();
-  if (!kv) return;
-  await kv.put("likes_total", String(likes));
-  await kv.put("dislikes_total", String(dislikes));
+function likesCaption(c: Counts) {
+  return `Оцінки: 👍 ${c.like} | 👎 ${c.dislike}`;
 }
 
-async function getUserVote(userId: number): Promise<"like" | "dislike" | null> {
-  const kv = CFG.kv();
-  if (!kv) return null;
-  return (await kv.get(`vote_${userId}`)) as any;
-}
-
-async function setUserVote(userId: number, v: "like" | "dislike" | null) {
-  const kv = CFG.kv();
-  if (!kv) return;
-  const key = `vote_${userId}`;
-  if (v) await kv.put(key, v);
-  else await kv.delete(key);
-}
-
-async function statsLine() {
-  const { likes, dislikes } = await readCounters();
-  return `Оцінки: 👍 ${likes} | 👎 ${dislikes}`;
-}
-
-async function handleStart(chatId: number) {
-  await sendMessage(chatId, "👋 Привіт! Бот підключено до Cloudflare Workers. Напишіть /help для довідки.");
-}
-
-async function handlePing(chatId: number) {
-  await sendMessage(chatId, "pong ✅");
-}
-
-async function handleHelp(chatId: number) {
+// --------- Commands ---------
+async function cmdStart(chatId: number) {
   await sendMessage(
     chatId,
-    [
-      "📑 Доступні команди:",
-      "/start — запуск і привітання",
-      "/ping — перевірка живості бота",
-      "/menu — головне меню",
-      "/likepanel — панель лайків",
-      "/help — довідка",
-    ].join("\n"),
+    "👋 Привіт! Бот підключено до Cloudflare Workers. Напишіть /help для довідки."
   );
 }
 
-async function handleMenu(chatId: number) {
-  await sendMessage(chatId, "Головне меню:", {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: "🔁 Ping", callback_data: "menu_ping" }],
-        [{ text: "👍 Лайки", callback_data: "menu_likepanel" }],
-        [{ text: "ℹ️ Допомога", callback_data: "menu_help" }],
-      ],
-    },
-  });
+async function cmdHelp(chatId: number) {
+  const text =
+    "🧾 Доступні команди:\n" +
+    "/start — запуск і привітання\n" +
+    "/ping — перевірка живості бота\n" +
+    "/menu — головне меню\n" +
+    "/likepanel — панель лайків\n" +
+    "/help — довідка";
+  await sendMessage(chatId, text);
 }
 
-async function handleLikePanel(chatId: number) {
-  const line = await statsLine();
-  await sendMessage(chatId, line, { reply_markup: likeKeyboard() });
+async function cmdPing(chatId: number) {
+  await sendMessage(chatId, "pong ✅");
 }
 
-async function handleMenuCallback(data: string, q: TgUpdate["callback_query"]) {
-  if (!q?.message) return;
-  const chatId = q.message.chat.id;
-  switch (data) {
-    case "menu_ping":
-      await answerCallback(q.id);
-      await handlePing(chatId);
-      break;
-    case "menu_likepanel":
-      await answerCallback(q.id);
-      await handleLikePanel(chatId);
-      break;
-    case "menu_help":
-      await answerCallback(q.id);
-      await handleHelp(chatId);
-      break;
+async function cmdMenu(chatId: number) {
+  await sendMessage(chatId, "Головне меню:", { reply_markup: mainMenuKeyboard() });
+}
+
+async function cmdLikePanel(chatId: number) {
+  const counts = await getCounts();
+  await sendMessage(chatId, likesCaption(counts), { reply_markup: likesKeyboard() });
+}
+
+// --------- Callback handlers ---------
+async function cbMenu(chatId: number, messageId: number, data: string) {
+  if (data === "menu:ping") {
+    await editMessageText(chatId, messageId, "pong ✅");
+  } else if (data === "menu:likepanel") {
+    const counts = await getCounts();
+    await editMessageText(chatId, messageId, likesCaption(counts), {
+      reply_markup: likesKeyboard(),
+    });
+  } else if (data === "menu:help") {
+    const text =
+      "🧾 Доступні команди:\n" +
+      "/start — запуск і привітання\n" +
+      "/ping — перевірка живості бота\n" +
+      "/menu — головне меню\n" +
+      "/likepanel — панель лайків\n" +
+      "/help — довідка";
+    await editMessageText(chatId, messageId, text, { reply_markup: mainMenuKeyboard() });
+  } else {
+    await editMessageText(chatId, messageId, "🤷‍♂️ Невідома дія кнопки.", {
+      reply_markup: mainMenuKeyboard(),
+    });
   }
 }
 
-async function handleVote(action: "like" | "dislike", q: TgUpdate["callback_query"]) {
-  if (!q?.message) return;
-  const chatId = q.message.chat.id;
-  const msgId = q.message.message_id;
-  const userId = q.from.id;
-
-  let { likes, dislikes } = await readCounters();
-  const prev = await getUserVote(userId);
-
-  // політика: від 1 користувача лише 1 голос.
-  if (prev === action) {
-    await answerCallback(q.id, "Ви вже проголосували так само 🙂");
-    return;
-  }
-
-  // якщо міняє сторони — віднімаємо попередній голос
-  if (prev === "like") likes = Math.max(0, likes - 1);
-  if (prev === "dislike") dislikes = Math.max(0, dislikes - 1);
-
-  // ставимо новий голос
-  if (action === "like") likes += 1;
-  else dislikes += 1;
-
-  await setUserVote(userId, action);
-  await writeCounters(likes, dislikes);
-
-  const text = `Оцінки: 👍 ${likes} | 👎 ${dislikes}`;
-  await editMessageText(chatId, msgId, text, { reply_markup: likeKeyboard() });
-  await answerCallback(q.id, "Дякую за оцінку!");
+async function cbVote(
+  fromId: number,
+  chatId: number,
+  messageId: number,
+  data: "vote:like" | "vote:dislike"
+) {
+  const choice = data === "vote:like" ? "like" : "dislike";
+  const counts = await registerVote(fromId, choice);
+  await answerCallbackQuery("✅ Зараховано");
+  await editMessageText(chatId, messageId, likesCaption(counts), { reply_markup: likesKeyboard() });
 }
 
-export async function handleUpdate(update: TgUpdate) {
-  // гарантуємо, що env ініціалізований
-  getEnv();
+// --------- Entry ---------
+export async function handleUpdate(update: any) {
+  try {
+    if (update.message) {
+      const msg = update.message;
+      const chatId: number = msg.chat?.id;
+      const text: string = (msg.text || "").trim();
 
-  if (update.message?.text) {
-    const chatId = update.message.chat.id;
-    const text = update.message.text.trim();
+      if (text.startsWith("/start")) return cmdStart(chatId);
+      if (text.startsWith("/help")) return cmdHelp(chatId);
+      if (text.startsWith("/ping")) return cmdPing(chatId);
+      if (text.startsWith("/menu")) return cmdMenu(chatId);
+      if (text.startsWith("/likepanel")) return cmdLikePanel(chatId);
 
-    if (text.startsWith("/start")) return handleStart(chatId);
-    if (text.startsWith("/ping")) return handlePing(chatId);
-    if (text.startsWith("/help")) return handleHelp(chatId);
-    if (text.startsWith("/menu")) return handleMenu(chatId);
-    if (text.startsWith("/likepanel")) return handleLikePanel(chatId);
-
-    // службова: перевірка KV-стану
-    if (text.startsWith("/kv_state")) {
-      const kv = CFG.kv();
-      await sendMessage(chatId, `KV STATE: ${kv ? "✅" : "❌"}`);
-      return;
+      // за замовчуванням покажемо help
+      return cmdHelp(chatId);
     }
 
-    // службова: список ключів
-    if (text.startsWith("/kv_list")) {
-      const kv = CFG.kv();
-      if (!kv) return sendMessage(chatId, "❌ KV не прив'язаний");
-      const list = await kv.list({ limit: 20 });
-      const out = list.keys.length
-        ? "🔑 Ключі:\n" + list.keys.map(k => `• ${k.name}`).join("\n")
-        : "📭 KV порожній";
-      return sendMessage(chatId, out);
-    }
-  }
+    if (update.callback_query) {
+      const cb = update.callback_query;
+      const fromId: number = cb.from?.id;
+      const data: string = cb.data || "";
+      const chatId: number | undefined = cb.message?.chat?.id;
+      const messageId: number | undefined = cb.message?.message_id;
 
-  if (update.callback_query) {
-    const data = update.callback_query.data || "";
-    if (data.startsWith("menu_")) return handleMenuCallback(data, update.callback_query);
-    if (data === "like" || data === "dislike")
-      return handleVote(data, update.callback_query);
+      // Telegram вимагає відповідь на callback
+      // (навіть якщо далі нічого не робимо)
+      // відповідаємо коротким нотіфікацією в cbVote
+      if (!chatId || !messageId) {
+        await answerCallbackQuery();
+        return;
+      }
+
+      if (data.startsWith("menu:")) {
+        await answerCallbackQuery();
+        return cbMenu(chatId, messageId, data);
+      }
+
+      if (data === "vote:like" || data === "vote:dislike") {
+        return cbVote(fromId, chatId, messageId, data as "vote:like" | "vote:dislike");
+      }
+
+      await answerCallbackQuery("🤷‍♂️ Невідома дія");
+    }
+  } catch (err) {
+    console.error("handleUpdate fatal:", (err as Error).message || err);
   }
 }
