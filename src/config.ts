@@ -1,26 +1,37 @@
-// src/config.ts
+// Єдине місце правди для оточення і KV
 
 export type Env = {
-  BOT_TOKEN: string;
+  LIKES_KV: KVNamespace;
   API_BASE_URL?: string;
-  OWNER_ID?: string;
-  /**
-   * ВАЖЛИВО: назва збігається з binding у wrangler.toml
-   * [[kv_namespaces]] binding = "LIKES_KV"
-   */
-  LIKES_KV?: KVNamespace;
+  BOT_TOKEN: string;
+  OWNER_ID?: string; // або number як рядок
 };
 
-// Тримай актуальне оточення у модулі, щоб діставати з будь-якого файлу
-let CURRENT_ENV: Env | undefined;
+let _env: Env | null = null;
 
-export function setEnv(env: Env) {
-  CURRENT_ENV = env;
+export function setEnv(e: Env) {
+  _env = e;
 }
 
 export function getEnv(): Env {
-  if (!CURRENT_ENV) {
-    throw new Error("Environment is not set. Call setEnv(env) first.");
-  }
-  return CURRENT_ENV;
+  if (!_env) throw new Error("Env not set – call setEnv(env) in entrypoint");
+  return _env;
 }
+
+// Зручний фасад. НІЯКИХ прямих звернень до process/env у коді.
+// Все тільки через CFG.
+export const CFG = {
+  get kv(): KVNamespace {
+    return getEnv().LIKES_KV;
+  },
+  get apiBase(): string {
+    return getEnv().API_BASE_URL || "https://api.telegram.org";
+  },
+  get botToken(): string {
+    return getEnv().BOT_TOKEN;
+  },
+  get ownerId(): number {
+    const raw = getEnv().OWNER_ID || "0";
+    return Number(raw);
+  },
+};
