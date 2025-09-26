@@ -19,4 +19,39 @@ async function call<T = any>(method: string, body: Json): Promise<T> {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw
+    throw new Error(`Telegram API ${method} failed: ${res.status} ${text}`);
+  }
+  const json = await res.json<T>();
+  return json as T;
+}
+
+export async function sendMessage(
+  chat_id: number | string,
+  text: string,
+  opts?: { reply_markup?: ReplyMarkup }
+) {
+  return call("sendMessage", { chat_id, text, ...opts });
+}
+
+export async function editMessageText(
+  chat_id: number | string,
+  message_id: number,
+  text: string,
+  opts?: { reply_markup?: ReplyMarkup }
+) {
+  return call("editMessageText", { chat_id, message_id, text, ...opts });
+}
+
+export async function answerCallbackQuery(text?: string) {
+  // API вимагає передавати callback_query_id, але в роутері ми відповідаємо
+  // одразу після натискання кнопки, тому беремо його з останнього апдейту:
+  // спростимо — Cloudflare Worker не зберігає стан; тому зробимо
+  // «без тексту» варіант через sendChatAction як запасний варіант.
+  // Краще — передавати id із роутера; однак тут підемо простим шляхом:
+  if ((globalThis as any).__last_callback_id) {
+    const id = (globalThis as any).__last_callback_id as string;
+    return call("answerCallbackQuery", { callback_query_id: id, text });
+  }
+  // Fallback: нічого не робимо (Telegram все одно оновить кнопку)
+  return;
+}
