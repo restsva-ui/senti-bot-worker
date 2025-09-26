@@ -1,55 +1,57 @@
+import { KVns } from "../config";
 import { sendMessage } from "../telegram/api";
 
-// Ключі в KV: likes:{chatId}, votes:{chatId}:{userId}  (щоб 1 користувач = 1 голос)
+// 1 користувач = 1 активний голос на чат
 type Likes = { like: number; dislike: number };
-
-function empty(): Likes { return { like: 0, dislike: 0 }; }
+const empty = (): Likes => ({ like: 0, dislike: 0 });
 
 export async function likepanel(chatId: number) {
-  const state = await getLikes(chatId);
+  const s = await getLikes(chatId);
   const replyMarkup = {
     inline_keyboard: [
       [{ text: "👍", callback_data: "like" }, { text: "👎", callback_data: "dislike" }],
     ],
   };
-  await sendMessage(chatId, `Оцінки: 👍 ${state.like} | 👎 ${state.dislike}`, replyMarkup);
+  await sendMessage(chatId, `Оцінки: 👍 ${s.like} | 👎 ${s.dislike}`, replyMarkup);
 }
 
 export async function handleLikeCallback(update: any): Promise<boolean> {
   const cq = update.callback_query;
-  if (!cq || !cq.data || !cq.message?.chat?.id || !cq.from?.id) return false;
+  if (!cq?.data || !cq.message?.chat?.id || !cq.from?.id) return false;
 
   const chatId = cq.message.chat.id as number;
   const userId = cq.from.id as number;
-  const data = cq.data as string;
+  const data = String(cq.data);
 
   if (data !== "like" && data !== "dislike") return false;
 
-  // читаємо поточний голос користувача
-  const userKey = `votes:${chatId}:${userId}`;
-  const prev = await KV.get(userKey); // "like" | "dislike" | null
+  const kv = KVns();
+  const votesKey = `votes:${chatId}:${userId}`;
+  const likesKey = `likes:${chatId}`;
 
-  if (prev === data) {
-    // нічого не міняємо — вже проголосував
-  } else {
-    // оновлюємо агрегати
+  const prev = await kv.get(votesKey); // "like" | "dislike" | null
+  if (prev !== data) {
     const s = await getLikes(chatId);
     if (prev === "like") s.like--;
     if (prev === "dislike") s.dislike--;
     if (data === "like") s.like++;
     if (data === "dislike") s.dislike++;
-    await KV.put(`likes:${chatId}`, JSON.stringify(s));
-    await KV.put(userKey, data);
+    await kv.put(likesKey, JSON.stringify(s));
+    await kv.put(votesKey, data);
   }
-
-  // показати свіжі числа
-  const state = await getLikes(chatId);
-  await sendMessage(chatId, `Оцінки: 👍 ${state.like} | 👎 ${state.dislike}`);
+  const s2 = await getLikes(chatId);
+  await sendMessage(chatId, `Оцінки: 👍 ${s2.like} | 👎 ${s2.dislike}`);
   return true;
 }
 
 async function getLikes(chatId: number): Promise<Likes> {
-  const raw = await KV.get(`likes:${chatId}`);
+  const kv = KVns();
+  const raw = await kv.get(`likes:${chatId}`);
   if (!raw) return empty();
-  try { return JSON.parse(raw) as Likes; } catch { return empty(); }
+  try {
+    const s = JSON.parse(raw) as Likes;
+    return { like: Math.max(0, s.like|0), dislike: Math.max(0, s.dislike|0) };
+  } catch {
+    return empty();
+  }
 }
