@@ -1,4 +1,4 @@
-# wrangler.toml — фінальна версія без logpush
+# wrangler.toml — v0.2-stable
 
 name = "senti-bot-worker"
 main = "src/index.ts"
