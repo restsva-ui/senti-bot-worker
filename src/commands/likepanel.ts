@@ -1,28 +1,26 @@
 // src/commands/likepanel.ts
-import { CFG } from "../config";
-import { sendMessage, editMessageText, answerCallbackQuery } from "../telegram/api";
+// Легка та надійна реалізація панелі лайків з урахуванням 1 юзер -> 1 голос
 
-// Мінімально потрібні типи з Telegram
+import { sendMessage, editMessageReplyMarkup } from "../telegram/api";
+import { getEnv } from "../config"; // у нас є getEnv() після останніх правок
+
 type TGUser = { id: number };
-type TGChat = { id: number };
-type TGMessage = { message_id: number; chat: TGChat };
-type TGCallbackQuery = { id: string; from: TGUser; data?: string; message?: TGMessage };
+type TGMessage = { message_id: number; chat: { id: number } };
+type TGCallbackQuery = { id: string; from: TGUser; message?: TGMessage; data?: string };
 type TGUpdate = { callback_query?: TGCallbackQuery };
 
-type StateUnique = { up: number; down: number; voters: Record<string, "up" | "down"> };
-type StateCumulative = { up: number; down: number };
+type Counters = { like: number; dislike: number };
 
-const PREFIX = "likes";
+const PANEL_ID = "global"; // одна панель на бота; при бажанні можна `${chatId}`
 
-function kvKey(chatId: number, messageId: number) {
-  return `${PREFIX}:${chatId}:${messageId}`;
+function cKey(panelId: string) {
+  return `likes:${panelId}`;                       // JSON { like, dislike }
+}
+function uKey(panelId: string, userId: number) {
+  return `likes:${panelId}:u:${userId}`;          // "up" | "down"
 }
 
-function likeText(up: number, down: number) {
-  return `Оцінки: 👍 ${up} | 👎 ${down}`;
-}
-
-function keyboard() {
+function buttons() {
   return {
     inline_keyboard: [
       [{ text: "👍", callback_data: "like:up" }, { text: "👎", callback_data: "like:down" }],
@@ -30,88 +28,78 @@ function keyboard() {
   };
 }
 
-async function getUniqueState(chatId: number, messageId: number): Promise<StateUnique> {
-  const raw = await CFG.KV.get(kvKey(chatId, messageId));
-  if (!raw) return { up: 0, down: 0, voters: {} };
+async function readJSON<T>(ns: KVNamespace, key: string, fallback: T): Promise<T> {
+  const raw = await ns.get(key);
+  if (!raw) return fallback;
   try {
-    const parsed = JSON.parse(raw) as StateUnique;
-    // Backward-compat guard
-    return { up: parsed.up || 0, down: parsed.down || 0, voters: parsed.voters || {} };
+    return JSON.parse(raw) as T;
   } catch {
-    return { up: 0, down: 0, voters: {} };
+    return fallback;
   }
 }
 
-async function getCumulativeState(chatId: number, messageId: number): Promise<StateCumulative> {
-  const raw = await CFG.KV.get(kvKey(chatId, messageId));
-  if (!raw) return { up: 0, down: 0 };
-  try {
-    const parsed = JSON.parse(raw) as StateCumulative;
-    return { up: parsed.up || 0, down: parsed.down || 0 };
-  } catch {
-    return { up: 0, down: 0 };
-  }
+async function writeJSON(ns: KVNamespace, key: string, val: unknown): Promise<void> {
+  await ns.put(key, JSON.stringify(val));
 }
 
-async function putState(chatId: number, messageId: number, obj: unknown) {
-  await CFG.KV.put(kvKey(chatId, messageId), JSON.stringify(obj));
-}
-
-/** Виводить панель лайків з нулями (рахунок підтягнеться при першому кліку) */
+// Публічна команда: показати панель з поточними значеннями
 export async function likepanel(chatId: number) {
-  await sendMessage(chatId, likeText(0, 0), { reply_markup: keyboard() });
+  const env = getEnv();
+  const ns = env.KV;
+  const counters = await readJSON<Counters>(ns, cKey(PANEL_ID), { like: 0, dislike: 0 });
+  const text = `Оцінки: 👍 ${counters.like} | 👎 ${counters.dislike}`;
+  await sendMessage(chatId, text, buttons());
 }
 
-/** Обробка callback’ів від кнопок 👍 / 👎. Повертає true, якщо оброблено. */
+// Обробник callback з кнопок 👍/👎
+// Повертає true, якщо це наш callback і ми його обробили
 export async function handleLikeCallback(update: TGUpdate): Promise<boolean> {
   const cq = update.callback_query;
-  if (!cq || !cq.data || !cq.message) return false;
+  if (!cq || !cq.data) return false;
+  if (!cq.data.startsWith("like:")) return false;
 
-  const data = cq.data;
-  if (data !== "like:up" && data !== "like:down") return false;
+  const env = getEnv();
+  const ns = env.KV;
 
-  const chatId = cq.message.chat.id;
-  const messageId = cq.message.message_id;
-  const direction = data === "like:up" ? "up" : "down";
+  const choice = cq.data.split(":")[1]; // "up" | "down"
+  if (choice !== "up" && choice !== "down") return false;
 
-  // Підтвердження та прибирання «годинника»
-  await answerCallbackQuery(cq.id).catch(() => {});
+  // Ідентифікатори
+  const panelId = PANEL_ID;
+  const chatId = cq.message?.chat.id;
+  if (!chatId) return true; // чужі callback-и ігноруємо без помилки
 
-  const mode = (CFG.LIKE_MODE || "unique").toLowerCase(); // "unique" | "cumulative"
+  // Поточний стан
+  const counters = await readJSON<Counters>(ns, cKey(panelId), { like: 0, dislike: 0 });
+  const prev = (await ns.get(uKey(panelId, cq.from.id))) as "up" | "down" | null;
 
-  if (mode === "cumulative") {
-    // Кожен клік — +1 (навіть від того самого користувача)
-    const st = await getCumulativeState(chatId, messageId);
-    if (direction === "up") st.up += 1;
-    else st.down += 1;
-
-    await putState(chatId, messageId, st);
-    await editMessageText(chatId, messageId, likeText(st.up, st.down), { reply_markup: keyboard() });
+  // Нова дія == попередній голос -> нічого не змінюємо
+  if (prev === choice) {
+    // просто освіжимо клавіатуру, щоб не було “зависань”
+    if (cq.message) {
+      await editMessageReplyMarkup(chatId, cq.message.message_id, buttons()).catch(() => {});
+    }
     return true;
   }
 
-  // UNIQUE: один голос на користувача, можна переключати між up/down
-  const st = await getUniqueState(chatId, messageId);
-  const uid = String(cq.from.id);
-  const prev = st.voters[uid];
+  // Забезпечимо коректні межі
+  const safe = (n: number) => (n < 0 ? 0 : n);
 
-  if (!prev) {
-    // Перший голос
-    if (direction === "up") st.up += 1;
-    else st.down += 1;
-    st.voters[uid] = direction;
-  } else if (prev !== direction) {
-    // Перемикання голосу
-    if (prev === "up") st.up = Math.max(0, st.up - 1);
-    else st.down = Math.max(0, st.down - 1);
+  // Зняти попередній голос, якщо був
+  if (prev === "up") counters.like = safe(counters.like - 1);
+  if (prev === "down") counters.dislike = safe(counters.dislike - 1);
 
-    if (direction === "up") st.up += 1;
-    else st.down += 1;
+  // Поставити новий голос
+  if (choice === "up") counters.like = safe(counters.like + 1);
+  else counters.dislike = safe(counters.dislike + 1);
 
-    st.voters[uid] = direction;
-  } // якщо клік у той самий бік — нічого не змінюємо
+  // Зберегти
+  await writeJSON(ns, cKey(panelId), counters);
+  await ns.put(uKey(panelId, cq.from.id), choice);
 
-  await putState(chatId, messageId, st);
-  await editMessageText(chatId, messageId, likeText(st.up, st.down), { reply_markup: keyboard() });
+  // Пере-показати панель (простий шлях без editMessageText)
+  const text = `Оцінки: 👍 ${counters.like} | 👎 ${counters.dislike}`;
+  await sendMessage(chatId, text, buttons());
+
   return true;
 }
