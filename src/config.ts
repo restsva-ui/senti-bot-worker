@@ -1,23 +1,41 @@
-// Централізоване зберігання ENV та доступ до KV
+// Централізовані типи та доступ до ENV/KV
 
 export type Env = {
-  BOT_TOKEN: string;
-  API_BASE_URL?: string;         // опційно (за замовчуванням https://api.telegram.org)
-  LIKES_KV: KVNamespace;         // <- назва біндингу KV у wrangler.toml
+  BOT_TOKEN: string;         // secret у Cloudflare
+  API_BASE_URL?: string;     // vars → "https://api.telegram.org"
+  OWNER_ID?: string;         // vars → "784869835"
+  LIKES_KV: KVNamespace;     // binding у wrangler.toml
 };
-
-let ENV: Env | undefined;
-
-export function setEnv(env: Env) {
-  ENV = env;
-  CFG.kv = env.LIKES_KV;         // важливо: сюди кладемо саме KVNamespace
-}
-
-export function getEnv(): Env {
-  if (!ENV) throw new Error("ENV is not initialized");
-  return ENV;
-}
 
 export const CFG = {
-  kv: undefined as unknown as KVNamespace, // після setEnv стане справжнім KV
+  apiBase: (env: Env) => (env.API_BASE_URL || "https://api.telegram.org").replace(/\/+$/, ""),
+  botToken: (env: Env) => env.BOT_TOKEN,
+  ownerId:  (env: Env) => Number(env.OWNER_ID || 0),
+  kv:       (env: Env) => env.LIKES_KV,
 };
+
+// Ключі KV
+export const KV_KEYS = {
+  COUNTS: "likes:counts",                 // {"like":number,"dislike":number}
+  USER:   (id: number) => `likes:user:${id}`, // "like" | "dislike"
+  ERRORS: "errors:rolling",               // JSON-масив останніх помилок
+} as const;
+
+// Допоміжний логер у KV (кільце на N записів)
+export async function pushError(env: Env, tag: string, payload: unknown, limit = 50) {
+  try {
+    const kv = CFG.kv(env);
+    const raw = (await kv.get(KV_KEYS.ERRORS)) || "[]";
+    const arr = JSON.parse(raw) as any[];
+    const item = {
+      t: new Date().toISOString(),
+      tag,
+      payload,
+    };
+    arr.push(item);
+    while (arr.length > limit) arr.shift();
+    await kv.put(KV_KEYS.ERRORS, JSON.stringify(arr));
+  } catch {
+    // у крайніх випадках ковтаємо помилку логера
+  }
+}
