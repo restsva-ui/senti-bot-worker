@@ -1,46 +1,40 @@
 // src/config.ts
 export type Env = {
-  // уже існуючі в тебе прив’язки:
-  BOT_TOKEN: string        // secret
-  API_BASE_URL: string     // var, "https://api.telegram.org"
-  OWNER_ID?: string        // var
-  LIKES_KV?: KVNamespace   // binding
+  // існуючі
+  BOT_TOKEN: string
+  API_BASE_URL: string
+  OWNER_ID?: string
+  LIKES_KV?: KVNamespace
 
-  // === Нове для ШІ ===
-  // провайдер: "groq" (безкоштовно) або "openai" (платно)
+  // === для ШІ (MVP) ===
   AI_PROVIDER?: "groq" | "openai"
-  // модель за замовчуванням (під Groq ставимо швидку Llama)
   AI_MODEL?: string
-  // таймаут на відповідь моделі, мс
   AI_TIMEOUT_MS?: number
-  // макс. кількість пар реплік у пам'яті
   MEMORY_MAX_TURNS?: number
 
-  // secrets (додаються через wrangler secret)
+  // secrets
   GROQ_API_KEY?: string
   OPENAI_API_KEY?: string
 };
 
-// У Cloudflare Workers `env` передається у fetch(). Робимо простий геттери.
+// Локальний кеш env, який виставляємо у entrypoint (index.ts)
 let _env: Env | null = null;
 
 export function setEnv(e: Env) {
   _env = e;
 }
-
 export function getEnv(): Env {
   if (!_env) throw new Error("Env not initialized");
   return _env!;
 }
 
-// Допоміжні дефолти (щоб не падало без vars)
+// --------- Утиліти для ШІ з дефолтами ---------
 export function getAiProvider(): "groq" | "openai" {
   const env = getEnv();
-  return (env.AI_PROVIDER || "groq"); // за замовчуванням безкоштовний Groq
+  return env.AI_PROVIDER || "groq";
 }
 export function getAiModel(): string {
   const env = getEnv();
-  // дефолт під Groq — швидка 8B
   return env.AI_MODEL || "llama-3.1-8b-instant";
 }
 export function getAiTimeout(): number {
@@ -49,5 +43,22 @@ export function getAiTimeout(): number {
 }
 export function getMemoryMaxTurns(): number {
   const env = getEnv();
-  return Math.max(0, Number(env.MEMORY_MAX_TURNS ?? 4)); // 4 пари реплік для MVP
+  return Math.max(0, Number(env.MEMORY_MAX_TURNS ?? 4));
 }
+
+// --------- БЕК-СУМІСНІСТЬ З ІМПОРТОМ { CFG } ---------
+// Деякі модулі імпортують { CFG }.
+// Даємо шім з очікуваними полями: .env та .kv
+export const CFG = {
+  get env() {
+    return getEnv();
+  },
+  get kv(): KVNamespace {
+    const e = getEnv();
+    if (!e.LIKES_KV) {
+      // узгоджено з існуючими повідомленнями у боті
+      throw new Error("KV не прив'язаний");
+    }
+    return e.LIKES_KV;
+  },
+} as const;
