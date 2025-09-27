@@ -1,73 +1,55 @@
+// src/telegram/api.ts
+// Мінімальний Telegram API-шар для Worker.
+// Експортує sendMessage та answerCallback, які очікує router.ts.
+
 import { CFG } from "../config";
 
+// Будуємо базову URL до Telegram Bot API
 function apiBase(): string {
-  return CFG.apiBase.replace(/\/+$/, "");
+  const base = CFG.API_BASE_URL || "https://api.telegram.org";
+  // BOT_TOKEN обовʼязково має бути доданий як secret: `wrangler secret put BOT_TOKEN`
+  const token = CFG.BOT_TOKEN;
+  return `${base.replace(/\/+$/, "")}/bot${token}`;
 }
 
-function bot(): string {
-  return `bot${CFG.botToken}`;
-}
+// Відправка звичайного повідомлення
+export async function sendMessage(
+  chatId: number,
+  text: string,
+  reply_markup?: unknown
+): Promise<Response> {
+  const url = `${apiBase()}/sendMessage`;
+  const body: Record<string, unknown> = {
+    chat_id: chatId,
+    text,
+    disable_web_page_preview: true,
+  };
+  if (reply_markup) body.reply_markup = reply_markup;
 
-async function tgPost(method: string, body: unknown) {
-  const url = `${apiBase()}/${bot()}/${method}`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Telegram API ${method} failed: ${res.status} ${text}`);
-  }
-  return res.json();
+  return res;
 }
 
-export async function sendMessage(
-  chat_id: number,
-  text: string,
-  extra?: Record<string, unknown>
-) {
-  return tgPost("sendMessage", { chat_id, text, parse_mode: "HTML", ...extra });
-}
-
-export async function editMessageText(
-  chat_id: number,
-  message_id: number,
-  text: string,
-  extra?: Record<string, unknown>
-) {
-  return tgPost("editMessageText", {
-    chat_id,
-    message_id,
-    text,
-    parse_mode: "HTML",
-    ...extra,
-  });
-}
-
-export async function answerCallbackQuery(
+// Відповідь на натискання inline-кнопок (callback_query)
+// Викликається з router.ts → answerCallback(...)
+export async function answerCallback(
+  callback_query_id: string,
   text?: string,
-  show_alert = false
-) {
-  return tgPost("answerCallbackQuery", {
-    // telegram сам підставляє callback_query_id через webhook, але
-    // у Workers ми передаємо його з router (див. handleUpdate)
-    callback_query_id: (globalThis as any).__cb_id,
-    text,
-    show_alert,
-  });
-}
+  show_alert?: boolean
+): Promise<Response> {
+  const url = `${apiBase()}/answerCallbackQuery`;
+  const body: Record<string, unknown> = { callback_query_id };
+  if (text) body.text = text;
+  if (show_alert !== undefined) body.show_alert = show_alert;
 
-export async function setMyCommands() {
-  // не обов'язково, але корисно
-  const commands = [
-    { command: "start", description: "Запуск і привітання" },
-    { command: "ping", description: "Перевірка живості бота" },
-    { command: "menu", description: "Головне меню" },
-    { command: "likepanel", description: "Панель лайків" },
-    { command: "help", description: "Довідка" },
-    { command: "kvtest", description: "Діагностика KV" },
-    { command: "resetlikes", description: "Скинути лічильники лайків" },
-  ];
-  return tgPost("setMyCommands", { commands });
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return res;
 }
