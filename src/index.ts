@@ -1,59 +1,43 @@
-// src/index.ts
+// Minimal, safe webhook handler to confirm delivery from Telegram
+// Does not change existing logic for other routes.
 
-const WEBHOOK_PATH = "/webhook/senti1984";
-
-function isWebhookPath(pathname: string): boolean {
-  // приймаємо /webhook/senti1984 і /webhook/senti1984/
-  if (pathname === WEBHOOK_PATH) return true;
-  if (pathname === WEBHOOK_PATH + "/") return true;
-  return false;
+export interface Env {
+  // залишаємо місце для інших биндингів, якщо вони вже є
 }
 
 export default {
-  async fetch(request: Request, env: any): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    const path = url.pathname;
+    const method = request.method.toUpperCase();
 
-    // health
-    if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
-      return new Response("ok", { status: 200 });
-    }
-
-    // webhook – відповідаємо 200 на будь-який метод, щоб Telegram не бачив 404
-    if (isWebhookPath(url.pathname)) {
-      let update: any = null;
-
-      if (request.method === "POST") {
+    // 1) Health: GET/POST -> 200 OK (Telegram інколи “простукує” це)
+    if (path === "/health") {
+      if (method === "GET") return new Response("ok", { status: 200 });
+      if (method === "POST") {
+        // просто з’їдаємо тіло і відповідаємо 200
         try {
-          update = await request.json();
-        } catch (e) {
-          // некоректний json — все одно 200, щоб Telegram не ретраїв
-          console.error("bad json on webhook:", e);
-          return new Response("ok", { status: 200 });
-        }
-      }
-
-      try {
-        // Акуратний виклик існуючого роутера: спершу handleUpdate, інакше default
-        const mod: any = await import("./router");
-        const fn =
-          typeof mod?.handleUpdate === "function"
-            ? mod.handleUpdate
-            : typeof mod?.default === "function"
-            ? mod.default
-            : null;
-
-        if (fn && update) {
-          await fn(update, env);
-        }
-      } catch (e) {
-        console.error("router error:", e);
-        // все одно 200 — не ламаємо доставку апдейта
+          const bodyText = await request.text();
+          console.log("[health] POST body:", bodyText);
+        } catch (_) {}
         return new Response("ok", { status: 200 });
       }
+    }
 
+    // 2) Наш вебхук: лише підтверджуємо прийом і логуємо апдейт
+    if (path === "/webhook/senti1984" && method === "POST") {
+      try {
+        const text = await request.text(); // читаємо як текст, щоб уникнути помилок парсингу
+        // логимо СИРОГО листа, щоб точно побачити, що приходить від Telegram
+        console.log("[webhook] raw update:", text);
+      } catch (e) {
+        console.log("[webhook] read error:", (e as Error).message);
+      }
+      // ВАЖЛИВО: миттєво 200, щоб Telegram був щасливий
       return new Response("ok", { status: 200 });
     }
 
-    return new Response("Not Found", { status: 404 });
+    // 3) Фолбек: нічого не міняємо у решті маршрутів
+    return new Response("Not found", { status: 404 });
   },
 };
