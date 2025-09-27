@@ -1,55 +1,65 @@
 // src/telegram/api.ts
-// Мінімальний Telegram API-шар для Worker.
-// Експортує sendMessage та answerCallback, які очікує router.ts.
+export type CfEnv = { TELEGRAM_BOT_TOKEN?: string };
 
-import { CFG } from "../config";
+function tgBase(env: CfEnv) {
+  const token =
+    env.TELEGRAM_BOT_TOKEN ??
+    // резерв, якщо десь раніше зберігали інакше:
+    (globalThis as any).TELEGRAM_BOT_TOKEN ??
+    (globalThis as any).BOT_TOKEN;
 
-// Будуємо базову URL до Telegram Bot API
-function apiBase(): string {
-  const base = CFG.API_BASE_URL || "https://api.telegram.org";
-  // BOT_TOKEN обовʼязково має бути доданий як secret: `wrangler secret put BOT_TOKEN`
-  const token = CFG.BOT_TOKEN;
-  return `${base.replace(/\/+$/, "")}/bot${token}`;
+  if (!token) {
+    console.error("[tg] BOT TOKEN MISSING");
+    throw new Error("BOT TOKEN MISSING");
+  }
+  // Маскуємо у логах
+  const masked = token.slice(0, 7) + "..." + token.slice(-4);
+  console.log("[tg] using token:", masked);
+
+  const base = `https://api.telegram.org/bot${token}`;
+  return { base };
 }
 
-// Відправка звичайного повідомлення
 export async function sendMessage(
-  chatId: number,
+  env: CfEnv,
+  chat_id: number | string,
   text: string,
-  reply_markup?: unknown
-): Promise<Response> {
-  const url = `${apiBase()}/sendMessage`;
-  const body: Record<string, unknown> = {
-    chat_id: chatId,
-    text,
-    disable_web_page_preview: true,
-  };
-  if (reply_markup) body.reply_markup = reply_markup;
+  extra: Record<string, any> = {}
+) {
+  const { base } = tgBase(env);
+  const url = `${base}/sendMessage`;
+  const body = { chat_id, text, ...extra };
 
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  return res;
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    console.error("[tg] sendMessage fail", { status: res.status, data });
+    throw new Error("sendMessage failed");
+  }
+  return data;
 }
 
-// Відповідь на натискання inline-кнопок (callback_query)
-// Викликається з router.ts → answerCallback(...)
 export async function answerCallback(
+  env: CfEnv,
   callback_query_id: string,
-  text?: string,
-  show_alert?: boolean
-): Promise<Response> {
-  const url = `${apiBase()}/answerCallbackQuery`;
-  const body: Record<string, unknown> = { callback_query_id };
-  if (text) body.text = text;
-  if (show_alert !== undefined) body.show_alert = show_alert;
-
+  text = "✅"
+) {
+  const { base } = tgBase(env);
+  const url = `${base}/answerCallbackQuery`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ callback_query_id, text }),
   });
-  return res;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    console.error("[tg] answerCallback fail", { status: res.status, data });
+    throw new Error("answerCallback failed");
+  }
+  return data;
 }
