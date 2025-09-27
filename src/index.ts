@@ -2,38 +2,52 @@
 
 const WEBHOOK_PATH = "/webhook/senti1984";
 
+function isWebhookPath(pathname: string): boolean {
+  // приймаємо /webhook/senti1984 і /webhook/senti1984/
+  if (pathname === WEBHOOK_PATH) return true;
+  if (pathname === WEBHOOK_PATH + "/") return true;
+  return false;
+}
+
 export default {
-  async fetch(request: Request, env: any, _ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: any): Promise<Response> {
     const url = new URL(request.url);
 
-    // простий healthcheck
+    // health
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
       return new Response("ok", { status: 200 });
     }
 
-    // основний вебхук
-    if (request.method === "POST" && url.pathname === WEBHOOK_PATH) {
-      let update: any;
-      try {
-        update = await request.json();
-      } catch {
-        return new Response("bad json", { status: 400 });
+    // webhook – відповідаємо 200 на будь-який метод, щоб Telegram не бачив 404
+    if (isWebhookPath(url.pathname)) {
+      let update: any = null;
+
+      if (request.method === "POST") {
+        try {
+          update = await request.json();
+        } catch (e) {
+          // некоректний json — все одно 200, щоб Telegram не ретраїв
+          console.error("bad json on webhook:", e);
+          return new Response("ok", { status: 200 });
+        }
       }
 
-      // Акуратно викликаємо існуючий роутер:
-      // спочатку шукаємо named export handleUpdate,
-      // якщо нема — default (щоб не зламати поточну структуру)
       try {
+        // Акуратний виклик існуючого роутера: спершу handleUpdate, інакше default
         const mod: any = await import("./router");
-        if (typeof mod?.handleUpdate === "function") {
-          await mod.handleUpdate(update, env);
-        } else if (typeof mod?.default === "function") {
-          await mod.default(update, env);
+        const fn =
+          typeof mod?.handleUpdate === "function"
+            ? mod.handleUpdate
+            : typeof mod?.default === "function"
+            ? mod.default
+            : null;
+
+        if (fn && update) {
+          await fn(update, env);
         }
       } catch (e) {
-        // повертаємо 200, щоб Telegram не дудосив ретраями,
-        // але лог Worker’а збере stack
         console.error("router error:", e);
+        // все одно 200 — не ламаємо доставку апдейта
         return new Response("ok", { status: 200 });
       }
 
