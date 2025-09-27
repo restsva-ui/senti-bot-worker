@@ -1,127 +1,60 @@
 // src/router.ts
-import { sendMessage, answerCallback } from "./telegram/api";
-import type { Update } from "./telegram/types";
-import { CFG } from "./config";
-import { cmdLikePanel } from "./commands/likepanel";
-import { cmdKvTest, cmdResetLikes } from "./commands/kvdebug";
+import { sendMessage } from "./telegram/api";
 
-/** Виділяє команду з тексту: /ping, /ping@bot, /PING  */
-function extractCommand(text?: string): string | null {
-  if (!text || !text.startsWith("/")) return null;
-  const first = text.trim().split(/\s+/)[0]; // "/ping" або "/ping@bot"
-  const withoutMention = first.split("@")[0];
-  return withoutMention.toLowerCase();
+type TgUser = { id: number; first_name?: string; username?: string };
+type TgChat = { id: number; type: "private" | "group" | "supergroup" | "channel" };
+type TgMessage = { message_id: number; from?: TgUser; chat: TgChat; text?: string };
+type TgCallback = { id: string; from: TgUser; message?: TgMessage; data?: string };
+type TgUpdate = {
+  update_id: number;
+  message?: TgMessage;
+  callback_query?: TgCallback;
+};
+
+const WEBHOOK_PATH = "/webhook/senti1984";
+
+function ok(text = "ok") {
+  return new Response(text, { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
+}
+function notFound() {
+  // Повертай 200 замість 404, щоб Telegram не спамив помилками в getWebhookInfo
+  return ok("");
 }
 
-export async function routeUpdate(update: Update): Promise<void> {
-  try {
-    // 1) callback кнопки (лайки)
-    if (update.callback_query) {
-      const cq = update.callback_query;
-      const chatId = cq.message?.chat.id;
-      if (!chatId) return;
-      await answerCallback(cq.id, "✅ Прийнято");
-      await cmdLikePanel(chatId, { data: cq.data || "" });
-      return;
-    }
-
-    // 2) звичайні повідомлення
-    const msg = update.message;
-    if (!msg || !msg.text) return;
-
-    const chatId = msg.chat.id;
-    const raw = msg.text.trim();
-    const lower = raw.toLowerCase();
-
-    // A) Клавіатурні кнопки (без слеша)
-    if (lower === "🔁 ping" || lower === "ping") {
-      await sendMessage(chatId, "pong ✅");
-      return;
-    }
-    if (lower === "👍 лайки") {
-      await cmdLikePanel(chatId);
-      return;
-    }
-    if (lower === "ℹ️ допомога" || lower === "допомога" || lower === "help") {
-      await sendMessage(chatId,
-`📄 Доступні команди:
-/start — запуск і привітання
-/ping — перевірка живості бота
-/menu — головне меню
-/likepanel — панель лайків
-/kvtest — стан KV
-/resetlikes — скинути лічильники`);
-      return;
-    }
-
-    // B) Слеш-команди (з урахуванням @username)
-    const cmd = extractCommand(raw);
-
-    if (cmd === "/start") {
-      await sendMessage(
-        chatId,
-        "👋 Привіт! Бот підключено до Cloudflare Workers. Напишіть /help для довідки."
-      );
-      return;
-    }
-
-    if (cmd === "/help") {
-      await sendMessage(chatId,
-`📄 Доступні команди:
-/start — запуск і привітання
-/ping — перевірка живості бота
-/menu — головне меню
-/likepanel — панель лайків
-/kvtest — стан KV
-/resetlikes — скинути лічильники`);
-      return;
-    }
-
-    if (cmd === "/ping") {
-      await sendMessage(chatId, "pong ✅");
-      return;
-    }
-
-    if (cmd === "/menu") {
-      await sendMessage(chatId, "Головне меню:", {
-        reply_markup: {
-          keyboard: [
-            [{ text: "🔁 Ping" }],
-            [{ text: "👍 Лайки" }],
-            [{ text: "ℹ️ Допомога" }],
-          ],
-          resize_keyboard: true,
-          one_time_keyboard: false,
-        },
-      });
-      return;
-    }
-
-    if (cmd === "/likepanel") {
-      await cmdLikePanel(chatId);
-      return;
-    }
-
-    // Адмін-команди
-    const isOwner = String(chatId) === String(CFG.ownerId);
-    if (isOwner && cmd === "/kvtest") {
-      await cmdKvTest(chatId);
-      return;
-    }
-    if (isOwner && cmd === "/resetlikes") {
-      await cmdResetLikes(chatId);
-      return;
-    }
-
-    // C) Діагностичний фолбек (тимчасово, щоб переконатися, що апдейти доходять)
-    await sendMessage(chatId, `🤖 Отримав: "${raw}" (cmd: ${cmd ?? "—"})`);
-  } catch (e) {
-    // Мʼякий захист, щоб не падати тихо
-    try {
-      const owner = Number(CFG.ownerId);
-      if (owner) {
-        await sendMessage(owner, `⚠️ Router error: ${(e as Error).message}`);
-      }
-    } catch { /* ignore */ }
+async function handleUpdate(update: TgUpdate): Promise<Response> {
+  // /ping у звичайних повідомленнях
+  const msg = update.message;
+  if (msg?.text && msg.text.trim().startsWith("/ping")) {
+    await sendMessage(msg.chat.id, "✅ Pong");
+    return ok();
   }
+
+  // На інші апдейти поки мовчимо, але успішно відповідаємо
+  return ok();
 }
+
+export default {
+  async fetch(request: Request): Promise<Response> {
+    const { method } = request;
+    const url = new URL(request.url);
+
+    // 1) Health-check
+    if (method === "GET" && url.pathname === "/health") {
+      return ok("healthy");
+    }
+
+    // 2) Telegram webhook
+    if (method === "POST" && url.pathname === WEBHOOK_PATH) {
+      try {
+        const update = (await request.json()) as TgUpdate;
+        return await handleUpdate(update);
+      } catch {
+        // Навіть якщо прилетіла невалідна JSON — не ламаємо вебхук, віддаємо 200
+        return ok();
+      }
+    }
+
+    // 3) Інші маршрути — гасимо 404
+    return notFound();
+  },
+};
