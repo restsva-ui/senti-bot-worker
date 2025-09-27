@@ -1,47 +1,61 @@
 // src/router.ts
-import { sendMessage } from "./telegram/api";
-
-type TgUser = { id: number; first_name?: string; username?: string };
-type TgChat = { id: number; type: "private" | "group" | "supergroup" | "channel" };
-type TgMessage = { message_id: number; from?: TgUser; chat: TgChat; text?: string };
-type TgCallback = { id: string; from: TgUser; message?: TgMessage; data?: string };
-type TgUpdate = { update_id: number; message?: TgMessage; callback_query?: TgCallback };
-
-const WEBHOOK_PATH = "/webhook/senti1984";
-
-function ok(text = "ok") {
-  return new Response(text, { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
-}
-
-async function handleUpdate(update: TgUpdate): Promise<Response> {
-  const msg = update.message;
-  if (msg?.text?.trim().startsWith("/ping")) {
-    await sendMessage(msg.chat.id, "✅ Pong");
-    return ok();
-  }
-  return ok(); // інші апдейти підтверджуємо 200
-}
+import { sendMessage, answerCallback } from "./telegram/api";
 
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: any, ctx: ExecutionContext) {
     const url = new URL(request.url);
 
-    // 1) Health-check: приймаємо і GET, і POST
+    // health
     if (url.pathname === "/health") {
-      return ok("healthy");
+      return new Response("ok", { status: 200 });
     }
 
-    // 2) Telegram webhook
-    if (request.method === "POST" && url.pathname === WEBHOOK_PATH) {
+    // вебхук
+    if (request.method === "POST" && url.pathname.startsWith("/webhook/")) {
+      let update: any = null;
       try {
-        const update = (await request.json()) as TgUpdate;
-        return await handleUpdate(update);
-      } catch {
-        return ok(); // не валимо вебхук навіть на кривому JSON
+        update = await request.json();
+        console.log("[webhook] raw update:", JSON.stringify(update));
+      } catch (e) {
+        console.error("[webhook] bad json", e);
+        return new Response("bad json", { status: 400 });
+      }
+
+      try {
+        // callback_query
+        if (update.callback_query) {
+          const cq = update.callback_query;
+          await answerCallback(env, cq.id, "✅");
+          return new Response("ok", { status: 200 });
+        }
+
+        // message/commands
+        const msg = update.message;
+        if (msg?.text) {
+          const chatId = msg.chat.id;
+          let text = String(msg.text).trim();
+
+          // Нормалізуємо команду: /ping або /ping@username
+          if (text.startsWith("/")) {
+            text = text.split(" ")[0]; // беремо тільки команду
+            text = text.split("@")[0]; // відкидаємо @username
+          }
+
+          if (text === "/ping") {
+            await sendMessage(env, chatId, "pong ✅");
+            return new Response("ok", { status: 200 });
+          }
+        }
+
+        // Фолбек: нічого не зробили — але відповімо 200, щоб TG не ретраїв
+        return new Response("ok", { status: 200 });
+      } catch (e: any) {
+        console.error("[webhook] handler error:", e?.message || e);
+        // все одно 200, щоб не накопичувались pending updates
+        return new Response("ok", { status: 200 });
       }
     }
 
-    // 3) Решта маршрутів — тиха 200, щоб не плодити 404 у getWebhookInfo
-    return ok("");
+    return new Response("Not Found", { status: 404 });
   },
 };
