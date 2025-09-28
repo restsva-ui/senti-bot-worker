@@ -1,22 +1,4 @@
-export type Env = {
-  BOT_TOKEN: string;
-  API_BASE_URL?: string;
-};
-
-export type TgUser = { language_code?: string };
+export type TgUser = { id?: number; language_code?: string };
 export type TgChat = { id: number };
-
-export type TgMessageEntity = {
-  type: "bot_command" | string;
-  offset: number;
-  length: number;
-};
-
-export type TgMessage = {
-  text?: string;
-  chat: TgChat;
-  from?: TgUser;
-  entities?: TgMessageEntity[];
-};
-
-export type TgUpdate = { message?: TgMessage };
+export type TgMessage = { message_id?: number; text?: string; chat: TgChat; from?: TgUser };
+export type TgUpdate = { update_id?: number; message?: TgMessage };
