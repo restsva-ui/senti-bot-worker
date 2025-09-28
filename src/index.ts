@@ -14,11 +14,28 @@ function parseJson<T = unknown>(req: Request): Promise<T> {
   return req.json() as Promise<T>;
 }
 
-function isCommand(msg?: TgMessage, name?: string) {
-  const t = msg?.text ?? "";
-  if (!name) return false;
-  const re = new RegExp(`^\\/${name}(?:@\\w+)?(?:\\s|$)`, "i");
-  return re.test(t);
+/** Надійний парсер команд: читає entities + робить резервний парс по тексту. */
+function getCommand(msg?: TgMessage): { name: string | null; args: string } {
+  const text = msg?.text ?? "";
+
+  // 1) Пробуємо entities
+  const ent = msg?.entities?.find(e => e.type === "bot_command" && e.offset === 0);
+  if (ent) {
+    const raw = text.slice(ent.offset, ent.offset + ent.length); // наприклад "/help@mybot"
+    const name = raw.replace(/^\/+/, "").split("@")[0].toLowerCase(); // -> "help"
+    const args = text.slice(ent.offset + ent.length).trimStart();
+    return { name, args };
+  }
+
+  // 2) Резервний парс по рядку (на випадок відсутніх entities)
+  const m = text.match(/^\/(\w+)(?:@\w+)?(?:\s+|$)/);
+  if (m) {
+    const name = m[1].toLowerCase();
+    const args = text.slice(m[0].length).trimStart();
+    return { name, args };
+  }
+
+  return { name: null, args: "" };
 }
 
 function json(data: unknown, init?: ResponseInit) {
@@ -34,14 +51,20 @@ async function handleWebhook(env: Env, req: Request): Promise<Response> {
   console.log("[webhook] raw update:", JSON.stringify(update));
 
   const msg = update.message;
+  const { name } = getCommand(msg);
 
-  if (isCommand(msg, "start"))  { await cmdStart(env, update);  return new Response("OK"); }
-  if (isCommand(msg, "ping"))   { await cmdPing(env, update);   return new Response("OK"); }
-  if (isCommand(msg, "health")) { await cmdHealth(env, update); return new Response("OK"); }
-  if (isCommand(msg, "help"))   { await cmdHelp(env, update);   return new Response("OK"); }
-  if (isCommand(msg, "wiki"))   { await cmdWiki(env, update);   return new Response("OK"); }
+  switch (name) {
+    case "start":  await cmdStart(env, update);  break;
+    case "ping":   await cmdPing(env, update);   break;
+    case "health": await cmdHealth(env, update); break;
+    case "help":   await cmdHelp(env, update);   break;
+    case "wiki":   await cmdWiki(env, update);   break;
+    default:
+      // мовчазна відповідь на будь-який інший апдейт/текст
+      break;
+  }
 
-  // мовчазна відповідь для нерозпізнаного апдейту
+  // Завжди 200 для TG
   return new Response("OK");
 }
 
@@ -61,7 +84,6 @@ export default {
         return await handleWebhook(env, req);
       } catch (e) {
         console.error("webhook error:", e);
-        // Завжди 200, щоб Telegram не ретраїв агресивно
         return new Response("OK");
       }
     }
