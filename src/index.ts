@@ -1,15 +1,14 @@
 // src/index.ts
 /* --------------------------- Env & Imports --------------------------- */
 export type Env = {
-  BOT_TOKEN: string;            // секрет у Workers → Variables (Secret)
-  API_BASE_URL?: string;        // опціонально, за замовч. https://api.telegram.org
+  BOT_TOKEN: string;
+  API_BASE_URL?: string;
 };
 
 import { sendMessage } from "./utils/telegram";
 import { cmdWiki } from "./commands/wiki";
 
 /* --------------------------- Constants ------------------------------- */
-// НЕ міняємо, щоб не ламати поточний вебхук
 const WEBHOOK_PATH = "/webhook/senti1984";
 
 /* --------------------------- Types ----------------------------------- */
@@ -72,18 +71,16 @@ async function cmdHelp(env: Env, update: TgUpdate) {
 /* --------------------------- Router (HTTP) --------------------------- */
 async function handleWebhook(env: Env, req: Request): Promise<Response> {
   const update = (await parseJson<TgUpdate>(req));
-  // Лог для діагностики (видно у Workers Logs)
   console.log("[webhook] raw update:", JSON.stringify(update));
 
   const msg = update.message;
 
-  if (isCommand(msg, "start")) return cmdStart(env, update), new Response("OK");
-  if (isCommand(msg, "ping")) return cmdPing(env, update), new Response("OK");
-  if (isCommand(msg, "health")) return cmdHealth(env, update), new Response("OK");
-  if (isCommand(msg, "help")) return cmdHelp(env, update), new Response("OK");
-  if (isCommand(msg, "wiki")) return cmdWiki(env, update), new Response("OK");
+  if (isCommand(msg, "start")) { await cmdStart(env, update); return new Response("OK"); }
+  if (isCommand(msg, "ping"))  { await cmdPing(env, update);  return new Response("OK"); }
+  if (isCommand(msg, "health")){ await cmdHealth(env, update);return new Response("OK"); }
+  if (isCommand(msg, "help"))  { await cmdHelp(env, update);  return new Response("OK"); }
+  if (isCommand(msg, "wiki"))  { await cmdWiki(env, update);  return new Response("OK"); }
 
-  // Якщо не команда — мовчки ОК (щоб TG не ретраїв)
   return new Response("OK");
 }
 
@@ -110,7 +107,6 @@ export default {
         return await handleWebhook(env, req);
       } catch (e) {
         console.error("webhook error:", e);
-        // Відповідаємо 200, щоб TG не засипав повторними ретраями
         return new Response("OK");
       }
     }
