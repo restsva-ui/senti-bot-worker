@@ -6,8 +6,20 @@ export default {
     const url = new URL(request.url);
 
     // health
-    if (url.pathname === "/health") {
-      return new Response("ok", { status: 200 });
+    if (url.pathname === "/health") return new Response("ok", { status: 200 });
+
+    // DIAG: ручна перевірка відправки
+    // GET/POST /diag/send?chat_id=784869835&text=hello
+    if (url.pathname === "/diag/send") {
+      const chatId = url.searchParams.get("chat_id");
+      const text = url.searchParams.get("text") || "diag";
+      try {
+        await sendMessage(env, chatId!, text);
+        return new Response("diag: ok", { status: 200 });
+      } catch (e: any) {
+        console.error("[diag] send fail:", e?.message || e);
+        return new Response("diag: fail", { status: 500 });
+      }
     }
 
     // вебхук
@@ -22,36 +34,31 @@ export default {
       }
 
       try {
-        // callback_query
+        // callback
         if (update.callback_query) {
-          const cq = update.callback_query;
-          await answerCallback(env, cq.id, "✅");
+          await answerCallback(env, update.callback_query.id, "✅");
           return new Response("ok", { status: 200 });
         }
 
-        // message/commands
         const msg = update.message;
         if (msg?.text) {
           const chatId = msg.chat.id;
-          let text = String(msg.text).trim();
-
-          // Нормалізуємо команду: /ping або /ping@username
-          if (text.startsWith("/")) {
-            text = text.split(" ")[0]; // беремо тільки команду
-            text = text.split("@")[0]; // відкидаємо @username
+          let cmd = String(msg.text).trim();
+          if (cmd.startsWith("/")) {
+            cmd = cmd.split(" ")[0]; // /ping@user -> /ping
+            cmd = cmd.split("@")[0];
           }
+          console.log("[router] cmd:", cmd);
 
-          if (text === "/ping") {
+          if (cmd === "/ping") {
             await sendMessage(env, chatId, "pong ✅");
             return new Response("ok", { status: 200 });
           }
         }
 
-        // Фолбек: нічого не зробили — але відповімо 200, щоб TG не ретраїв
         return new Response("ok", { status: 200 });
       } catch (e: any) {
         console.error("[webhook] handler error:", e?.message || e);
-        // все одно 200, щоб не накопичувались pending updates
         return new Response("ok", { status: 200 });
       }
     }
