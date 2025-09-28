@@ -2,6 +2,7 @@
 export type TgEnv = { BOT_TOKEN: string };
 
 export function makeTelegram(env: TgEnv) {
+  if (!env.BOT_TOKEN) console.error("[tg] BOT_TOKEN is missing!");
   const base = `https://api.telegram.org/bot${env.BOT_TOKEN}`;
 
   async function sendMessage(chat_id: number, text: string) {
@@ -12,7 +13,7 @@ export function makeTelegram(env: TgEnv) {
     });
     const body = await res.text().catch(() => "");
     if (!res.ok) console.error("[tg] sendMessage FAIL", res.status, body);
-    else console.log("[tg] sendMessage OK", body);
+    else console.log("[tg] sendMessage OK");
     return res.ok;
   }
 
@@ -24,7 +25,7 @@ export function makeTelegram(env: TgEnv) {
     });
     const body = await res.text().catch(() => "");
     if (!res.ok) console.error("[tg] answerCallback FAIL", res.status, body);
-    else console.log("[tg] answerCallback OK", body);
+    else console.log("[tg] answerCallback OK");
     return res.ok;
   }
 
