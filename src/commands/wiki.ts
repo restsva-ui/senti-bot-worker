@@ -1,50 +1,47 @@
 import { sendMessage } from "../utils/telegram";
-import type { Env, TgUpdate } from "../types";
+import type { Env } from "../index";
+import type { TgUpdate } from "../types";
 
-function extractQuery(text: string) {
-  // /wiki, /wiki@botname, з параметром або без
-  return text.replace(/^\/wiki(?:@\w+)?\s*/i, "").trim();
+const WIKI_API = "https://uk.wikipedia.org/api/rest_v1/page/summary/";
+
+// Витягуємо запит після /wiki
+function extractQuery(text: string | undefined): string {
+  if (!text) return "";
+  const m = text.match(/^\/wiki(?:@\w+)?\s+(.+)$/i);
+  return (m?.[1] ?? "").trim();
 }
 
-function truncate(s: string, max = 1200) {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1).trimEnd() + "…";
+async function fetchWikiSummary(q: string): Promise<string | null> {
+  const slug = encodeURIComponent(q);
+  const r = await fetch(`${WIKI_API}${slug}`);
+  if (!r.ok) return null;
+  const data = await r.json<any>().catch(() => null);
+  const title = data?.title;
+  const extract = data?.extract;
+  if (!title || !extract) return null;
+  return `📚 <b>${title}</b>\n\n${extract}`;
 }
 
 export async function cmdWiki(env: Env, update: TgUpdate) {
-  const chatId = update.message!.chat.id;
-  const t = update.message?.text ?? "";
-  const q = extractQuery(t);
+  if (!update.message) return;
+  const chatId = update.message.chat.id;
+  const q = extractQuery(update.message.text);
 
   if (!q) {
-    await sendMessage(env, chatId, "ℹ️ Використання: <b>/wiki &lt;запит&gt;</b>\nНапр.: <code>/wiki Київ</code>");
+    await sendMessage(env, chatId, "ℹ️ Використання: <code>/wiki &lt;запит&gt;</code>\nНапр.: <code>/wiki Київ</code>");
     return;
   }
 
-  const url = `https://uk.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(q)}`;
-  try {
-    const res = await fetch(url, { headers: { "accept": "application/json" } });
-    if (!res.ok) {
-      await sendMessage(env, chatId, "Не вдалося отримати дані з Вікіпедії. Спробуй інший запит.");
-      return;
-    }
-    const data = await res.json() as any;
-
-    // Може повертати disambiguation або помилку
-    if (data?.type === "disambiguation") {
-      await sendMessage(env, chatId, `📖 <b>${data.title}</b>\nЦе неоднозначний запит. Уточни, будь ласка.`);
-      return;
-    }
-    if (!data?.extract) {
-      await sendMessage(env, chatId, "Нічого не знайдено. Спробуй інший запит.");
-      return;
-    }
-
-    const title = data.title || q;
-    const extract = truncate(String(data.extract));
-    await sendMessage(env, chatId, `📚 <b>${title}</b>\n\n${extract}`);
-  } catch (e) {
-    console.error("wiki error:", e);
-    await sendMessage(env, chatId, "Сталася помилка при зверненні до Вікіпедії.");
+  const text = await fetchWikiSummary(q);
+  if (!text) {
+    await sendMessage(env, chatId, "Не вдалося отримати дані з Вікіпедії. Спробуй інший запит.");
+    return;
   }
+  await sendMessage(env, chatId, text);
 }
+
+export const wikiCommand = {
+  name: "wiki",
+  description: "Коротка довідка з Вікіпедії",
+  execute: cmdWiki,
+};
