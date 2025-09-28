@@ -1,59 +1,62 @@
-// src/index.ts
-import {
-  Env,
-  cmdPing,
-  cmdStart,
-  cmdHealthMessage,
-  healthJson,
-  sendTelegramMessage,
-} from "./commands";
+import { handleHelp } from "./commands/help";
 
-type TgUser = { id: number; is_bot: boolean; first_name?: string; username?: string };
-type TgChat = { id: number; type: "private" | "group" | "supergroup" | "channel"; username?: string; first_name?: string };
-type TgMessage = { message_id: number; date: number; text?: string; from?: TgUser; chat: TgChat; entities?: {offset:number;length:number;type:string}[] };
-type TgUpdate = { update_id: number; message?: TgMessage; callback_query?: any };
+export interface Env {
+  BOT_TOKEN: string;
+  API_BASE_URL: string;
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    try {
-      const url = new URL(request.url);
-      const { pathname } = url;
+    const { pathname } = new URL(request.url);
 
-      // 1) health endpoint (GET)
-      if (request.method === "GET" && pathname === "/health") {
-        return healthJson();
-      }
-
-      // 2) webhook приймає POST /webhook/senti1984
-      if (request.method === "POST" && pathname === "/webhook/senti1984") {
-        const update = (await request.json()) as TgUpdate;
-
-        // Витягнемо текст команди
-        const msg = update.message;
-        const text = msg?.text?.trim() || "";
-
-        // Маршрутизація команд
-        let reply: string | null = null;
-        if (text.startsWith("/ping")) reply = cmdPing().text;
-        else if (text.startsWith("/start")) reply = cmdStart().text;
-        else if (text.startsWith("/health")) reply = cmdHealthMessage().text;
-
-        // Якщо команда впізнана — відповідаємо
-        if (reply && msg?.chat?.id) {
-          await sendTelegramMessage(env, msg.chat.id, reply);
-        }
-
-        // Telegram очікує 200 OK швидко
-        return new Response("ok", { status: 200 });
-      }
-
-      // 3) усе інше
-      if (request.method === "GET") {
-        return new Response("Not found", { status: 404 });
-      }
-      return new Response("Method not allowed", { status: 405 });
-    } catch (err) {
-      return new Response(`Internal error: ${(err as Error).message}`, { status: 500 });
+    // Health-check
+    if (pathname === "/health") {
+      return new Response(JSON.stringify({ ok: true, ts: Date.now() }), {
+        headers: { "Content-Type": "application/json" },
+      });
     }
+
+    // Webhook
+    if (pathname.startsWith("/webhook")) {
+      if (request.method !== "POST") {
+        return new Response("Method not allowed", { status: 405 });
+      }
+
+      const update = await request.json<{ message?: any }>();
+      if (update.message) {
+        const chatId = update.message.chat.id;
+        const text = update.message.text;
+
+        if (text === "/ping") {
+          await sendMessage(env, chatId, "pong ✅");
+        } else if (text === "/health") {
+          await sendMessage(env, chatId, "ok ✅");
+        } else if (text === "/start") {
+          await sendMessage(
+            env,
+            chatId,
+            "✅ Senti онлайн\nНадішли /ping щоб перевірити відповідь."
+          );
+        } else if (text === "/help") {
+          await handleHelp(env, chatId);
+        }
+      }
+
+      return new Response("ok", { status: 200 });
+    }
+
+    return new Response("Not found", { status: 404 });
   },
 };
+
+// Відправка повідомлення
+async function sendMessage(env: Env, chatId: number, text: string) {
+  const url = `${env.API_BASE_URL}/bot${env.BOT_TOKEN}/sendMessage`;
+  const body = { chat_id: chatId, text, parse_mode: "Markdown" };
+
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
