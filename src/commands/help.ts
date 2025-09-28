@@ -1,5 +1,6 @@
 import { sendMessage } from "../utils/telegram";
-import type { Env, TgUpdate } from "../types";
+import type { Env } from "../index";
+import type { TgUpdate } from "../types";
 
 // Текст допомоги
 export function helpText(): string {
@@ -16,14 +17,14 @@ export function helpText(): string {
   ].join("\n");
 }
 
-// Обробник команди /help
+// Обробник
 export async function cmdHelp(env: Env, update: TgUpdate): Promise<void> {
   if (!update.message) return;
   const chatId = update.message.chat.id;
   await sendMessage(env, chatId, helpText());
 }
 
-// Явний експорт для реєстрації в index.ts
+// Явний дескриптор
 export const helpCommand = {
   name: "help",
   description: "Список доступних команд",
