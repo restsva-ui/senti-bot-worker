@@ -1,158 +1,26 @@
-// src/index.ts
+/* --------------------------- Imports & Types ------------------------- */
+import type { Env, TgMessage, TgUpdate } from "./types";
+import { cmdStart }   from "./commands/start";
+import { cmdPing }    from "./commands/ping";
+import { cmdHealth }  from "./commands/health";
+import { cmdHelp }    from "./commands/help";
+import { cmdWiki }    from "./commands/wiki";
 
-/* --------------------------- Env & Types --------------------------- */
-export type Env = {
-  BOT_TOKEN: string;             // обов'язково: токен бота
-  API_BASE_URL?: string;         // опціонально: базовий URL Telegram API
-};
-
-type TgChat = { id: number };
-type TgUser = { id: number; language_code?: string };
-type TgMessage = { message_id: number; text?: string; chat: TgChat; from?: TgUser };
-type TgUpdate = { update_id: number; message?: TgMessage };
-
-/* --------------------------- Consts ------------------------------- */
+/* --------------------------- Constants ------------------------------- */
 const WEBHOOK_PATH = "/webhook/senti1984";
 
-/* --------------------------- Telegram utils ----------------------- */
-function tgBase(env: Env) {
-  const base = env.API_BASE_URL?.replace(/\/+$/, "") || "https://api.telegram.org";
-  return `${base}/bot${env.BOT_TOKEN}`;
+/* --------------------------- Utils ---------------------------------- */
+function parseJson<T = unknown>(req: Request): Promise<T> {
+  return req.json() as Promise<T>;
 }
 
-async function tgCall<T>(env: Env, method: string, payload: Record<string, unknown>): Promise<T> {
-  const res = await fetch(`${tgBase(env)}/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`tg ${method} HTTP ${res.status}: ${text}`);
-  }
-  const data = await res.json<any>();
-  if (!data?.ok) throw new Error(`tg ${method} not ok: ${JSON.stringify(data)}`);
-  return data.result as T;
-}
-
-async function sendMessage(env: Env, chat_id: number, text: string, extra?: Record<string, unknown>) {
-  return tgCall(env, "sendMessage", {
-    chat_id,
-    text,
-    // не вказуємо parse_mode, щоб уникнути падінь через розмітку
-    disable_web_page_preview: true,
-    ...extra,
-  });
-}
-
-/* --------------------------- Helpers ------------------------------ */
-function isCommand(msg: TgMessage | undefined, name: string): boolean {
+function isCommand(msg?: TgMessage, name?: string) {
   const t = msg?.text ?? "";
+  if (!name) return false;
   const re = new RegExp(`^\\/${name}(?:@\\w+)?(?:\\s|$)`, "i");
   return re.test(t);
 }
-function afterCommandText(msg: TgMessage, name: string): string {
-  const t = msg.text ?? "";
-  return t.replace(new RegExp(`^\\/${name}(?:@\\w+)?\\s*`, "i"), "");
-}
 
-function helpText(): string {
-  return [
-    "📋 Доступні команди:",
-    "",
-    "/start – запуск і вітання",
-    "/ping – перевірка звʼязку (pong)",
-    "/health – перевірка стану сервера",
-    "/help – список команд",
-    "/wiki <запит> – коротка довідка з Вікіпедії",
-    "",
-    "⚡ Надалі будуть нові функції (AI, інтеграції тощо).",
-  ].join("\n");
-}
-
-/* --------------------------- Wiki (uk) ---------------------------- */
-async function wikiLookup(query: string, lang = "uk") {
-  // 1) Пошук першого збігу
-  const searchUrl =
-    `https://${lang}.wikipedia.org/w/api.php?action=opensearch&limit=1&namespace=0&format=json&origin=*&search=` +
-    encodeURIComponent(query);
-  const searchRes = await fetch(searchUrl);
-  if (!searchRes.ok) throw new Error(`wiki search HTTP ${searchRes.status}`);
-  const arr = (await searchRes.json()) as [string, string[], string[], string[]];
-  const title = arr?.[1]?.[0];
-  if (!title) return null;
-
-  // 2) Короткий опис
-  const sumUrl =
-    `https://${lang}.wikipedia.org/api/rest_v1/page/summary/` + encodeURIComponent(title);
-  const sumRes = await fetch(sumUrl, { headers: { "accept": "application/json" } });
-  if (!sumRes.ok) throw new Error(`wiki summary HTTP ${sumRes.status}`);
-  const sum = await sumRes.json<any>();
-  const extract: string = sum.extract || "";
-  const url: string = sum.content_urls?.desktop?.page || `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(title)}`;
-
-  return { title, extract, url };
-}
-
-/* --------------------------- Handlers ----------------------------- */
-async function handleStart(env: Env, msg: TgMessage) {
-  return sendMessage(
-    env,
-    msg.chat.id,
-    "✅ Senti онлайн\nНадішли /ping щоб перевірити відповідь."
-  );
-}
-async function handlePing(env: Env, msg: TgMessage) {
-  return sendMessage(env, msg.chat.id, "pong ✅");
-}
-async function handleHealth(env: Env, msg: TgMessage) {
-  return sendMessage(env, msg.chat.id, "ok ✅");
-}
-async function handleHelp(env: Env, msg: TgMessage) {
-  return sendMessage(env, msg.chat.id, helpText());
-}
-async function handleWiki(env: Env, msg: TgMessage) {
-  const q = afterCommandText(msg, "wiki").trim();
-  if (!q) {
-    return sendMessage(env, msg.chat.id, "ℹ️ Використання: /wiki <запит>\nНапр.: /wiki Київ");
-  }
-  try {
-    const res = await wikiLookup(q, (msg.from?.language_code || "uk").split("-")[0] || "uk");
-    if (!res) return sendMessage(env, msg.chat.id, `Нічого не знайдено за запитом “${q}”`);
-    const text =
-      `📖 <b>${res.title}</b>\n\n` +
-      `${res.extract}\n\n` +
-      `${res.url}`;
-    // без parse_mode — щоб уникнути проблем з HTML, просто шлемо текст
-    return sendMessage(env, msg.chat.id, text);
-  } catch (e) {
-    console.error("wiki error:", e);
-    return sendMessage(env, msg.chat.id, "❌ Не вдалося отримати дані з Вікіпедії.");
-  }
-}
-
-/* --------------------------- Webhook router ----------------------- */
-async function handleWebhook(env: Env, req: Request): Promise<Response> {
-  const update = (await req.json()) as TgUpdate;
-  console.log("[webhook] raw update:", JSON.stringify(update));
-  const msg = update.message;
-  if (!msg) return new Response("OK");
-
-  try {
-    if (isCommand(msg, "start"))  await handleStart(env, msg);
-    else if (isCommand(msg, "ping"))   await handlePing(env, msg);
-    else if (isCommand(msg, "health")) await handleHealth(env, msg);
-    else if (isCommand(msg, "help"))   await handleHelp(env, msg);
-    else if (isCommand(msg, "wiki"))   await handleWiki(env, msg);
-    // інші — ігноруємо тихо
-  } catch (e) {
-    console.error("handler error:", e);
-    // відповідаємо 200, щоб TG не ретраїв
-  }
-  return new Response("OK");
-}
-
-/* --------------------------- Worker entry ------------------------- */
 function json(data: unknown, init?: ResponseInit) {
   return new Response(JSON.stringify(data), {
     headers: { "content-type": "application/json; charset=utf-8" },
@@ -160,25 +28,47 @@ function json(data: unknown, init?: ResponseInit) {
   });
 }
 
+/* --------------------------- Webhook -------------------------------- */
+async function handleWebhook(env: Env, req: Request): Promise<Response> {
+  const update = await parseJson<TgUpdate>(req);
+  console.log("[webhook] raw update:", JSON.stringify(update));
+
+  const msg = update.message;
+
+  if (isCommand(msg, "start"))  { await cmdStart(env, update);  return new Response("OK"); }
+  if (isCommand(msg, "ping"))   { await cmdPing(env, update);   return new Response("OK"); }
+  if (isCommand(msg, "health")) { await cmdHealth(env, update); return new Response("OK"); }
+  if (isCommand(msg, "help"))   { await cmdHelp(env, update);   return new Response("OK"); }
+  if (isCommand(msg, "wiki"))   { await cmdWiki(env, update);   return new Response("OK"); }
+
+  // мовчазна відповідь для нерозпізнаного апдейту
+  return new Response("OK");
+}
+
+/* --------------------------- Worker export --------------------------- */
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
 
-    // GET /health
+    // Healthcheck
     if (req.method === "GET" && url.pathname === "/health") {
       return json({ ok: true, ts: Date.now() });
     }
 
-    // POST /webhook/senti1984
+    // Telegram webhook
     if (req.method === "POST" && url.pathname === WEBHOOK_PATH) {
-      return handleWebhook(env, req);
+      try {
+        return await handleWebhook(env, req);
+      } catch (e) {
+        console.error("webhook error:", e);
+        // Завжди 200, щоб Telegram не ретраїв агресивно
+        return new Response("OK");
+      }
     }
 
-    // метод не дозволено
-    if (!["GET", "POST"].includes(req.method)) {
+    if (req.method !== "GET" && req.method !== "POST") {
       return new Response("Method not allowed", { status: 405 });
     }
-
     return new Response("Not found", { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
