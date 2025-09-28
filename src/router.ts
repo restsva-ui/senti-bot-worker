@@ -1,68 +1,53 @@
 // src/router.ts
 import { sendMessage, answerCallback } from "./telegram/api";
 
+type TgUser = { id: number; is_bot?: boolean; first_name?: string; username?: string };
+type TgChat = { id: number; type: "private" | "group" | "supergroup" | "channel" };
+type TgMessage = { message_id: number; from?: TgUser; chat: TgChat; date: number; text?: string };
+type TgCallbackQuery = { id: string; from: TgUser; message?: TgMessage; data?: string };
+type TgUpdate = { update_id: number; message?: TgMessage; callback_query?: TgCallbackQuery };
+
+function json(status = 200, body: unknown = { ok: true }): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
+
 export default {
-  async fetch(request: Request, env: any, ctx: ExecutionContext) {
+  async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
-    // health
-    if (url.pathname === "/health") return new Response("ok", { status: 200 });
-
-    // DIAG: ручна перевірка відправки
-    // GET/POST /diag/send?chat_id=784869835&text=hello
-    if (url.pathname === "/diag/send") {
-      const chatId = url.searchParams.get("chat_id");
-      const text = url.searchParams.get("text") || "diag";
-      try {
-        await sendMessage(env, chatId!, text);
-        return new Response("diag: ok", { status: 200 });
-      } catch (e: any) {
-        console.error("[diag] send fail:", e?.message || e);
-        return new Response("diag: fail", { status: 500 });
-      }
+    // healthcheck (щоб /health не давав 404)
+    if (url.pathname === "/health") {
+      return json(200, { ok: true, service: "senti-bot-worker" });
     }
 
     // вебхук
-    if (request.method === "POST" && url.pathname.startsWith("/webhook/")) {
-      let update: any = null;
-      try {
-        update = await request.json();
-        console.log("[webhook] raw update:", JSON.stringify(update));
-      } catch (e) {
-        console.error("[webhook] bad json", e);
-        return new Response("bad json", { status: 400 });
+    if (url.pathname.startsWith("/webhook/")) {
+      if (request.method !== "POST") return json(405, { ok: false, error: "method not allowed" });
+
+      const update = (await request.json().catch(() => ({}))) as TgUpdate;
+
+      // 1) Команда /ping
+      const msg = update.message;
+      if (msg?.text?.trim().toLowerCase() === "/ping") {
+        await sendMessage(msg.chat.id, "pong ✅");
+        return json(); // 200
       }
 
-      try {
-        // callback
-        if (update.callback_query) {
-          await answerCallback(env, update.callback_query.id, "✅");
-          return new Response("ok", { status: 200 });
-        }
-
-        const msg = update.message;
-        if (msg?.text) {
-          const chatId = msg.chat.id;
-          let cmd = String(msg.text).trim();
-          if (cmd.startsWith("/")) {
-            cmd = cmd.split(" ")[0]; // /ping@user -> /ping
-            cmd = cmd.split("@")[0];
-          }
-          console.log("[router] cmd:", cmd);
-
-          if (cmd === "/ping") {
-            await sendMessage(env, chatId, "pong ✅");
-            return new Response("ok", { status: 200 });
-          }
-        }
-
-        return new Response("ok", { status: 200 });
-      } catch (e: any) {
-        console.error("[webhook] handler error:", e?.message || e);
-        return new Response("ok", { status: 200 });
+      // 2) Callback (на майбутнє – просто safe-ack)
+      const cb = update.callback_query;
+      if (cb?.id) {
+        await answerCallback(cb.id);
+        return json();
       }
+
+      // 3) Fallback – тихо Ok
+      return json();
     }
 
-    return new Response("Not Found", { status: 404 });
+    // 404 для інших шляхів
+    return new Response("Not found", { status: 404 });
   },
 };
