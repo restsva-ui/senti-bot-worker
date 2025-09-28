@@ -2,7 +2,7 @@
 /* --------------------------- Env & Imports --------------------------- */
 export type Env = {
   BOT_TOKEN: string;
-  API_BASE_URL?: string; // e.g. https://api.telegram.org  (optional)
+  API_BASE_URL?: string; // optional, default https://api.telegram.org
 };
 
 import { sendMessage } from "./utils/telegram";
@@ -14,23 +14,18 @@ const WEBHOOK_PATH = "/webhook/senti1984";
 /* --------------------------- Types ----------------------------------- */
 type TgUser = { language_code?: string };
 type TgChat = { id: number };
-type TgMessage = { text?: string; chat: TgChat; from?: TgUser };
-type TgUpdate =
-  | { message?: TgMessage } // ми працюємо з message; інші типи ігноруємо
-  ;
+type TgEntity = { offset: number; length: number; type: string };
+type TgMessage = {
+  text?: string;
+  chat: TgChat;
+  from?: TgUser;
+  entities?: TgEntity[];
+};
+type TgUpdate = { message?: TgMessage };
 
-/* --------------------------- Small utils ----------------------------- */
+/* --------------------------- Utils ----------------------------------- */
 function parseJson<T = unknown>(req: Request): Promise<T> {
   return req.json() as Promise<T>;
-}
-
-// більш лояльний матчинг: допускаємо пробіли/переноси до і після,
-// суфікс @botname, кінець рядка або пробіл після команди
-function isCommand(msg: TgMessage | undefined, name: string): boolean {
-  const t = (msg?.text ?? "").trim();              // обрізаємо «дивні» пробіли/переноси
-  if (!t.startsWith("/")) return false;
-  const re = new RegExp(`^\\/${name}(?:@\\w+)?(?:\\s|$)`, "i");
-  return re.test(t);
 }
 
 function helpText() {
@@ -47,49 +42,84 @@ function helpText() {
   ].join("\n");
 }
 
+/** Надійний парсер команди з повідомлення (через entities) */
+function extractCommand(msg?: TgMessage): { name?: string; args?: string } {
+  if (!msg?.text) return {};
+  const text = msg.text;
+
+  // 1) Спроба через entities
+  const cmdEnt = msg.entities?.find((e) => e.type === "bot_command");
+  if (cmdEnt) {
+    const raw = text.substring(cmdEnt.offset, cmdEnt.offset + cmdEnt.length); // напр. "/help@my_bot"
+    const args = text.substring(cmdEnt.offset + cmdEnt.length).trim(); // решта після команди
+    const lower = raw.toLowerCase();
+    // відкидаємо @botname
+    const name = lower.startsWith("/")
+      ? lower.slice(1).split("@")[0]
+      : lower.split("@")[0];
+    return { name, args };
+  }
+
+  // 2) Фолбек на regex (на випадок відсутніх entities)
+  const m = text.trim().match(/^\/([a-z0-9_]+)(?:@\w+)?(?:\s+(.+))?$/i);
+  if (m) {
+    return {
+      name: m[1].toLowerCase(),
+      args: (m[2] ?? "").trim(),
+    };
+  }
+  return {};
+}
+
 /* --------------------------- Command handlers ------------------------ */
 async function cmdStart(env: Env, update: TgUpdate) {
   const chatId = update.message!.chat.id;
   await sendMessage(env, chatId, "✅ Senti онлайн\nНадішли /ping щоб перевірити відповідь.");
 }
-
 async function cmdPing(env: Env, update: TgUpdate) {
   const chatId = update.message!.chat.id;
   await sendMessage(env, chatId, "pong ✅");
 }
-
 async function cmdHealth(env: Env, update: TgUpdate) {
   const chatId = update.message!.chat.id;
   await sendMessage(env, chatId, "ok ✅");
 }
-
 async function cmdHelp(env: Env, update: TgUpdate) {
   const chatId = update.message!.chat.id;
   await sendMessage(env, chatId, helpText());
 }
 
-/* --------------------------- Router (webhook) ------------------------ */
+/* --------------------------- Webhook router -------------------------- */
 async function handleWebhook(env: Env, req: Request): Promise<Response> {
   const update = await parseJson<TgUpdate>(req);
   console.log("[webhook] raw update:", JSON.stringify(update));
 
   const msg = update.message;
-  const txt = msg?.text ?? "";
-  if (!msg) {
-    console.log("[webhook] no message – ignore");
-    return new Response("OK");
+  if (!msg) return new Response("OK");
+
+  const { name } = extractCommand(msg);
+  console.log("[webhook] command parsed:", name, "text:", msg.text);
+
+  switch (name) {
+    case "start":
+      await cmdStart(env, update);
+      break;
+    case "ping":
+      await cmdPing(env, update);
+      break;
+    case "health":
+      await cmdHealth(env, update);
+      break;
+    case "help":
+      await cmdHelp(env, update);
+      break;
+    case "wiki":
+      await cmdWiki(env, update); // сам хендлер обробляє відсутні аргументи
+      break;
+    default:
+      // не команда — ігноруємо
+      break;
   }
-
-  // командний роутер
-  if (isCommand(msg, "start")) { await cmdStart(env, update); return new Response("OK"); }
-  if (isCommand(msg, "ping"))  { await cmdPing(env, update);  return new Response("OK"); }
-  if (isCommand(msg, "health")){ await cmdHealth(env, update);return new Response("OK"); }
-  if (isCommand(msg, "help"))  { await cmdHelp(env, update);  return new Response("OK"); }
-  if (isCommand(msg, "wiki"))  { await cmdWiki(env, update);  return new Response("OK"); }
-
-  // Фолбек: якщо користувач натиснув меню і відправив порожній /wiki без аргументу,
-  // cmdWiki сам поверне підказку. Якщо взагалі не команда — просто OK.
-  console.log("[webhook] not a known command:", JSON.stringify({ text: txt }));
   return new Response("OK");
 }
 
@@ -102,7 +132,6 @@ function json(data: unknown, init?: ResponseInit) {
 }
 
 /* --------------------------- Admin endpoints ------------------------- */
-/** GET /admin/set-commands — реєстрація меню команд у Телеграмі */
 async function registerBotCommands(env: Env): Promise<Response> {
   const body = {
     commands: [
@@ -115,7 +144,6 @@ async function registerBotCommands(env: Env): Promise<Response> {
     scope: { type: "default" },
     language_code: "uk",
   };
-
   const base = env.API_BASE_URL || "https://api.telegram.org";
   const url = `${base}/bot${env.BOT_TOKEN}/setMyCommands`;
   const res = await fetch(url, {
@@ -133,12 +161,12 @@ export default {
     const url = new URL(req.url);
     const { pathname } = url;
 
-    // 1) Healthcheck
+    // Health
     if (req.method === "GET" && pathname === "/health") {
       return json({ ok: true, ts: Date.now() });
     }
 
-    // 2) Webhook
+    // Webhook
     if (req.method === "POST" && pathname === WEBHOOK_PATH) {
       try {
         return await handleWebhook(env, req);
@@ -148,7 +176,7 @@ export default {
       }
     }
 
-    // 3) Admin: зареєструвати меню команд
+    // Admin: меню команд
     if (req.method === "GET" && pathname === "/admin/set-commands") {
       try {
         return await registerBotCommands(env);
@@ -158,7 +186,6 @@ export default {
       }
     }
 
-    // 4) Метод не дозволений / або шлях не знайдено
     if (req.method !== "GET" && req.method !== "POST") {
       return new Response("Method not allowed", { status: 405 });
     }
