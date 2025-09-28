@@ -1,7 +1,14 @@
 import { sendMessage } from "../utils/telegram";
-import type { Env, TgUpdate } from "../types";
+import type { Env } from "../index";
+import type { TgUpdate } from "../types";
 
 export async function cmdPing(env: Env, update: TgUpdate) {
-  const chatId = update.message!.chat.id;
-  await sendMessage(env, chatId, "pong ✅");
+  if (!update.message) return;
+  await sendMessage(env, update.message.chat.id, "pong ✅");
 }
+
+export const pingCommand = {
+  name: "ping",
+  description: "Перевірка звʼязку (pong)",
+  execute: cmdPing,
+};
