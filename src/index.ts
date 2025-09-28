@@ -16,7 +16,17 @@ export default {
       return json({ ok: true, ts: Date.now() });
     }
 
-    // 2) все інше — 404 (щоб явно бачити, що працює воркер)
+    // 2) telegram webhook
+    if (url.pathname.startsWith("/webhook/")) {
+      if (req.method === "POST") {
+        const update = await req.json().catch(() => null);
+        console.log("[webhook] raw update:", JSON.stringify(update));
+        return json({ ok: true });
+      }
+      return new Response("Method not allowed", { status: 405 });
+    }
+
+    // 3) все інше
     return new Response("Not found", { status: 404 });
   },
 };
