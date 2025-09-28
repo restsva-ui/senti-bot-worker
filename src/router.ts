@@ -1,67 +1,55 @@
 // src/router.ts
-import { makeTelegram, TgEnv } from "./telegram/api";
-
-type TgUser = { id: number; username?: string };
-type TgChat = { id: number; type: string };
-type TgMessage = { message_id: number; from?: TgUser; chat: TgChat; date: number; text?: string };
-type TgCallbackQuery = { id: string; from: TgUser; message?: TgMessage; data?: string };
-type TgUpdate = { update_id: number; message?: TgMessage; callback_query?: TgCallbackQuery };
-
-function json(status = 200, data: unknown = { ok: true }) {
-  return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8" } });
-}
+import { sendMessage } from "./telegram/api";
 
 export default {
-  async fetch(req: Request, env: TgEnv): Promise<Response> {
-    const url = new URL(req.url);
-    const tg = makeTelegram(env);
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
 
-    // health (GET/POST)
+    // health
     if (url.pathname === "/health") {
-      return json(200, { ok: true, service: "senti-bot-worker" });
+      return new Response(JSON.stringify({ ok: true, service: "senti-bot-worker" }), {
+        headers: { "content-type": "application/json" },
+      });
     }
 
-    // ручний тест: /test/<chatId>?text=...
-    if (url.pathname.startsWith("/test/")) {
-      const chatId = Number(url.pathname.split("/").pop());
-      const text = url.searchParams.get("text") ?? "test from worker";
-      console.log("[test] send to", chatId, "text:", text);
-      await tg.sendMessage(chatId, text);
-      return json(200, { sent: true, chatId, text });
+    // простий тест відправки
+    if (url.pathname.startsWith("/test/") && request.method === "GET") {
+      const chatId = url.pathname.split("/").pop();
+      const text = url.searchParams.get("text") ?? "test";
+      try {
+        await sendMessage(env.BOT_TOKEN, chatId!, text);
+        return new Response("sent");
+      } catch (e: any) {
+        return new Response(`fail: ${e?.message ?? e}`, { status: 500 });
+      }
     }
 
-    // Webhook
-    if (url.pathname.startsWith("/webhook/")) {
-      if (req.method !== "POST") return json(405, { ok: false, error: "method not allowed" });
+    // webhook
+    if (url.pathname.startsWith("/webhook/") && request.method === "POST") {
+      const update = await request.json().catch(() => null);
+      console.log("[webhook] raw update:", JSON.stringify(update, null, 2));
 
-      const update = (await req.json().catch(() => ({}))) as TgUpdate;
-      console.log("[webhook] update:", JSON.stringify(update));
+      try {
+        const msg = update?.message;
+        const chatId = msg?.chat?.id;
+        const text: string | undefined = msg?.text;
 
-      const msg = update.message;
-      const cb = update.callback_query;
+        if (chatId && typeof text === "string") {
+          // важливо: точне порівняння на /ping
+          if (text === "/ping") {
+            await sendMessage(env.BOT_TOKEN, chatId, "pong ✅");
+          } else if (text === "/health") {
+            await sendMessage(env.BOT_TOKEN, chatId, "Worker alive 🚀");
+          }
+        }
 
-      // Прямий хендлер /ping
-      const text = msg?.text?.trim() ?? "";
-      if (text.toLowerCase().startsWith("/ping")) {
-        await tg.sendMessage(msg!.chat.id, "pong ✅");
-        return json();
+        return new Response("ok");
+      } catch (e: any) {
+        console.error("[webhook] handler error", e);
+        return new Response("error", { status: 500 });
       }
-
-      // Echo для діагностики
-      if (text) {
-        await tg.sendMessage(msg!.chat.id, `echo: ${text}`);
-        return json();
-      }
-
-      // Callback
-      if (cb?.id) {
-        await tg.answerCallback(cb.id);
-        return json();
-      }
-
-      return json();
     }
 
     return new Response("Not found", { status: 404 });
   },
-};
+} satisfies ExportedHandler<Env>;
