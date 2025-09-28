@@ -1,4 +1,4 @@
-import type { Env } from "../types";
+import type { Env } from "../index";
 
 const TG_API = "https://api.telegram.org";
 
@@ -8,16 +8,15 @@ export async function sendMessage(env: Env, chatId: number, text: string) {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
-    disable_web_page_preview: true,
+    disable_web_page_preview: false,
   };
-  const res = await fetch(url, {
+  const r = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  // не кидаємо помилку в проді — просто лог
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    console.error("sendMessage failed:", res.status, t);
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    console.error("sendMessage fail:", r.status, t);
   }
 }
