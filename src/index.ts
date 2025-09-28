@@ -1,117 +1,101 @@
+// Cloudflare Worker entry — лише маршрутизація + командний роутер.
+
+import { tgSend, parseUpdate, md, trimCommand } from "./tg";
+import { wikiSummary } from "./wiki";
+import { nbuRate } from "./rate";
+import { weatherNow } from "./weather";
+
 export interface Env {
-  BOT_TOKEN: string;        // wrangler secret put BOT_TOKEN
-  WEBHOOK_SECRET?: string;  // wrangler secret put WEBHOOK_SECRET (за замовчуванням 'senti1984')
+  TELEGRAM_TOKEN: string;          // обовʼязково (твій бот-токен)
+  WEBHOOK_SECRET?: string;         // секретна частина шляху вебхука
 }
 
-const JSON_HEADERS = {
-  "content-type": "application/json; charset=utf-8",
-  "cache-control": "no-store",
-};
-const TEXT_HEADERS = {
-  "content-type": "text/plain; charset=utf-8",
-  "cache-control": "no-store",
-};
+function json(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-    const method = request.method.toUpperCase();
-
-    // ---------- Health ----------
+  async fetch(req: Request, env: Env): Promise<Response> {
+    // 1) HEALTH
+    const url = new URL(req.url);
     if (url.pathname === "/health") {
-      return new Response("ok", { status: 200, headers: TEXT_HEADERS });
+      return json({ ok: true, ts: Date.now() });
     }
-    if (url.pathname === "/health.json") {
-      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: JSON_HEADERS });
-    }
-    // ---------- /Health end ----------
 
-    // ---------- Telegram webhook ----------
-    const secret = (env.WEBHOOK_SECRET || "senti1984").replace(/^\//, "");
-    if (url.pathname === `/webhook/${secret}` && method === "POST") {
-      let update: any = null;
+    // 2) TELEGRAM WEBHOOK: /webhook/<secret>
+    const secret = env.WEBHOOK_SECRET || "senti1984";
+    if (url.pathname === `/webhook/${secret}` && req.method === "POST") {
+      const update = await req.json<any>().catch(() => null);
+      if (!update) return json({ ok: false, error: "bad json" }, 400);
 
-      try {
-        // Telegram надсилає JSON
-        update = await request.json();
-      } catch {
-        // якщо раптом не JSON — ігноруємо тихо, щоб не дропати вебхук
-        return new Response("ok", { status: 200, headers: TEXT_HEADERS });
-      }
+      // лог-сирий апдейт (Cloudflare Logs)
+      console.log("[webhook] raw update:", JSON.stringify(update, null, 2));
 
-      // Лог в тому ж форматі, який ти бачив у CF
-      try {
-        // коротко обрізаємо, щоб не засмічувати (опціонально)
-        const pretty = JSON.stringify(update);
-        console.log(`[webhook] raw update: ${pretty}`);
-      } catch {
-        // ignore
-      }
+      const parsed = parseUpdate(update);
+      if (!parsed) return json({ ok: true }); // нічого відповідати
 
-      // Дістаємо базову інфу
-      const msg = update?.message ?? update?.edited_message ?? null;
-      const chatId: number | undefined = msg?.chat?.id;
-      const text: string | undefined = msg?.text;
+      const { chatId, text } = parsed;
+      const token = env.TELEGRAM_TOKEN;
+      if (!token) return json({ ok: false, error: "no token" }, 500);
 
-      // Немає що обробляти — підтверджуємо 200, щоб TG не ретраїв
-      if (!chatId) {
-        return new Response("ok", { status: 200, headers: TEXT_HEADERS });
-      }
-
-      // Обробка команд
+      // --- командний роутер ---
       try {
         if (text === "/start") {
-          await tgSend(env, chatId, "✅ Senti онлайн\nНадішли /ping щоб перевірити відповідь.");
-        } else if (text === "/ping") {
-          await tgSend(env, chatId, "pong ✅");
-        } else {
-          // за замовчуванням — нічого, але можна дати підказку
-          // await tgSend(env, chatId, "Команда не підтримується. Спробуй /ping");
+          await tgSend(token, chatId,
+            md`✅ *Senti онлайн*  
+Надішли \`/ping\` щоб перевірити відповідь.  
+Корисне: \`/wiki Київ\`, \`/rate\`, \`/weather Lviv\``,
+            "Markdown");
+          return json({ ok: true });
         }
-      } catch (err) {
-        console.error("[webhook] send error:", err);
-        // повертаємо 200, аби TG не заспамив ретраями
+
+        if (text === "/ping") {
+          await tgSend(token, chatId, "pong ✅");
+          return json({ ok: true });
+        }
+
+        if (text.startsWith("/wiki")) {
+          const q = trimCommand(text, "/wiki");
+          if (!q) {
+            await tgSend(token, chatId, "Синтаксис: /wiki <запит>");
+            return json({ ok: true });
+          }
+          const ans =
+            await wikiSummary(q, "uk").catch(() => wikiSummary(q, "en"));
+          await tgSend(token, chatId, ans, "Markdown");
+          return json({ ok: true });
+        }
+
+        if (text === "/rate") {
+          const ans = await nbuRate();
+          await tgSend(token, chatId, ans, "Markdown");
+          return json({ ok: true });
+        }
+
+        if (text.startsWith("/weather")) {
+          const q = trimCommand(text, "/weather");
+          if (!q) {
+            await tgSend(token, chatId, "Синтаксис: /weather <місто|країна>");
+            return json({ ok: true });
+          }
+          const ans = await weatherNow(q);
+          await tgSend(token, chatId, ans);
+          return json({ ok: true });
+        }
+
+        // Unknown command -> ігноруємо тихо
+        return json({ ok: true });
+      } catch (e: any) {
+        console.error("handler error:", e);
+        await tgSend(token, chatId, "Помилка обробки запиту 😔");
+        return json({ ok: true });
       }
-
-      return new Response("ok", { status: 200, headers: TEXT_HEADERS });
     }
-    // ---------- /Telegram webhook end ----------
 
-    // Фолбек
-    return new Response("Not found", { status: 404, headers: TEXT_HEADERS });
+    // 3) Fallback
+    return new Response("Not found", { status: 404 });
   },
 };
-
-/** Надіслати повідомлення в TG */
-async function tgSend(env: Env, chatId: number, text: string) {
-  const token = env.BOT_TOKEN;
-  if (!token) throw new Error("BOT_TOKEN is not set");
-  const api = `https://api.telegram.org/bot${token}/sendMessage`;
-
-  const body = {
-    chat_id: chatId,
-    text,
-    parse_mode: "Markdown",
-    disable_web_page_preview: true,
-  };
-
-  const res = await fetch(api, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const errText = await safeText(res);
-    throw new Error(`TG sendMessage HTTP ${res.status}: ${errText}`);
-  }
-
-  const data = await res.json().catch(() => null);
-  if (!data?.ok) {
-    throw new Error(`TG sendMessage API error: ${JSON.stringify(data)}`);
-  }
-}
-
-async function safeText(r: Response) {
-  try { return await r.text(); } catch { return "<no body>"; }
-}
