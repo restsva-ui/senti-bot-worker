@@ -1,3 +1,4 @@
+// src/index.ts
 /* --------------------------- Imports & Types ------------------------- */
 import type { Env, TgMessage, TgUpdate } from "./types";
 import { cmdStart }   from "./commands/start";
@@ -9,26 +10,39 @@ import { cmdWiki }    from "./commands/wiki";
 /* --------------------------- Constants ------------------------------- */
 const WEBHOOK_PATH = "/webhook/senti1984";
 
-/* --------------------------- Utils ---------------------------------- */
+/* --------------------------- Small utils ----------------------------- */
 function parseJson<T = unknown>(req: Request): Promise<T> {
   return req.json() as Promise<T>;
 }
 
-/** Надійний парсер команд: читає entities + робить резервний парс по тексту. */
-function getCommand(msg?: TgMessage): { name: string | null; args: string } {
-  const text = msg?.text ?? "";
+/** Прибираємо невидимі символи/пробіли з початку. */
+function sanitizeHead(s: string): string {
+  // LRM, RLM, ALM, NBSP, NNBSP, ZWSP, ZWNJ, WJ тощо
+  const LEADING_JUNK = /^[\u200E\u200F\u061C\u00A0\u202F\u2000-\u200B\u2060\uFEFF]+/u;
+  return s.replace(LEADING_JUNK, "");
+}
 
-  // 1) Пробуємо entities
-  const ent = msg?.entities?.find(e => e.type === "bot_command" && e.offset === 0);
+/** Надійне визначення команди */
+function getCommand(msg?: TgMessage): { name: string | null; args: string } {
+  let text = msg?.text ?? "";
+  text = sanitizeHead(text);
+
+  // 1) Entities: інколи offset стає 1 через LRM — дозволяємо 0 або 1
+  const ent = msg?.entities?.find(
+    e => e.type === "bot_command" && (e.offset === 0 || e.offset === 1)
+  );
   if (ent) {
-    const raw = text.slice(ent.offset, ent.offset + ent.length); // наприклад "/help@mybot"
-    const name = raw.replace(/^\/+/, "").split("@")[0].toLowerCase(); // -> "help"
-    const args = text.slice(ent.offset + ent.length).trimStart();
+    const start = Math.max(0, ent.offset);
+    const raw = text.slice(start, start + ent.length); // "/help@bot"
+    const name = raw.replace(/^\/+/, "").split("@")[0].toLowerCase();
+    const args = text.slice(start + ent.length).trimStart();
     return { name, args };
   }
 
-  // 2) Резервний парс по рядку (на випадок відсутніх entities)
-  const m = text.match(/^\/(\w+)(?:@\w+)?(?:\s+|$)/);
+  // 2) Резервний парс по рядку (враховуємо можливі NBSP/NNBSP після команди)
+  const SPACE_CLASS = "[\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u00A0\\u202F]";
+  const re = new RegExp("^\\/(\\w+)(?:@\\w+)?(?:" + SPACE_CLASS + "+|$)", "u");
+  const m = text.match(re);
   if (m) {
     const name = m[1].toLowerCase();
     const args = text.slice(m[0].length).trimStart();
@@ -60,11 +74,9 @@ async function handleWebhook(env: Env, req: Request): Promise<Response> {
     case "help":   await cmdHelp(env, update);   break;
     case "wiki":   await cmdWiki(env, update);   break;
     default:
-      // мовчазна відповідь на будь-який інший апдейт/текст
+      // без відповіді на сторонні повідомлення
       break;
   }
-
-  // Завжди 200 для TG
   return new Response("OK");
 }
 
@@ -78,7 +90,7 @@ export default {
       return json({ ok: true, ts: Date.now() });
     }
 
-    // Telegram webhook
+    // Webhook
     if (req.method === "POST" && url.pathname === WEBHOOK_PATH) {
       try {
         return await handleWebhook(env, req);
