@@ -2,31 +2,41 @@
 export type TgEnv = { BOT_TOKEN: string };
 
 export function makeTelegram(env: TgEnv) {
-  if (!env.BOT_TOKEN) console.error("[tg] BOT_TOKEN is missing!");
-  const base = `https://api.telegram.org/bot${env.BOT_TOKEN}`;
+  const token = env.BOT_TOKEN;
+  if (!token) {
+    console.error("[tg] BOT_TOKEN is missing!");
+  }
+  const base = `https://api.telegram.org/bot${token}`;
 
-  async function sendMessage(chat_id: number, text: string) {
-    const res = await fetch(`${base}/sendMessage`, {
+  async function sendJSON(path: string, payload: unknown) {
+    const url = `${base}${path}`;
+    const body = JSON.stringify(payload);
+    const res = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id, text }),
+      body,
+    }).catch((e) => {
+      console.error("[tg] fetch error:", String(e));
+      return undefined as any;
     });
-    const body = await res.text().catch(() => "");
-    if (!res.ok) console.error("[tg] sendMessage FAIL", res.status, body);
-    else console.log("[tg] sendMessage OK");
-    return res.ok;
+
+    if (!res) return false;
+
+    const text = await res.text().catch(() => "");
+    if (!res.ok) {
+      console.error("[tg] FAIL", res.status, text);
+      return false;
+    }
+    console.log("[tg] OK", path, text.slice(0, 200));
+    return true;
   }
 
-  async function answerCallback(callback_query_id: string) {
-    const res = await fetch(`${base}/answerCallbackQuery`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ callback_query_id }),
-    });
-    const body = await res.text().catch(() => "");
-    if (!res.ok) console.error("[tg] answerCallback FAIL", res.status, body);
-    else console.log("[tg] answerCallback OK");
-    return res.ok;
+  function sendMessage(chat_id: number, text: string) {
+    return sendJSON("/sendMessage", { chat_id, text });
+  }
+
+  function answerCallback(callback_query_id: string) {
+    return sendJSON("/answerCallbackQuery", { callback_query_id });
   }
 
   return { sendMessage, answerCallback };
