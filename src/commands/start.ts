@@ -1,28 +1,23 @@
 // src/commands/start.ts
 import type { TgUpdate } from "../types";
 
-type EnvBase = { BOT_TOKEN: string; API_BASE_URL?: string };
-
 export const startCommand = {
   name: "start",
   description: "Початкове повідомлення для користувача",
-  async execute(env: EnvBase, update: TgUpdate) {
+  async execute(env: { BOT_TOKEN: string; API_BASE_URL?: string }, update: TgUpdate) {
     const msg = update.message;
     const chatId = msg?.chat?.id;
     if (!chatId) return;
 
-    const text = [
-      "👋 Привіт! Я <b>Senti</b> — бот-асистент.",
-      "",
-      "Основні команди:",
-      "• /ping — перевірка звʼязку",
-      "• /menu — кнопки з командами",
-      "• /likes — показати ❤️ під повідомленням",
-      "• /stats — статистика лайків",
-      "• /wiki — натисни й просто введи запит у відповідь",
-      "",
-      "Довідка: /help",
-    ].join("\n");
+    const text =
+      [
+        "👋 Привіт! Я <b>Senti</b> — бот-асистент.",
+        "",
+        "Корисне:",
+        "• <code>/menu</code> — кнопки команд",
+        "• <code>/help</code> — довідка",
+        "• <code>/wiki</code> — введи запит у відповідь або одразу так: <code>/wiki Київ</code>, <code>/wiki en Albert Einstein</code>",
+      ].join("\n");
 
     await sendMessage(env, chatId, text, { parse_mode: "HTML" });
   },
@@ -30,7 +25,7 @@ export const startCommand = {
 
 /* -------------------- low-level telegram -------------------- */
 async function sendMessage(
-  env: EnvBase,
+  env: { BOT_TOKEN: string; API_BASE_URL?: string },
   chatId: number,
   text: string,
   extra?: Record<string, unknown>
@@ -39,14 +34,9 @@ async function sendMessage(
   const url = `${apiBase}/bot${env.BOT_TOKEN}/sendMessage`;
   const body = JSON.stringify({ chat_id: chatId, text, ...extra });
 
-  const res = await fetch(url, {
+  await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body,
-  });
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    console.error("sendMessage error:", res.status, errText);
-  }
+  }).catch(console.error);
 }
