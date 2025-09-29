@@ -1,7 +1,7 @@
 // src/commands/registry.ts
 import type { TgUpdate } from "../types";
 
-// Команди
+/* Іменовані експорти з файлів команд (усі — const ...Command) */
 import { startCommand } from "./start";
 import { pingCommand } from "./ping";
 import { healthCommand } from "./health";
@@ -25,11 +25,13 @@ export type Command = {
   execute: (env: CommandEnv, update: TgUpdate) => Promise<void>;
 };
 
-/**
- * Єдиний реєстр текстових команд.
- * Порядок у цьому масиві = порядок показу в /help.
- */
-export const commandsList: Command[] = [
+/** Type-guard: валідний об'єкт команди */
+function isCommandDef(x: any): x is Command {
+  return !!x && typeof x.name === "string" && typeof x.description === "string" && typeof x.execute === "function";
+}
+
+/** Єдиний список команд (порядок = порядок у /help) */
+const rawList = [
   startCommand,
   helpCommand,
   pingCommand,
@@ -41,12 +43,15 @@ export const commandsList: Command[] = [
   healthCommand,
 ];
 
-/** Доступ по імені (для роутера) */
+/** Фінальний список (прибирає undefined/невалідні) */
+export const commandsList: Command[] = rawList.filter(isCommandDef);
+
+/** Індекс за ім'ям — для роутера */
 export const commandsByName: Record<string, Command> = Object.fromEntries(
   commandsList.map((c) => [c.name, c])
 );
 
-/** Зручний даункаст для отримання короткої довідки */
+/** Довідка для /help */
 export function getCommandsInfo() {
   return commandsList.map((c) => ({ name: c.name, description: c.description }));
 }
