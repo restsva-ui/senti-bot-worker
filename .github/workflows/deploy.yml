@@ -1,44 +1,45 @@
-name: Cloudflare Worker / deploy (manual wrangler)
+name: Deploy Senti Worker
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch:
-
-permissions:
-  contents: read
+    branches: [ main ]      # авто-деплой після merge в main
+  pull_request:
+    branches: [ main ]      # перевірка збірки у PR, без публікації
+  workflow_dispatch:         # ручний запуск з Actions
 
 jobs:
-  deploy:
+  preview:
+    name: Build (PR dry-run)
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-
-      - name: Install wrangler
-        run: |
-          npm i -g wrangler@3
-          wrangler --version
-
-      - name: Verify Cloudflare token
+          node-version: 20
+      - name: Install Wrangler
+        run: npm i -g wrangler@4
+      - name: Dry-run build
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            https://api.cloudflare.com/client/v4/user/tokens/verify | jq .
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: wrangler deploy --config wrangler.toml --dry-run
 
+  deploy:
+    name: Publish to Cloudflare
+    if: github.event_name != 'pull_request'   # пуш у main або ручний запуск
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install Wrangler
+        run: npm i -g wrangler@4
       - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-        run: |
-          set -euo pipefail
-          # за бажанням: додай --log-level debug
-          wrangler deploy --config wrangler.toml
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: wrangler deploy --config wrangler.toml
