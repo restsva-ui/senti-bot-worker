@@ -4,9 +4,14 @@ import type { TgUpdate } from "../types";
 /**
  * Команда /likes — надсилає повідомлення з кнопкою "❤️ <count>".
  * Лічильник зберігаємо у KV за ключем: likes:<chatId>:<messageId>
+ * Антиспам: 1 клік / користувач / 5с через ключ:
+ * likes_users:<chatId>:<messageId>:<userId>
  */
 const CB_PREFIX = "likes:";
 const CB_INC = `${CB_PREFIX}inc`;
+
+// Антиспам: TTL (секунди). Мінімум 1, максимум 1 хв. (клемп)
+const SPAM_TTL_SEC = 5;
 
 export const likesCommand = {
   name: "likes",
@@ -31,7 +36,7 @@ export const likesCommand = {
     // Ініціалізуємо лічильник у KV (на випадок першого кліку)
     const messageId = sent?.result?.message_id as number | undefined;
     if (typeof messageId === "number") {
-      const key = kvKey(chatId, messageId);
+      const key = kvLikesKey(chatId, messageId);
       const existed = await env.LIKES_KV.get(key);
       if (!existed) {
         await env.LIKES_KV.put(key, JSON.stringify({ count: 0 }));
@@ -45,7 +50,7 @@ export function likesCanHandleCallback(data: string | undefined): boolean {
   return data === CB_INC;
 }
 
-/** Обробка callback: інкремент у KV і оновлення кнопки */
+/** Обробка callback: антиспам + інкремент у KV і оновлення кнопки */
 export async function likesOnCallback(
   env: { BOT_TOKEN: string; API_BASE_URL?: string; LIKES_KV: KVNamespace },
   update: TgUpdate
@@ -55,9 +60,24 @@ export async function likesOnCallback(
   const chatId: number | undefined = cq?.message?.chat?.id;
   const messageId: number | undefined = cq?.message?.message_id;
   const cqId: string | undefined = cq?.id;
-  if (!data || !chatId || !messageId || !cqId) return;
+  const userId: number | undefined = cq?.from?.id;
 
-  const key = kvKey(chatId, messageId);
+  if (!data || !chatId || !messageId || !cqId || !userId) return;
+
+  // ---- Антиспам ----
+  const spamKey = kvSpamKey(chatId, messageId, userId);
+  const ttl = clampTtl(SPAM_TTL_SEC, 1, 60);
+  const recent = await env.LIKES_KV.get(spamKey);
+  if (recent) {
+    // Ліміт: один клік у вікні TTL
+    await answerCallbackQuery(env, cqId, "Занадто часто 🙂 Спробуйте за кілька секунд");
+    return;
+  }
+  // Ставимо маркер для користувача з TTL
+  await env.LIKES_KV.put(spamKey, "1", { expirationTtl: ttl });
+  // -------------------
+
+  const key = kvLikesKey(chatId, messageId);
 
   // 1) Поточне значення
   let count = 0;
@@ -72,7 +92,7 @@ export async function likesOnCallback(
     console.warn("likes: parse KV error", e);
   }
 
-  // 2) Інкремент (простий RMW; для нашого кейсу достатньо)
+  // 2) Інкремент
   count += 1;
   await env.LIKES_KV.put(key, JSON.stringify({ count }));
 
@@ -82,14 +102,21 @@ export async function likesOnCallback(
   };
   await editMessageReplyMarkup(env, chatId, messageId, keyboard);
 
-  // 4) Відповідаємо на callback (без спливаючого тексту, щоб не дратувати)
+  // 4) Відповідаємо на callback (без спливаючого тексту)
   await answerCallbackQuery(env, cqId);
 }
 
 /* ===================== helpers ===================== */
 
-function kvKey(chatId: number, messageId: number) {
+function kvLikesKey(chatId: number, messageId: number) {
   return `likes:${chatId}:${messageId}`;
+}
+function kvSpamKey(chatId: number, messageId: number, userId: number) {
+  return `likes_users:${chatId}:${messageId}:${userId}`;
+}
+function clampTtl(ttl: number, min: number, max: number) {
+  const t = Math.floor(ttl);
+  return Math.max(min, Math.min(max, t));
 }
 
 async function sendMessage(
@@ -149,11 +176,14 @@ async function editMessageReplyMarkup(
 
 async function answerCallbackQuery(
   env: { BOT_TOKEN: string; API_BASE_URL?: string },
-  callbackQueryId: string
+  callbackQueryId: string,
+  text?: string
 ) {
   const apiBase = env.API_BASE_URL || "https://api.telegram.org";
   const url = `${apiBase}/bot${env.BOT_TOKEN}/answerCallbackQuery`;
-  const body = JSON.stringify({ callback_query_id: callbackQueryId });
+  const body = JSON.stringify(
+    text ? { callback_query_id: callbackQueryId, text, show_alert: false } : { callback_query_id: callbackQueryId }
+  );
 
   const res = await fetch(url, {
     method: "POST",
