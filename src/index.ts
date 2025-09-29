@@ -11,10 +11,10 @@ export type Env = {
 };
 
 import type { TgUpdate } from "./types";
-import { sendMessage } from "./utils/telegram";
 import { seenUpdateRecently } from "./utils/dedup";
 import { verifyWebhook } from "./middlewares/verifyWebhook";
 import { handleDedupTest } from "./routes/dedupTest";
+import { handleHealth } from "./routes/health";
 
 /* Команди */
 import { startCommand } from "./commands/start";
@@ -99,7 +99,7 @@ export default {
 
     // 1) Healthcheck (GET)
     if (req.method === "GET" && url.pathname === "/health") {
-      return json({ ok: true, ts: Date.now() });
+      return handleHealth();
     }
 
     // 1.1) Тест антидублів (GET /__dedup_test/:id[?ttl=...])
