@@ -1,9 +1,10 @@
 // src/commands/start.ts
 import type { TgUpdate } from "../types";
-import type { Command } from "./types";
+
+type Env = { BOT_TOKEN: string; API_BASE_URL?: string };
 
 async function tgCall(
-  env: { BOT_TOKEN: string; API_BASE_URL?: string },
+  env: Env,
   method: string,
   payload: Record<string, unknown>
 ) {
@@ -13,28 +14,35 @@ async function tgCall(
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
   });
+  // не валимо воркер, просто логнемо
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    console.error("tgCall error", method, res.status, t);
+  }
   return res.json().catch(() => ({}));
 }
 
-const text = [
-  "👋 Привіт! Я Senti — бот-асистент.",
-  "",
-  "Корисне:",
-  "• /ping — перевірка зв’язку",
-  "• /health — статус OK",
-  "• /help — довідка по командам",
-  "• /wiki — міні-пошук у Вікі (демо)",
-].join("\n");
-
-export const startCommand: Command = {
+export const startCommand = {
   name: "start",
   description: "Початкове повідомлення для користувача",
-  async execute(env, update) {
-    const chatId = update.message?.chat?.id ?? update.callback_query?.message?.chat?.id;
+  async execute(env: Env, update: TgUpdate) {
+    const chatId = update.message?.chat?.id;
     if (!chatId) return;
-    await tgCall(env as any, "sendMessage", {
+
+    const text = [
+      "👋 Привіт! Я <b>Senti</b> — бот-асистент.",
+      "",
+      "Корисне:",
+      "• <code>/menu</code> — кнопки команд",
+      "• <code>/help</code> — довідка",
+      "• <code>/wiki</code> — введи запит у відповідь або одразу так: <code>/wiki Київ</code>, <code>/wiki en Albert Einstein</code>",
+      "• <code>/ping</code> — перевірка зв’язку",
+    ].join("\n");
+
+    await tgCall(env, "sendMessage", {
       chat_id: chatId,
       text,
+      parse_mode: "HTML",
     });
   },
-};
+} as const;
