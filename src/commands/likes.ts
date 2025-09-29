@@ -2,16 +2,21 @@
 import type { TgUpdate } from "../types";
 
 /**
- * Команда /likes — надсилає повідомлення з кнопкою "❤️ <count>".
- * Лічильник зберігаємо у KV за ключем: likes:<chatId>:<messageId>
- * Антиспам: 1 клік / користувач / 5с через ключ:
- * likes_users:<chatId>:<messageId>:<userId>
+ * /likes — кнопка "❤️ <count>" з лічильником у KV:
+ *   likes:<chatId>:<messageId> -> { count: number }
+ *
+ * Антиспам: 1 клік / користувач / 5с.
+ *   Зберігаємо timestamp у KV з TTL >= 60с:
+ *   likes_users:<chatId>:<messageId>:<userId> -> { ts: number }
+ *   Перевіряємо різницю часу локально.
  */
 const CB_PREFIX = "likes:";
 const CB_INC = `${CB_PREFIX}inc`;
 
-// Антиспам: TTL (секунди). Мінімум 1, максимум 1 хв. (клемп)
-const SPAM_TTL_SEC = 5;
+// Вікно антиспаму
+const SPAM_WINDOW_MS = 5_000;
+// Безпечний TTL для KV (мінімум 60с, щоб не падало)
+const SAFE_TTL_SEC = 60;
 
 export const likesCommand = {
   name: "likes",
@@ -24,16 +29,13 @@ export const likesCommand = {
     const chatId = msg?.chat?.id;
     if (!chatId) return;
 
-    // Спочатку надсилаємо повідомлення з кнопкою "❤️ 0".
-    const keyboard = {
-      inline_keyboard: [[{ text: "❤️ 0", callback_data: CB_INC }]],
-    };
+    const keyboard = { inline_keyboard: [[{ text: "❤️ 0", callback_data: CB_INC }]] };
 
     const sent = await sendMessage(env, chatId, "Лайкни це повідомлення:", {
       reply_markup: keyboard,
     });
 
-    // Ініціалізуємо лічильник у KV (на випадок першого кліку)
+    // Ініціалізація лічильника
     const messageId = sent?.result?.message_id as number | undefined;
     if (typeof messageId === "number") {
       const key = kvLikesKey(chatId, messageId);
@@ -45,12 +47,10 @@ export const likesCommand = {
   },
 } as const;
 
-/** Чи можемо ми обробити цей callback */
 export function likesCanHandleCallback(data: string | undefined): boolean {
   return data === CB_INC;
 }
 
-/** Обробка callback: антиспам + інкремент у KV і оновлення кнопки */
 export async function likesOnCallback(
   env: { BOT_TOKEN: string; API_BASE_URL?: string; LIKES_KV: KVNamespace },
   update: TgUpdate
@@ -64,46 +64,61 @@ export async function likesOnCallback(
 
   if (!data || !chatId || !messageId || !cqId || !userId) return;
 
-  // ---- Антиспам ----
-  const spamKey = kvSpamKey(chatId, messageId, userId);
-  const ttl = clampTtl(SPAM_TTL_SEC, 1, 60);
-  const recent = await env.LIKES_KV.get(spamKey);
-  if (recent) {
-    // Ліміт: один клік у вікні TTL
-    await answerCallbackQuery(env, cqId, "Занадто часто 🙂 Спробуйте за кілька секунд");
-    return;
-  }
-  // Ставимо маркер для користувача з TTL
-  await env.LIKES_KV.put(spamKey, "1", { expirationTtl: ttl });
-  // -------------------
-
-  const key = kvLikesKey(chatId, messageId);
-
-  // 1) Поточне значення
-  let count = 0;
   try {
-    const val = await env.LIKES_KV.get(key);
-    if (val) {
-      const parsed = JSON.parse(val);
-      const num = Number(parsed?.count);
-      if (Number.isFinite(num) && num >= 0) count = num;
+    // ---- Антиспам (через timestamp у KV, TTL >= 60s) ----
+    const spamKey = kvSpamKey(chatId, messageId, userId);
+    const now = Date.now();
+    let tooSoon = false;
+
+    const prevJson = await env.LIKES_KV.get(spamKey);
+    if (prevJson) {
+      try {
+        const prev = JSON.parse(prevJson) as { ts?: number };
+        if (typeof prev.ts === "number" && now - prev.ts < SPAM_WINDOW_MS) {
+          tooSoon = true;
+        }
+      } catch { /* ignore parse */ }
     }
-  } catch (e) {
-    console.warn("likes: parse KV error", e);
+
+    if (tooSoon) {
+      await answerCallbackQuery(env, cqId, "Занадто часто 🙂 Спробуйте за кілька секунд");
+      return;
+    }
+
+    // Записуємо новий timestamp з безпечним TTL (60с)
+    await env.LIKES_KV.put(spamKey, JSON.stringify({ ts: now }), {
+      expirationTtl: SAFE_TTL_SEC,
+    });
+
+    // ---- Лічильник лайків ----
+    const likesKey = kvLikesKey(chatId, messageId);
+
+    let count = 0;
+    try {
+      const val = await env.LIKES_KV.get(likesKey);
+      if (val) {
+        const parsed = JSON.parse(val);
+        const num = Number(parsed?.count);
+        if (Number.isFinite(num) && num >= 0) count = num;
+      }
+    } catch (e) {
+      console.warn("likes: parse KV error", e);
+    }
+
+    count += 1;
+    await env.LIKES_KV.put(likesKey, JSON.stringify({ count }));
+
+    const keyboard = {
+      inline_keyboard: [[{ text: `❤️ ${count}`, callback_data: CB_INC }]],
+    };
+    await editMessageReplyMarkup(env, chatId, messageId, keyboard);
+
+    await answerCallbackQuery(env, cqId);
+  } catch (err) {
+    console.error("likesOnCallback error:", err);
+    // обовʼязково відповідаємо, щоб не висів «завантаження»
+    await answerCallbackQuery(env, cqId, "Упс, щось пішло не так 😅");
   }
-
-  // 2) Інкремент
-  count += 1;
-  await env.LIKES_KV.put(key, JSON.stringify({ count }));
-
-  // 3) Оновлюємо підпис кнопки
-  const keyboard = {
-    inline_keyboard: [[{ text: `❤️ ${count}`, callback_data: CB_INC }]],
-  };
-  await editMessageReplyMarkup(env, chatId, messageId, keyboard);
-
-  // 4) Відповідаємо на callback (без спливаючого тексту)
-  await answerCallbackQuery(env, cqId);
 }
 
 /* ===================== helpers ===================== */
@@ -113,10 +128,6 @@ function kvLikesKey(chatId: number, messageId: number) {
 }
 function kvSpamKey(chatId: number, messageId: number, userId: number) {
   return `likes_users:${chatId}:${messageId}:${userId}`;
-}
-function clampTtl(ttl: number, min: number, max: number) {
-  const t = Math.floor(ttl);
-  return Math.max(min, Math.min(max, t));
 }
 
 async function sendMessage(
@@ -129,19 +140,9 @@ async function sendMessage(
   const url = `${apiBase}/bot${env.BOT_TOKEN}/sendMessage`;
   const body = JSON.stringify({ chat_id: chatId, text, ...extra });
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body,
-  });
-
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
   let json: any | null = null;
-  try {
-    json = await res.json();
-  } catch (_) {
-    // ignore
-  }
-
+  try { json = await res.json(); } catch {}
   if (!res.ok) {
     console.error("sendMessage error:", res.status, json ?? (await res.text().catch(() => "")));
   }
@@ -156,18 +157,9 @@ async function editMessageReplyMarkup(
 ) {
   const apiBase = env.API_BASE_URL || "https://api.telegram.org";
   const url = `${apiBase}/bot${env.BOT_TOKEN}/editMessageReplyMarkup`;
-  const body = JSON.stringify({
-    chat_id: chatId,
-    message_id: messageId,
-    reply_markup: replyMarkup,
-  });
+  const body = JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: replyMarkup });
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body,
-  });
-
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
     console.error("editMessageReplyMarkup error:", res.status, errText);
@@ -185,12 +177,7 @@ async function answerCallbackQuery(
     text ? { callback_query_id: callbackQueryId, text, show_alert: false } : { callback_query_id: callbackQueryId }
   );
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body,
-  });
-
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
     console.error("answerCallbackQuery error:", res.status, errText);
