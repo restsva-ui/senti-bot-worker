@@ -17,47 +17,103 @@ export const wikiCommand = {
       return;
     }
 
-    const result =
-      (await wikiSearch("uk", query)) ||
-      (await wikiSearch("en", query));
+    // 1) Шукаємо в укр-вікі, якщо порожньо — в англ-вікі
+    const first =
+      (await searchPage("uk", query)) ||
+      (await searchPage("en", query));
 
-    if (!result) {
+    if (!first) {
       await sendMessage(env, chatId, `Нічого не знайшов за запитом: <b>${escapeHtml(query)}</b>`, {
         parse_mode: "HTML",
       });
       return;
     }
 
-    const { title, extract, url } = result;
-    const reply = `<b>${escapeHtml(title)}</b>\n${escapeHtml(extract)}`;
-    const keyboard = { inline_keyboard: [[{ text: "🔗 Відкрити у Вікіпедії", url }]] };
+    // Є шанс, що excerpt короткий. Спробуємо summary по exact key.
+    const summary =
+      (await fetchSummary(first.lang, first.key)) ||
+      { title: first.title, extract: stripHtml(first.excerpt), url: first.url };
 
-    await sendMessage(env, chatId, reply, { parse_mode: "HTML", reply_markup: keyboard });
+    const MAX = 1200;
+    const textOut = [
+      `<b>${escapeHtml(summary.title)}</b>`,
+      escapeHtml(summary.extract.length > MAX ? summary.extract.slice(0, MAX - 1) + "…" : summary.extract),
+    ].join("\n");
+
+    const keyboard = { inline_keyboard: [[{ text: "🔗 Відкрити у Вікіпедії", url: summary.url }]] };
+    await sendMessage(env, chatId, textOut, { parse_mode: "HTML", reply_markup: keyboard });
   },
 } as const;
 
-/* -------------------- Wikipedia OpenSearch -------------------- */
-async function wikiSearch(lang: "uk" | "en", query: string) {
+/* ===================== Wikipedia helpers ===================== */
+
+/**
+ * Новий пошук: /w/rest.php/v1/search/page?q=<q>&limit=1
+ * Повертає title, key, excerpt, content_urls
+ */
+async function searchPage(lang: "uk" | "en", q: string) {
   try {
-    const enc = encodeURIComponent(query);
-    const url = `https://${lang}.wikipedia.org/w/api.php?action=opensearch&limit=1&namespace=0&format=json&search=${enc}`;
-    const res = await fetch(url);
+    const enc = encodeURIComponent(q);
+    const url = `https://${lang}.wikipedia.org/w/rest.php/v1/search/page?q=${enc}&limit=1`;
+    const res = await fetch(url, {
+      headers: {
+        "accept": "application/json",
+        // Деякі еджи люблять коректний UA
+        "user-agent": "SentiBot/1.0 (Cloudflare Worker)",
+      },
+    });
     if (!res.ok) return null;
     const j: any = await res.json();
-    const [_, titles, extracts, links] = j;
-    if (!titles?.length) return null;
+    const page = j?.pages?.[0];
+    if (!page?.title || !page?.key) return null;
+
+    const urlOut =
+      (page?.content_urls?.desktop?.page as string) ||
+      `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(page.title)}`;
 
     return {
-      title: titles[0],
-      extract: extracts[0] || "Без опису",
-      url: links[0] || `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(titles[0])}`,
+      lang,
+      title: String(page.title),
+      key: String(page.key),          // exact page key, без пробілів
+      excerpt: String(page.excerpt ?? ""),
+      url: urlOut,
     };
   } catch {
     return null;
   }
 }
 
-/* -------------------- Telegram -------------------- */
+/** Summary по exact key — детальніший текст */
+async function fetchSummary(lang: "uk" | "en", key: string) {
+  try {
+    const encKey = encodeURIComponent(key);
+    const url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encKey}`;
+    const res = await fetch(url, {
+      headers: {
+        "accept": "application/json",
+        "user-agent": "SentiBot/1.0 (Cloudflare Worker)",
+      },
+    });
+    if (!res.ok) return null;
+    const j: any = await res.json();
+    if (!j?.title || !j?.extract) return null;
+
+    const urlOut =
+      (j?.content_urls?.desktop?.page as string) ||
+      `https://${lang}.wikipedia.org/wiki/${encKey}`;
+
+    return {
+      title: String(j.title),
+      extract: String(j.extract),
+      url: urlOut,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/* ===================== Telegram low-level ===================== */
+
 async function sendMessage(
   env: EnvBase,
   chatId: number,
@@ -67,12 +123,18 @@ async function sendMessage(
   const apiBase = env.API_BASE_URL || "https://api.telegram.org";
   const url = `${apiBase}/bot${env.BOT_TOKEN}/sendMessage`;
   const body = JSON.stringify({ chat_id: chatId, text, ...extra });
-
-  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body })
-    .catch(() => null);
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    console.error("sendMessage error:", res.status, errText);
+  }
 }
 
-/* -------------------- Utils -------------------- */
+/* ===================== utils ===================== */
+
+function stripHtml(s: string) {
+  return s.replace(/<[^>]+>/g, "");
+}
 function escapeHtml(s: string) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
