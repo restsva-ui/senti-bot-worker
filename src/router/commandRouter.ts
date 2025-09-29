@@ -1,60 +1,79 @@
 // src/router/commandRouter.ts
+/* --------------------------- Types & Imports --------------------------- */
+import type { Env } from "../config";
 import type { TgUpdate } from "../types";
-import type { CommandEnv } from "../commands/registry";
-import { commandsByName } from "../commands/registry";
-import { menuCanHandleCallback, menuOnCallback } from "../commands/menu";
-import { likesCanHandleCallback, likesOnCallback } from "../commands/likes";
-import { wikiCommand } from "../commands/wiki"; // для спеціальної обробки ForceReply-відповіді
 
+/* Команди */
+import { startCommand } from "../commands/start";
+import { pingCommand } from "../commands/ping";
+import { healthCommand } from "../commands/health";
+import { helpCommand } from "../commands/help";
+import { menuCommand } from "../commands/menu";
+import { echoCommand } from "../commands/echo";
+import { likesCommand, likesCanHandleCallback, likesOnCallback } from "../commands/likes";
+import { statsCommand } from "../commands/stats";
+import { wikiCommand } from "../commands/wiki";
+
+/* --------------------------- Utils ------------------------------------ */
 function isCommand(msgText: string | undefined, name: string) {
   const t = msgText ?? "";
   const re = new RegExp(`^\\/${name}(?:@\\w+)?(?:\\s|$)`, "i");
   return re.test(t);
 }
 
-export async function routeUpdate(env: CommandEnv, update: TgUpdate): Promise<void> {
+/* --------------------------- Registry --------------------------------- */
+type Command = {
+  name: string;
+  description: string;
+  execute: (env: Env, update: TgUpdate) => Promise<void>;
+};
+
+const commands: Record<string, Command> = {
+  [startCommand.name]: startCommand,
+  [pingCommand.name]: pingCommand,
+  [healthCommand.name]: healthCommand,
+  [helpCommand.name]: helpCommand,
+  [menuCommand.name]: menuCommand,
+  [echoCommand.name]: echoCommand,
+  [likesCommand.name]: likesCommand,
+  [statsCommand.name]: statsCommand,
+  [wikiCommand.name]: wikiCommand,
+};
+
+/* --------------------------- Router ----------------------------------- */
+/**
+ * Головний роутер апдейтів Telegram.
+ * – Команди з тексту обробляються за префіксом /<cmd>
+ * – callback_query обробляємо лише для лайків
+ */
+export async function handleUpdate(env: Env, update: TgUpdate): Promise<void> {
   // 1) callback_query (inline-кнопки)
-  const cq: any = (update as any).callback_query;
-  if (cq?.data) {
-    const data: string = cq.data;
+  if (update.callback_query) {
+    const cb = update.callback_query;
+    const data = cb.data ?? "";
 
-    if (menuCanHandleCallback(data)) {
-      await menuOnCallback(env, update);
-      return;
-    }
+    // Лишаємо тільки лайки
     if (likesCanHandleCallback(data)) {
-      await likesOnCallback(env, update);
-      return;
+      await likesOnCallback(env as any, update);
     }
     return;
   }
 
-  // 2) Текстові повідомлення
-  const msg = (update as any).message;
-  const text: string = msg?.text ?? "";
+  // 2) Текстові команди
+  const msg = update.message;
+  const text = msg?.text ?? "";
+  if (!text) return;
 
-  // 2.1) Якщо це відповідь на наш ForceReply-запит для /wiki — обробляємо як /wiki <user text>
-  const replied = msg?.reply_to_message;
-  const isReplyToWikiPrompt =
-    replied?.from?.is_bot === true &&
-    typeof replied?.text === "string" &&
-    replied.text.startsWith("🔎 Введіть запит для /wiki");
-
-  if (isReplyToWikiPrompt) {
-    // Синтезуємо виклик команди: "/wiki " + текст користувача
-    const syntheticUpdate: TgUpdate = JSON.parse(JSON.stringify(update));
-    (syntheticUpdate as any).message.text = `/wiki ${text}`;
-    await wikiCommand.execute(env, syntheticUpdate);
-    return;
-  }
-
-  // 2.2) Звичайні команди у форматі "/<name>"
-  for (const name of Object.keys(commandsByName)) {
-    if (isCommand(text, name)) {
-      await commandsByName[name].execute(env, update);
+  for (const key of Object.keys(commands)) {
+    if (isCommand(text, key)) {
+      await commands[key].execute(env as any, update);
       return;
     }
   }
 
-  // Інакше — тихий OK (нічого не робимо)
+  // 3) Невідома команда — мовчимо
+  return;
 }
+
+/* Сумісність з різними імпортами в проекті */
+export { handleUpdate as routeUpdate, handleUpdate as commandRouter };
