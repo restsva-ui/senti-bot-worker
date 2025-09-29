@@ -19,7 +19,7 @@ export const helpCommand = {
         (c) => `• <code>/${c.name}</code> — ${escapeHtml(c.description || "")}`
       ),
       "",
-      "Підказка: натисни <code>/wiki</code> — і просто введи запит у відповідь.",
+      "Порада: надішли <code>/wiki</code> і впиши запит у відповідь, або одразу: <code>/wiki Київ</code> / <code>/wiki en Albert Einstein</code>.",
     ];
 
     await sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML" });
