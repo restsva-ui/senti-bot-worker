@@ -2,6 +2,9 @@
 export type Env = {
   BOT_TOKEN: string;
   API_BASE_URL?: string;
+
+  // --- Безпека вебхука ---
+  WEBHOOK_SECRET?: string;
 };
 
 import type { TgUpdate } from "./types";
@@ -52,6 +55,16 @@ function json(data: unknown, init?: ResponseInit) {
 
 /* --------------------------- Router (Webhook) ------------------------ */
 async function handleWebhook(env: Env, req: Request): Promise<Response> {
+  // ---- Перевірка секрету вебхука (перші рядки хендлера) ----
+  const expected = env.WEBHOOK_SECRET;
+  const got = req.headers.get("X-Telegram-Bot-Api-Secret-Token");
+  if (expected && got !== expected) {
+    // легкий лог без розкриття деталей
+    console.warn("Webhook rejected: bad secret token");
+    return new Response("forbidden", { status: 403 });
+  }
+  // ----------------------------------------------------------
+
   const update = await parseJson<TgUpdate>(req);
 
   const msg = update.message;
