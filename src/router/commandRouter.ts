@@ -9,12 +9,13 @@ import { helpCommand } from "../commands/help";
 import { wikiCommand } from "../commands/wiki";
 import { echoCommand } from "../commands/echo";
 import { menuCommand, menuCanHandleCallback, menuOnCallback } from "../commands/menu";
+import { likesCommand, likesCanHandleCallback, likesOnCallback } from "../commands/likes";
 
 /** Мінімальний контракт середовища, потрібний командам */
 export type CommandEnv = {
   BOT_TOKEN: string;
   API_BASE_URL?: string;
-  LIKES_KV: KVNamespace; // для команд, що потребують KV
+  LIKES_KV: KVNamespace; // для likes та інших станів
 };
 
 /** Опис команди */
@@ -24,7 +25,7 @@ type Command = {
   execute: (env: CommandEnv, update: TgUpdate) => Promise<void>;
 };
 
-/** Реєстр команд (тільки для текстових повідомлень/команд) */
+/** Реєстр команд (текстові) */
 const commands: Record<string, Command> = {
   [startCommand.name]: startCommand,
   [pingCommand.name]: pingCommand,
@@ -33,6 +34,7 @@ const commands: Record<string, Command> = {
   [wikiCommand.name]: wikiCommand,
   [echoCommand.name]: echoCommand,
   [menuCommand.name]: menuCommand,
+  [likesCommand.name]: likesCommand, // ⟵ додано
 };
 
 /** Перевірка, чи текст є викликом конкретної команди */
@@ -52,6 +54,12 @@ export async function routeUpdate(env: CommandEnv, update: TgUpdate): Promise<vo
     // Меню
     if (menuCanHandleCallback(data)) {
       await menuOnCallback(env, update);
+      return;
+    }
+
+    // Likes
+    if (likesCanHandleCallback(data)) {
+      await likesOnCallback(env, update);
       return;
     }
 
