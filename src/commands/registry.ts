@@ -1,32 +1,22 @@
 // src/commands/registry.ts
-import type { Command } from "../types";
 import { startCommand } from "./start";
 import { helpCommand } from "./help";
-import { healthCommand } from "./health";
-import { wikiCommand } from "./wiki";
+import { wikiCommand } from "./wiki";           // ← важливо
 import { pingCommand } from "./ping";
-import { likesCommand, likesStatsCommand } from "./likes";
+import { healthCommand } from "./health";
 
-const commands: Command[] = [
-  startCommand,
-  helpCommand,
-  healthCommand,
-  wikiCommand,
-  pingCommand,
-  likesCommand,
-  likesStatsCommand,
-];
+export const COMMANDS: Record<string, Function> = {
+  start: startCommand,
+  help: helpCommand,
+  wiki: wikiCommand,                            // ← підключено
+  ping: pingCommand,
+  health: healthCommand,
+};
 
-export function findCommandByName(name: string): Command | undefined {
-  return commands.find(
-    (c) => c.name === name || (c.aliases && c.aliases.includes(name))
-  );
-}
-
-/** Використовується для /help */
+// короткий список у меню
 export function getCommandsInfo() {
-  return commands.map((c) => ({
-    name: c.name,
-    description: c.description ?? "",
-  }));
+  return [
+    { command: "help", description: "Довідка" },
+    { command: "wiki", description: "Пошук у Вікіпедії" },
+  ];
 }
