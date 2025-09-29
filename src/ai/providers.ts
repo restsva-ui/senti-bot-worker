@@ -1,96 +1,204 @@
-// src/ai/providers.js
-// Лаконічні провайдери для тексту та зображень на Cloudflare Workers AI.
-// Нічого зайвого: повертаємо простий рядок, щоб не ламати існуючі хендлери.
+// src/ai/providers.ts
+// Єдині точки інтеграції з ШІ-провайдерами + спільні утиліти
 
-const TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct";          // швидка й дешева
-const VISION_MODEL = "@cf/llama-3.2-11b-vision-instruct";      // для зображень
+export type AIResult =
+  | { ok: true; text: string; provider: string }
+  | { ok: false; provider: string; error: string; retryable: boolean };
 
-/**
- * Генерує коротку відповідь українською.
- * @param {string} userText
- * @param {any} env - Worker env (має містити binding AI)
- * @returns {Promise<string>}
- */
-export async function aiText(userText, env) {
-  const prompt = (userText ?? "").trim();
-  if (!prompt) return "(порожній запит)";
+export interface Provider {
+  name: string;
+  call: (env: Env, prompt: string, signal: AbortSignal) => Promise<AIResult>;
+  // Чи ввімкнений провайдер (напр. немає ключа — вимикаємо)
+  enabled: (env: Env) => boolean;
+}
 
+// ---- helpers ---------------------------------------------------------------
+
+const toAIError = (provider: string, e: unknown, retryable = true): AIResult => {
+  const msg =
+    e instanceof Error ? `${e.name}: ${e.message}` : typeof e === "string" ? e : "Unknown error";
+  // Деякі тексти помилок не варто ретраїти (400/401/403)
+  const m = msg.toLowerCase();
+  const hard =
+    m.includes("401") || m.includes("unauthorized") ||
+    m.includes("403") || m.includes("forbidden") ||
+    m.includes("invalid") || m.includes("bad request") ||
+    m.includes("unsupported");
+  return { ok: false, provider, error: msg, retryable: retryable && !hard };
+};
+
+// таймаут для будь-якого провайдера (захист від «зависань»)
+export const withTimeout = async <T>(
+  ms: number,
+  task: (signal: AbortSignal) => Promise<T>,
+): Promise<T> => {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort("timeout"), ms);
   try {
-    // Формат chat-messages сумісний з Workers AI
-    const res = await env.AI.run(TEXT_MODEL, {
-      messages: [
-        {
-          role: "system",
-          content:
-            "Ти лаконічний асистент українською. Відповідай коротко та по суті (1–3 речення).",
-        },
-        { role: "user", content: prompt },
-      ],
-    });
+    return await task(ctrl.signal);
+  } finally {
+    clearTimeout(t);
+  }
+};
 
-    // У CF AI буває response або output_text
-    const out = (res && (res.response || res.output_text || "")) || "";
-    const text = String(out).trim();
-    return text || "Не вдалося згенерувати відповідь.";
-  } catch (err) {
-    console.error("AI text error:", err);
-    return "Не вийшло звернутися до моделі. Спробуй інакше сформулювати запит.";
+// компактний вирівнювач пробілів
+export const normalize = (s: string) =>
+  s.replace(/\s+/g, " ").replace(/^[\s\r\n]+|[\s\r\n]+$/g, "");
+
+// ---- Gemini (Google) -------------------------------------------------------
+
+async function callGemini(env: Env, prompt: string, signal: AbortSignal): Promise<AIResult> {
+  try {
+    const key = env.GEMINI_API_KEY;
+    // Можна змінити модель за бажанням
+    const model = "gemini-1.5-flash";
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+      {
+        method: "POST",
+        signal,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.2, maxOutputTokens: 512 },
+        }),
+      },
+    );
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(`${res.status} ${res.statusText}: ${t}`);
+    }
+    const data = await res.json();
+    const text: string =
+      data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text).join("") ?? "";
+    if (!text) throw new Error("Empty response");
+    return { ok: true, text: normalize(text), provider: "gemini" };
+  } catch (e) {
+    return toAIError("gemini", e);
   }
 }
 
-/**
- * Стислий опис зображення (якщо переданий imageUrl).
- * @param {{ prompt?: string, imageUrl?: string }} args
- * @param {any} env
- * @returns {Promise<string>}
- */
-export async function aiVision({ prompt, imageUrl } = {}, env) {
-  if (!imageUrl) {
-    // Не ламаємо існуючі тексти-нотифікації у твоєму хендлері
-    return "Бачу зображення, але не отримав його URL для аналізу.";
-  }
+const Gemini: Provider = {
+  name: "gemini",
+  enabled: (env) => Boolean(env.GEMINI_API_KEY),
+  call: callGemini,
+};
 
-  const userPrompt =
-    (prompt && String(prompt).trim()) ||
-    "Опиши зображення стисло українською й зроби 1–2 висновки.";
+// ---- Groq (Llama/Mixtral) --------------------------------------------------
 
-  // Два способи виклику: сучасний messages та fallback через image:{url}
-  // Щоб не впасти, пробуємо послідовно.
+async function callGroq(env: Env, prompt: string, signal: AbortSignal): Promise[AIResult] {
   try {
-    // Варіант 1: через messages із image_url
-    const res1 = await env.AI.run(VISION_MODEL, {
-      messages: [
-        { role: "system", content: "Відповідай коротко українською." },
-        {
-          role: "user",
-          content: [
-            { type: "image_url", image_url: imageUrl },
-            { type: "text", text: userPrompt },
-          ],
-        },
-      ],
+    const key = env.GROQ_API_KEY;
+    const model = "llama-3.1-70b-versatile";
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      signal,
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.2,
+        max_tokens: 512,
+        messages: [{ role: "user", content: prompt }],
+      }),
     });
-    const out1 =
-      (res1 && (res1.response || res1.output_text || res1.description)) || "";
-    const txt1 = String(out1).trim();
-    if (txt1) return txt1;
-  } catch (e1) {
-    console.warn("AI vision (messages) failed, try fallback:", e1);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
+    const j = await res.json();
+    const text: string = j?.choices?.[0]?.message?.content ?? "";
+    if (!text) throw new Error("Empty response");
+    return { ok: true, text: normalize(text), provider: "groq" };
+  } catch (e) {
+    return toAIError("groq", e);
   }
-
-  try {
-    // Варіант 2: старий інтерфейс LLaVA-подібних моделей
-    const res2 = await env.AI.run(VISION_MODEL, {
-      prompt: userPrompt,
-      image: [{ url: imageUrl }],
-    });
-    const out2 =
-      (res2 && (res2.response || res2.output_text || res2.description)) || "";
-    const txt2 = String(out2).trim();
-    if (txt2) return txt2;
-  } catch (e2) {
-    console.error("AI vision (fallback) error:", e2);
-  }
-
-  return "Не зміг проаналізувати зображення.";
 }
+
+const Groq: Provider = {
+  name: "groq",
+  enabled: (env) => Boolean(env.GROQ_API_KEY),
+  call: callGroq,
+};
+
+// ---- OpenRouter (агрегатор моделей) ---------------------------------------
+
+async function callOpenRouter(env: Env, prompt: string, signal: AbortSignal): Promise<AIResult> {
+  try {
+    const key = env.OPENROUTER_API_KEY;
+    // Дозволяємо задати модель через секрет OPENROUTER_MODEL
+    const model = env.OPENROUTER_MODEL || "google/gemma-2-9b-it";
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      signal,
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${key}`,
+        "HTTP-Referer": "https://restSVA.workers.dev", // будь-який валідний реферер
+        "X-Title": "Senti Bot",
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.2,
+        max_tokens: 512,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
+    const j = await res.json();
+    const text: string = j?.choices?.[0]?.message?.content ?? "";
+    if (!text) throw new Error("Empty response");
+    return { ok: true, text: normalize(text), provider: `openrouter:${model}` };
+  } catch (e) {
+    return toAIError("openrouter", e);
+  }
+}
+
+const OpenRouter: Provider = {
+  name: "openrouter",
+  enabled: (env) => Boolean(env.OPENROUTER_API_KEY),
+  call: callOpenRouter,
+};
+
+// ---- DeepSeek --------------------------------------------------------------
+
+async function callDeepSeek(env: Env, prompt: string, signal: AbortSignal): Promise<AIResult> {
+  try {
+    const key = env.DEEPSEEK_API_KEY;
+    const model = "deepseek-chat";
+    const res = await fetch("https://api.deepseek.com/chat/completions", {
+      method: "POST",
+      signal,
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.2,
+        max_tokens: 512,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
+    const j = await res.json();
+    const text: string = j?.choices?.[0]?.message?.content ?? "";
+    if (!text) throw new Error("Empty response");
+    return { ok: true, text: normalize(text), provider: "deepseek" };
+  } catch (e) {
+    return toAIError("deepseek", e);
+  }
+}
+
+const DeepSeek: Provider = {
+  name: "deepseek",
+  enabled: (env) => Boolean(env.DEEPSEEK_API_KEY),
+  call: callDeepSeek,
+};
+
+// ---- експорт списку провайдерів за замовчуванням ---------------------------
+
+/**
+ * Порядок = пріоритет фейловеру. Можна змінити в одному місці.
+ * Провайдер виключається автоматично, якщо немає ключа в Env.
+ */
+export const DefaultProviders: Provider[] = [Gemini, Groq, OpenRouter, DeepSeek];
