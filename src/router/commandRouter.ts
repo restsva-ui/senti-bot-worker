@@ -4,15 +4,16 @@ import { findCommandByName } from "../commands/registry";
 import { menuCanHandleCallback, menuOnCallback } from "../commands/menu";
 import { likesCanHandleCallback, likesOnCallback } from "../commands/likes";
 
-type Env = { BOT_TOKEN: string; API_BASE_URL?: string; LIKES_KV?: any };
+type Env = { BOT_TOKEN: string; API_BASE_URL?: string; LIKES_KV?: unknown };
 
 function getMessageText(update: TgUpdate): string | undefined {
   const msg = update.message ?? update.edited_message;
-  return (msg?.text ?? msg?.caption ?? undefined)?.trim();
+  const text = msg?.text ?? msg?.caption;
+  return typeof text === "string" ? text.trim() : undefined;
 }
 
 export async function commandRouter(env: Env, update: TgUpdate) {
-  // 1) Callback-и (спочатку лайки, потім меню)
+  // 1) Спочатку обробляємо callback_data (лайки → меню)
   const cb = update.callback_query;
   if (cb?.data) {
     if (likesCanHandleCallback(cb.data)) {
@@ -25,13 +26,13 @@ export async function commandRouter(env: Env, update: TgUpdate) {
     }
   }
 
-  // 2) Текст/команди
+  // 2) Текстові повідомлення / команди
   const text = getMessageText(update);
   if (!text) return new Response("NO_CONTENT");
 
   if (text.startsWith("/")) {
-    const cmdToken = text.split(/\s+/, 1)[0]!.slice(1); // без '/'
-    const cmd = findCommandByName(cmdToken);
+    const cmdToken = text.split(/\s+/, 1)[0]!.slice(1); // відкидаємо '/'
+    const cmd = findCommandByName(cmdToken); // усередині зрізається @botname
     if (cmd?.execute) {
       await cmd.execute(env as any, update);
       return new Response("OK");
