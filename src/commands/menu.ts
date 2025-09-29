@@ -11,12 +11,15 @@ export const menuCommand = {
     const keyboard = {
       inline_keyboard: [
         [
-          { text: "🏓 Ping", callback_data: "cmd_ping" },
+          { text: "🏓 Ping",  callback_data: "cmd_ping"  },
           { text: "📊 Stats", callback_data: "cmd_stats" },
         ],
         [
           { text: "❤️ Likes", callback_data: "cmd_likes" },
-          { text: "📖 Wiki", callback_data: "cmd_wiki" },
+          { text: "📖 Wiki",  callback_data: "cmd_wiki"  },
+        ],
+        [
+          { text: "🆘 Help",  callback_data: "cmd_help"  },
         ],
       ],
     };
@@ -41,21 +44,17 @@ export async function menuOnCallback(
   if (!data || !chatId || !cqId) return;
 
   switch (data) {
-    case "cmd_ping":
-      await sendText(env, chatId, "/ping");
-      break;
-    case "cmd_stats":
-      await sendText(env, chatId, "/stats");
-      break;
-    case "cmd_likes":
-      await sendText(env, chatId, "/likes");
-      break;
+    case "cmd_ping":  await sendText(env, chatId, "/ping");  break;
+    case "cmd_stats": await sendText(env, chatId, "/stats"); break;
+    case "cmd_likes": await sendText(env, chatId, "/likes"); break;
+    case "cmd_help":  await sendText(env, chatId, "/help");  break;
     case "cmd_wiki":
-      // ❗Замість відправки /wiki — просимо користувача ввести запит (ForceReply)
+      // Просимо ввести запит для /wiki (ForceReply)
       await sendMessage(env, chatId, "🔎 Введіть запит для /wiki:", {
         reply_markup: {
           force_reply: true,
-          input_field_placeholder: "Напр.: Київ • en Albert Einstein • de Berlin • fr Paris",
+          input_field_placeholder:
+            "Напр.: Київ • en Albert Einstein • de Berlin • fr Paris",
         },
       });
       break;
@@ -75,7 +74,11 @@ async function sendMessage(
   const url = `${apiBase}/bot${env.BOT_TOKEN}/sendMessage`;
   const body = JSON.stringify({ chat_id: chatId, text, ...extra });
 
-  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body }).catch(console.error);
+  await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body,
+  }).catch(console.error);
 }
 
 async function sendText(
@@ -94,5 +97,9 @@ async function answerCallbackQuery(
   const url = `${apiBase}/bot${env.BOT_TOKEN}/answerCallbackQuery`;
   const body = JSON.stringify({ callback_query_id: callbackQueryId });
 
-  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body }).catch(console.error);
+  await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body,
+  }).catch(console.error);
 }
