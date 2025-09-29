@@ -1,21 +1,15 @@
-import type { TgUpdate } from "../types";
-import { menuCommand } from "./menu";
-import { likesCommand, likesStatsCommand } from "./likes";
 import { wikiCommand } from "./wiki";
+import { helpCommand } from "./help";
+import { healthCommand } from "./health";
+// ...
 
-type Cmd = {
-  name: string;
-  description: string;
-  execute(env: any, update: TgUpdate): Promise<void>;
-};
-
-export const commands: Cmd[] = [
-  menuCommand,
+const commands = [
   wikiCommand,
-  likesCommand,
-  likesStatsCommand,
+  helpCommand,
+  healthCommand,
+  // тут має бути startCommand
 ];
 
 export function findCommandByName(name: string) {
-  return commands.find((c) => c.name === name);
+  return commands.find(c => c.name === name || c.aliases?.includes(name));
 }
