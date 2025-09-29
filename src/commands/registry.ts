@@ -3,30 +3,55 @@ import type { TgUpdate } from "../types";
 
 export type CommandHandler = (update: TgUpdate, env: any) => Promise<void>;
 
-// Імпортуємо модулі як namespace — незалежно від того, як саме вони експортують
+// Імпортуємо всі модулі команд як namespace
 import * as startModule from "./start";
 import * as helpModule from "./help";
 import * as pingModule from "./ping";
 import * as healthModule from "./health";
 import * as wikiModule from "./wiki";
 
-// Допоміжна: обрати хендлер з модуля (named або default)
-function pickHandler(mod: any, names: string[]): CommandHandler {
-  for (const n of names) {
-    if (typeof mod?.[n] === "function") return mod[n] as CommandHandler;
+/** Повертає першу функцію з модуля (як запасний варіант) */
+function firstFunctionExport(mod: any): CommandHandler | undefined {
+  if (!mod || typeof mod !== "object") return undefined;
+  for (const k of Object.keys(mod)) {
+    const v = (mod as any)[k];
+    if (typeof v === "function") return v as CommandHandler;
   }
-  if (typeof mod?.default === "function") return mod.default as CommandHandler;
-  throw new Error(`Command handler not found in module: ${names.join(", ")}`);
+  return undefined;
 }
 
-// Дістаємо основні хендлери
-const start = pickHandler(startModule, ["start", "handleStart"]);
-const help = pickHandler(helpModule, ["help", "handleHelp"]);
-const ping = pickHandler(pingModule, ["ping", "handlePing"]);
-const health = pickHandler(healthModule, ["health", "handleHealth"]);
-const wiki = pickHandler(wikiModule, ["wiki", "handleWiki"]);
+/** Прагматично шукаємо хендлер у модулі */
+function tryPickHandler(
+  mod: any,
+  candidates: string[]
+): CommandHandler | undefined {
+  // 1) іменовані
+  for (const n of candidates) {
+    if (typeof mod?.[n] === "function") return mod[n] as CommandHandler;
+  }
+  // 2) default як функція
+  if (typeof mod?.default === "function")
+    return mod.default as CommandHandler;
 
-// Додаткові функції wiki (необов'язкові). Якщо нема — no-op.
+  // 3) перша будь-яка функція серед експортів
+  return firstFunctionExport(mod);
+}
+
+/** Допоміжне: додати команду лише якщо є хендлер */
+function addIf(handler: CommandHandler | undefined, name: string, to: Record<string, CommandHandler>) {
+  if (typeof handler === "function") {
+    to[name] = handler;
+  }
+}
+
+// === Підхоплюємо хендлери (без винятків, усе «best effort») ===
+const start = tryPickHandler(startModule, ["start", "handleStart"]);
+const help = tryPickHandler(helpModule, ["help", "handleHelp"]);
+const ping = tryPickHandler(pingModule, ["ping", "handlePing"]);
+const health = tryPickHandler(healthModule, ["health", "handleHealth"]);
+const wiki = tryPickHandler(wikiModule, ["wiki", "handleWiki"]);
+
+// Додаткові функції wiki (необов’язкові)
 export const wikiSetAwait:
   (update: TgUpdate, env: any) => Promise<void> | void =
   typeof (wikiModule as any).wikiSetAwait === "function"
@@ -39,22 +64,21 @@ export const wikiMaybeHandleFreeText:
     ? (wikiModule as any).wikiMaybeHandleFreeText
     : async () => false;
 
-// Головний реєстр команд
-export const COMMANDS: Record<string, CommandHandler> = {
-  start,
-  help,
-  ping,
-  health,
-  wiki,
-};
+// === Реєстр команд (лише наявні) ===
+export const COMMANDS: Record<string, CommandHandler> = {};
+addIf(start, "start", COMMANDS);
+addIf(help, "help", COMMANDS);
+addIf(ping, "ping", COMMANDS);
+addIf(health, "health", COMMANDS);
+addIf(wiki, "wiki", COMMANDS);
 
-// Пошук хендлера за назвою
+// Пошук за назвою
 export function findCommandByName(name: string): CommandHandler | undefined {
   if (!name) return undefined;
   return COMMANDS[name.toLowerCase()];
 }
 
-// Опис для /help
+// Інфо для /help (перелік усіх, навіть якщо частина не зареєструвалась — це ок)
 export type CommandInfo = { command: string; description: string };
 
 export function getCommandsInfo(): CommandInfo[] {
@@ -67,7 +91,7 @@ export function getCommandsInfo(): CommandInfo[] {
   ];
 }
 
-// Меню Telegram — показуємо лише те, що ми залишили у меню
+// Меню Telegram — лише help та wiki
 export function getMenuCommands(): CommandInfo[] {
   return [
     { command: "help", description: "Довідка" },
