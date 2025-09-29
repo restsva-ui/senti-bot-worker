@@ -15,41 +15,14 @@ import { seenUpdateRecently } from "./utils/dedup";
 import { verifyWebhook } from "./middlewares/verifyWebhook";
 import { handleDedupTest } from "./routes/dedupTest";
 import { handleHealth } from "./routes/health";
-
-/* Команди */
-import { startCommand } from "./commands/start";
-import { pingCommand } from "./commands/ping";
-import { healthCommand } from "./commands/health";
-import { helpCommand } from "./commands/help";
-import { wikiCommand } from "./commands/wiki";
+import { routeUpdate } from "./router/commandRouter";
 
 /* --------------------------- Constants ------------------------------- */
 const WEBHOOK_PATH = "/webhook/senti1984";
 
-/* --------------------------- Registry -------------------------------- */
-type Command = {
-  name: string;
-  description: string;
-  execute: (env: Env, update: TgUpdate) => Promise<void>;
-};
-
-const commands: Record<string, Command> = {
-  [startCommand.name]: startCommand,
-  [pingCommand.name]: pingCommand,
-  [healthCommand.name]: healthCommand,
-  [helpCommand.name]: helpCommand,
-  [wikiCommand.name]: wikiCommand,
-};
-
 /* --------------------------- Utils ----------------------------------- */
 function parseJson<T = unknown>(req: Request): Promise<T> {
   return req.json() as Promise<T>;
-}
-
-function isCommand(msgText: string | undefined, name: string) {
-  const t = msgText ?? "";
-  const re = new RegExp(`^\\/${name}(?:@\\w+)?(?:\\s|$)`, "i");
-  return re.test(t);
 }
 
 function json(data: unknown, init?: ResponseInit) {
@@ -61,14 +34,14 @@ function json(data: unknown, init?: ResponseInit) {
 
 /* --------------------------- Router (Webhook) ------------------------ */
 async function handleWebhook(env: Env, req: Request): Promise<Response> {
-  // ---- Middleware: перевірка секрету ----
+  // 1) Перевірка секрету
   const deny = verifyWebhook(req, env.WEBHOOK_SECRET);
   if (deny) return deny;
 
-  // Парсимо апдейт
+  // 2) Парсимо апдейт
   const update = await parseJson<TgUpdate>(req);
 
-  // ---- Антидубль (KV) ----
+  // 3) Антидубль (KV)
   const updateId = (update as any)?.update_id as number | undefined;
   if (typeof updateId === "number") {
     const isDup = await seenUpdateRecently(env, updateId, 120); // 2 хвилини
@@ -77,18 +50,10 @@ async function handleWebhook(env: Env, req: Request): Promise<Response> {
     }
   }
 
-  const msg = update.message;
-  const text = msg?.text ?? "";
+  // 4) Передаємо в роутер команд
+  await routeUpdate(env, update);
 
-  // Визначаємо команду
-  for (const key of Object.keys(commands)) {
-    if (isCommand(text, key)) {
-      await commands[key].execute(env, update);
-      return new Response("OK");
-    }
-  }
-
-  // Fallback: якщо команда не впізнана — тихий OK
+  // 5) Тихий OK (навіть якщо команда не знайдена)
   return new Response("OK");
 }
 
