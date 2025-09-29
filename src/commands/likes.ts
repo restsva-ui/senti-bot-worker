@@ -1,11 +1,8 @@
-// src/commands/likes.ts
 import type { TgUpdate } from "../types";
 
-/** Кнопка з нульовим лічильником */
+/** Кнопка-лайк */
 function likeKeyboard(count: number) {
-  return {
-    inline_keyboard: [[{ text: `❤️ ${count}`, callback_data: "like" }]],
-  };
+  return { inline_keyboard: [[{ text: `❤️ ${count}`, callback_data: "like" }]] };
 }
 
 async function tgCall(
@@ -29,13 +26,9 @@ async function tgCall(
 export const likesCommand = {
   name: "likes",
   description: "Показує кнопку ❤️ та рахує натискання",
-  async execute(
-    env: { BOT_TOKEN: string; API_BASE_URL?: string },
-    update: TgUpdate
-  ) {
+  async execute(env: { BOT_TOKEN: string; API_BASE_URL?: string }, update: TgUpdate) {
     const chatId = update.message?.chat?.id;
     if (!chatId) return;
-
     await tgCall(env, "sendMessage", {
       chat_id: chatId,
       text: "Лайкни це повідомлення:",
@@ -44,7 +37,6 @@ export const likesCommand = {
   },
 } as const;
 
-/** Обробка натискання на ❤️ */
 export function likesCanHandleCallback(data: string) {
   return data === "like";
 }
@@ -60,22 +52,17 @@ export async function likesOnCallback(
   if (!chatId || !msgId) return;
 
   const key = `likes:${chatId}:${msgId}`;
-
-  // поточне значення
   const raw = (await env.LIKES_KV.get(key)) ?? "0";
   const current = Number.parseInt(raw) || 0;
   const next = current + 1;
-
   await env.LIKES_KV.put(key, String(next));
 
-  // оновлюємо підпис кнопки
   await tgCall(env, "editMessageReplyMarkup", {
     chat_id: chatId,
     message_id: msgId,
     reply_markup: likeKeyboard(next),
   });
 
-  // відповідаємо на callback, щоб прибрати "годинник"
   await tgCall(env, "answerCallbackQuery", {
     callback_query_id: cb.id,
     text: `❤️ ${next}`,
@@ -83,21 +70,16 @@ export async function likesOnCallback(
   });
 }
 
-/** /stats — зведення по чату */
 export const likesStatsCommand = {
   name: "stats",
   description: "Показує суму всіх ❤️ у чаті та кількість повідомлень із лайками",
-  async execute(
-    env: { BOT_TOKEN: string; API_BASE_URL?: string; LIKES_KV: any },
-    update: TgUpdate
-  ) {
+  async execute(env: { BOT_TOKEN: string; API_BASE_URL?: string; LIKES_KV: any }, update: TgUpdate) {
     const chatId = update.message?.chat?.id;
     if (!chatId) return;
 
     let total = 0;
     let messagesWithLikes = 0;
 
-    // зчитуємо всі ключі цього чату
     const prefix = `likes:${chatId}:`;
     let cursor: string | undefined = undefined;
     do {
