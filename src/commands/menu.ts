@@ -1,77 +1,70 @@
 // src/commands/menu.ts
 import type { TgUpdate } from "../types";
 
-const CB_PREFIX = "menu:";
-const CB_PING = `${CB_PREFIX}ping`;
-const CB_HELP = `${CB_PREFIX}help`;
-
 export const menuCommand = {
   name: "menu",
-  description: "Показує меню з кнопками (inline keyboard)",
+  description: "Показує меню з кнопками команд",
   async execute(env: { BOT_TOKEN: string; API_BASE_URL?: string }, update: TgUpdate) {
-    const msg = update.message;
-    const chatId = msg?.chat?.id;
+    const chatId = update.message?.chat?.id;
     if (!chatId) return;
 
     const keyboard = {
       inline_keyboard: [
         [
-          { text: "Пінг ✅", callback_data: CB_PING },
-          { text: "Допомога ℹ️", callback_data: CB_HELP },
+          { text: "🏓 Ping", callback_data: "cmd_ping" },
+          { text: "📊 Stats", callback_data: "cmd_stats" },
+        ],
+        [
+          { text: "❤️ Likes", callback_data: "cmd_likes" },
+          { text: "📖 Wiki", callback_data: "cmd_wiki" },
         ],
       ],
     };
 
-    await sendMessage(env, chatId, "Меню:", {
-      reply_markup: keyboard,
-    });
+    await sendMessage(env, chatId, "📋 Меню:", { reply_markup: keyboard });
   },
 } as const;
 
-/** Чи може цей модуль обробити callback data */
+/* -------------------- Callback router -------------------- */
 export function menuCanHandleCallback(data: string | undefined): boolean {
-  return typeof data === "string" && data.startsWith(CB_PREFIX);
+  return !!data && data.startsWith("cmd_");
 }
 
-/** Обробка callback_query від кнопок меню */
 export async function menuOnCallback(
   env: { BOT_TOKEN: string; API_BASE_URL?: string },
   update: TgUpdate
-): Promise<void> {
+) {
   const cq: any = (update as any).callback_query;
   const data: string | undefined = cq?.data;
-  const chatId: number | undefined = cq?.message?.chat?.id;
-  const cqId: string | undefined = cq?.id;
-
+  const chatId = cq?.message?.chat?.id;
+  const cqId = cq?.id;
   if (!data || !chatId || !cqId) return;
 
-  if (data === CB_PING) {
-    await answerCallbackQuery(env, cqId, "pong ✅");
-    await sendMessage(env, chatId, "pong ✅");
-    return;
+  switch (data) {
+    case "cmd_ping":
+      await sendText(env, chatId, "/ping");
+      break;
+    case "cmd_stats":
+      await sendText(env, chatId, "/stats");
+      break;
+    case "cmd_likes":
+      await sendText(env, chatId, "/likes");
+      break;
+    case "cmd_wiki":
+      // ❗Замість відправки /wiki — просимо користувача ввести запит (ForceReply)
+      await sendMessage(env, chatId, "🔎 Введіть запит для /wiki:", {
+        reply_markup: {
+          force_reply: true,
+          input_field_placeholder: "Напр.: Київ • en Albert Einstein • de Berlin • fr Paris",
+        },
+      });
+      break;
   }
 
-  if (data === CB_HELP) {
-    await answerCallbackQuery(env, cqId); // без повідомлення
-    await sendMessage(
-      env,
-      chatId,
-      [
-        "Доступні команди:",
-        "• /ping — перевірка зв'язку",
-        "• /echo <текст> — повторить ваш текст",
-        "• /menu — показати кнопки",
-      ].join("\n")
-    );
-    return;
-  }
-
-  // Невідомий кейс — просто тихо відповідаємо на callback
   await answerCallbackQuery(env, cqId);
 }
 
-/* ===================== низькорівневі виклики Telegram API ===================== */
-
+/* -------------------- Low-level Telegram -------------------- */
 async function sendMessage(
   env: { BOT_TOKEN: string; API_BASE_URL?: string },
   chatId: number,
@@ -82,37 +75,24 @@ async function sendMessage(
   const url = `${apiBase}/bot${env.BOT_TOKEN}/sendMessage`;
   const body = JSON.stringify({ chat_id: chatId, text, ...extra });
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body,
-  });
+  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body }).catch(console.error);
+}
 
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    console.error("sendMessage error:", res.status, errText);
-  }
+async function sendText(
+  env: { BOT_TOKEN: string; API_BASE_URL?: string },
+  chatId: number,
+  text: string
+) {
+  return sendMessage(env, chatId, text);
 }
 
 async function answerCallbackQuery(
   env: { BOT_TOKEN: string; API_BASE_URL?: string },
-  callbackQueryId: string,
-  text?: string
+  callbackQueryId: string
 ) {
   const apiBase = env.API_BASE_URL || "https://api.telegram.org";
   const url = `${apiBase}/bot${env.BOT_TOKEN}/answerCallbackQuery`;
-  const body = JSON.stringify(
-    text ? { callback_query_id: callbackQueryId, text } : { callback_query_id: callbackQueryId }
-  );
+  const body = JSON.stringify({ callback_query_id: callbackQueryId });
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body,
-  });
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    console.error("answerCallbackQuery error:", res.status, errText);
-  }
+  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body }).catch(console.error);
 }
