@@ -7,30 +7,44 @@ type EnvBase = { BOT_TOKEN: string; API_BASE_URL?: string };
 type Lang = "uk" | "ru" | "en" | "de" | "fr";
 const DEFAULT_LANG_ORDER: Lang[] = ["uk", "ru", "en", "de", "fr"];
 
+// Промпт, на який користувач відповідає своїм запитом
+export const WIKI_PROMPT_PREFIX = "🔎 Введіть запит для /wiki";
+export function isWikiPrompt(text?: string): boolean {
+  return typeof text === "string" && text.startsWith(WIKI_PROMPT_PREFIX);
+}
+
 export const wikiCommand = {
   name: "wiki",
   description:
-    "Пошук стислої довідки у Вікіпедії (uk/ru/en/de/fr). Можна: /wiki <lang> <запит>",
+    "Пошук стислої довідки у Вікіпедії (uk/ru/en/de/fr). Можна: /wiki <lang?> <запит>",
   async execute(env: EnvBase, update: TgUpdate) {
-    const chatId = update.message?.chat?.id;
-    const text = update.message?.text ?? "";
+    const msg = update.message;
+    const chatId = msg?.chat?.id;
     if (!chatId) return;
 
-    const raw = text.replace(/^\/wiki(?:@\w+)?/i, "").trim();
+    // 1) Спочатку пробуємо дістати аргументи надійно через entities
+    const argsFromEntities = extractCommandArgs(msg);
+    // 2) Фолбек — через regex з тексту
+    const rawText = msg?.text ?? "";
+    const argsFromRegex = rawText.replace(/^\/wiki(?:@\w+)?/i, "").trim();
 
+    const raw = (argsFromEntities || argsFromRegex || "").trim();
+
+    // Якщо аргументів немає — ForceReply
     if (!raw) {
-      const usage =
-        "Використання: <code>/wiki Київ</code>\n" +
-        "Або з мовою: <code>/wiki de Berlin</code>\n" +
-        "Мови: uk, ru, en, de, fr";
-      await sendMessage(env, chatId, usage, { parse_mode: "HTML" });
+      await sendMessage(env, chatId, `${WIKI_PROMPT_PREFIX}:`, {
+        reply_markup: {
+          force_reply: true,
+          input_field_placeholder:
+            "Напр.: Київ • en Albert Einstein • de Berlin • fr Paris",
+        },
+      });
       return;
     }
 
     const { query, preferLang } = parseLangFromQuery(raw);
     const langOrder = buildLangOrder(preferLang, getUserLang(update));
 
-    // Пошук послідовно різними мовами
     let found: Awaited<ReturnType<typeof searchPage>> | null = null;
     for (const L of langOrder) {
       found = await searchPage(L, query);
@@ -44,7 +58,6 @@ export const wikiCommand = {
       return;
     }
 
-    // Детальніший summary по exact key (якщо є)
     const sum =
       (await fetchSummary(found.lang, found.key)) ||
       { title: found.title, extract: stripHtml(found.excerpt), url: found.url };
@@ -163,4 +176,15 @@ function stripHtml(s: string) {
 }
 function escapeHtml(s: string) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/* ---------------- args via entities ---------------- */
+function extractCommandArgs(msg: any): string | null {
+  const text: string | undefined = msg?.text;
+  const entities: any[] | undefined = msg?.entities;
+  if (!text || !entities) return null;
+  const cmdEnt = entities.find((e) => e.type === "bot_command" && e.offset === 0);
+  if (!cmdEnt) return null;
+  const end = cmdEnt.offset + cmdEnt.length;
+  return text.slice(end).trim();
 }
