@@ -7,6 +7,7 @@ import { pingCommand } from "../commands/ping";
 import { healthCommand } from "../commands/health";
 import { helpCommand } from "../commands/help";
 import { wikiCommand } from "../commands/wiki";
+import { echoCommand } from "../commands/echo"; // ⟵ нова фіча
 
 /** Мінімальний контракт середовища, потрібний командам */
 export type CommandEnv = {
@@ -29,6 +30,7 @@ const commands: Record<string, Command> = {
   [healthCommand.name]: healthCommand,
   [helpCommand.name]: helpCommand,
   [wikiCommand.name]: wikiCommand,
+  [echoCommand.name]: echoCommand, // ⟵ додано до реєстру
 };
 
 /** Перевірка, чи текст є викликом конкретної команди */
