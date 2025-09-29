@@ -1,160 +1,111 @@
 // src/commands/wiki.ts
 import type { TgUpdate } from "../types";
 
-type EnvBase = { BOT_TOKEN: string; API_BASE_URL?: string };
+type Env = { BOT_TOKEN: string; API_BASE_URL?: string };
 
-// Підтримувані мови
-type Lang = "uk" | "ru" | "en" | "de" | "fr";
-const DEFAULT_LANG_ORDER: Lang[] = ["uk", "ru", "en", "de", "fr"];
-
-// Промпт, на який користувач відповідає своїм запитом
-export const WIKI_PROMPT_PREFIX = "🔎 Введіть запит для /wiki";
-export function isWikiPrompt(text?: string): boolean {
-  return typeof text === "string" && text.startsWith(WIKI_PROMPT_PREFIX);
-}
+const WIKI_LANGS = ["uk", "ru", "en", "de", "fr"] as const;
+type Lang = (typeof WIKI_LANGS)[number];
 
 export const wikiCommand = {
   name: "wiki",
   description:
     "Пошук стислої довідки у Вікіпедії (uk/ru/en/de/fr). Можна: /wiki <lang?> <запит>",
-  async execute(env: EnvBase, update: TgUpdate) {
+  async execute(env: Env, update: TgUpdate) {
     const msg = update.message;
     const chatId = msg?.chat?.id;
     if (!chatId) return;
 
-    // 1) Спочатку пробуємо дістати аргументи надійно через entities
-    const argsFromEntities = extractCommandArgs(msg);
-    // 2) Фолбек — через regex з тексту
-    const rawText = msg?.text ?? "";
-    const argsFromRegex = rawText.replace(/^\/wiki(?:@\w+)?/i, "").trim();
+    const raw = (msg?.text ?? msg?.caption ?? "").trim();
 
-    const raw = (argsFromEntities || argsFromRegex || "").trim();
+    // Витягуємо аргументи після /wiki (з урахуванням /wiki@botname)
+    const args = extractArgs(raw, "wiki");
 
-    // Якщо аргументів немає — ForceReply
-    if (!raw) {
-      await sendMessage(env, chatId, `${WIKI_PROMPT_PREFIX}:`, {
-        reply_markup: {
-          force_reply: true,
-          input_field_placeholder:
-            "Напр.: Київ • en Albert Einstein • de Berlin • fr Paris",
-        },
-      });
+    // Якщо аргументів немає — просимо ввести запит (reply-флоу)
+    if (!args) {
+      await sendMessage(
+        env,
+        chatId,
+        "🔎 Введіть запит для /wiki:",
+        { reply_to_message_id: msg?.message_id }
+      );
       return;
     }
 
-    const { query, preferLang } = parseLangFromQuery(raw);
-    const langOrder = buildLangOrder(preferLang, getUserLang(update));
-
-    let found: Awaited<ReturnType<typeof searchPage>> | null = null;
-    for (const L of langOrder) {
-      found = await searchPage(L, query);
-      if (found) break;
-    }
-
-    if (!found) {
-      await sendMessage(env, chatId, `Нічого не знайшов за запитом: <b>${escapeHtml(query)}</b>`, {
-        parse_mode: "HTML",
-      });
+    // Парсимо можливу мову + сам запит
+    const { lang, query } = parseLangAndQuery(args);
+    if (!query) {
+      await sendMessage(env, chatId, "Не бачу запиту. Приклад: /wiki Київ або /wiki en Berlin");
       return;
     }
 
-    const sum =
-      (await fetchSummary(found.lang, found.key)) ||
-      { title: found.title, extract: stripHtml(found.excerpt), url: found.url };
+    const summary =
+      (await fetchSummarySafe(lang, query)) ??
+      // fallback: якщо з мовою не знайшли — пробуємо по колу мов
+      (await tryOtherLangs(query, lang));
 
-    const MAX = 1200;
-    const body =
-      `<b>${escapeHtml(sum.title)}</b>\n` +
-      `${escapeHtml(sum.extract.length > MAX ? sum.extract.slice(0, MAX - 1) + "…" : sum.extract)}`;
+    if (!summary) {
+      await sendMessage(
+        env,
+        chatId,
+        `Нічого не знайшов за запитом: ${query}`
+      );
+      return;
+    }
 
-    const keyboard = { inline_keyboard: [[{ text: "🔗 Відкрити у Вікіпедії", url: sum.url }]] };
-    await sendMessage(env, chatId, body, { parse_mode: "HTML", reply_markup: keyboard });
+    const text = `<b>${summary.title}</b>\n${summary.extract}`;
+    await sendMessage(env, chatId, text, { parse_mode: "HTML" });
   },
 } as const;
 
-/* ---------------- Wikipedia helpers ---------------- */
+/* -------------------- helpers -------------------- */
+function extractArgs(text: string, cmd: string): string | null {
+  // приклади: "/wiki Київ", "/wiki@SentiBot en Berlin"
+  const re = new RegExp(`^\\/${cmd}(?:@\\w+)?\\s*(.*)$`, "i");
+  const m = text.match(re);
+  const tail = (m?.[1] ?? "").trim();
+  return tail.length ? tail : null;
+}
 
-async function searchPage(lang: Lang, q: string) {
+function parseLangAndQuery(tail: string): { lang: Lang; query: string } {
+  const parts = tail.split(/\s+/);
+  const maybeLang = parts[0]?.toLowerCase() as Lang | undefined;
+  if (maybeLang && (WIKI_LANGS as readonly string[]).includes(maybeLang)) {
+    return { lang: maybeLang as Lang, query: parts.slice(1).join(" ").trim() };
+  }
+  return { lang: "uk", query: tail };
+}
+
+async function fetchSummarySafe(lang: Lang, query: string) {
   try {
-    const enc = encodeURIComponent(q);
-    const url = `https://${lang}.wikipedia.org/w/rest.php/v1/search/page?q=${enc}&limit=1`;
-    const res = await fetch(url, {
-      headers: { accept: "application/json", "user-agent": "SentiBot/1.0 (Cloudflare Worker)" },
-    });
+    const url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(
+      query
+    )}`;
+    const res = await fetch(url, { headers: { accept: "application/json" } });
     if (!res.ok) return null;
-    const j: any = await res.json();
-    const page = j?.pages?.[0];
-    if (!page?.title || !page?.key) return null;
+    const j = (await res.json()) as any;
+    if (j?.type === "disambiguation" && j?.titles?.normalized) {
+      // якщо дизамбіґ — все одно повернемо вступ
+      return { title: j.titles.normalized as string, extract: j.extract as string };
+    }
+    if (j?.extract && j?.title) {
+      return { title: j.title as string, extract: j.extract as string };
+    }
+  } catch {}
+  return null;
+}
 
-    const urlOut =
-      (page?.content_urls?.desktop?.page as string) ||
-      `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(page.title)}`;
-
-    return {
-      lang,
-      title: String(page.title),
-      key: String(page.key),
-      excerpt: String(page.excerpt ?? ""),
-      url: urlOut,
-    };
-  } catch {
-    return null;
+async function tryOtherLangs(query: string, skip: Lang) {
+  for (const l of WIKI_LANGS) {
+    if (l === skip) continue;
+    const s = await fetchSummarySafe(l, query);
+    if (s) return s;
   }
+  return null;
 }
 
-async function fetchSummary(lang: Lang, key: string) {
-  try {
-    const encKey = encodeURIComponent(key);
-    const url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encKey}`;
-    const res = await fetch(url, {
-      headers: { accept: "application/json", "user-agent": "SentiBot/1.0 (Cloudflare Worker)" },
-    });
-    if (!res.ok) return null;
-    const j: any = await res.json();
-    if (!j?.title || !j?.extract) return null;
-
-    const urlOut =
-      (j?.content_urls?.desktop?.page as string) ||
-      `https://${lang}.wikipedia.org/wiki/${encKey}`;
-
-    return { title: String(j.title), extract: String(j.extract), url: urlOut };
-  } catch {
-    return null;
-  }
-}
-
-/* ---------------- Lang helpers ---------------- */
-
-function parseLangFromQuery(raw: string): { query: string; preferLang?: Lang } {
-  const m = raw.match(/^([a-z]{2})\s+(.+)/i);
-  if (m) {
-    const code = m[1].toLowerCase();
-    const rest = m[2].trim();
-    if (isSupportedLang(code)) return { query: rest, preferLang: code as Lang };
-  }
-  return { query: raw };
-}
-function buildLangOrder(prefer?: Lang, userLang?: Lang): Lang[] {
-  const order: Lang[] = [];
-  if (prefer && !order.includes(prefer)) order.push(prefer);
-  if (userLang && !order.includes(userLang)) order.push(userLang);
-  for (const l of DEFAULT_LANG_ORDER) if (!order.includes(l)) order.push(l);
-  return order;
-}
-function getUserLang(update: TgUpdate): Lang | undefined {
-  const code = (update.message as any)?.from?.language_code as string | undefined;
-  if (!code) return undefined;
-  const c2 = code.slice(0, 2).toLowerCase();
-  return isSupportedLang(c2) ? (c2 as Lang) : undefined;
-}
-function isSupportedLang(code: string): code is Lang {
-  return (["uk", "ru", "en", "de", "fr"] as const).includes(code as Lang);
-}
-
-/* ---------------- Telegram low-level ---------------- */
-
+/* -------------------- low-level telegram -------------------- */
 async function sendMessage(
-  env: EnvBase,
+  env: Env,
   chatId: number,
   text: string,
   extra?: Record<string, unknown>
@@ -162,29 +113,15 @@ async function sendMessage(
   const apiBase = env.API_BASE_URL || "https://api.telegram.org";
   const url = `${apiBase}/bot${env.BOT_TOKEN}/sendMessage`;
   const body = JSON.stringify({ chat_id: chatId, text, ...extra });
-  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body,
+  });
+
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
     console.error("sendMessage error:", res.status, errText);
   }
-}
-
-/* ---------------- utils ---------------- */
-
-function stripHtml(s: string) {
-  return s.replace(/<[^>]+>/g, "");
-}
-function escapeHtml(s: string) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-/* ---------------- args via entities ---------------- */
-function extractCommandArgs(msg: any): string | null {
-  const text: string | undefined = msg?.text;
-  const entities: any[] | undefined = msg?.entities;
-  if (!text || !entities) return null;
-  const cmdEnt = entities.find((e) => e.type === "bot_command" && e.offset === 0);
-  if (!cmdEnt) return null;
-  const end = cmdEnt.offset + cmdEnt.length;
-  return text.slice(end).trim();
 }
