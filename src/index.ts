@@ -1,49 +1,53 @@
 // src/index.ts
 import type { TgUpdate } from "./types";
-import { commandRouter as routeUpdate } from "./router/commandRouter";
+import { commandRouter } from "./router/commandRouter";
 
 type Env = {
   BOT_TOKEN: string;
   API_BASE_URL?: string;
-  WEBHOOK_SECRET?: string;        // опціонально: якщо ставиш секрет у вебхуку
+  WEBHOOK_SECRET?: string;
   LIKES_KV?: KVNamespace;
-  OWNER_ID?: string;
 };
 
-function ok(text = "OK", code = 200) {
-  return new Response(text, { status: code });
-}
-
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
-    try {
-      // Проста перевірка здоров'я
-      if (req.method === "GET") return ok("ok ✅");
+  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+    const { pathname } = new URL(request.url);
 
-      // Приймаємо POST з будь-якого шляху (/ або /webhook — неважливо)
-      if (req.method !== "POST") return ok("method not allowed", 405);
-
-      // Валідація секрету (якщо використовуєш secret_token у setWebhook)
-      const secret = env.WEBHOOK_SECRET;
-      if (secret) {
-        const got = req.headers.get("x-telegram-bot-api-secret-token");
-        if (got !== secret) return ok("forbidden", 403);
-      }
-
-      const update = (await req.json()) as TgUpdate;
-
-      // Гарт: жодних падінь назовні — завжди 200
-      try {
-        await routeUpdate(env as any, update);
-      } catch (e) {
-        console.error("[routeUpdate error]", e);
-      }
-
-      return ok();
-    } catch (e) {
-      console.error("[fetch error]", e);
-      // Telegram очікує 200, навіть якщо всередині помилка
-      return ok();
+    // простий healthcheck
+    if (request.method === "GET" && pathname === "/health") {
+      return new Response("OK", { status: 200 });
     }
+
+    // Telegram надсилає POST на корінь (той самий URL, що у setWebhook)
+    if (request.method === "POST" && pathname === "/") {
+      // 1) Перевірка секрету (якщо заданий)
+      const got = request.headers.get("x-telegram-bot-api-secret-token") ?? "";
+      if (env.WEBHOOK_SECRET && got !== env.WEBHOOK_SECRET) {
+        console.log("Webhook: secret mismatch", {
+          haveSecret: !!env.WEBHOOK_SECRET,
+          gotLen: got.length,
+        });
+        return new Response("UNAUTHORIZED", { status: 401 });
+      }
+
+      // 2) Парсимо апдейт і віддаємо в роутер
+      try {
+        const update = (await request.json()) as TgUpdate;
+        // Трохи діагностики у логи
+        const kind = update.message ? "message"
+          : update.callback_query ? "callback_query"
+          : update.edited_message ? "edited_message"
+          : "other";
+        console.log("Webhook: update kind =", kind);
+
+        return await commandRouter(env, update);
+      } catch (err) {
+        console.error("Webhook: parsing/route error", err);
+        return new Response("BAD_REQUEST", { status: 400 });
+      }
+    }
+
+    // решта — просто 200, щоб не лякати сканери
+    return new Response("OK", { status: 200 });
   },
 } satisfies ExportedHandler<Env>;
