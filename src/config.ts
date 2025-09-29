@@ -15,6 +15,9 @@ export type Env = {
   // secrets
   GROQ_API_KEY?: string
   OPENAI_API_KEY?: string
+
+  // --- Безпека вебхука ---
+  WEBHOOK_SECRET?: string
 };
 
 // Локальний кеш env, який виставляємо у entrypoint (index.ts)
