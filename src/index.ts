@@ -106,7 +106,7 @@ export default {
     if (req.method === "GET" && url.pathname.startsWith("/__dedup_test/")) {
       const id = url.pathname.split("/__dedup_test/")[1] || "0";
       const ttlParam = url.searchParams.get("ttl");
-      const ttl = ttlParam ? Math.max(1, Number(ttlParam)) : 120;
+      const ttl = ttlParam ? Number(ttlParam) : 120;
       return handleDedupTest(env, id, ttl);
     }
 
