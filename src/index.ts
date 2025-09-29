@@ -6,12 +6,13 @@ export type Env = {
   // --- Безпека вебхука ---
   WEBHOOK_SECRET?: string;
 
-  // --- KV для антидублів (у тебе підключено як LIKES_KV = senti-state) ---
+  // --- KV для антидублів (LIKES_KV = senti-state) ---
   LIKES_KV: KVNamespace;
 };
 
 import type { TgUpdate } from "./types";
 import { sendMessage } from "./utils/telegram";
+import { seenUpdateRecently } from "./utils/dedup"; // ⟵ винесено в модуль
 
 /* Команди */
 import { startCommand } from "./commands/start";
@@ -56,43 +57,27 @@ function json(data: unknown, init?: ResponseInit) {
   });
 }
 
-/** Антидубль: запам'ятати update_id на короткий час у KV. */
-async function seenUpdateRecently(
-  env: Env,
-  updateId: number,
-  ttlSec = 120
-): Promise<boolean> {
-  const key = `dedup:update:${updateId}`;
-  const existed = await env.LIKES_KV.get(key);
-  if (existed) return true;
-  await env.LIKES_KV.put(key, "1", { expirationTtl: ttlSec });
-  return false;
-}
-
 /* --------------------------- Router (Webhook) ------------------------ */
 async function handleWebhook(env: Env, req: Request): Promise<Response> {
-  // ---- Перевірка секрету вебхука (має бути на самому початку) ----
+  // ---- Перевірка секрету вебхука (мінімум в індексі) ----
   const expected = env.WEBHOOK_SECRET;
   const got = req.headers.get("X-Telegram-Bot-Api-Secret-Token");
   if (expected && got !== expected) {
     console.warn("Webhook rejected: bad secret token");
     return new Response("forbidden", { status: 403 });
   }
-  // ----------------------------------------------------------
 
   // Парсимо апдейт
   const update = await parseJson<TgUpdate>(req);
 
-  // ---- Антидубль (KV) ----
+  // ---- Антидубль (виклик утиліти) ----
   const updateId = (update as any)?.update_id as number | undefined;
   if (typeof updateId === "number") {
     const isDup = await seenUpdateRecently(env, updateId, 120); // 2 хвилини
     if (isDup) {
-      // Тихий OK: апдейт уже оброблявся
       return new Response("OK");
     }
   }
-  // ------------------------
 
   const msg = update.message;
   const text = msg?.text ?? "";
@@ -125,7 +110,6 @@ export default {
         return await handleWebhook(env, req);
       } catch (e) {
         console.error("webhook error:", e);
-        // не витікаємо деталями у відповідь
         return new Response("OK");
       }
     }
