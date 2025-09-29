@@ -3,35 +3,33 @@ import { startCommand } from "./start";
 import { pingCommand } from "./ping";
 import { healthCommand } from "./health";
 import { helpCommand } from "./help";
-import { menuCommand } from "./menu";
 import { echoCommand } from "./echo";
-import { likesCommand } from "./likes";
-import { statsCommand } from "./stats";
+import { likesCommand, likesStatsCommand } from "./likes";
+import { menuCommand } from "./menu";
 import { wikiCommand } from "./wiki";
 
-export type Command = {
-  name: string;
-  description: string;
-  execute: (...args: any[]) => Promise<void>;
-};
-
-// Збираємо всі команди в масив
-export const allCommands: Command[] = [
+export const commands = [
   startCommand,
   pingCommand,
   healthCommand,
   helpCommand,
-  menuCommand,
   echoCommand,
   likesCommand,
-  statsCommand,
+  likesStatsCommand,
+  menuCommand,
   wikiCommand,
-].filter((cmd): cmd is Command => Boolean(cmd && cmd.name && cmd.execute));
+] as const;
 
-// Допоміжна функція для /help
+export type Command = (typeof commands)[number];
+
+export function findCommandByName(name: string): Command | undefined {
+  const n = name.replace(/^\/+/, "").split("@")[0].toLowerCase();
+  return (commands as readonly any[]).find((c) => c.name === n);
+}
+
 export function getCommandsInfo() {
-  return allCommands.map((c) => ({
-    name: c.name,
-    description: c.description,
+  return commands.map((c) => ({
+    name: c.name as string,
+    description: (c.description as string) ?? "",
   }));
 }
