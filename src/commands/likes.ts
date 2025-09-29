@@ -1,185 +1,126 @@
 // src/commands/likes.ts
 import type { TgUpdate } from "../types";
 
-/**
- * /likes — кнопка "❤️ <count>" з лічильником у KV:
- *   likes:<chatId>:<messageId> -> { count: number }
- *
- * Антиспам: 1 клік / користувач / 5с.
- *   Зберігаємо timestamp у KV з TTL >= 60с:
- *   likes_users:<chatId>:<messageId>:<userId> -> { ts: number }
- *   Перевіряємо різницю часу локально.
- */
-const CB_PREFIX = "likes:";
-const CB_INC = `${CB_PREFIX}inc`;
+/** Кнопка з нульовим лічильником */
+function likeKeyboard(count: number) {
+  return {
+    inline_keyboard: [[{ text: `❤️ ${count}`, callback_data: "like" }]],
+  };
+}
 
-// Вікно антиспаму
-const SPAM_WINDOW_MS = 5_000;
-// Безпечний TTL для KV (мінімум 60с, щоб не падало)
-const SAFE_TTL_SEC = 60;
+async function tgCall(
+  env: { BOT_TOKEN: string; API_BASE_URL?: string },
+  method: string,
+  payload: Record<string, unknown>
+) {
+  const api = env.API_BASE_URL || "https://api.telegram.org";
+  const res = await fetch(`${api}/bot${env.BOT_TOKEN}/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    console.error("tgCall error", method, res.status, t);
+  }
+  return res.json().catch(() => ({}));
+}
 
 export const likesCommand = {
   name: "likes",
   description: "Показує кнопку ❤️ та рахує натискання",
   async execute(
-    env: { BOT_TOKEN: string; API_BASE_URL?: string; LIKES_KV: KVNamespace },
+    env: { BOT_TOKEN: string; API_BASE_URL?: string },
     update: TgUpdate
   ) {
-    const msg = update.message;
-    const chatId = msg?.chat?.id;
+    const chatId = update.message?.chat?.id;
     if (!chatId) return;
 
-    const keyboard = { inline_keyboard: [[{ text: "❤️ 0", callback_data: CB_INC }]] };
-
-    const sent = await sendMessage(env, chatId, "Лайкни це повідомлення:", {
-      reply_markup: keyboard,
+    await tgCall(env, "sendMessage", {
+      chat_id: chatId,
+      text: "Лайкни це повідомлення:",
+      reply_markup: likeKeyboard(0),
     });
-
-    // Ініціалізація лічильника
-    const messageId = sent?.result?.message_id as number | undefined;
-    if (typeof messageId === "number") {
-      const key = kvLikesKey(chatId, messageId);
-      const existed = await env.LIKES_KV.get(key);
-      if (!existed) {
-        await env.LIKES_KV.put(key, JSON.stringify({ count: 0 }));
-      }
-    }
   },
 } as const;
 
-export function likesCanHandleCallback(data: string | undefined): boolean {
-  return data === CB_INC;
+/** Обробка натискання на ❤️ */
+export function likesCanHandleCallback(data: string) {
+  return data === "like";
 }
 
 export async function likesOnCallback(
-  env: { BOT_TOKEN: string; API_BASE_URL?: string; LIKES_KV: KVNamespace },
+  env: { BOT_TOKEN: string; API_BASE_URL?: string; LIKES_KV: any },
   update: TgUpdate
-): Promise<void> {
-  const cq: any = (update as any).callback_query;
-  const data: string | undefined = cq?.data;
-  const chatId: number | undefined = cq?.message?.chat?.id;
-  const messageId: number | undefined = cq?.message?.message_id;
-  const cqId: string | undefined = cq?.id;
-  const userId: number | undefined = cq?.from?.id;
+) {
+  const cb = update.callback_query!;
+  const msg = cb.message;
+  const chatId = msg?.chat?.id;
+  const msgId = msg?.message_id;
+  if (!chatId || !msgId) return;
 
-  if (!data || !chatId || !messageId || !cqId || !userId) return;
+  const key = `likes:${chatId}:${msgId}`;
 
-  try {
-    // ---- Антиспам (через timestamp у KV, TTL >= 60s) ----
-    const spamKey = kvSpamKey(chatId, messageId, userId);
-    const now = Date.now();
-    let tooSoon = false;
+  // поточне значення
+  const raw = (await env.LIKES_KV.get(key)) ?? "0";
+  const current = Number.parseInt(raw) || 0;
+  const next = current + 1;
 
-    const prevJson = await env.LIKES_KV.get(spamKey);
-    if (prevJson) {
-      try {
-        const prev = JSON.parse(prevJson) as { ts?: number };
-        if (typeof prev.ts === "number" && now - prev.ts < SPAM_WINDOW_MS) {
-          tooSoon = true;
-        }
-      } catch { /* ignore parse */ }
-    }
+  await env.LIKES_KV.put(key, String(next));
 
-    if (tooSoon) {
-      await answerCallbackQuery(env, cqId, "Занадто часто 🙂 Спробуйте за кілька секунд");
-      return;
-    }
+  // оновлюємо підпис кнопки
+  await tgCall(env, "editMessageReplyMarkup", {
+    chat_id: chatId,
+    message_id: msgId,
+    reply_markup: likeKeyboard(next),
+  });
 
-    // Записуємо новий timestamp з безпечним TTL (60с)
-    await env.LIKES_KV.put(spamKey, JSON.stringify({ ts: now }), {
-      expirationTtl: SAFE_TTL_SEC,
-    });
+  // відповідаємо на callback, щоб прибрати "годинник"
+  await tgCall(env, "answerCallbackQuery", {
+    callback_query_id: cb.id,
+    text: `❤️ ${next}`,
+    show_alert: false,
+  });
+}
 
-    // ---- Лічильник лайків ----
-    const likesKey = kvLikesKey(chatId, messageId);
+/** /stats — зведення по чату */
+export const likesStatsCommand = {
+  name: "stats",
+  description: "Показує суму всіх ❤️ у чаті та кількість повідомлень із лайками",
+  async execute(
+    env: { BOT_TOKEN: string; API_BASE_URL?: string; LIKES_KV: any },
+    update: TgUpdate
+  ) {
+    const chatId = update.message?.chat?.id;
+    if (!chatId) return;
 
-    let count = 0;
-    try {
-      const val = await env.LIKES_KV.get(likesKey);
-      if (val) {
-        const parsed = JSON.parse(val);
-        const num = Number(parsed?.count);
-        if (Number.isFinite(num) && num >= 0) count = num;
+    let total = 0;
+    let messagesWithLikes = 0;
+
+    // зчитуємо всі ключі цього чату
+    const prefix = `likes:${chatId}:`;
+    let cursor: string | undefined = undefined;
+    do {
+      const page = await env.LIKES_KV.list({ prefix, cursor });
+      cursor = page.cursor;
+      for (const key of page.keys) {
+        const val = await env.LIKES_KV.get(key.name);
+        const n = Number.parseInt(val ?? "0") || 0;
+        if (n > 0) messagesWithLikes += 1;
+        total += n;
       }
-    } catch (e) {
-      console.warn("likes: parse KV error", e);
-    }
+    } while (cursor);
 
-    count += 1;
-    await env.LIKES_KV.put(likesKey, JSON.stringify({ count }));
+    const text = [
+      "📊 <b>Статистика лайків</b>",
+      `Повідомлень із лайками: <b>${messagesWithLikes}</b>`,
+      `Усього ❤️: <b>${total}</b>`,
+    ].join("\n");
 
-    const keyboard = {
-      inline_keyboard: [[{ text: `❤️ ${count}`, callback_data: CB_INC }]],
-    };
-    await editMessageReplyMarkup(env, chatId, messageId, keyboard);
-
-    await answerCallbackQuery(env, cqId);
-  } catch (err) {
-    console.error("likesOnCallback error:", err);
-    // обовʼязково відповідаємо, щоб не висів «завантаження»
-    await answerCallbackQuery(env, cqId, "Упс, щось пішло не так 😅");
-  }
-}
-
-/* ===================== helpers ===================== */
-
-function kvLikesKey(chatId: number, messageId: number) {
-  return `likes:${chatId}:${messageId}`;
-}
-function kvSpamKey(chatId: number, messageId: number, userId: number) {
-  return `likes_users:${chatId}:${messageId}:${userId}`;
-}
-
-async function sendMessage(
-  env: { BOT_TOKEN: string; API_BASE_URL?: string },
-  chatId: number,
-  text: string,
-  extra?: Record<string, unknown>
-): Promise<any | null> {
-  const apiBase = env.API_BASE_URL || "https://api.telegram.org";
-  const url = `${apiBase}/bot${env.BOT_TOKEN}/sendMessage`;
-  const body = JSON.stringify({ chat_id: chatId, text, ...extra });
-
-  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
-  let json: any | null = null;
-  try { json = await res.json(); } catch {}
-  if (!res.ok) {
-    console.error("sendMessage error:", res.status, json ?? (await res.text().catch(() => "")));
-  }
-  return json;
-}
-
-async function editMessageReplyMarkup(
-  env: { BOT_TOKEN: string; API_BASE_URL?: string },
-  chatId: number,
-  messageId: number,
-  replyMarkup: any
-) {
-  const apiBase = env.API_BASE_URL || "https://api.telegram.org";
-  const url = `${apiBase}/bot${env.BOT_TOKEN}/editMessageReplyMarkup`;
-  const body = JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: replyMarkup });
-
-  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    console.error("editMessageReplyMarkup error:", res.status, errText);
-  }
-}
-
-async function answerCallbackQuery(
-  env: { BOT_TOKEN: string; API_BASE_URL?: string },
-  callbackQueryId: string,
-  text?: string
-) {
-  const apiBase = env.API_BASE_URL || "https://api.telegram.org";
-  const url = `${apiBase}/bot${env.BOT_TOKEN}/answerCallbackQuery`;
-  const body = JSON.stringify(
-    text ? { callback_query_id: callbackQueryId, text, show_alert: false } : { callback_query_id: callbackQueryId }
-  );
-
-  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    console.error("answerCallbackQuery error:", res.status, errText);
-  }
-}
+    await tgCall(env, "sendMessage", {
+      chat_id: chatId,
+      text,
+      parse_mode: "HTML",
+    });
+  },
+} as const;
