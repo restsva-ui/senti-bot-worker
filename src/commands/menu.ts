@@ -1,101 +1,76 @@
-// src/commands/menu.ts
 import type { TgUpdate } from "../types";
 
-type Env = { BOT_TOKEN: string; API_BASE_URL?: string };
+const MENU_CB_WIKI = "menu:wiki";
+const MENU_CB_HELP = "menu:help";
+
+export function menuCanHandleCallback(data: string) {
+  return data === MENU_CB_WIKI || data === MENU_CB_HELP;
+}
+
+async function tgCall(
+  env: { BOT_TOKEN: string; API_BASE_URL?: string },
+  method: string,
+  payload: Record<string, unknown>
+) {
+  const api = env.API_BASE_URL || "https://api.telegram.org";
+  const res = await fetch(`${api}/bot${env.BOT_TOKEN}/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    console.error("tgCall error", method, res.status, t);
+  }
+  return res.json().catch(() => ({}));
+}
 
 export const menuCommand = {
   name: "menu",
-  description: "Показує спрощене меню з кнопками (Help, Wiki)",
-  async execute(env: Env, update: TgUpdate) {
+  description: "Показати меню",
+  async execute(env: { BOT_TOKEN: string; API_BASE_URL?: string }, update: TgUpdate) {
     const chatId = update.message?.chat?.id;
     if (!chatId) return;
-
-    await sendMessage(env, chatId, "🗂️ Меню:", {
+    await tgCall(env, "sendMessage", {
+      chat_id: chatId,
+      text: "Меню:",
       reply_markup: {
         inline_keyboard: [
-          [
-            { text: "ℹ️ Help", callback_data: "menu:help" },
-            { text: "📚 Wiki", callback_data: "menu:wiki" },
-          ],
+          [{ text: "🔎 Wiki", callback_data: MENU_CB_WIKI }],
+          [{ text: "❓ Help", callback_data: MENU_CB_HELP }],
         ],
       },
     });
   },
 } as const;
 
-// Чи можемо обробити callback від меню
-export function menuCanHandleCallback(data: string) {
-  return data?.startsWith("menu:");
-}
-
-// Обробка callback’ів
-export async function menuOnCallback(env: Env, update: TgUpdate) {
-  const cb = update.callback_query;
-  if (!cb?.data) return;
+export async function menuOnCallback(
+  env: { BOT_TOKEN: string; API_BASE_URL?: string },
+  update: TgUpdate
+) {
+  const cb = update.callback_query!;
   const chatId = cb.message?.chat?.id;
   if (!chatId) return;
 
-  const action = cb.data.slice("menu:".length);
-
-  if (action === "help") {
-    const text =
-      "ℹ️ Довідка по командам\n\n" +
-      "• /start — Початкове повідомлення\n" +
-      "• /ping — Перевірка звʼязку\n" +
-      "• /health — Статус OK\n" +
-      "• /menu — Спрощене меню (Help, Wiki)\n" +
-      "• /echo — Повторює текст\n" +
-      "• /likes — Показує кнопку ❤️ та рахує натискання\n" +
-      "• /stats — Показує суму всіх ❤️ у чаті та кількість повідомлень із лайками\n" +
-      "• /wiki — Довідка з Вікі: /wiki <lang?> <запит> (uk/ru/en/de/fr)";
-    await editMessage(env, chatId, cb.message!.message_id, text, {});
+  if (cb.data === MENU_CB_HELP) {
+    const msg = [
+      "Доступні команди:",
+      "• /wiki <запит> — пошук у вікі. Без аргументів — відкриє запит.",
+      "• /menu — показати меню кнопок",
+      "• /likes — повідомлення з ❤️",
+      "• /stats — статистика лайків",
+    ].join("\n");
+    await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id });
+    await tgCall(env, "sendMessage", { chat_id: chatId, text: msg });
     return;
   }
 
-  if (action === "wiki") {
-    await editMessage(env, chatId, cb.message!.message_id,
-      "🔎 Введіть запит для /wiki:", {});
-    return;
+  if (cb.data === MENU_CB_WIKI) {
+    await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id });
+    await tgCall(env, "sendMessage", {
+      chat_id: chatId,
+      text: "✍️ Напишіть ваш запит для Wiki повідомленням-відповіддю на це.",
+      reply_markup: { force_reply: true, selective: true },
+    });
   }
-}
-
-/* -------------------- low-level telegram -------------------- */
-async function sendMessage(
-  env: Env,
-  chatId: number,
-  text: string,
-  extra?: Record<string, unknown>
-) {
-  const apiBase = env.API_BASE_URL || "https://api.telegram.org";
-  const url = `${apiBase}/bot${env.BOT_TOKEN}/sendMessage`;
-  const body = JSON.stringify({ chat_id: chatId, text, ...extra });
-
-  await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body,
-  }).catch(() => {});
-}
-
-async function editMessage(
-  env: Env,
-  chatId: number,
-  messageId: number,
-  text: string,
-  extra?: Record<string, unknown>
-) {
-  const apiBase = env.API_BASE_URL || "https://api.telegram.org";
-  const url = `${apiBase}/bot${env.BOT_TOKEN}/editMessageText`;
-  const body = JSON.stringify({
-    chat_id: chatId,
-    message_id: messageId,
-    text,
-    ...extra,
-  });
-
-  await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body,
-  }).catch(() => {});
 }
