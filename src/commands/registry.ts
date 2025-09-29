@@ -1,57 +1,45 @@
 // src/commands/registry.ts
 import type { TgUpdate } from "../types";
 
-/* Іменовані експорти з файлів команд (усі — const ...Command) */
-import { startCommand } from "./start";
-import { pingCommand } from "./ping";
-import { healthCommand } from "./health";
-import { helpCommand } from "./help";
-import { wikiCommand } from "./wiki";
-import { echoCommand } from "./echo";
-import { menuCommand } from "./menu";
-import { likesCommand } from "./likes";
-import { statsCommand } from "./stats";
-
-/** Мінімальний контракт середовища, потрібний командам */
+/** Уніфіковане оточення команд */
 export type CommandEnv = {
   BOT_TOKEN: string;
   API_BASE_URL?: string;
-  LIKES_KV: KVNamespace;
+  LIKES_KV?: KVNamespace;
 };
 
+/** Сигнатура команди */
 export type Command = {
   name: string;
   description: string;
   execute: (env: CommandEnv, update: TgUpdate) => Promise<void>;
 };
 
-/** Type-guard: валідний об'єкт команди */
-function isCommandDef(x: any): x is Command {
-  return !!x && typeof x.name === "string" && typeof x.description === "string" && typeof x.execute === "function";
-}
+// Команди
+import { startCommand } from "./start";
+import { pingCommand } from "./ping";
+import { helpCommand } from "./help";
+import { healthCommand } from "./health";
+import { menuCommand } from "./menu";
+import { echoCommand } from "./echo";
+import { likesCommand } from "./likes";
+import { statsCommand } from "./stats";
+import { wikiCommand } from "./wiki";
 
-/** Єдиний список команд (порядок = порядок у /help) */
-const rawList = [
+// Реєстр
+export const commands: Command[] = [
   startCommand,
-  helpCommand,
   pingCommand,
   echoCommand,
   menuCommand,
   likesCommand,
   statsCommand,
   wikiCommand,
+  helpCommand,
   healthCommand,
 ];
 
-/** Фінальний список (прибирає undefined/невалідні) */
-export const commandsList: Command[] = rawList.filter(isCommandDef);
-
-/** Індекс за ім'ям — для роутера */
+// Індекс за назвою
 export const commandsByName: Record<string, Command> = Object.fromEntries(
-  commandsList.map((c) => [c.name, c])
+  commands.map((c) => [c.name, c])
 );
-
-/** Довідка для /help */
-export function getCommandsInfo() {
-  return commandsList.map((c) => ({ name: c.name, description: c.description }));
-}
