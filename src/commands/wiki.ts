@@ -1,127 +1,93 @@
-// src/commands/wiki.ts
 import type { TgUpdate } from "../types";
 
-type Env = { BOT_TOKEN: string; API_BASE_URL?: string };
+async function tgCall(
+  env: { BOT_TOKEN: string; API_BASE_URL?: string },
+  method: string,
+  payload: Record<string, unknown>
+) {
+  const api = env.API_BASE_URL || "https://api.telegram.org";
+  const res = await fetch(`${api}/bot${env.BOT_TOKEN}/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    console.error("tgCall error", method, res.status, t);
+  }
+  return res.json().catch(() => ({}));
+}
 
-const WIKI_LANGS = ["uk", "ru", "en", "de", "fr"] as const;
-type Lang = (typeof WIKI_LANGS)[number];
+function detectLang(code?: string, text?: string) {
+  const t = (text || "").toLowerCase();
+  if (code && ["uk", "en", "ru", "de", "fr"].includes(code.slice(0,2))) return code.slice(0,2);
+  if (/[а-яіїєґ]/i.test(t)) {
+    if (/[ієїґ]/i.test(t)) return "uk";
+    return "ru";
+  }
+  if (/[äöüß]/i.test(t)) return "de";
+  if (/[àâçéèêëîïôùûüÿœæ]/i.test(t)) return "fr";
+  return "en";
+}
+
+function extractArg(text: string) {
+  const m = text.trim().match(/^\/\w+\s*(.*)$/);
+  return (m?.[1] || "").trim();
+}
+
+function escapeHtml(s: string) {
+  return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] as string));
+}
 
 export const wikiCommand = {
   name: "wiki",
-  description:
-    "Пошук стислої довідки у Вікіпедії (uk/ru/en/de/fr). Можна: /wiki <lang?> <запит>",
-  async execute(env: Env, update: TgUpdate) {
-    const msg = update.message;
-    const chatId = msg?.chat?.id;
+  description: "Пошук у Вікі. /wiki <запит> або натисніть Wiki у меню і надішліть запит у відповідь",
+  async execute(env: { BOT_TOKEN: string; API_BASE_URL?: string }, update: TgUpdate) {
+    const chatId = update.message?.chat?.id;
+    const text = update.message?.text || "";
     if (!chatId) return;
 
-    const raw = (msg?.text ?? msg?.caption ?? "").trim();
-
-    // Витягуємо аргументи після /wiki (з урахуванням /wiki@botname)
-    const args = extractArgs(raw, "wiki");
-
-    // Якщо аргументів немає — просимо ввести запит (reply-флоу)
-    if (!args) {
-      await sendMessage(
-        env,
-        chatId,
-        "🔎 Введіть запит для /wiki:",
-        { reply_to_message_id: msg?.message_id }
-      );
+    const arg = extractArg(text);
+    if (arg) {
+      const lang = detectLang(update.message?.from?.language_code, arg);
+      const reply = [
+        `🔎 <b>Wiki (${lang})</b>`,
+        `Запит: <i>${escapeHtml(arg)}</i>`,
+        "",
+        "Демо-відповідь: (тут мав би бути реальний результат пошуку)",
+      ].join("\n");
+      await tgCall(env, "sendMessage", { chat_id: chatId, text: reply, parse_mode: "HTML" });
       return;
     }
 
-    // Парсимо можливу мову + сам запит
-    const { lang, query } = parseLangAndQuery(args);
-    if (!query) {
-      await sendMessage(env, chatId, "Не бачу запиту. Приклад: /wiki Київ або /wiki en Berlin");
-      return;
-    }
-
-    const summary =
-      (await fetchSummarySafe(lang, query)) ??
-      // fallback: якщо з мовою не знайшли — пробуємо по колу мов
-      (await tryOtherLangs(query, lang));
-
-    if (!summary) {
-      await sendMessage(
-        env,
-        chatId,
-        `Нічого не знайшов за запитом: ${query}`
-      );
-      return;
-    }
-
-    const text = `<b>${summary.title}</b>\n${summary.extract}`;
-    await sendMessage(env, chatId, text, { parse_mode: "HTML" });
+    await tgCall(env, "sendMessage", {
+      chat_id: chatId,
+      text: "✍️ Введіть запит для Wiki у наступному повідомленні (відповіддю).",
+      reply_markup: { force_reply: true, selective: true },
+    });
   },
 } as const;
 
-/* -------------------- helpers -------------------- */
-function extractArgs(text: string, cmd: string): string | null {
-  // приклади: "/wiki Київ", "/wiki@SentiBot en Berlin"
-  const re = new RegExp(`^\\/${cmd}(?:@\\w+)?\\s*(.*)$`, "i");
-  const m = text.match(re);
-  const tail = (m?.[1] ?? "").trim();
-  return tail.length ? tail : null;
-}
-
-function parseLangAndQuery(tail: string): { lang: Lang; query: string } {
-  const parts = tail.split(/\s+/);
-  const maybeLang = parts[0]?.toLowerCase() as Lang | undefined;
-  if (maybeLang && (WIKI_LANGS as readonly string[]).includes(maybeLang)) {
-    return { lang: maybeLang as Lang, query: parts.slice(1).join(" ").trim() };
-  }
-  return { lang: "uk", query: tail };
-}
-
-async function fetchSummarySafe(lang: Lang, query: string) {
-  try {
-    const url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(
-      query
-    )}`;
-    const res = await fetch(url, { headers: { accept: "application/json" } });
-    if (!res.ok) return null;
-    const j = (await res.json()) as any;
-    if (j?.type === "disambiguation" && j?.titles?.normalized) {
-      // якщо дизамбіґ — все одно повернемо вступ
-      return { title: j.titles.normalized as string, extract: j.extract as string };
-    }
-    if (j?.extract && j?.title) {
-      return { title: j.title as string, extract: j.extract as string };
-    }
-  } catch {}
-  return null;
-}
-
-async function tryOtherLangs(query: string, skip: Lang) {
-  for (const l of WIKI_LANGS) {
-    if (l === skip) continue;
-    const s = await fetchSummarySafe(l, query);
-    if (s) return s;
-  }
-  return null;
-}
-
-/* -------------------- low-level telegram -------------------- */
-async function sendMessage(
-  env: Env,
-  chatId: number,
-  text: string,
-  extra?: Record<string, unknown>
+/** Якщо прийшов текст-відповідь на наш prompt — це запит до Wiki */
+export function wikiMaybeHandleFreeText(
+  env: { BOT_TOKEN: string; API_BASE_URL?: string },
+  update: TgUpdate
 ) {
-  const apiBase = env.API_BASE_URL || "https://api.telegram.org";
-  const url = `${apiBase}/bot${env.BOT_TOKEN}/sendMessage`;
-  const body = JSON.stringify({ chat_id: chatId, text, ...extra });
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body,
-  });
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    console.error("sendMessage error:", res.status, errText);
+  const msg = update.message;
+  if (!msg?.text) return false;
+  const isReplyToBot = !!msg.reply_to_message?.from?.is_bot;
+  const repliedText = msg.reply_to_message?.text || "";
+  if (!isReplyToBot) return false;
+  if (!/Введіть запит|Напишіть ваш запит|Write your wiki query|Запрос для Wiki/i.test(repliedText)) {
+    return false;
   }
+  const lang = detectLang(msg.from?.language_code, msg.text);
+  const reply = [
+    `🔎 <b>Wiki (${lang})</b>`,
+    `Запит: <i>${escapeHtml(msg.text)}</i>`,
+    "",
+    "Демо-відповідь: (тут мав би бути реальний результат пошуку)",
+  ].join("\n");
+  tgCall(env, "sendMessage", { chat_id: msg.chat.id, text: reply, parse_mode: "HTML" });
+  return true;
 }
