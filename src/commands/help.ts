@@ -1,48 +1,51 @@
 // src/commands/help.ts
 import type { TgUpdate } from "../types";
-import { getCommandsInfo } from "./registry";
 
-type EnvBase = { BOT_TOKEN: string; API_BASE_URL?: string };
+type Env = { BOT_TOKEN: string; API_BASE_URL?: string };
+
+async function tgCall(
+  env: Env,
+  method: string,
+  payload: Record<string, unknown>
+) {
+  const api = env.API_BASE_URL || "https://api.telegram.org";
+  const res = await fetch(`${api}/bot${env.BOT_TOKEN}/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    console.error("tgCall error", method, res.status, t);
+  }
+  return res.json().catch(() => ({}));
+}
 
 export const helpCommand = {
   name: "help",
   description: "Показує довідку по доступних командах",
-  async execute(env: EnvBase, update: TgUpdate) {
+  async execute(env: Env, update: TgUpdate) {
     const chatId = update.message?.chat?.id;
     if (!chatId) return;
 
-    const cmds = getCommandsInfo();
-    const lines = [
+    const text = [
       "ℹ️ <b>Довідка по командам</b>",
       "",
-      ...cmds.map(
-        (c) => `• <code>/${c.name}</code> — ${escapeHtml(c.description || "")}`
-      ),
+      "• <code>/start</code> — початкове повідомлення",
+      "• <code>/ping</code> — перевірка зв’язку (pong)",
+      "• <code>/health</code> — повертає статус OK",
+      "• <code>/help</code> — показує цю довідку",
+      "• <code>/wiki</code> — пошук стислої довідки у Вікіпедії",
       "",
-      "Порада: надішли <code>/wiki</code> і впиши запит у відповідь, або одразу: <code>/wiki Київ</code> / <code>/wiki en Albert Einstein</code>.",
-    ];
+      "Порада: надішли <code>/wiki</code> і впиши запит у відповідь, або одразу так:",
+      "<code>/wiki Київ</code>, <code>/wiki en Albert Einstein</code>.",
+    ].join("\n");
 
-    await sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML" });
+    await tgCall(env, "sendMessage", {
+      chat_id: chatId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    });
   },
 } as const;
-
-/* --------------- low-level telegram --------------- */
-async function sendMessage(
-  env: EnvBase,
-  chatId: number,
-  text: string,
-  extra?: Record<string, unknown>
-) {
-  const apiBase = env.API_BASE_URL || "https://api.telegram.org";
-  const url = `${apiBase}/bot${env.BOT_TOKEN}/sendMessage`;
-  const body = JSON.stringify({ chat_id: chatId, text, ...extra });
-  await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body,
-  }).catch(console.error);
-}
-
-function escapeHtml(s: string) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
