@@ -1,68 +1,37 @@
 // src/commands/start.ts
-import type { TgUpdate } from "../types";
+type TgUpdate = any;
 
-type Env = { BOT_TOKEN: string; API_BASE_URL?: string };
-type TgCmd = { command: string; description: string };
+async function sendMessage(env: any, chatId: number | string, text: string, replyTo?: number) {
+  const url = `${env.API_BASE_URL}/bot${env.BOT_TOKEN}/sendMessage`;
+  const body: any = {
+    chat_id: chatId,
+    text,
+    parse_mode: "Markdown",
+    disable_web_page_preview: true,
+  };
+  if (replyTo) body.reply_to_message_id = replyTo;
 
-const MINIMAL_CMDS: TgCmd[] = [
-  { command: "help", description: "Довідка" },
-  { command: "wiki", description: "Пошук у Вікіпедії" },
-];
-
-function apiBase(env: Env) {
-  return env.API_BASE_URL || "https://api.telegram.org";
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  if (!res.ok) console.warn("sendMessage /start failed", await res.text());
 }
 
-async function tgCall<T = any>(
-  env: Env,
-  method: string,
-  payload: Record<string, unknown>
-): Promise<T> {
-  const r = await fetch(`${apiBase(env)}/bot${env.BOT_TOKEN}/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  return (await r.json().catch(() => ({}))) as T;
+function getChatId(update: TgUpdate): number | undefined {
+  return update?.message?.chat?.id ?? update?.callback_query?.message?.chat?.id;
 }
 
-async function deleteCommands(env: Env, scope: Record<string, unknown>) {
-  await tgCall(env, "deleteMyCommands", { scope });
+export async function start(update: TgUpdate, env: any) {
+  const chatId = getChatId(update);
+  if (!chatId) return;
+  const text =
+`👋 Привіт! Я *Senti* — бот-асистент.
+
+Корисне:
+• \`/help\` — довідка
+• \`/wiki\` — введи запит у відповідь або одразу так: \`/wiki  Київ\`, \`/wiki  en  Albert Einstein\`
+
+Порада: надішли *\/wiki* і в наступному повідомленні просто напиши свій запит.`;
+  await sendMessage(env, chatId, text, update?.message?.message_id);
 }
-async function setCommands(env: Env, scope: Record<string, unknown>) {
-  await tgCall(env, "setMyCommands", { commands: MINIMAL_CMDS, scope });
-}
 
-export const startCommand = {
-  name: "start",
-  description: "Початкове повідомлення для користувача",
-  async execute(env: Env, update: TgUpdate) {
-    const chatId = update.message?.chat?.id;
-    if (!chatId) return;
-
-    // Вітання
-    await tgCall(env, "sendMessage", {
-      chat_id: chatId,
-      parse_mode: "HTML",
-      text:
-        "👋 Привіт! Я <b>Senti</b> — бот-асистент.\n\n" +
-        "Корисне:\n" +
-        "• /menu — кнопки команд\n" +
-        "• /help — довідка\n" +
-        "• /wiki — введи запит у відповідь або одразу так: <code>/wiki  Київ</code>, <code>/wiki  en  Albert Einstein</code>",
-    });
-
-    // 1) Почистити попередні списки в глобальних областях
-    await deleteCommands(env, { type: "default" }).catch(() => {});
-    await deleteCommands(env, { type: "all_private_chats" }).catch(() => {});
-    await deleteCommands(env, { type: "all_group_chats" }).catch(() => {});
-    await deleteCommands(env, { type: "all_chat_administrators" }).catch(() => {});
-
-    // 2) Поставити мінімальне меню глобально (на майбутні чати)
-    await setCommands(env, { type: "default" }).catch(() => {});
-    await setCommands(env, { type: "all_private_chats" }).catch(() => {});
-
-    // 3) Головне: ПРИЦІЛЬНО оновити меню саме в цьому чаті (ефект одразу)
-    await setCommands(env, { type: "chat", chat_id: chatId }).catch(() => {});
-  },
-} as const;
+export const handleStart = start;
+export default start;
