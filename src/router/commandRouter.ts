@@ -1,43 +1,9 @@
 // src/router/commandRouter.ts
 import type { TgUpdate } from "../types";
-
-/* Команди */
-import { startCommand } from "../commands/start";
-import { pingCommand } from "../commands/ping";
-import { healthCommand } from "../commands/health";
-import { helpCommand } from "../commands/help";
-import { wikiCommand } from "../commands/wiki";
-import { echoCommand } from "../commands/echo";
-import { menuCommand, menuCanHandleCallback, menuOnCallback } from "../commands/menu";
-import { likesCommand, likesCanHandleCallback, likesOnCallback } from "../commands/likes";
-import { statsCommand } from "../commands/stats"; // ⟵ нова команда
-
-/** Мінімальний контракт середовища, потрібний командам */
-export type CommandEnv = {
-  BOT_TOKEN: string;
-  API_BASE_URL?: string;
-  LIKES_KV: KVNamespace; // для likes/stats
-};
-
-/** Опис команди */
-type Command = {
-  name: string;
-  description: string;
-  execute: (env: CommandEnv, update: TgUpdate) => Promise<void>;
-};
-
-/** Реєстр команд (текстові) */
-const commands: Record<string, Command> = {
-  [startCommand.name]: startCommand,
-  [pingCommand.name]: pingCommand,
-  [healthCommand.name]: healthCommand,
-  [helpCommand.name]: helpCommand,
-  [wikiCommand.name]: wikiCommand,
-  [echoCommand.name]: echoCommand,
-  [menuCommand.name]: menuCommand,
-  [likesCommand.name]: likesCommand,
-  [statsCommand.name]: statsCommand, // ⟵ додано
-};
+import type { CommandEnv } from "../commands/registry";
+import { commandsByName } from "../commands/registry";
+import { menuCanHandleCallback, menuOnCallback } from "../commands/menu";
+import { likesCanHandleCallback, likesOnCallback } from "../commands/likes";
 
 /** Перевірка, чи текст є викликом конкретної команди */
 function isCommand(msgText: string | undefined, name: string) {
@@ -53,32 +19,25 @@ export async function routeUpdate(env: CommandEnv, update: TgUpdate): Promise<vo
   if (cq?.data) {
     const data: string = cq.data;
 
-    // Меню
     if (menuCanHandleCallback(data)) {
       await menuOnCallback(env, update);
       return;
     }
-
-    // Likes
     if (likesCanHandleCallback(data)) {
       await likesOnCallback(env, update);
       return;
     }
-
-    // Інші модулі з callback'ами — аналогічно ↑
-    return;
+    return; // невідомий callback — ігноруємо
   }
 
   // 2) Текстові команди
   const msg = (update as any).message;
   const text: string = msg?.text ?? "";
-
-  for (const key of Object.keys(commands)) {
-    if (isCommand(text, key)) {
-      await commands[key].execute(env, update);
+  for (const name of Object.keys(commandsByName)) {
+    if (isCommand(text, name)) {
+      await commandsByName[name].execute(env, update);
       return;
     }
   }
-
-  // Якщо команда не впізнана — свідомо нічого не робимо (тихий OK у index.ts)
+  // Невідома команда — тиша, OK поверне index.ts
 }
