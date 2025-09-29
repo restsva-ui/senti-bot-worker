@@ -1,28 +1,30 @@
 // src/commands/ping.ts
 import type { TgUpdate } from "../types";
+import type { Command } from "./types";
 
-export const pingCommand = {
-  name: "ping",
-  description: "Перевірка звʼязку",
-  async execute(env: { BOT_TOKEN: string; API_BASE_URL?: string }, update: TgUpdate) {
-    const chatId = update.message?.chat?.id;
-    if (!chatId) return;
-    await sendMessage(env, chatId, "pong ✅");
-  },
-} as const;
-
-async function sendMessage(
+async function tgCall(
   env: { BOT_TOKEN: string; API_BASE_URL?: string },
-  chatId: number,
-  text: string
+  method: string,
+  payload: Record<string, unknown>
 ) {
-  const apiBase = env.API_BASE_URL || "https://api.telegram.org";
-  const url = `${apiBase}/bot${env.BOT_TOKEN}/sendMessage`;
-  const body = JSON.stringify({ chat_id: chatId, text });
-
-  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    console.error("sendMessage error:", res.status, errText);
-  }
+  const api = env.API_BASE_URL || "https://api.telegram.org";
+  const res = await fetch(`${api}/bot${env.BOT_TOKEN}/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return res.json().catch(() => ({}));
 }
+
+export const pingCommand: Command = {
+  name: "ping",
+  description: "Перевірка зв’язку",
+  async execute(env, update) {
+    const chatId = update.message?.chat?.id ?? update.callback_query?.message?.chat?.id;
+    if (!chatId) return;
+    await tgCall(env as any, "sendMessage", {
+      chat_id: chatId,
+      text: "pong ✅",
+    });
+  },
+};
