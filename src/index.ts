@@ -1,74 +1,53 @@
 // src/index.ts
-import { commandRouter } from "./router/commandRouter";
 import type { TgUpdate } from "./types";
+import { commandRouter } from "./router/commandRouter";
 
 type Env = {
   BOT_TOKEN: string;
   API_BASE_URL?: string;
-  LIKES_KV?: any;
-  WEBHOOK_SECRET?: string;
-  OWNER_ID?: string;
+  WEBHOOK_SECRET?: string; // опційно
 };
 
-function isTelegramRequest(req: Request): boolean {
-  // Telegram завжди шле JSON POST на вебхук
-  return req.method === "POST";
-}
-
-function checkSecret(req: Request, env: Env): boolean {
-  const expected = env.WEBHOOK_SECRET?.trim();
-  if (!expected) return true; // секрет не задано — пропускаємо (для локалки)
-  const got = req.headers.get("X-Telegram-Bot-Api-Secret-Token") ?? "";
-  return got === expected;
-}
-
-async function parseUpdate(req: Request): Promise<TgUpdate | null> {
-  try {
-    const u = (await req.json()) as TgUpdate;
-    return u ?? null;
-  } catch {
-    return null;
-  }
-}
-
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
-    const url = new URL(req.url);
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const { pathname } = new URL(request.url);
 
-    // health для швидкої перевірки
-    if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/")) {
-      return new Response("OK", { status: 200 });
+    // Проста перевірка живості
+    if (request.method === "GET" && pathname === "/health") {
+      return new Response("ok", { status: 200 });
     }
 
-    // Приймаємо вебхук на /webhook і на будь-який інший шлях (на випадок, якщо поставили вебхук на корінь)
-    if (isTelegramRequest(req)) {
-      if (!checkSecret(req, env)) {
-        // Не логай сам секрет, лише факт розбіжності
-        console.warn("Webhook rejected: bad secret");
-        return new Response("forbidden", { status: 403 });
+    // TG webhook endpoint
+    if (pathname === "/webhook" && request.method === "POST") {
+      // 1) Перевіряємо секрет ТІЛЬКИ якщо він заданий у воркері
+      const got = request.headers.get("x-telegram-bot-api-secret-token");
+      const need = env.WEBHOOK_SECRET;
+      if (need && got !== need) {
+        console.warn("Webhook secret mismatch (update пропущено)");
+        return new Response("OK", { status: 200 }); // не ретраїмо TG
       }
 
-      const update = await parseUpdate(req);
-      if (!update) {
-        console.warn("Empty/invalid update body");
-        return new Response("bad request", { status: 400 });
+      // 2) Читаємо апдейт і передаємо в роутер
+      let update: TgUpdate | null = null;
+      try {
+        update = (await request.json()) as TgUpdate;
+      } catch (e) {
+        console.error("Bad JSON", e);
+        return new Response("OK", { status: 200 });
       }
 
       try {
-        const resp = await commandRouter(env, update);
-        // всередині router ми вже повертаємо Response; але Telegram очікує 200 швидко
-        // Якщо router вернув щось не 2xx — все одно дамо OK, щоб не було ретраїв
-        if (!resp || resp.status >= 300) {
-          return new Response("OK");
-        }
-        return resp;
+        const resp = await commandRouter(env as any, update);
+        // роутер повертає Response; гарантуємо 200 для TG
+        return resp ?? new Response("OK", { status: 200 });
       } catch (e) {
-        console.error("commandRouter error:", e);
-        // Віддаємо 200, щоб Telegram не ретраїв, а ми подивимося логи
-        return new Response("OK");
+        console.error("Router error", e);
+        // все одно відповідаємо 200, щоб TG не дудосив ретраями
+        return new Response("OK", { status: 200 });
       }
     }
 
-    return new Response("Not Found", { status: 404 });
+    // За замовчуванням
+    return new Response("OK", { status: 200 });
   },
 };
