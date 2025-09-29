@@ -19,7 +19,6 @@ export const helpCommand = {
   },
 } as const;
 
-/* -------------------- low-level telegram -------------------- */
 async function sendMessage(
   env: { BOT_TOKEN: string; API_BASE_URL?: string },
   chatId: number,
@@ -30,12 +29,7 @@ async function sendMessage(
   const url = `${apiBase}/bot${env.BOT_TOKEN}/sendMessage`;
   const body = JSON.stringify({ chat_id: chatId, text, ...extra });
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body,
-  });
-
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
     console.error("sendMessage error:", res.status, errText);
