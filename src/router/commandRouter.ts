@@ -1,79 +1,38 @@
 // src/router/commandRouter.ts
-/* --------------------------- Types & Imports --------------------------- */
-import type { Env } from "../config";
 import type { TgUpdate } from "../types";
+import { findCommandByName } from "../commands/registry";
+import { menuCanHandleCallback, menuOnCallback } from "../commands/menu";
 
-/* Команди */
-import { startCommand } from "../commands/start";
-import { pingCommand } from "../commands/ping";
-import { healthCommand } from "../commands/health";
-import { helpCommand } from "../commands/help";
-import { menuCommand } from "../commands/menu";
-import { echoCommand } from "../commands/echo";
-import { likesCommand, likesCanHandleCallback, likesOnCallback } from "../commands/likes";
-import { statsCommand } from "../commands/stats";
-import { wikiCommand } from "../commands/wiki";
+type Env = { BOT_TOKEN: string; API_BASE_URL?: string; OWNER_ID?: string };
 
-/* --------------------------- Utils ------------------------------------ */
-function isCommand(msgText: string | undefined, name: string) {
-  const t = msgText ?? "";
-  const re = new RegExp(`^\\/${name}(?:@\\w+)?(?:\\s|$)`, "i");
-  return re.test(t);
+// Витягує текст повідомлення чи підпису (для фото/відео)
+function getMessageText(update: TgUpdate): string | undefined {
+  const msg = update.message ?? update.edited_message;
+  return (msg?.text ?? msg?.caption ?? undefined)?.trim();
 }
 
-/* --------------------------- Registry --------------------------------- */
-type Command = {
-  name: string;
-  description: string;
-  execute: (env: Env, update: TgUpdate) => Promise<void>;
-};
-
-const commands: Record<string, Command> = {
-  [startCommand.name]: startCommand,
-  [pingCommand.name]: pingCommand,
-  [healthCommand.name]: healthCommand,
-  [helpCommand.name]: helpCommand,
-  [menuCommand.name]: menuCommand,
-  [echoCommand.name]: echoCommand,
-  [likesCommand.name]: likesCommand,
-  [statsCommand.name]: statsCommand,
-  [wikiCommand.name]: wikiCommand,
-};
-
-/* --------------------------- Router ----------------------------------- */
-/**
- * Головний роутер апдейтів Telegram.
- * – Команди з тексту обробляються за префіксом /<cmd>
- * – callback_query обробляємо лише для лайків
- */
-export async function handleUpdate(env: Env, update: TgUpdate): Promise<void> {
-  // 1) callback_query (inline-кнопки)
-  if (update.callback_query) {
-    const cb = update.callback_query;
-    const data = cb.data ?? "";
-
-    // Лишаємо тільки лайки
-    if (likesCanHandleCallback(data)) {
-      await likesOnCallback(env as any, update);
-    }
-    return;
+export async function commandRouter(env: Env, update: TgUpdate) {
+  // 1) Callback кнопок нашого меню
+  const cb = update.callback_query;
+  if (cb?.data && menuCanHandleCallback(cb.data)) {
+    await menuOnCallback(env, update);
+    return new Response("OK");
   }
 
-  // 2) Текстові команди
-  const msg = update.message;
-  const text = msg?.text ?? "";
-  if (!text) return;
+  // 2) Текстові/командні повідомлення
+  const text = getMessageText(update);
+  if (!text) return new Response("NO_CONTENT");
 
-  for (const key of Object.keys(commands)) {
-    if (isCommand(text, key)) {
-      await commands[key].execute(env as any, update);
-      return;
+  // Команди виду "/name ..." або "/name@bot ..."
+  if (text.startsWith("/")) {
+    const cmdName = text.split(/\s+/, 1)[0]!.slice(1); // без '/'
+    const cmd = findCommandByName(cmdName);
+    if (cmd?.execute) {
+      await cmd.execute(env as any, update);
+      return new Response("OK");
     }
   }
 
-  // 3) Невідома команда — мовчимо
-  return;
+  // 3) Фолбек — нічого не робимо
+  return new Response("IGNORED");
 }
-
-/* Сумісність з різними імпортами в проекті */
-export { handleUpdate as routeUpdate, handleUpdate as commandRouter };
