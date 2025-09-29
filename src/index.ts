@@ -12,7 +12,8 @@ export type Env = {
 
 import type { TgUpdate } from "./types";
 import { sendMessage } from "./utils/telegram";
-import { seenUpdateRecently } from "./utils/dedup"; // ⟵ винесено в модуль
+import { seenUpdateRecently } from "./utils/dedup";
+import { verifyWebhook } from "./middlewares/verifyWebhook";
 
 /* Команди */
 import { startCommand } from "./commands/start";
@@ -59,18 +60,14 @@ function json(data: unknown, init?: ResponseInit) {
 
 /* --------------------------- Router (Webhook) ------------------------ */
 async function handleWebhook(env: Env, req: Request): Promise<Response> {
-  // ---- Перевірка секрету вебхука (мінімум в індексі) ----
-  const expected = env.WEBHOOK_SECRET;
-  const got = req.headers.get("X-Telegram-Bot-Api-Secret-Token");
-  if (expected && got !== expected) {
-    console.warn("Webhook rejected: bad secret token");
-    return new Response("forbidden", { status: 403 });
-  }
+  // ---- Middleware: перевірка секрету (мінімум коду в index.ts) ----
+  const deny = verifyWebhook(req, env.WEBHOOK_SECRET);
+  if (deny) return deny;
 
   // Парсимо апдейт
   const update = await parseJson<TgUpdate>(req);
 
-  // ---- Антидубль (виклик утиліти) ----
+  // ---- Антидубль (KV) ----
   const updateId = (update as any)?.update_id as number | undefined;
   if (typeof updateId === "number") {
     const isDup = await seenUpdateRecently(env, updateId, 120); // 2 хвилини
