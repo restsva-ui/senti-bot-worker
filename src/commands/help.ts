@@ -1,51 +1,39 @@
 // src/commands/help.ts
-import type { TgUpdate } from "../types";
+type TgUpdate = any;
 
-type Env = { BOT_TOKEN: string; API_BASE_URL?: string };
+async function sendMessage(env: any, chatId: number | string, text: string, replyTo?: number) {
+  const url = `${env.API_BASE_URL}/bot${env.BOT_TOKEN}/sendMessage`;
+  const body: any = {
+    chat_id: chatId,
+    text,
+    parse_mode: "Markdown",
+    disable_web_page_preview: true,
+  };
+  if (replyTo) body.reply_to_message_id = replyTo;
 
-async function tgCall(
-  env: Env,
-  method: string,
-  payload: Record<string, unknown>
-) {
-  const api = env.API_BASE_URL || "https://api.telegram.org";
-  const res = await fetch(`${api}/bot${env.BOT_TOKEN}/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    console.error("tgCall error", method, res.status, t);
-  }
-  return res.json().catch(() => ({}));
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  if (!res.ok) console.warn("sendMessage /help failed", await res.text());
 }
 
-export const helpCommand = {
-  name: "help",
-  description: "Показує довідку по доступних командах",
-  async execute(env: Env, update: TgUpdate) {
-    const chatId = update.message?.chat?.id;
-    if (!chatId) return;
+function getChatId(update: TgUpdate): number | undefined {
+  return update?.message?.chat?.id ?? update?.callback_query?.message?.chat?.id;
+}
 
-    const text = [
-      "ℹ️ <b>Довідка по командам</b>",
-      "",
-      "• <code>/start</code> — початкове повідомлення",
-      "• <code>/ping</code> — перевірка зв’язку (pong)",
-      "• <code>/health</code> — повертає статус OK",
-      "• <code>/help</code> — показує цю довідку",
-      "• <code>/wiki</code> — пошук стислої довідки у Вікіпедії",
-      "",
-      "Порада: надішли <code>/wiki</code> і впиши запит у відповідь, або одразу так:",
-      "<code>/wiki Київ</code>, <code>/wiki en Albert Einstein</code>.",
-    ].join("\n");
+export async function help(update: TgUpdate, env: any) {
+  const chatId = getChatId(update);
+  if (!chatId) return;
+  const text =
+`ℹ️ *Довідка*
 
-    await tgCall(env, "sendMessage", {
-      chat_id: chatId,
-      text,
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-    });
-  },
-} as const;
+Доступні команди:
+• \`/wiki [<lang>] <запит>\` — стислий опис з Вікіпедії (мови: uk/ru/en/de/fr)
+• \`/help\` — ця довідка
+
+Приклади:
+• \`/wiki Київ\`
+• \`/wiki en Albert Einstein\``;
+  await sendMessage(env, chatId, text, update?.message?.message_id);
+}
+
+export const handleHelp = help;
+export default help;
