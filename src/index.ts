@@ -14,6 +14,7 @@ import type { TgUpdate } from "./types";
 import { sendMessage } from "./utils/telegram";
 import { seenUpdateRecently } from "./utils/dedup";
 import { verifyWebhook } from "./middlewares/verifyWebhook";
+import { handleDedupTest } from "./routes/dedupTest";
 
 /* Команди */
 import { startCommand } from "./commands/start";
@@ -60,7 +61,7 @@ function json(data: unknown, init?: ResponseInit) {
 
 /* --------------------------- Router (Webhook) ------------------------ */
 async function handleWebhook(env: Env, req: Request): Promise<Response> {
-  // ---- Middleware: перевірка секрету (мінімум коду в index.ts) ----
+  // ---- Middleware: перевірка секрету ----
   const deny = verifyWebhook(req, env.WEBHOOK_SECRET);
   if (deny) return deny;
 
@@ -99,6 +100,14 @@ export default {
     // 1) Healthcheck (GET)
     if (req.method === "GET" && url.pathname === "/health") {
       return json({ ok: true, ts: Date.now() });
+    }
+
+    // 1.1) Тест антидублів (GET /__dedup_test/:id[?ttl=...])
+    if (req.method === "GET" && url.pathname.startsWith("/__dedup_test/")) {
+      const id = url.pathname.split("/__dedup_test/")[1] || "0";
+      const ttlParam = url.searchParams.get("ttl");
+      const ttl = ttlParam ? Math.max(1, Number(ttlParam)) : 120;
+      return handleDedupTest(env, id, ttl);
     }
 
     // 2) Webhook (POST)
