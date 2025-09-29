@@ -10,12 +10,13 @@ import { wikiCommand } from "../commands/wiki";
 import { echoCommand } from "../commands/echo";
 import { menuCommand, menuCanHandleCallback, menuOnCallback } from "../commands/menu";
 import { likesCommand, likesCanHandleCallback, likesOnCallback } from "../commands/likes";
+import { statsCommand } from "../commands/stats"; // ⟵ нова команда
 
 /** Мінімальний контракт середовища, потрібний командам */
 export type CommandEnv = {
   BOT_TOKEN: string;
   API_BASE_URL?: string;
-  LIKES_KV: KVNamespace; // для likes та інших станів
+  LIKES_KV: KVNamespace; // для likes/stats
 };
 
 /** Опис команди */
@@ -34,7 +35,8 @@ const commands: Record<string, Command> = {
   [wikiCommand.name]: wikiCommand,
   [echoCommand.name]: echoCommand,
   [menuCommand.name]: menuCommand,
-  [likesCommand.name]: likesCommand, // ⟵ додано
+  [likesCommand.name]: likesCommand,
+  [statsCommand.name]: statsCommand, // ⟵ додано
 };
 
 /** Перевірка, чи текст є викликом конкретної команди */
@@ -63,7 +65,7 @@ export async function routeUpdate(env: CommandEnv, update: TgUpdate): Promise<vo
       return;
     }
 
-    // Інші модулі з callback'ами можна підключати аналогічно ↑
+    // Інші модулі з callback'ами — аналогічно ↑
     return;
   }
 
