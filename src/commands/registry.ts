@@ -1,15 +1,30 @@
-import { wikiCommand } from "./wiki";
+// src/commands/registry.ts
+import type { Command } from "./types";
+import { startCommand } from "./start";
 import { helpCommand } from "./help";
 import { healthCommand } from "./health";
-// ...
+import { wikiCommand } from "./wiki";
+import { pingCommand } from "./ping";
+// якщо є ще menu / likes, можна теж додати
 
-const commands = [
-  wikiCommand,
+const commands: Command[] = [
+  startCommand,
   helpCommand,
   healthCommand,
-  // тут має бути startCommand
+  wikiCommand,
+  pingCommand,
 ];
 
-export function findCommandByName(name: string) {
-  return commands.find(c => c.name === name || c.aliases?.includes(name));
+export function findCommandByName(name: string): Command | undefined {
+  return commands.find(
+    (c) => c.name === name || (c.aliases && c.aliases.includes(name))
+  );
+}
+
+// те, чого бракувало — для /help
+export function getCommandsInfo() {
+  return commands.map((c) => ({
+    name: c.name,
+    description: c.description ?? "",
+  }));
 }
