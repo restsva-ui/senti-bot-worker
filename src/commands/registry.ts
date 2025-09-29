@@ -15,18 +15,18 @@ export type Command = {
   execute: (env: CommandEnv, update: TgUpdate) => Promise<void>;
 };
 
-// Команди
+/* ------------ Імпорти команд ------------ */
 import { startCommand } from "./start";
 import { pingCommand } from "./ping";
-import { helpCommand } from "./help";
-import { healthCommand } from "./health";
-import { menuCommand } from "./menu";
 import { echoCommand } from "./echo";
+import { menuCommand } from "./menu";
 import { likesCommand } from "./likes";
 import { statsCommand } from "./stats";
 import { wikiCommand } from "./wiki";
+import { helpCommand } from "./help";
+import { healthCommand } from "./health";
 
-// Реєстр
+/* ------------ Реєстр команд ------------ */
 export const commands: Command[] = [
   startCommand,
   pingCommand,
@@ -39,7 +39,12 @@ export const commands: Command[] = [
   healthCommand,
 ];
 
-// Індекс за назвою
+/** Індекс за назвою (для роутера) */
 export const commandsByName: Record<string, Command> = Object.fromEntries(
   commands.map((c) => [c.name, c])
 );
+
+/** Коротка довідка (для /help) */
+export function getCommandsInfo(): Array<{ name: string; description: string }> {
+  return commands.map((c) => ({ name: c.name, description: c.description }));
+}
