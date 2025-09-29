@@ -1,31 +1,59 @@
 // src/commands/registry.ts
-import { start } from "./start";
-import { help } from "./help";
-import { ping } from "./ping";
-import { health } from "./health";
-import { wiki, wikiSetAwait, wikiMaybeHandleFreeText } from "./wiki";
-import { ai } from "./ai"; // ⬅️ нове
+// Єдиний реєстр команд із безпечними імпортами (працює і з default, і з named).
+// Експортує іменований об'єкт COMMANDS, щоб index.ts міг імпортувати: { COMMANDS }.
+// Також даємо допоміжні pickHandler / hasCommand — якщо десь використовуються.
 
-type Env = { AI_ENABLED?: string };
+type Handler = (ctx: any, args?: any) => Promise<any> | any;
 
-export type CommandHandler = (update: any, env: any) => Promise<void>;
+// Безпечні імпорти (named || default)
+import startNamed, { start as startExport } from "./start";
+const start: Handler = (startExport as any) ?? (startNamed as any);
 
-export function getCommands(env: Env): Map<string, CommandHandler> {
-  const map = new Map<string, CommandHandler>();
+import helpNamed, { help as helpExport } from "./help";
+const help: Handler = (helpExport as any) ?? (helpNamed as any);
 
-  map.set("start", start);
-  map.set("help", help);
-  map.set("ping", ping);
-  map.set("health", health);
-  map.set("wiki", wiki);
+import pingNamed, { ping as pingExport } from "./ping";
+const ping: Handler = (pingExport as any) ?? (pingNamed as any);
 
-  // умовно підключаємо /ai
-  if (String(env.AI_ENABLED).toLowerCase() === "true") {
-    map.set("ai", ai);
-  }
+import healthNamed, { health as healthExport } from "./health";
+const health: Handler = (healthExport as any) ?? (healthNamed as any);
 
-  return map;
+// Wiki — наші нові іменовані експорти
+import wikiDefault, {
+  wiki as wikiExport,
+  wikiSetAwait,
+  wikiMaybeHandleFreeText,
+} from "./wiki";
+const wiki: Handler = (wikiExport as any) ?? (wikiDefault as any);
+
+// AI (може бути відключений змінною середовища, але в реєстрі лишимо)
+import aiNamed, { ai as aiExport } from "./ai";
+const ai: Handler | undefined = (aiExport as any) ?? (aiNamed as any);
+
+// Карта доступних команд (імена рівно такі, як ви очікуєте у /help)
+export const COMMANDS: Record<string, Handler> = {
+  start,
+  help,
+  ping,
+  health,
+  wiki,
+  // додаткові службові "не командні", але корисні в роутингу:
+  // їх НЕ оголошуємо як видимі команди, проте експортуємо окремо нижче
+};
+
+// Окремо експортуємо wiki-сервісні хелпери (потрібні іншим місцям)
+export { wikiSetAwait, wikiMaybeHandleFreeText };
+
+// AI команду додаємо акуратно: якщо файл є — вона в реєстрі, якщо ні — ні.
+if (ai) {
+  (COMMANDS as any).ai = ai;
 }
 
-// (за наявності у тебе цих хелперів — не прибираємо)
-export { wikiSetAwait, wikiMaybeHandleFreeText };
+// Дрібні утиліти (можуть використовуватись у index.ts або інших частинах)
+export function pickHandler(name: string): Handler | undefined {
+  return (COMMANDS as any)[name];
+}
+
+export function hasCommand(name: string): boolean {
+  return typeof (COMMANDS as any)[name] === "function";
+}
