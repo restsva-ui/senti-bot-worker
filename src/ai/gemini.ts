@@ -1,49 +1,55 @@
 // src/ai/gemini.ts
 
-export interface GeminiEnv {
+/**
+ * Мінімальний клієнт до Gemini (Google Generative Language API).
+ * Потрібен лише GEMINI_API_KEY у секретах воркера.
+ *
+ * Приклад використання:
+ *   const text = await geminiAskText(env, "Привіт! Хто ти?");
+ */
+
+export interface Env {
   GEMINI_API_KEY?: string;
 }
 
-/**
- * Витягує текст з відповіді Gemini (candidates → content.parts[].text).
- */
-function extractText(resp: any): string {
-  const parts =
-    resp?.candidates?.[0]?.content?.parts ??
-    resp?.candidates?.[0]?.content?.parts ??
-    [];
+/** Моделі, які стабільно є в v1beta */
+export type GeminiTextModel =
+  | "gemini-2.5-flash"
+  | "gemini-2.0-flash-001"
+  | "gemini-pro-latest";
 
-  const texts: string[] = [];
-  for (const p of parts) {
-    if (typeof p?.text === "string") texts.push(p.text);
-  }
-  return texts.join("\n").trim();
-}
+const DEFAULT_MODEL: GeminiTextModel = "gemini-2.5-flash";
+
+/** Опції генерації (усі — необов’язкові) */
+export type AskOptions = {
+  model?: GeminiTextModel;
+  system?: string; // system prompt
+  temperature?: number;
+  topP?: number;
+  maxOutputTokens?: number;
+};
 
 /**
- * Простий генератор тексту через Gemini 2.5 Flash.
- * Повертає згенерований текст або кидає помилку з читабельним повідомленням.
+ * Викликає Gemini і повертає згенерований текст (перший кандидат).
+ * Кидає помилку, якщо щось пішло не так.
  */
-export async function geminiGenerateText(
-  env: GeminiEnv,
+export async function geminiAskText(
+  env: Env,
   prompt: string,
-  opts?: {
-    model?: string; // якщо треба інша модель
-    temperature?: number;
-    topP?: number;
-    maxOutputTokens?: number;
-  },
+  opts: AskOptions = {},
 ): Promise<string> {
   if (!env.GEMINI_API_KEY) {
     throw new Error("GEMINI_API_KEY is missing");
   }
 
-  const model = opts?.model ?? "gemini-2.5-flash";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-    model,
-  )}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+  const model = opts.model ?? DEFAULT_MODEL;
 
-  const body = {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
+    env.GEMINI_API_KEY,
+  )}`;
+
+  // Тіло запиту згідно v1beta
+  const body: any = {
     contents: [
       {
         role: "user",
@@ -51,43 +57,59 @@ export async function geminiGenerateText(
       },
     ],
     generationConfig: {
-      temperature: opts?.temperature ?? 0.7,
-      topP: opts?.topP ?? 0.95,
-      maxOutputTokens: opts?.maxOutputTokens ?? 1024,
+      temperature: opts.temperature ?? 0.7,
+      topP: opts.topP ?? 0.95,
+      maxOutputTokens: opts.maxOutputTokens ?? 512,
     },
   };
 
-  const r = await fetch(url, {
+  if (opts.system) {
+    // systemInstruction підтримується у v1beta
+    body.systemInstruction = {
+      role: "system",
+      parts: [{ text: opts.system }],
+    };
+  }
+
+  const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
 
-  const text = await r.text();
-  if (!r.ok) {
-    // Спробуємо дістати повідомлення про помилку з JSON
-    try {
-      const j = JSON.parse(text);
-      const msg =
-        j?.error?.message ||
-        j?.error?.status ||
-        `HTTP ${r.status} ${r.statusText}`;
-      throw new Error(`Gemini error: ${msg}`);
-    } catch {
-      throw new Error(`Gemini error: HTTP ${r.status} ${r.statusText}`);
-    }
+  const text = await res.text();
+
+  if (!res.ok) {
+    // Повертаємо зміст відповіді для швидкої діагностики
+    throw new Error(
+      `Gemini HTTP ${res.status}: ${text || "no body returned"}`,
+    );
   }
 
   let json: any;
   try {
     json = JSON.parse(text);
   } catch {
-    throw new Error("Gemini error: bad JSON from upstream");
+    throw new Error("Gemini: bad JSON in response");
   }
 
-  const out = extractText(json);
+  // Очікувана форма: { candidates: [ { content: { parts: [ {text} ] } } ] }
+  const candidate = json?.candidates?.[0];
+  const parts: Array<{ text?: string }> = candidate?.content?.parts ?? [];
+
+  const out = parts
+    .map((p) => (typeof p?.text === "string" ? p.text : ""))
+    .join("")
+    .trim();
+
   if (!out) {
-    throw new Error("Gemini error: empty response");
+    // Іноді помилка при success=true, але без тексту
+    const errMsg =
+      candidate?.finishReason ||
+      json?.error?.message ||
+      "empty result from Gemini";
+    throw new Error(`Gemini: ${errMsg}`);
   }
+
   return out;
 }
