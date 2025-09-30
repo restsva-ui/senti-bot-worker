@@ -1,49 +1,43 @@
 // src/diagnostics.ts
+// Загальні діагностичні ендпоїнти + делегування в AI-діагностику.
+
 import { ok, err } from "./ai/providers";
 import { handleAIDiagnostics } from "./diagnostics-ai";
 
-export interface Env {
-  BOT_TOKEN: string;
-  TELEGRAM_SECRET_TOKEN?: string;
-  WEBHOOK_SECRET?: string;
-  CF_VISION: string;
-  CLOUDFLARE_API_TOKEN: string;
-  GEMINI_API_KEY?: string;
-  OPENROUTER_API_KEY?: string;
+interface Env {
+  CLOUDFLARE_API_TOKEN?: string;
+  [k: string]: unknown;
 }
 
-/**
- * Основні діагностичні маршрути:
- * - GET /diag/ping
- * - GET /diag/env
- * + делегування у handleAIDiagnostics (AI тести)
- */
 export async function handleDiagnostics(
   request: Request,
   env: Env,
   url: URL
 ): Promise<Response | null> {
-  if (request.method !== "GET") return null;
+  const path = url.pathname;
 
-  // 🔹 AI diagnostics (CF Vision, Gemini, OpenRouter)
+  // Перевірка CF API токена
+  // GET /cf/check
+  if (request.method === "GET" && path === "/cf/check") {
+    const token = env.CLOUDFLARE_API_TOKEN;
+    if (!token) return err("Missing CLOUDFLARE_API_TOKEN", 400);
+
+    try {
+      const res = await fetch(
+        "https://api.cloudflare.com/client/v4/user/tokens/verify",
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const data = await res.json();
+      return ok(data, res.status);
+    } catch (e: any) {
+      return err(e?.message || String(e), 500);
+    }
+  }
+
+  // Делегування AI-маршрутів
   const ai = await handleAIDiagnostics(request, env, url);
   if (ai) return ai;
 
-  // /diag/ping
-  if (url.pathname === "/diag/ping") {
-    return ok({ pong: true, ts: Date.now() });
-  }
-
-  // /diag/env
-  if (url.pathname === "/diag/env") {
-    return ok({
-      BOT_TOKEN: env.BOT_TOKEN ? "set" : "missing",
-      CF_VISION: env.CF_VISION ? "set" : "missing",
-      CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN ? "set" : "missing",
-      GEMINI_API_KEY: env.GEMINI_API_KEY ? "set" : "missing",
-      OPENROUTER_API_KEY: env.OPENROUTER_API_KEY ? "set" : "missing",
-    });
-  }
-
+  // Якщо не ми — повертаємо управління вище
   return null;
 }
