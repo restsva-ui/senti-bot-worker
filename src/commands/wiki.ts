@@ -1,87 +1,161 @@
 // src/commands/wiki.ts
-import type { Env, TgCtx, TgMessage } from "../types";
+// Команда /wiki з простим очікуванням наступного повідомлення (await)
+// та хелперами wikiSetAwait / wikiMaybeHandleFreeText.
+//
+// Підтримані мови: uk|ru|en|de|fr (за замовчуванням — uk).
+// Приклади:
+//   /wiki Київ
+//   /wiki en Vienna
+//   /wiki  -> просить ввести запит наступним повідомленням
 
-type Lang = "uk" | "ru" | "en" | "de" | "fr";
-const DEFAULT_LANG: Lang = "uk";
+type Ctx = any;
+type Msg = any;
 
-function parseArgs(text: string) {
-  const withoutCmd = text.replace(/^\/wiki(@\w+)?\s*/i, "").trim();
-  if (!withoutCmd) return { lang: DEFAULT_LANG, q: "" };
-  const m = withoutCmd.match(/^(uk|ru|en|de|fr)\s+(.+)$/i);
-  if (m) return { lang: m[1].toLowerCase() as Lang, q: m[2].trim() };
-  return { lang: DEFAULT_LANG, q: withoutCmd };
+// ===== Внутрішнє "сховище очікувань" (на випадок, якщо KV недоступне) =====
+const memoryAwait = new Map<string, number>(); // key = chatId, value = expireTs
+
+const AWAIT_TTL_SEC = 5 * 60; // 5 хв
+
+function nowSec() {
+  return Math.floor(Date.now() / 1000);
 }
 
-async function send(ctx: TgCtx, chatId: number, text: string, replyTo?: number) {
-  const url = `${ctx.env.API_BASE_URL || "https://api.telegram.org"}/bot${ctx.env.BOT_TOKEN}/sendMessage`;
-  const body = { chat_id: chatId, text, reply_to_message_id: replyTo, disable_web_page_preview: false };
-  await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+function chatKey(msg: Msg): string {
+  // спробуємо знайти чат-id типово як у Telegram
+  const id =
+    msg?.chat?.id ??
+    msg?.message?.chat?.id ??
+    msg?.from?.id ??
+    "unknown";
+  return String(id);
 }
 
-async function fetchSummary(lang: Lang, q: string) {
-  const url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(q)}`;
-  const r = await fetch(url);
-  if (r.ok) {
-    const j = await r.json();
-    if (j?.extract && j?.content_urls?.desktop?.page) {
-      return { title: j.title || q, extract: j.extract as string, link: j.content_urls.desktop.page as string };
+// ===== Хелпери (експортуються) =============================================
+
+/** Увімкнути режим очікування наступного повідомлення для /wiki */
+export async function wikiSetAwait(ctx: Ctx, msg: Msg): Promise<void> {
+  const key = `wiki:await:${chatKey(msg)}`;
+  const expire = nowSec() + AWAIT_TTL_SEC;
+
+  // Якщо у середовищі є KV (наприклад LIKES_KV), скористаємось ним
+  const kv: any = ctx?.env?.LIKES_KV ?? ctx?.env?.KV ?? null;
+  if (kv?.put) {
+    try {
+      await kv.put(key, "1", { expirationTtl: AWAIT_TTL_SEC });
+      return;
+    } catch (_) {
+      // падаємо у in-memory fallback
     }
   }
-  const os = await fetch(`https://${lang}.wikipedia.org/w/api.php?action=opensearch&format=json&search=${encodeURIComponent(q)}&limit=1`);
-  if (os.ok) {
-    const arr = await os.json();
-    const title = (arr?.[1]?.[0] as string) || q;
-    if (title) {
-      const r2 = await fetch(`https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`);
-      if (r2.ok) {
-        const j2 = await r2.json();
-        if (j2?.extract && j2?.content_urls?.desktop?.page) {
-          return { title: j2.title || title, extract: j2.extract as string, link: j2.content_urls.desktop.page as string };
-        }
+  memoryAwait.set(key, expire);
+}
+
+/** Якщо користувач надіслав вільний текст і ми чекали /wiki — перехоплюємо. */
+export async function wikiMaybeHandleFreeText(ctx: Ctx, msg: Msg): Promise<boolean> {
+  const text: string = msg?.text ?? "";
+  if (!text || text.startsWith("/")) return false; // це команда, не вільний текст
+
+  const key = `wiki:await:${chatKey(msg)}`;
+
+  // спочатку KV
+  const kv: any = ctx?.env?.LIKES_KV ?? ctx?.env?.KV ?? null;
+  let awaited = false;
+
+  if (kv?.get) {
+    try {
+      const v = await kv.get(key);
+      if (v) {
+        awaited = true;
+        // гасимо прапорець
+        if (kv.delete) await kv.delete(key);
+        else await kv.put(key, "", { expirationTtl: 1 });
       }
+    } catch (_) {
+      // fallback нижче
     }
   }
-  return null;
+
+  if (!awaited) {
+    const exp = memoryAwait.get(key);
+    if (exp && exp > nowSec()) {
+      awaited = true;
+    }
+    memoryAwait.delete(key);
+  }
+
+  if (!awaited) return false;
+
+  // Якщо ми тут — це вільний текст після /wiki. Виконуємо пошук як запит.
+  await wiki(ctx, { ...msg, text }); // викликаємо саму команду
+  return true;
 }
 
-export async function wikiSetAwait(ctx: TgCtx, chatId: number) {
-  try { await ctx.env.LIKES_KV?.put(`await:${chatId}`, "1", { expirationTtl: 300 }); } catch {}
+// ===== Основна команда /wiki ===============================================
+
+async function fetchWiki(lang: string, query: string) {
+  const title = encodeURIComponent(query.trim());
+  const url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${title}`;
+  const r = await fetch(url, {
+    headers: { "accept": "application/json" },
+  });
+  if (!r.ok) throw new Error(`Wiki HTTP ${r.status}`);
+  return r.json();
 }
 
-export async function wikiMaybeHandleFreeText(_ctx: TgCtx, _msg: TgMessage) {
-  return false;
+function parseArgs(text: string): { lang: string; query: string } {
+  // розбираємо: "/wiki [<lang>] <запит>"
+  // якщо перше слово — одна з підтриманих мов, візьмемо її
+  const supported = new Set(["uk", "ru", "en", "de", "fr"]);
+  const parts = text.replace(/^\/\w+\s*/, "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { lang: "uk", query: "" };
+  if (supported.has(parts[0].toLowerCase())) {
+    const lang = parts.shift()!.toLowerCase();
+    return { lang, query: parts.join(" ") };
+    }
+  return { lang: "uk", query: parts.join(" ") };
 }
 
-async function wiki(ctx: TgCtx, msg: TgMessage) {
-  const chatId = msg.chat.id;
-  const replyTo = msg.message_id;
+function reply(ctx: Ctx, text: string, extra: any = {}) {
+  // універсальна відповідь
+  if (typeof ctx?.reply === "function") return ctx.reply(text, extra);
+  if (typeof ctx?.send === "function") return ctx.send(text, extra);
+  return text;
+}
+
+export async function wiki(ctx: Ctx, msg: Msg) {
+  const text: string = msg?.text ?? "";
+  const { lang, query } = parseArgs(text);
+
+  // Якщо запиту нема — підкажемо і увімкнемо очікування
+  if (!query) {
+    await reply(
+      ctx,
+      "✍️ Введіть запит для Wiki у наступному повідомленні (відповіддю)."
+    );
+    await wikiSetAwait(ctx, msg);
+    return;
+  }
 
   try {
-    const text = msg.text || msg.caption || "";
-    const { lang, q } = parseArgs(text);
+    const data: any = await fetchWiki(lang, query);
 
-    if (!q) {
-      await send(ctx, chatId, "📚 Надішли так: `/wiki [uk|ru|en|de|fr] <запит>`\nНапр.: `/wiki Київ` або `/wiki en Vienna`", replyTo);
-      return;
-    }
+    const title = data?.title ?? query;
+    const extract = data?.extract ?? "Нічого не знайшов…";
+    const pageUrl = data?.content_urls?.desktop?.page ?? data?.content_urls?.mobile?.page;
 
-    const res = await fetchSummary(lang, q);
-    if (!res) {
-      await send(ctx, chatId, `Нічого не знайшов за запитом: *${q}* (${lang}).`, replyTo);
-      return;
-    }
+    let out = `📚 *${title}*\n\n${extract}`;
+    if (pageUrl) out += `\n\n🔗 ${pageUrl}`;
 
-    const out =
-      `📚 *${res.title}*\n\n` +
-      `${res.extract}\n\n` +
-      `🔗 ${res.link}`;
-
-    await send(ctx, chatId, out, replyTo);
-  } catch (e: any) {
-    console.error("wiki error:", e?.stack || e?.message || e);
-    await send(ctx, chatId, "❌ Помилка при пошуку у Вікіпедії.", replyTo);
+    await reply(ctx, out, { parse_mode: "Markdown" });
+  } catch (err: any) {
+    await reply(
+      ctx,
+      `⚠️ Не вдалося отримати статтю за запитом: *${query}* (${lang}). Спробуйте інший запит.`,
+      { parse_mode: "Markdown" }
+    );
   }
 }
 
-export { wiki };        // ✅ named export
-export default wiki;    // ✅ default export
+// Експорти як вимагає реєстр
+export { wiki as wikiExport }; // не обовʼязково, але не завадить
+export default wiki;
