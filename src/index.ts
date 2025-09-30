@@ -2,7 +2,8 @@
 import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { handleDiagnostics } from "./diagnostics";
-import { geminiGenerateText } from "./ai/gemini";
+import { geminiAskText } from "./ai/gemini";
+import { openrouterAskText } from "./ai/openrouter";
 
 export interface Env {
   BOT_TOKEN: string;
@@ -14,15 +15,12 @@ export interface Env {
   CLOUDFLARE_API_TOKEN: string;
   GEMINI_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
-
-  // Необов’язково: щоб явно вказати провайдера
-  AI_PROVIDER?: "gemini" | "openrouter" | "cf-vision";
 }
 
 function json(res: unknown, status = 200) {
-  return new Response(JSON.stringify(res, null, 2), {
+  return new Response(JSON.stringify(res), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: { "content-type": "application/json" },
   });
 }
 
@@ -35,7 +33,7 @@ export default {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // діагностика
+    // діагностика / ai
     const diag = await handleDiagnostics(request, env as any, url);
     if (diag) return diag;
 
@@ -46,7 +44,8 @@ export default {
       if (expected) {
         const got =
           request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
-        if (got !== expected) return json({ ok: false, error: "invalid secret" }, 403);
+        if (got !== expected)
+          return json({ ok: false, error: "invalid secret" }, 403);
       }
 
       // Зчитуємо апдейт
@@ -62,48 +61,45 @@ export default {
         const msg = update?.message;
         const text: string | undefined = msg?.text;
         const chatId = msg?.chat?.id;
-
         if (text === "/ping" && chatId) {
           await pingCommand(env as any, chatId);
           return json({ ok: true, handled: "ping" });
         }
 
-        // Будь-який інший текст — генеруємо відповідь через Gemini
-        if (chatId && typeof text === "string" && !text.startsWith("/")) {
-          const prompt = text.trim();
-          if (prompt.length > 0) {
+        // Якщо прийшла звичайна текстова фраза — відповідаємо LLM
+        if (text && chatId && !text.startsWith("/")) {
+          let reply: string | null = null;
+
+          // 1) primary: Gemini
+          try {
+            if (env.GEMINI_API_KEY) {
+              reply = await geminiAskText(env as any, text);
+            }
+          } catch (e: any) {
+            // падіння Gemini не ламає флоу — переходимо на fallback
+            console.warn("Gemini failed, will try OpenRouter:", e?.message || e);
+          }
+
+          // 2) fallback: OpenRouter (лише якщо є ключ і попередній крок не дав відповіді)
+          if (!reply && env.OPENROUTER_API_KEY) {
             try {
-              // якщо явно не вказано AI_PROVIDER, але є ключ Gemini — вважаємо, що використовуємо Gemini
-              const provider = env.AI_PROVIDER ?? (env.GEMINI_API_KEY ? "gemini" : undefined);
-
-              if (provider === "gemini") {
-                const reply = await geminiGenerateText(env, prompt, {
-                  model: "gemini-2.5-flash", // можна замінити на будь-яку з /diagnostics/ai/gemini/models
-                  temperature: 0.7,
-                });
-                await tgSendMessage(env as any, chatId, reply);
-                return json({ ok: true, handled: "gemini" });
-              }
-
-              // Якщо провайдер інший або не заданий — просто no-op (щоб нічого не зламати)
-              await tgSendMessage(
-                env as any,
-                chatId,
-                "⚠️ AI не налаштований. Доступні діагностичні ендпоїнти: /diagnostics",
-              );
-              return json({ ok: true, handled: "no-ai" });
+              reply = await openrouterAskText(env as any, text);
             } catch (e: any) {
-              await tgSendMessage(
-                env as any,
-                chatId,
-                `❌ Помилка Gemini: ${e?.message || e}`,
-              );
-              return json({ ok: false, error: "gemini-failed" }, 500);
+              console.error("OpenRouter failed:", e?.message || e);
             }
           }
+
+          // 3) Якщо нічого не вийшло — м’яке повідомлення користувачу
+          if (!reply) {
+            reply =
+              "На жаль, зараз не можу відповісти. Спробуй ще раз трохи пізніше 🙏";
+          }
+
+          await tgSendMessage(env as any, chatId, reply);
+          return json({ ok: true, handled: "chat" });
         }
 
-        // callback query
+        // callback
         const cb = update?.callback_query;
         if (cb?.id && cb?.message?.chat?.id) {
           await tgSendMessage(
