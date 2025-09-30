@@ -1,9 +1,9 @@
 // src/commands/registry.ts
-// Реєстр команд + утиліти пошуку/ввімкнення AI
+// Єдиний реєстр команд. Даємо ключі і з префіксом "/", і без — щоб router завжди попав.
 
 type Handler = (ctx: any, args?: any) => Promise<any> | any;
 
-// Безпечні імпорти (named || default)
+// ---- Безпечні імпорти (працює і з default, і з named) ----
 import startNamed, { start as startExport } from "./start";
 const start: Handler = (startExport as any) ?? (startNamed as any);
 
@@ -23,12 +23,12 @@ import wikiDefault, {
 } from "./wiki";
 const wiki: Handler = (wikiExport as any) ?? (wikiDefault as any);
 
-// AI може бути відключений
+// AI (може бути відключений змінною середовища)
 import aiNamed, { ai as aiExport } from "./ai";
-const aiHandler: Handler | undefined = (aiExport as any) ?? (aiNamed as any);
+const ai: Handler | undefined = (aiExport as any) ?? (aiNamed as any);
 
-// внутрішня мапа
-const MAP: Record<string, Handler> = {
+// ---- Базовий набір без слеша ----
+const base: Record<string, Handler> = {
   start,
   help,
   ping,
@@ -36,21 +36,30 @@ const MAP: Record<string, Handler> = {
   wiki,
 };
 
-// керування AI-видимістю
-export function attachAI(enabled: boolean) {
-  if (enabled && aiHandler) MAP.ai = aiHandler;
-  else delete MAP.ai;
+// Додаємо версії з префіксом "/"
+const withSlash = Object.fromEntries(
+  Object.entries(base).map(([k, v]) => ["/" + k, v])
+);
+
+// Якщо AI є — додаємо обидві форми
+if (ai) {
+  (base as any).ai = ai;
+  (withSlash as any)["/ai"] = ai;
 }
 
-// пошук хендлера
-export function findCommandByName(name: string): Handler | undefined {
-  return MAP[name];
-}
+// Експортуємо єдину мапу, що містить ключі і з "/", і без
+export const COMMANDS: Record<string, Handler> = {
+  ...base,
+  ...withSlash,
+};
 
-// (опційно) віддати список видимих команд — зручно для /help
-export function listVisible(): string[] {
-  return Object.keys(MAP);
-}
-
-// реекспорт wiki-хелперів, якщо десь потрібні
+// Виносимо wiki-хелпери
 export { wikiSetAwait, wikiMaybeHandleFreeText };
+
+// Утиліти (на випадок якщо десь юзаються)
+export function pickHandler(name: string): Handler | undefined {
+  return (COMMANDS as any)[name];
+}
+export function hasCommand(name: string): boolean {
+  return typeof (COMMANDS as any)[name] === "function";
+}
