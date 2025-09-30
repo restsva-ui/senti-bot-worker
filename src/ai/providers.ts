@@ -10,14 +10,7 @@ function assert(ok: any, msg: string): asserts ok {
   if (!ok) throw new Error(msg);
 }
 
-/**
- * Cloudflare Workers AI (Vision) через AI Gateway /client/v4/.../ai/run
- * Очікує: env.CF_VISION  -> базовий URL (до /ai/run)
- *         env.CLOUDFLARE_API_TOKEN -> Bearer
- *
- * model: наприклад "cf/meta/llama-3.2-11b-vision-instruct"
- * imageUrl: http(s) URL картинки
- */
+// ✅ Cloudflare Workers AI (Vision)
 export async function runCfVision(
   env: Record<string, string>,
   prompt: string,
@@ -42,11 +35,9 @@ export async function runCfVision(
 
   const data = await r.json().catch(() => ({}));
   if (!r.ok || data?.success === false) {
-    const msg =
-      data?.errors?.[0]?.message ||
-      data?.message ||
-      `CF Vision ${r.status}`;
-    throw new Error(msg);
+    throw new Error(
+      data?.errors?.[0]?.message || data?.message || `CF Vision ${r.status}`,
+    );
   }
 
   const text =
@@ -58,11 +49,7 @@ export async function runCfVision(
   return { provider: "cf-vision", text, raw: data };
 }
 
-/**
- * Google Gemini (Text) — REST v1beta
- * Очікує: env.GEMINI_API_KEY
- * Модель: "models/gemini-1.5-flash" або "models/gemini-1.5-pro"
- */
+// ✅ Gemini (Text API)
 export async function runGemini(
   env: Record<string, string>,
   prompt: string,
@@ -85,8 +72,7 @@ export async function runGemini(
 
   const data = await r.json().catch(() => ({}));
   if (!r.ok || data?.error) {
-    const msg = data?.error?.message || `Gemini ${r.status}`;
-    throw new Error(msg);
+    throw new Error(data?.error?.message || `Gemini ${r.status}`);
   }
 
   const text =
@@ -97,11 +83,7 @@ export async function runGemini(
   return { provider: "gemini", text, raw: data };
 }
 
-/**
- * OpenRouter (DeepSeek та інші моделі) — Chat Completions
- * Очікує: env.OPENROUTER_API_KEY
- * За замовчуванням: "deepseek/deepseek-chat"
- */
+// ✅ OpenRouter (DeepSeek та інші)
 export async function runOpenRouter(
   env: Record<string, string>,
   prompt: string,
@@ -123,9 +105,9 @@ export async function runOpenRouter(
 
   const data = await r.json().catch(() => ({}));
   if (!r.ok || data?.error) {
-    const msg =
-      data?.error?.message || data?.error || `OpenRouter ${r.status}`;
-    throw new Error(msg);
+    throw new Error(
+      data?.error?.message || data?.error || `OpenRouter ${r.status}`,
+    );
   }
 
   const text = data?.choices?.[0]?.message?.content ?? JSON.stringify(data);
