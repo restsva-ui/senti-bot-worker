@@ -1,165 +1,175 @@
 // src/ai/providers.ts
-// Єдине місце для звернень до зовнішніх AI-провайдерів
-// і стандартних JSON-відповідей ok/err.
 
-export type TextProvider = "gemini" | "openrouter";
-
-export function ok(data: unknown, status = 200): Response {
+// Узгоджений формат відповіді для діагностики/ручних перевірок
+export function ok<T = unknown>(data: T, status = 200) {
   return new Response(JSON.stringify({ ok: true, status, data }), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json; charset=utf-8" },
   });
 }
 
-export function err(error: unknown, status = 400): Response {
-  const message =
-    typeof error === "string"
-      ? error
-      : (error as any)?.message || String(error);
+export function err(message: string, status = 500) {
   return new Response(JSON.stringify({ ok: false, status, error: message }), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json; charset=utf-8" },
   });
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Gemini: простий text completion
+type EnvLike = Record<string, string | undefined>;
+
+/* -------------------------- GEMINI -------------------------- */
+
+function getGeminiKey(env: EnvLike) {
+  // Підтримуємо обидві змінні — як інколи заводять у різних проєктах
+  return env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
+}
+
+export async function geminiListModels(env: EnvLike) {
+  const key = getGeminiKey(env);
+  if (!key) return err("Gemini error: missing GEMINI_API_KEY (or GOOGLE_API_KEY)", 400);
+
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`;
+
+  let raw = "";
+  try {
+    const res = await fetch(url);
+    raw = await res.text();
+    if (!res.ok) return err(`Gemini ${res.status}: ${raw || res.statusText}`, res.status);
+
+    let json: any;
+    try { json = JSON.parse(raw); } catch {
+      return err(`Gemini parse error (models): ${raw.slice(0, 300)}`, 502);
+    }
+    return ok({ provider: "gemini", models: json.models ?? [], raw: json });
+  } catch (e: any) {
+    return err(`Gemini error: ${e?.message || e}`);
+  }
+}
+
 export async function geminiText(
-  env: any,
-  prompt: string,
-  model = "models/gemini-2.5-flash"
+  env: EnvLike,
+  model: string,
+  prompt: string
 ) {
-  const key = env.GEMINI_API_KEY;
-  if (!key) throw new Error("Missing GEMINI_API_KEY");
+  const key = getGeminiKey(env);
+  if (!key) return err("Gemini error: missing GEMINI_API_KEY (or GOOGLE_API_KEY)", 400);
+  if (!model) return err("Gemini error: missing 'model' query param", 400);
+  if (!prompt) return err("Gemini error: missing 'q' (prompt) query param", 400);
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/${encodeURIComponent(
-    model
-  )}:generateContent?key=${encodeURIComponent(key)}`;
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-    }),
-  });
-  const raw = await res.json();
-  if (!res.ok) throw new Error(raw?.error?.message || res.statusText);
+  const body = {
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+  };
 
-  const parts = raw?.candidates?.[0]?.content?.parts || [];
-  const text =
-    parts.map((p: any) => p?.text).filter(Boolean).join("") ||
-    raw?.candidates?.[0]?.content?.parts?.[0]?.text ||
-    "";
+  let raw = "";
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify(body),
+    });
 
-  return { text, raw };
+    raw = await res.text();
+
+    // Якщо Google повертає 4xx/5xx з порожнім тілом, не падаємо на JSON.parse
+    if (!res.ok) return err(`Gemini ${res.status}: ${raw || res.statusText}`, res.status);
+
+    let json: any;
+    try { json = JSON.parse(raw); } catch {
+      return err(`Gemini parse error: ${raw.slice(0, 300)}`, 502);
+    }
+
+    const text =
+      json?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text).join("") ??
+      json?.candidates?.[0]?.content?.parts?.[0]?.text ??
+      "";
+
+    if (!text) {
+      // Повертаємо сирий JSON для простішого дебагу
+      return err(`Gemini empty text. Raw: ${raw.slice(0, 500)}`, 502);
+    }
+
+    return ok({ provider: "gemini", model, text, raw: json });
+  } catch (e: any) {
+    return err(`Gemini error: ${e?.message || e}`);
+  }
 }
 
-// Gemini: список моделей
-export async function geminiListModels(env: any) {
-  const key = env.GEMINI_API_KEY;
-  if (!key) throw new Error("Missing GEMINI_API_KEY");
+/* -------------------------- CF VISION -------------------------- */
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(
-    key
-  )}`;
-  const res = await fetch(url);
-  const raw = await res.json();
-  if (!res.ok) throw new Error(raw?.error?.message || res.statusText);
-
-  return { models: raw?.models || [], raw };
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// OpenRouter: text completion
-export async function openrouterText(
-  env: any,
-  prompt: string,
-  model = "deepseek/deepseek-chat"
+export async function cfVision(
+  env: EnvLike,
+  imgUrl: string,
+  prompt = "Describe the image in detail"
 ) {
-  const key = env.OPENROUTER_API_KEY;
-  if (!key) throw new Error("Missing OPENROUTER_API_KEY");
-
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      Authorization: `Bearer ${key}`,
-      // невимогливо, але корисно для лімітів OR
-      "HTTP-Referer": "https://workers.dev",
-      "X-Title": "senti-bot-worker",
-    },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  });
-  const raw = await res.json();
-  if (!res.ok) throw new Error(raw?.error?.message || res.statusText);
-
-  const text = raw?.choices?.[0]?.message?.content || "";
-  return { text, raw };
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Уніфікований роутер для текстових провайдерів
-export async function aiTextRouter(
-  env: any,
-  provider: TextProvider,
-  prompt: string,
-  model?: string
-) {
-  if (provider === "gemini") return geminiText(env, prompt, model);
-  if (provider === "openrouter") return openrouterText(env, prompt, model);
-  throw new Error(`Unsupported provider: ${provider}`);
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// CF Workers AI Vision (наприклад @cf/llava-hf/llava-1.5-7b)
-// Очікуємо, що env.CF_VISION = "@"-шлях моделі, напр. "@cf/llava-hf/llava-1.5-7b"
-export async function cfVision(env: any, imageUrl: string, prompt: string) {
+  const accountId = env.CF_ACCOUNT_ID;
   const token = env.CLOUDFLARE_API_TOKEN;
-  const model = env.CF_VISION || "@cf/llava-hf/llava-1.5-7b";
-  if (!token) throw new Error("Missing CLOUDFLARE_API_TOKEN");
 
-  // 1) Дістаємо account id (cid) з verify, якщо не заданий явно
-  let accountId = env.CF_ACCOUNT_ID;
-  if (!accountId) {
-    const verify = await fetch(
-      "https://api.cloudflare.com/client/v4/user/tokens/verify",
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    const vj = await verify.json();
-    accountId = vj?.result?.cid || vj?.result?.account_id;
-    if (!accountId) throw new Error("Cannot resolve Cloudflare Account ID");
+  if (!accountId) return err("CF Vision error: missing CF_ACCOUNT_ID", 400);
+  if (!token) return err("CF Vision error: missing CLOUDFLARE_API_TOKEN", 400);
+  if (!imgUrl) return err("CF Vision error: missing 'img' query param", 400);
+
+  // Модель з підтримкою image+text. Підійде стабільна llava 1.5 7B (Workers AI)
+  const model = "@cf/llava-hf/llava-1.5-7b-hf";
+  const url = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(
+    accountId as string
+  )}/ai/run/${encodeURIComponent(model)}`;
+
+  const payload = {
+    // Workers AI приймає зовнішні URL-и зображень у цьому форматі
+    image: imgUrl,
+    prompt,
+  };
+
+  let raw = "";
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    raw = await res.text();
+    if (!res.ok) return err(`CF Vision ${res.status}: ${raw || res.statusText}`, res.status);
+
+    let json: any;
+    try { json = JSON.parse(raw); } catch {
+      return err(`CF Vision parse error: ${raw.slice(0, 300)}`, 502);
+    }
+
+    const text =
+      json?.result?.description ??
+      json?.result?.output ??
+      json?.result?.[0]?.text ??
+      json?.result?.text ??
+      "";
+
+    if (!text) {
+      return err(`CF Vision empty text. Raw: ${raw.slice(0, 500)}`, 502);
+    }
+
+    return ok({ provider: "cf-vision", text, raw: json });
+  } catch (e: any) {
+    return err(`CF Vision error: ${e?.message || e}`);
   }
+}
 
-  // 2) Викликаємо AI run
-  const runUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`;
-  const res = await fetch(runUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      // формат для LLaVA-сумісних моделей
-      prompt,
-      image: [imageUrl],
-    }),
-  });
-
-  const raw = await res.json();
-  if (!res.ok) {
-    const msg = raw?.errors?.[0]?.message || res.statusText;
-    throw new Error(msg);
+/* -------------------------- TEXT ROUTER -------------------------- */
+/** Простий роутер для /ai/text/:provider */
+export async function aiTextRouter(
+  env: EnvLike,
+  provider: string,
+  prompt: string,
+  opts: { model?: string } = {}
+) {
+  if (provider === "gemini") {
+    return geminiText(env, opts.model || "models/gemini-2.5-flash", prompt);
   }
-
-  const text =
-    raw?.result?.response ||
-    raw?.result?.description ||
-    raw?.result?.text ||
-    "";
-
-  return { text, raw };
+  return err(`Unknown text provider: ${provider}`, 400);
 }
