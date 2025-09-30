@@ -3,7 +3,6 @@ import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { handleDiagnostics } from "./diagnostics";
 import { geminiAskText } from "./ai/gemini";
-import { openrouterAskText } from "./ai/openrouter";
 
 export interface Env {
   BOT_TOKEN: string;
@@ -61,42 +60,32 @@ export default {
         const msg = update?.message;
         const text: string | undefined = msg?.text;
         const chatId = msg?.chat?.id;
+
         if (text === "/ping" && chatId) {
           await pingCommand(env as any, chatId);
           return json({ ok: true, handled: "ping" });
         }
 
-        // Якщо прийшла звичайна текстова фраза — відповідаємо LLM
-        if (text && chatId && !text.startsWith("/")) {
-          let reply: string | null = null;
+        // /ask <prompt>
+        if (text?.startsWith("/ask") && chatId) {
+          const prompt = text.replace(/^\/ask\s*/, "").trim();
+          if (!prompt) {
+            await tgSendMessage(env as any, chatId, "❗ Введи запит після /ask");
+            return json({ ok: false, error: "empty prompt" }, 400);
+          }
 
-          // 1) primary: Gemini
           try {
-            if (env.GEMINI_API_KEY) {
-              reply = await geminiAskText(env as any, text);
-            }
+            const answer = await geminiAskText(env as any, prompt);
+            await tgSendMessage(env as any, chatId, answer);
+            return json({ ok: true, handled: "ask" });
           } catch (e: any) {
-            // падіння Gemini не ламає флоу — переходимо на fallback
-            console.warn("Gemini failed, will try OpenRouter:", e?.message || e);
+            await tgSendMessage(
+              env as any,
+              chatId,
+              `⚠️ Gemini error: ${e?.message || String(e)}`,
+            );
+            return json({ ok: false, error: "gemini failed" }, 500);
           }
-
-          // 2) fallback: OpenRouter (лише якщо є ключ і попередній крок не дав відповіді)
-          if (!reply && env.OPENROUTER_API_KEY) {
-            try {
-              reply = await openrouterAskText(env as any, text);
-            } catch (e: any) {
-              console.error("OpenRouter failed:", e?.message || e);
-            }
-          }
-
-          // 3) Якщо нічого не вийшло — м’яке повідомлення користувачу
-          if (!reply) {
-            reply =
-              "На жаль, зараз не можу відповісти. Спробуй ще раз трохи пізніше 🙏";
-          }
-
-          await tgSendMessage(env as any, chatId, reply);
-          return json({ ok: true, handled: "chat" });
         }
 
         // callback
