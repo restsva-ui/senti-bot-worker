@@ -1,204 +1,145 @@
 // src/ai/providers.ts
-// Єдині точки інтеграції з ШІ-провайдерами + спільні утиліти
 
-export type AIResult =
-  | { ok: true; text: string; provider: string }
-  | { ok: false; provider: string; error: string; retryable: boolean };
+export interface AIEnv {
+  // текстові провайдери
+  GEMINI_API_KEY?: string;
+  DEEPSEEK_API_KEY?: string;
+  OPENROUTER_API_KEY?: string;
 
-export interface Provider {
-  name: string;
-  call: (env: Env, prompt: string, signal: AbortSignal) => Promise<AIResult>;
-  // Чи ввімкнений провайдер (напр. немає ключа — вимикаємо)
-  enabled: (env: Env) => boolean;
+  // для CF Vision (ми вже налаштували)
+  CF_VISION: string;
+  CLOUDFLARE_API_TOKEN: string;
 }
 
-// ---- helpers ---------------------------------------------------------------
+// ---------------------- helpers ----------------------
 
-const toAIError = (provider: string, e: unknown, retryable = true): AIResult => {
-  const msg =
-    e instanceof Error ? `${e.name}: ${e.message}` : typeof e === "string" ? e : "Unknown error";
-  // Деякі тексти помилок не варто ретраїти (400/401/403)
-  const m = msg.toLowerCase();
-  const hard =
-    m.includes("401") || m.includes("unauthorized") ||
-    m.includes("403") || m.includes("forbidden") ||
-    m.includes("invalid") || m.includes("bad request") ||
-    m.includes("unsupported");
-  return { ok: false, provider, error: msg, retryable: retryable && !hard };
-};
-
-// таймаут для будь-якого провайдера (захист від «зависань»)
-export const withTimeout = async <T>(
-  ms: number,
-  task: (signal: AbortSignal) => Promise<T>,
-): Promise<T> => {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort("timeout"), ms);
-  try {
-    return await task(ctrl.signal);
-  } finally {
-    clearTimeout(t);
-  }
-};
-
-// компактний вирівнювач пробілів
-export const normalize = (s: string) =>
-  s.replace(/\s+/g, " ").replace(/^[\s\r\n]+|[\s\r\n]+$/g, "");
-
-// ---- Gemini (Google) -------------------------------------------------------
-
-async function callGemini(env: Env, prompt: string, signal: AbortSignal): Promise<AIResult> {
-  try {
-    const key = env.GEMINI_API_KEY;
-    // Можна змінити модель за бажанням
-    const model = "gemini-1.5-flash";
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
-      {
-        method: "POST",
-        signal,
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 512 },
-        }),
-      },
-    );
-    if (!res.ok) {
-      const t = await res.text();
-      throw new Error(`${res.status} ${res.statusText}: ${t}`);
-    }
-    const data = await res.json();
-    const text: string =
-      data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text).join("") ?? "";
-    if (!text) throw new Error("Empty response");
-    return { ok: true, text: normalize(text), provider: "gemini" };
-  } catch (e) {
-    return toAIError("gemini", e);
-  }
+async function toJson(resp: Response) {
+  const text = await resp.text();
+  try { return JSON.parse(text); } catch { return { raw: text }; }
 }
 
-const Gemini: Provider = {
-  name: "gemini",
-  enabled: (env) => Boolean(env.GEMINI_API_KEY),
-  call: callGemini,
-};
-
-// ---- Groq (Llama/Mixtral) --------------------------------------------------
-
-async function callGroq(env: Env, prompt: string, signal: AbortSignal): Promise[AIResult] {
-  try {
-    const key = env.GROQ_API_KEY;
-    const model = "llama-3.1-70b-versatile";
-    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      signal,
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${key}`,
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.2,
-        max_tokens: 512,
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
-    const j = await res.json();
-    const text: string = j?.choices?.[0]?.message?.content ?? "";
-    if (!text) throw new Error("Empty response");
-    return { ok: true, text: normalize(text), provider: "groq" };
-  } catch (e) {
-    return toAIError("groq", e);
-  }
+function json(res: unknown, status = 200) {
+  return new Response(JSON.stringify(res), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }
 
-const Groq: Provider = {
-  name: "groq",
-  enabled: (env) => Boolean(env.GROQ_API_KEY),
-  call: callGroq,
-};
+// ---------------------- TEXT: Gemini ------------------
 
-// ---- OpenRouter (агрегатор моделей) ---------------------------------------
+export async function geminiText(env: AIEnv, prompt: string) {
+  if (!env.GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY is missing");
+  }
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+  const body = {
+    contents: [{ parts: [{ text: prompt }] }],
+  };
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await toJson(resp);
+  if (!resp.ok) throw new Error(`Gemini ${resp.status}: ${JSON.stringify(data)}`);
+  const textOut =
+    data?.candidates?.[0]?.content?.parts?.[0]?.text ??
+    data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text).filter(Boolean).join("\n");
+  return { provider: "gemini", text: textOut, raw: data };
+}
 
-async function callOpenRouter(env: Env, prompt: string, signal: AbortSignal): Promise<AIResult> {
-  try {
-    const key = env.OPENROUTER_API_KEY;
-    // Дозволяємо задати модель через секрет OPENROUTER_MODEL
-    const model = env.OPENROUTER_MODEL || "google/gemma-2-9b-it";
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      signal,
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${key}`,
-        "HTTP-Referer": "https://restSVA.workers.dev", // будь-який валідний реферер
-        "X-Title": "Senti Bot",
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.2,
-        max_tokens: 512,
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
-    const j = await res.json();
-    const text: string = j?.choices?.[0]?.message?.content ?? "";
-    if (!text) throw new Error("Empty response");
-    return { ok: true, text: normalize(text), provider: `openrouter:${model}` };
-  } catch (e) {
-    return toAIError("openrouter", e);
+// ---------------------- TEXT: DeepSeek ----------------
+
+export async function deepseekText(env: AIEnv, prompt: string) {
+  if (!env.DEEPSEEK_API_KEY) {
+    throw new Error("DEEPSEEK_API_KEY is missing");
+  }
+  const url = "https://api.deepseek.com/chat/completions";
+  const body = {
+    model: "deepseek-chat",
+    messages: [{ role: "user", content: prompt }],
+    stream: false,
+  };
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "authorization": `Bearer ${env.DEEPSEEK_API_KEY}`,
+    },
+    body: JSON.stringify(body),
+  });
+  const data = await toJson(resp);
+  if (!resp.ok) throw new Error(`DeepSeek ${resp.status}: ${JSON.stringify(data)}`);
+  const textOut = data?.choices?.[0]?.message?.content ?? "";
+  return { provider: "deepseek", text: textOut, raw: data };
+}
+
+// ---------------------- TEXT: OpenRouter ---------------
+
+export async function openrouterText(env: AIEnv, prompt: string, model?: string) {
+  if (!env.OPENROUTER_API_KEY) {
+    throw new Error("OPENROUTER_API_KEY is missing");
+  }
+  // За замовчуванням — легка безкоштовна/дешева модель (можеш підмінити)
+  const modelName = model || "google/gemini-2.0-flash-exp";
+  const url = "https://openrouter.ai/api/v1/chat/completions";
+  const body = {
+    model: modelName,
+    messages: [{ role: "user", content: prompt }],
+  };
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "authorization": `Bearer ${env.OPENROUTER_API_KEY}`,
+    // ці два заголовки — рекомендовані OpenRouter (не обов’язкові, але корисні для лімітів/аналітики)
+    "HTTP-Referer": "https://senti-bot-worker.restsva.workers.dev",
+    "X-Title": "senti-bot-worker",
+  };
+  const resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+  const data = await toJson(resp);
+  if (!resp.ok) throw new Error(`OpenRouter ${resp.status}: ${JSON.stringify(data)}`);
+  const textOut = data?.choices?.[0]?.message?.content ?? "";
+  return { provider: "openrouter", model: modelName, text: textOut, raw: data };
+}
+
+// ---------------------- VISION: CF (вже працює) -------
+
+export async function cfVision(env: AIEnv, imageUrl: string, prompt: string) {
+  const runUrl = `${env.CF_VISION}/@cf/meta/llama-3.2-11b-vision-instruct`;
+  const resp = await fetch(runUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "authorization": `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
+    },
+    body: JSON.stringify({ prompt, image_url: imageUrl }),
+  });
+  const data = await toJson(resp);
+  if (!resp.ok) throw new Error(`CF Vision ${resp.status}: ${JSON.stringify(data)}`);
+  const textOut = data?.result?.response ?? data?.response ?? "";
+  return { provider: "cf-vision", text: textOut, raw: data };
+}
+
+// ---------------------- Router -------------------------
+
+export async function aiTextRouter(
+  env: AIEnv,
+  provider: string,
+  prompt: string,
+  model?: string
+) {
+  switch ((provider || "").toLowerCase()) {
+    case "gemini":
+      return geminiText(env, prompt);
+    case "deepseek":
+      return deepseekText(env, prompt);
+    case "openrouter":
+      return openrouterText(env, prompt, model);
+    default:
+      throw new Error(`Unknown provider: ${provider}. Use gemini | deepseek | openrouter`);
   }
 }
 
-const OpenRouter: Provider = {
-  name: "openrouter",
-  enabled: (env) => Boolean(env.OPENROUTER_API_KEY),
-  call: callOpenRouter,
-};
-
-// ---- DeepSeek --------------------------------------------------------------
-
-async function callDeepSeek(env: Env, prompt: string, signal: AbortSignal): Promise<AIResult> {
-  try {
-    const key = env.DEEPSEEK_API_KEY;
-    const model = "deepseek-chat";
-    const res = await fetch("https://api.deepseek.com/chat/completions", {
-      method: "POST",
-      signal,
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${key}`,
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.2,
-        max_tokens: 512,
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
-    const j = await res.json();
-    const text: string = j?.choices?.[0]?.message?.content ?? "";
-    if (!text) throw new Error("Empty response");
-    return { ok: true, text: normalize(text), provider: "deepseek" };
-  } catch (e) {
-    return toAIError("deepseek", e);
-  }
+export function ok(res: unknown, status = 200) { return json(res, status); }
+export function err(e: unknown, status = 500) {
+  return json({ ok: false, error: String(e) }, status);
 }
-
-const DeepSeek: Provider = {
-  name: "deepseek",
-  enabled: (env) => Boolean(env.DEEPSEEK_API_KEY),
-  call: callDeepSeek,
-};
-
-// ---- експорт списку провайдерів за замовчуванням ---------------------------
-
-/**
- * Порядок = пріоритет фейловеру. Можна змінити в одному місці.
- * Провайдер виключається автоматично, якщо немає ключа в Env.
- */
-export const DefaultProviders: Provider[] = [Gemini, Groq, OpenRouter, DeepSeek];
