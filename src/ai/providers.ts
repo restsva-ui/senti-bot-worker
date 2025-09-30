@@ -18,7 +18,7 @@ type Env = {
   GEMINI_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
   CF_VISION?: string; // просто наявність секрету як прапорець
-  CF_AI_GATEWAY_BASE?: string; // optional proxy base
+  CF_AI_GATEWAY_BASE?: string; // optional proxy base (може бути видалений — тоді підемо напряму)
 };
 
 /**
@@ -31,24 +31,23 @@ export async function aiTextRouter(env: Env): Promise<Response> {
 
 /**
  * /diagnostics/ai/gemini/models
- * Безпечно тягне список моделей Gemini напряму або через CF AI Gateway (якщо задано CF_AI_GATEWAY_BASE)
+ * Тягне список моделей Gemini напряму або через CF AI Gateway (якщо задано CF_AI_GATEWAY_BASE)
  */
 export async function geminiListModels(env: Env): Promise<Response> {
   if (!env.GEMINI_API_KEY) {
     return err("Gemini error: GEMINI_API_KEY is missing", 500);
   }
 
-  // endpoint: офіційний Models API
   const base =
     (env.CF_AI_GATEWAY_BASE && env.CF_AI_GATEWAY_BASE.replace(/\/+$/, "")) ||
     "https://generativelanguage.googleapis.com";
+
   const url = `${base}/v1beta/models?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
 
   try {
     const r = await fetch(url, { headers: { accept: "application/json" } });
     const txt = await r.text();
 
-    // іноді gateway повертає порожній body з 200 — відловимо
     if (!txt) return err("Gemini error: Unexpected end of JSON input", 500);
 
     let json: unknown;
@@ -58,8 +57,99 @@ export async function geminiListModels(env: Env): Promise<Response> {
       return err("Gemini error: Bad JSON from upstream", 502);
     }
 
-    // Вирівнюємо у формат, зручний твоїм діагностичним екранам
-    return ok({ provider: "gemini", raw: json });
+    return ok({ provider: "gemini", raw: json as Json });
+  } catch (e: any) {
+    return err(`Gemini error: ${e?.message || String(e)}`, 500);
+  }
+}
+
+/**
+ * /diagnostics/ai/gemini/text
+ * Проста генерація тексту через Gemini (generateContent).
+ * Параметри:
+ *   - q (querystring) — промпт
+ *   - model (querystring, optional) — наприклад: gemini-2.0-flash-001 або gemini-2.5-flash
+ *
+ * ВАЖЛИВО: для endpoint'а потрібно ІД без префікса "models/".
+ */
+export async function geminiText(env: Env, prompt: string, model?: string): Promise<Response> {
+  if (!env.GEMINI_API_KEY) {
+    return err("Gemini error: GEMINI_API_KEY is missing", 500);
+  }
+
+  const base =
+    (env.CF_AI_GATEWAY_BASE && env.CF_AI_GATEWAY_BASE.replace(/\/+$/, "")) ||
+    "https://generativelanguage.googleapis.com";
+
+  // дефолтна швидка й дешева модель, яка гарантовано є у твоєму списку
+  let modelId = (model || "gemini-2.0-flash-001").trim();
+  modelId = modelId.replace(/^models\//, ""); // про всяк випадок
+
+  const url = `${base}/v1beta/models/${encodeURIComponent(modelId)}:generateContent?key=${encodeURIComponent(
+    env.GEMINI_API_KEY,
+  )}`;
+
+  const body = {
+    contents: [
+      {
+        parts: [{ text: prompt || "Hello from Worker" }],
+      },
+    ],
+    // Можеш додати generationConfig за потреби:
+    // generationConfig: { temperature: 0.7, topP: 0.9, maxOutputTokens: 512 }
+  };
+
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+
+    const txt = await r.text();
+    if (!txt) {
+      return ok({
+        provider: "gemini",
+        raw: { success: false, error: [{ code: r.status, message: "empty response body" }], result: null },
+      });
+    }
+
+    let json: any;
+    try {
+      json = JSON.parse(txt);
+    } catch {
+      return err("Gemini error: Bad JSON from upstream", 502);
+    }
+
+    // Нормалізуємо відповідь (витягуємо plain-текст, якщо є)
+    let resultText: string | null = null;
+    try {
+      resultText =
+        json?.candidates?.[0]?.content?.parts
+          ?.map((p: any) => (typeof p?.text === "string" ? p.text : ""))
+          .join("") || null;
+    } catch {
+      /* ignore */
+    }
+
+    // Якщо Google повернув 404 (неправильна модель), підкажемо користувачу
+    if (r.status === 404) {
+      return ok({
+        provider: "gemini",
+        raw: { success: false, error: [{ code: 404, message: "HTTP 404" }], result: null },
+      });
+    }
+
+    return ok({
+      provider: "gemini",
+      raw: json,
+      result: resultText,
+      model: modelId,
+      status: r.status,
+    });
   } catch (e: any) {
     return err(`Gemini error: ${e?.message || String(e)}`, 500);
   }
@@ -68,90 +158,10 @@ export async function geminiListModels(env: Env): Promise<Response> {
 /**
  * /diagnostics/ai/cf-vision
  * Легка перевірка наявності зв’язки з CF Vision.
- * Якщо в ENV є CF_VISION — вважаємо, що інтеграція дозволена.
- * (Минулу помилку “Cannot resolve Cloudflare Account ID” ми не дублюємо тут —
- * ця діагностика просто підтверджує, що у воркері є прапорець/секрет.)
  */
 export async function cfVision(env: Env): Promise<Response> {
   if (!env.CF_VISION) {
     return err("CF Vision error: CF_VISION secret is missing", 500);
   }
   return ok({ provider: "cf-vision" });
-}
-
-/**
- * /diagnostics/ai/gemini/text
- * Проста перевірка генерації тексту через Gemini
- */
-export async function geminiText(env: Env, text: string, modelName?: string) {
-  if (!env.GEMINI_API_KEY) {
-    return {
-      success: false,
-      error: [{ code: 401, message: "Missing GEMINI_API_KEY" }],
-      result: null,
-    };
-  }
-
-  const model = modelName || "models/gemini-2.5-flash";
-  const url = `https://generativelanguage.googleapis.com/v1beta/${encodeURIComponent(
-    model
-  )}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
-
-  const body = {
-    contents: [
-      {
-        role: "user",
-        parts: [{ text }],
-      },
-    ],
-  };
-
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
-    const txt = await res.text();
-    let json: any = null;
-    try {
-      json = txt ? JSON.parse(txt) : null;
-    } catch {
-      return {
-        success: false,
-        error: [{ code: 500, message: "Gemini text: invalid JSON from API" }],
-        result: null,
-      };
-    }
-
-    if (!res.ok) {
-      const msg =
-        (json && (json.error?.message || json.message)) ||
-        `HTTP ${res.status}`;
-      return {
-        success: false,
-        error: [{ code: res.status, message: msg }],
-        result: null,
-      };
-    }
-
-    const candidate = json?.candidates?.[0];
-    const parts = candidate?.content?.parts || [];
-    const out = parts
-      .map((p: any) => (typeof p?.text === "string" ? p.text : ""))
-      .join("");
-
-    return {
-      success: true,
-      error: [],
-      result: { text: out, raw: json },
-    };
-  } catch (err: any) {
-    return {
-      success: false,
-      error: [{ code: 500, message: `Gemini fetch error: ${err?.message || err}` }],
-      result: null,
-    };
-  }
 }
