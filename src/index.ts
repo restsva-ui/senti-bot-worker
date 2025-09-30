@@ -6,6 +6,8 @@ export interface Env {
   BOT_TOKEN: string;
   TELEGRAM_SECRET_TOKEN?: string;
   WEBHOOK_SECRET?: string; // fallback
+  CF_VISION: string;
+  CLOUDFLARE_API_TOKEN: string;
 }
 
 function json(res: unknown, status = 200) {
@@ -25,12 +27,40 @@ export default {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
+    // vision-test endpoint
+    if (method === "GET" && url.pathname === "/vision-test") {
+      try {
+        const resp = await fetch(
+          `${env.CF_VISION}/@cf/meta/llama-3.2-11b-vision-instruct`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              prompt: "Опиши це зображення двома словами.",
+              image_url:
+                "https://upload.wikimedia.org/wikipedia/commons/9/99/Black_square.jpg",
+            }),
+          }
+        );
+
+        const data = await resp.json();
+        return json({ ok: true, data });
+      } catch (err: any) {
+        console.error("Vision error:", err);
+        return json({ ok: false, error: String(err) }, 500);
+      }
+    }
+
     // Telegram webhook
     if (method === "POST" && url.pathname === "/webhook") {
-      // 1) Перевіряємо секрет вебхука (fallback на WEBHOOK_SECRET)
+      // 1) Перевірка секрету вебхука
       const expected = env.TELEGRAM_SECRET_TOKEN || env.WEBHOOK_SECRET || "";
       if (expected) {
-        const got = request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
+        const got =
+          request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
         if (got !== expected) {
           return json({ ok: false, error: "invalid secret" }, 403);
         }
@@ -45,7 +75,7 @@ export default {
       }
 
       try {
-        // 3) Обробка /ping у приватному чаті (просто і надійно)
+        // 3) Обробка /ping
         const msg = update?.message;
         const text: string | undefined = msg?.text;
         const chatId = msg?.chat?.id;
@@ -55,17 +85,16 @@ export default {
           return json({ ok: true, handled: "ping" });
         }
 
-        // 4) Callback-кнопки (на майбутнє)
+        // 4) Callback
         const cb = update?.callback_query;
         if (cb?.id && cb?.message?.chat?.id) {
           await tgSendMessage(env, cb.message.chat.id, `tap: ${cb.data ?? ""}`);
           return json({ ok: true, handled: "callback" });
         }
 
-        // 5) За замовчуванням — no-op
+        // 5) За замовчуванням
         return json({ ok: true, noop: true });
       } catch (e: any) {
-        // Лог у воркері для діагностики
         console.error("Webhook error:", e?.message || e);
         return json({ ok: false, error: "internal" }, 500);
       }
