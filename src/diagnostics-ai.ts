@@ -1,11 +1,14 @@
 // src/diagnostics-ai.ts
-// AI діагностика/проксі. Тут зібрані лише службові роути для тестів.
-// Мікрокрок: додано підтримку POST /ai/text/gemini (JSON body).
+// Службові AI-ендпоїнти для ручних перевірок.
 
-import { cfVision, aiTextRouter, geminiListModels, ok, err } from "./ai/providers";
+import {
+  cfVision,
+  aiTextRouter,
+  geminiListModels,
+  ok,
+  err,
+} from "./ai/providers";
 
-// Локальна мінімальна типізація, щоб уникнути кола імпортів з index.ts
-// (aiTextRouter працює і з `env as any`)
 interface Env {
   GEMINI_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
@@ -14,6 +17,7 @@ interface Env {
   [k: string]: unknown;
 }
 
+// ГОЛОВНИЙ ХЕНДЛЕР AI ДІАГНОСТИКИ
 export async function handleDiagnosticsAI(
   request: Request,
   env: Env,
@@ -21,8 +25,7 @@ export async function handleDiagnosticsAI(
 ): Promise<Response | null> {
   const path = url.pathname;
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // CF Vision (GET)
+  // ───────── CF Vision (GET)
   // /ai/vision/cf?img=<URL>&q=<prompt>
   if (request.method === "GET" && path === "/ai/vision/cf") {
     const img = url.searchParams.get("img") || "";
@@ -37,8 +40,7 @@ export async function handleDiagnosticsAI(
     }
   }
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // Gemini: список моделей (GET)
+  // ───────── Gemini: список моделей (GET)
   // /ai/models/gemini
   if (request.method === "GET" && path === "/ai/models/gemini") {
     try {
@@ -49,13 +51,11 @@ export async function handleDiagnosticsAI(
     }
   }
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // Gemini: текст (GET)
+  // ───────── Gemini: текст (GET)
   // /ai/text/gemini?model=<model>&q=<text>
-  if (path === "/ai/text/gemini" && request.method === "GET") {
+  if (request.method === "GET" && path === "/ai/text/gemini") {
     const q = url.searchParams.get("q") || "";
-    const model =
-      url.searchParams.get("model") || "models/gemini-2.5-flash";
+    const model = url.searchParams.get("model") || "models/gemini-2.5-flash";
     if (!q) return err("missing 'q' query param", 400);
 
     try {
@@ -66,11 +66,9 @@ export async function handleDiagnosticsAI(
     }
   }
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // ✅ МІКРОКРОК: Gemini: текст (POST)
-  // POST /ai/text/gemini
+  // ───────── Gemini: текст (POST)
   // body: { "q": "...", "model": "models/gemini-2.5-flash" }
-  if (path === "/ai/text/gemini" && request.method === "POST") {
+  if (request.method === "POST" && path === "/ai/text/gemini") {
     let body: any;
     try {
       body = await request.json();
@@ -90,13 +88,11 @@ export async function handleDiagnosticsAI(
     }
   }
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // OpenRouter: текст (GET) — залишаємо як було
+  // ───────── OpenRouter: текст (GET)
   // /ai/text/openrouter?model=<model>&q=<text>
-  if (path === "/ai/text/openrouter" && request.method === "GET") {
+  if (request.method === "GET" && path === "/ai/text/openrouter") {
     const q = url.searchParams.get("q") || "";
-    const model =
-      url.searchParams.get("model") || "deepseek/deepseek-chat";
+    const model = url.searchParams.get("model") || "deepseek/deepseek-chat";
     if (!q) return err("missing 'q' query param", 400);
 
     try {
@@ -107,6 +103,8 @@ export async function handleDiagnosticsAI(
     }
   }
 
-  // Невідомий шлях — повертати у вищий роутер
   return null;
 }
+
+// Для зворотної сумісності з існуючим імпортом у diagnostics.ts:
+export { handleDiagnosticsAI as handleAIDiagnostics };
