@@ -1,49 +1,56 @@
 // src/commands/registry.ts
-// Єдиний реєстр. Повертає мапу команд та дає findCommandByName.
-// Уніфікована сигнатура виклику команд: (env, update).
+// Реєстр команд + утиліти пошуку/ввімкнення AI
 
-import type { TgUpdate } from "../types";
-import type { TgEnv } from "../utils/telegram";
+type Handler = (ctx: any, args?: any) => Promise<any> | any;
 
-// Імпорти команд (ми їх лагодитимемо на етапі 2)
-import start from "./start";
-import help from "./help";
-import ping from "./ping";
-import wiki from "./wiki";
-// ai підʼєднаємо тільки коли AI_ENABLED=true і файл не зламаний
-let ai: ((env: TgEnv, update: TgUpdate) => Promise<void>) | undefined;
-try {
-  // @ts-ignore
-  const mod = await import("./ai");
-  ai = (mod.ai ?? mod.default) as any;
-} catch (_) {
-  ai = undefined;
-}
+// Безпечні імпорти (named || default)
+import startNamed, { start as startExport } from "./start";
+const start: Handler = (startExport as any) ?? (startNamed as any);
 
-export type CommandFn = (env: TgEnv, update: TgUpdate) => Promise<void>;
+import helpNamed, { help as helpExport } from "./help";
+const help: Handler = (helpExport as any) ?? (helpNamed as any);
 
-const REGISTRY = new Map<string, CommandFn>();
+import pingNamed, { ping as pingExport } from "./ping";
+const ping: Handler = (pingExport as any) ?? (pingNamed as any);
 
-function register(name: string, fn: any) {
-  if (typeof fn === "function") REGISTRY.set(name, fn as CommandFn);
-}
+import healthNamed, { health as healthExport } from "./health";
+const health: Handler = (healthExport as any) ?? (healthNamed as any);
 
-// базовий набір
-register("start", start);
-register("help", help);
-register("ping", ping);
-register("wiki", wiki);
+import wikiDefault, {
+  wiki as wikiExport,
+  wikiSetAwait,
+  wikiMaybeHandleFreeText,
+} from "./wiki";
+const wiki: Handler = (wikiExport as any) ?? (wikiDefault as any);
 
-// умовно додаємо ai
+// AI може бути відключений
+import aiNamed, { ai as aiExport } from "./ai";
+const aiHandler: Handler | undefined = (aiExport as any) ?? (aiNamed as any);
+
+// внутрішня мапа
+const MAP: Record<string, Handler> = {
+  start,
+  help,
+  ping,
+  health,
+  wiki,
+};
+
+// керування AI-видимістю
 export function attachAI(enabled: boolean) {
-  if (enabled && ai) REGISTRY.set("ai", ai as CommandFn);
-  else REGISTRY.delete("ai");
+  if (enabled && aiHandler) MAP.ai = aiHandler;
+  else delete MAP.ai;
 }
 
-export function getCommands(): Map<string, CommandFn> {
-  return REGISTRY;
+// пошук хендлера
+export function findCommandByName(name: string): Handler | undefined {
+  return MAP[name];
 }
 
-export function findCommandByName(name: string): CommandFn | undefined {
-  return REGISTRY.get(name.toLowerCase());
+// (опційно) віддати список видимих команд — зручно для /help
+export function listVisible(): string[] {
+  return Object.keys(MAP);
 }
+
+// реекспорт wiki-хелперів, якщо десь потрібні
+export { wikiSetAwait, wikiMaybeHandleFreeText };
