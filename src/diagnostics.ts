@@ -17,22 +17,25 @@ function err(e: unknown, status = 400) {
   return json({ ok: false, status, error: msg });
 }
 
-export async function handleDiagnostics(request: Request, env: Record<string, string>, url: URL) {
-  // /health уже обробляється в index.ts — тут тільки /ai/*
+export async function handleDiagnostics(
+  request: Request,
+  env: Record<string, string>,
+  url: URL,
+) {
   if (!url.pathname.startsWith("/ai/")) return null;
 
   try {
-    // GET /ai/text?provider=gemini|openrouter&prompt=...
+    // /ai/text
     if (request.method === "GET" && url.pathname === "/ai/text") {
       const provider = url.searchParams.get("provider") || "gemini";
       const prompt = url.searchParams.get("prompt") || "Скажи Привіт!";
 
       if (provider === "gemini") {
-        const modelParam = (url.searchParams.get("model") ||
+        const model = (url.searchParams.get("model") ||
           "models/gemini-1.5-flash") as
           | "models/gemini-1.5-flash"
           | "models/gemini-1.5-pro";
-        const out = await runGemini(env, prompt, modelParam);
+        const out = await runGemini(env, prompt, model);
         return ok(out, 200);
       }
 
@@ -45,12 +48,11 @@ export async function handleDiagnostics(request: Request, env: Record<string, st
       return err(`Unknown provider "${provider}"`, 400);
     }
 
-    // GET /ai/vision?url=<imageUrl>&prompt=...
+    // /ai/vision
     if (request.method === "GET" && url.pathname === "/ai/vision") {
       const imageUrl = url.searchParams.get("url");
       const prompt =
-        url.searchParams.get("prompt") ||
-        "Опиши зображення стисло українською.";
+        url.searchParams.get("prompt") || "Опиши зображення стисло українською.";
       if (!imageUrl) return err("Missing image url", 400);
 
       const model =
@@ -61,19 +63,19 @@ export async function handleDiagnostics(request: Request, env: Record<string, st
       return ok(out, 200);
     }
 
-    // GET /ai/token/verify?token=...
+    // /ai/token/verify
     if (request.method === "GET" && url.pathname === "/ai/token/verify") {
       const token = url.searchParams.get("token");
       if (!token) return err("Missing token", 400);
-      // простий пінг у Cloudflare API, щоб переконатись, що токен живий
-      const ping = await fetch("https://api.cloudflare.com/client/v4/user/tokens/verify", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+
+      const ping = await fetch(
+        "https://api.cloudflare.com/client/v4/user/tokens/verify",
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
       const data = await ping.json().catch(() => ({}));
       return ok(data, ping.status);
     }
 
-    // не впізнали маршрут — нехай обробить index.ts
     return null;
   } catch (e) {
     return err(e, 400);
