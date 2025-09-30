@@ -1,74 +1,92 @@
 // src/index.ts
 import type { TgUpdate } from "./types";
+import { getCommands, findCommandByName, attachAI } from "./commands/registry";
 import { sendMessage } from "./utils/telegram";
-import { COMMANDS } from "./commands/registry";
-import { wikiMaybeHandleFreeText } from "./commands/wiki";
 
 type Env = {
   BOT_TOKEN: string;
   API_BASE_URL?: string;
   OWNER_ID?: string;
   LIKES_KV?: KVNamespace;
+
+  // флаг фічі
+  AI_ENABLED?: string;
 };
 
-async function handleUpdate(update: TgUpdate, env: Env) {
-  const msg = update.message ?? update.edited_message;
-  if (!msg) return;
+const WEBHOOK_PATH = "/webhook";
 
-  // === 1) Якщо команда ===
-  const ent = msg.entities?.[0];
-  const isCommand = ent && ent.type === "bot_command" && ent.offset === 0;
-  if (isCommand) {
-    const m = msg.text?.match(/^\/(\w+)(?:@[\w_]+)?/);
-    const cmd = (m?.[1] || "").toLowerCase();
-
-    const fn = (COMMANDS as any)[cmd];
-    if (typeof fn === "function") {
-      try {
-        await fn(update, env);
-        return;
-      } catch (e) {
-        console.warn("cmd error", cmd, e);
-        await sendMessage(env, msg.chat.id, "❌ Помилка у виконанні команди.");
-        return;
-      }
-    } else {
-      console.warn("Unknown command:", cmd);
-      return;
-    }
-  }
-
-  // === 2) Якщо не команда — дати шанс Wiki обробити вільний текст ===
-  try {
-    const handled = await wikiMaybeHandleFreeText(update, env);
-    if (handled) return;
-  } catch (e) {
-    console.warn("wiki free-text error", e);
-  }
-
-  // === 3) Ігноруємо все інше ===
-  return;
+function parseJson<T = unknown>(req: Request): Promise<T> {
+  return req.json() as Promise<T>;
 }
 
-// Worker entrypoint
-export default {
-  async fetch(req: Request, env: Env) {
-    if (req.method === "POST" && new URL(req.url).pathname === "/webhook") {
-      const secret = req.headers.get("x-telegram-bot-api-secret-token");
-      if (secret && secret !== "senti1984") {
-        return new Response("Forbidden", { status: 403 });
-      }
+function isCommandEntity(update: TgUpdate) {
+  const e = update.message?.entities?.[0];
+  return e && e.type === "bot_command" && e.offset === 0;
+}
 
-      const update: TgUpdate = await req.json();
-      console.info("update:", JSON.stringify(update));
-      try {
-        await handleUpdate(update, env);
-      } catch (err) {
-        console.error("handleUpdate error", err);
+function pickCmdToken(text: string | undefined): string | null {
+  if (!text) return null;
+  const m = text.match(/^\/(\w+)(?:@[\w_]+)?/);
+  return (m?.[1] || "").toLowerCase() || null;
+}
+
+async function routeUpdate(env: Env, update: TgUpdate): Promise<void> {
+  try {
+    // оновлюємо реєстр з урахуванням фічі AI
+    attachAI(String(env.AI_ENABLED).toLowerCase() === "true");
+
+    // 1) якщо це команда — шукаємо та виконуємо
+    if (isCommandEntity(update)) {
+      const token = pickCmdToken(update.message?.text);
+      if (token) {
+        const fn = findCommandByName(token);
+        if (fn) {
+          await fn(env, update);
+          return;
+        } else {
+          // невідома команда — тихо ігноруємо
+          return;
+        }
       }
+    }
+
+    // 2) сюди можна додати free-text хендлери (наприклад wiki-await) — на етапі 2
+
+  } catch (err) {
+    console.error("routeUpdate error:", err);
+    const chatId = update.message?.chat?.id;
+    if (chatId) {
+      await sendMessage(env, chatId, "❌ Помилка у виконанні команди.", {
+        parse_mode: "Markdown",
+      }).catch(() => {});
+    }
+  }
+}
+
+function json(data: unknown, init?: ResponseInit) {
+  return new Response(JSON.stringify(data), {
+    headers: { "content-type": "application/json; charset=utf-8" },
+    ...init,
+  });
+}
+
+export default {
+  async fetch(req: Request, env: Env): Promise<Response> {
+    const url = new URL(req.url);
+
+    // health
+    if (req.method === "GET" && url.pathname === "/health") {
+      return json({ ok: true, ts: Date.now() });
+    }
+
+    // webhook
+    if (req.method === "POST" && url.pathname === WEBHOOK_PATH) {
+      const update = await parseJson<TgUpdate>(req);
+      console.info("update:", JSON.stringify(update));
+      await routeUpdate(env, update);
       return new Response("OK");
     }
 
-    return new Response("Senti bot worker");
+    return new Response("Not found", { status: 404 });
   },
-};
+} satisfies ExportedHandler<Env>;
