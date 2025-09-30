@@ -1,133 +1,95 @@
 // src/commands/wiki.ts
-// Легка, але надійна реалізація /wiki з підтримкою "очікування наступного повідомлення" через KV.
-// Експортує іменовані обробники: wiki, wikiSetAwait, wikiMaybeHandleFreeText.
-// Також залишено export default для сумісності (якщо десь викликається за замовчуванням).
+import type { Env, TgCtx, TgMessage } from "../types";
 
-// Типи навмисно "any", щоб не ламати збірку в esbuild без TS typecheck.
-type Ctx = any;
+type Lang = "uk" | "ru" | "en" | "de" | "fr";
 
-const AWAIT_KEY = (chatId: string | number) => `await:wiki:${chatId}`;
-const AWAIT_TTL_SECONDS = 60 * 5; // 5 хвилин
+const DEFAULT_LANG: Lang = "uk";
 
-async function fetchWikiSummary(lang: string, query: string) {
-  const q = query.trim();
-  const safeTitle = encodeURIComponent(q.replace(/\s+/g, "_"));
-  const url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${safeTitle}`;
+function parseArgs(text: string) {
+  // /wiki [lang] <query>
+  const withoutCmd = text.replace(/^\/wiki(@\w+)?\s*/i, "").trim();
+  if (!withoutCmd) return { lang: DEFAULT_LANG, q: "" };
 
-  const r = await fetch(url, { headers: { "accept": "application/json" } });
-  if (!r.ok) throw new Error(`wiki ${lang} ${q}: ${r.status}`);
-  const data = await r.json() as any;
-
-  const title = data.title || q;
-  const extract: string = data.extract || "";
-  const link = data.content_urls?.desktop?.page
-    ?? `https://${lang}.wikipedia.org/wiki/${safeTitle}`;
-
-  return { title, extract, link };
-}
-
-function detectLangAndQuery(text: string) {
-  // Варіанти:
-  // 1) "en Albert Einstein"
-  // 2) "Київ"
-  const parts = text.trim().split(/\s+/);
-  const maybeLang = (parts[0] || "").toLowerCase();
-  const supported = new Set(["uk", "ru", "en", "de", "fr"]);
-
-  if (supported.has(maybeLang) && parts.length > 1) {
-    return { lang: maybeLang, query: parts.slice(1).join(" ") };
+  const m = withoutCmd.match(/^(uk|ru|en|de|fr)\s+(.+)$/i);
+  if (m) {
+    return { lang: m[1].toLowerCase() as Lang, q: m[2].trim() };
   }
-  return { lang: "uk", query: text.trim() };
+  return { lang: DEFAULT_LANG, q: withoutCmd };
 }
 
-async function reply(ctx: Ctx, text: string, opts?: any) {
-  // Узгоджено з іншими командами: в них найчастіше є ctx.reply
-  if (typeof ctx?.reply === "function") return ctx.reply(text, opts);
-
-  // Бекап: якщо є chatId + send, спробуємо мінімальний шлях
-  if (ctx?.chatId && typeof ctx?.send === "function") return ctx.send(ctx.chatId, text);
-
-  // Останній варіант — просто нічого не робимо, щоб не зламати збірку
+async function send(ctx: TgCtx, chatId: number, text: string, replyTo?: number) {
+  const url = `${ctx.env.API_BASE_URL || "https://api.telegram.org"}/bot${ctx.env.BOT_TOKEN}/sendMessage`;
+  const body = { chat_id: chatId, text, reply_to_message_id: replyTo, disable_web_page_preview: false };
+  await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 }
 
-/** Увімкнути режим "чекаю наступне повідомлення як запит wiki" */
-export async function wikiSetAwait(ctx: Ctx) {
-  const chatId = ctx?.chat?.id ?? ctx?.chatId ?? ctx?.update?.message?.chat?.id;
-  if (!chatId) return;
-
-  const kv = ctx?.env?.LIKES_KV || ctx?.env?.KV || ctx?.LIKES_KV;
-  if (kv?.put) {
-    await kv.put(AWAIT_KEY(chatId), "1", { expirationTtl: AWAIT_TTL_SECONDS });
-  }
-}
-
-/** Якщо юзер відповів наступним повідомленням — перехоплюємо та виконуємо wiki */
-export async function wikiMaybeHandleFreeText(ctx: Ctx, text: string) {
-  const chatId = ctx?.chat?.id ?? ctx?.chatId ?? ctx?.update?.message?.chat?.id;
-  if (!chatId) return false;
-
-  const kv = ctx?.env?.LIKES_KV || ctx?.env?.KV || ctx?.LIKES_KV;
-  if (!kv?.get) return false;
-
-  const flag = await kv.get(AWAIT_KEY(chatId));
-  if (!flag) return false;
-
-  // Зняти прапорець, щоб не зациклитись
-  if (kv?.delete) await kv.delete(AWAIT_KEY(chatId));
-
-  await wiki(ctx, text);
-  return true;
-}
-
-/** Основний обробник команди /wiki */
-export async function wiki(ctx: Ctx, argLine?: string) {
-  const argsRaw =
-    argLine ??
-    ctx?.args?.join?.(" ") ??
-    ctx?.text?.trim?.() ??
-    "";
-
-  const trimmed = (argsRaw || "").trim();
-
-  // Якщо аргументів нема — вмикаємо "очікування" та просимо ввести запит
-  if (!trimmed) {
-    await wikiSetAwait(ctx);
-    await reply(
-      ctx,
-      "✍️ Введіть запит для Wiki у наступному повідомленні (відповіддю)."
-    );
-    return;
+async function fetchSummary(lang: Lang, q: string) {
+  // 1) REST Summary
+  const url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(q)}`;
+  const r = await fetch(url);
+  if (r.ok) {
+    const j = await r.json();
+    if (j?.extract && j?.content_urls?.desktop?.page) {
+      return { title: j.title || q, extract: j.extract as string, link: j.content_urls.desktop.page as string };
+    }
   }
 
-  const { lang, query } = detectLangAndQuery(trimmed);
-
-  try {
-    // 1) Спроба вибраною мовою
-    let res = await fetchWikiSummary(lang, query);
-
-    // Якщо тексту майже немає — fallback на en
-    if (!res.extract || res.extract.length < 20) {
-      if (lang !== "en") {
-        res = await fetchWikiSummary("en", query);
+  // 2) OpenSearch fallback
+  const os = await fetch(`https://${lang}.wikipedia.org/w/api.php?action=opensearch&format=json&search=${encodeURIComponent(q)}&limit=1`);
+  if (os.ok) {
+    const arr = await os.json();
+    const title = (arr?.[1]?.[0] as string) || q;
+    if (title) {
+      const r2 = await fetch(`https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`);
+      if (r2.ok) {
+        const j2 = await r2.json();
+        if (j2?.extract && j2?.content_urls?.desktop?.page) {
+          return { title: j2.title || title, extract: j2.extract as string, link: j2.content_urls.desktop.page as string };
+        }
       }
     }
-
-    const titleLine = `📚 <b>${res.title}</b>`;
-    const body = res.extract?.trim()
-      ? res.extract.trim().slice(0, 1800) // трішки обрізаємо, щоб не спамити
-      : "Нічого не знайшов у статті.";
-
-    const linkLine = `\n\n🔗 <a href="${res.link}">${res.link}</a>`;
-
-    await reply(ctx, `${titleLine}\n\n${body}${linkLine}`, {
-      parse_mode: "HTML",
-      disable_web_page_preview: false,
-    });
-  } catch (e) {
-    // Сама проста і дружня відповідь
-    await reply(ctx, `Не вдалося отримати статтю за запитом: ${query}`);
   }
+
+  return null;
 }
 
-// Сумісність з можливим default-імпортом в інших місцях
-export default wiki;
+export async function wikiSetAwait(ctx: TgCtx, chatId: number) {
+  // Робимо режим очікування необовʼязковим — якщо KV нема, просто пропускаємо
+  try { await ctx.env.LIKES_KV?.put(`await:${chatId}`, "1", { expirationTtl: 300 }); } catch {}
+}
+
+export async function wikiMaybeHandleFreeText(ctx: TgCtx, msg: TgMessage) {
+  // Якщо колись буде режим “/wiki → наступне повідомлення”, він не обовʼязковий.
+  return false;
+}
+
+export default async function wiki(ctx: TgCtx, msg: TgMessage) {
+  const chatId = msg.chat.id;
+  const replyTo = msg.message_id;
+
+  try {
+    const text = msg.text || msg.caption || "";
+    const { lang, q } = parseArgs(text);
+
+    if (!q) {
+      await send(ctx, chatId, "📚 Надішли так: `/wiki [uk|ru|en|de|fr] <запит>`\nНапр.: `/wiki Київ` або `/wiki en Vienna`", replyTo);
+      return;
+    }
+
+    const res = await fetchSummary(lang, q);
+    if (!res) {
+      await send(ctx, chatId, `Нічого не знайшов за запитом: *${q}* (${lang}).`, replyTo);
+      return;
+    }
+
+    const out =
+      `📚 *${res.title}*\n\n` +
+      `${res.extract}\n\n` +
+      `🔗 ${res.link}`;
+
+    await send(ctx, chatId, out, replyTo);
+  } catch (e: any) {
+    console.error("wiki error:", e?.stack || e?.message || e);
+    await send(ctx, chatId, "❌ Помилка при пошуку у Вікіпедії.", replyTo);
+  }
+}
