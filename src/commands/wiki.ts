@@ -2,18 +2,13 @@
 import type { Env, TgCtx, TgMessage } from "../types";
 
 type Lang = "uk" | "ru" | "en" | "de" | "fr";
-
 const DEFAULT_LANG: Lang = "uk";
 
 function parseArgs(text: string) {
-  // /wiki [lang] <query>
   const withoutCmd = text.replace(/^\/wiki(@\w+)?\s*/i, "").trim();
   if (!withoutCmd) return { lang: DEFAULT_LANG, q: "" };
-
   const m = withoutCmd.match(/^(uk|ru|en|de|fr)\s+(.+)$/i);
-  if (m) {
-    return { lang: m[1].toLowerCase() as Lang, q: m[2].trim() };
-  }
+  if (m) return { lang: m[1].toLowerCase() as Lang, q: m[2].trim() };
   return { lang: DEFAULT_LANG, q: withoutCmd };
 }
 
@@ -24,7 +19,6 @@ async function send(ctx: TgCtx, chatId: number, text: string, replyTo?: number) 
 }
 
 async function fetchSummary(lang: Lang, q: string) {
-  // 1) REST Summary
   const url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(q)}`;
   const r = await fetch(url);
   if (r.ok) {
@@ -33,8 +27,6 @@ async function fetchSummary(lang: Lang, q: string) {
       return { title: j.title || q, extract: j.extract as string, link: j.content_urls.desktop.page as string };
     }
   }
-
-  // 2) OpenSearch fallback
   const os = await fetch(`https://${lang}.wikipedia.org/w/api.php?action=opensearch&format=json&search=${encodeURIComponent(q)}&limit=1`);
   if (os.ok) {
     const arr = await os.json();
@@ -49,21 +41,18 @@ async function fetchSummary(lang: Lang, q: string) {
       }
     }
   }
-
   return null;
 }
 
 export async function wikiSetAwait(ctx: TgCtx, chatId: number) {
-  // Робимо режим очікування необовʼязковим — якщо KV нема, просто пропускаємо
   try { await ctx.env.LIKES_KV?.put(`await:${chatId}`, "1", { expirationTtl: 300 }); } catch {}
 }
 
-export async function wikiMaybeHandleFreeText(ctx: TgCtx, msg: TgMessage) {
-  // Якщо колись буде режим “/wiki → наступне повідомлення”, він не обовʼязковий.
+export async function wikiMaybeHandleFreeText(_ctx: TgCtx, _msg: TgMessage) {
   return false;
 }
 
-export default async function wiki(ctx: TgCtx, msg: TgMessage) {
+async function wiki(ctx: TgCtx, msg: TgMessage) {
   const chatId = msg.chat.id;
   const replyTo = msg.message_id;
 
@@ -93,3 +82,6 @@ export default async function wiki(ctx: TgCtx, msg: TgMessage) {
     await send(ctx, chatId, "❌ Помилка при пошуку у Вікіпедії.", replyTo);
   }
 }
+
+export { wiki };        // ✅ named export
+export default wiki;    // ✅ default export
