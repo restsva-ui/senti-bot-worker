@@ -1,96 +1,186 @@
-// src/index.ts
-import type { TgUpdate } from "./types";
-import { findCommandByName, attachAI } from "./commands/registry";
-import { sendMessage } from "./utils/telegram";
+// Точка входу Cloudflare Worker для Telegram-бота.
+// ПРИМІТКА: використовуємо BOT_TOKEN (fallback на TELEGRAM_BOT_TOKEN для сумісності).
 
-type Env = {
-  BOT_TOKEN: string;
+import { COMMANDS, wikiMaybeHandleFreeText } from "./commands/registry";
+
+type Json = Record<string, any>;
+
+export interface Env {
+  // головна назва змінної
+  BOT_TOKEN?: string;
+  // запасна (на випадок, якщо десь лишилась стара назва)
+  TELEGRAM_BOT_TOKEN?: string;
+
+  // Базовий URL Telegram API (необов'язковий; за замовченням — офіційний)
   API_BASE_URL?: string;
-  OWNER_ID?: string;
-  LIKES_KV?: KVNamespace;
-  AI_ENABLED?: string; // "true" | "false"
-};
 
-const WEBHOOK_PATH = "/webhook";
+  // (необов'язково) секрет токена для перевірки заголовка X-Telegram-Bot-Api-Secret-Token
+  TELEGRAM_SECRET_TOKEN?: string;
 
-function json(data: unknown, init?: ResponseInit) {
+  // інші ваші змінні також можна описати тут…
+  AI_ENABLED?: string;
+}
+
+function jsonResponse(data: Json, status = 200) {
   return new Response(JSON.stringify(data), {
+    status,
     headers: { "content-type": "application/json; charset=utf-8" },
-    ...init,
   });
 }
 
-// 1) Надійний дешифратор /команди
-function extractCommand(text: string | undefined, botUsername?: string): string | null {
-  if (!text) return null;
-  // варіант 1: починається з /cmd або /cmd@bot
-  const m = text.match(/^\/([a-zA-Z0-9_]+)(?:@([a-zA-Z0-9_]+))?/);
-  if (m) {
-    const [, name, atUser] = m;
-    if (!atUser || !botUsername || atUser.toLowerCase() === botUsername.toLowerCase()) {
-      return name.toLowerCase();
-    }
-  }
-  return null;
+function nowTs() {
+  return Math.floor(Date.now() / 1000);
 }
 
-async function routeUpdate(env: Env, update: TgUpdate): Promise<void> {
-  // Увімк/вимкнути AI на кожному апдейті (дешево і просто)
-  attachAI(String(env.AI_ENABLED).toLowerCase() === "true");
+function getBotToken(env: Env): string {
+  const token = env.BOT_TOKEN ?? env.TELEGRAM_BOT_TOKEN;
+  if (!token) throw new Error("BOT_TOKEN is missing");
+  return token;
+}
 
-  const msg = update.message;
-  const chatId = msg?.chat?.id;
+function getApiBase(env: Env): string {
+  return (env.API_BASE_URL || "https://api.telegram.org").replace(/\/+$/, "");
+}
 
-  // username бота інколи Телеграм підкидає в текст /cmd@MyBot
-  // якщо ти його зберігаєш у змінних — додай; якщо ні, просто працюємо без нього
-  const botUsername = undefined;
-
-  const text = msg?.text ?? "";
-  const cmd = extractCommand(text, botUsername);
-
-  console.log("update text =", text);
-  console.log("parsed cmd =", cmd);
-
-  if (!cmd) {
-    // сюди можна навісити вільний текст (wiki-await)
-    return;
+async function callTelegram(env: Env, method: string, payload: Json) {
+  const token = getBotToken(env);
+  const base = getApiBase(env);
+  const url = `${base}/bot${token}/${method}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Telegram API ${method} failed: ${res.status} ${text}`);
   }
+  return res.json();
+}
 
-  const handler = findCommandByName(cmd);
-  console.log("handler found =", !!handler);
+async function sendMessage(env: Env, chat_id: number | string, text: string, opts: Json = {}) {
+  return callTelegram(env, "sendMessage", {
+    chat_id,
+    text,
+    ...{ parse_mode: "Markdown" },
+    ...opts,
+  });
+}
 
-  if (!handler) {
-    if (chatId) {
-      await sendMessage(env as any, chatId, "❌ Невідома команда.");
-    }
-    return;
-  }
+function isFromTelegram(req: Request, env: Env): boolean {
+  // Якщо TELEGRAM_SECRET_TOKEN задано — перевіряємо заголовок.
+  const expected = env.TELEGRAM_SECRET_TOKEN;
+  if (!expected) return true;
+  const got = req.headers.get("x-telegram-bot-api-secret-token");
+  return got === expected;
+}
 
-  try {
-    await handler(env as any, update);
-  } catch (err) {
-    console.error("handler error:", err);
-    if (chatId) {
-      await sendMessage(env as any, chatId, "❌ Помилка у виконанні команди.");
-    }
-  }
+function parseCommand(text: string): { cmd: string; args: string } | null {
+  if (!text || text[0] !== "/") return null;
+  // відрізаємо /cmd@bot та аргументи
+  const firstSpace = text.indexOf(" ");
+  const head = (firstSpace === -1 ? text : text.slice(0, firstSpace)).trim();
+  const args = (firstSpace === -1 ? "" : text.slice(firstSpace + 1)).trim();
+
+  // /cmd@username -> /cmd
+  const cmd = head.replace(/^\/([^@\s]+)(?:@[\w_]+)?$/, "$1");
+  return { cmd, args };
 }
 
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
-    const url = new URL(req.url);
+  async fetch(req: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+    try {
+      const url = new URL(req.url);
+      const { pathname } = url;
 
-    if (req.method === "GET" && url.pathname === "/health") {
-      return json({ ok: true, ts: Date.now() });
+      // 1) Healthcheck
+      if (req.method === "GET" && pathname === "/health") {
+        return jsonResponse({ ok: true, ts: nowTs() });
+      }
+
+      // 2) Root/info (необов'язково)
+      if (req.method === "GET" && pathname === "/") {
+        return jsonResponse({ ok: true, name: "senti-bot-worker", ts: nowTs() });
+      }
+
+      // 3) Telegram webhook
+      if (pathname === "/webhook") {
+        if (!isFromTelegram(req, env)) {
+          return jsonResponse({ ok: false, error: "forbidden" }, 403);
+        }
+        if (req.method !== "POST") {
+          return jsonResponse({ ok: true, note: "use POST" });
+        }
+
+        let update: any;
+        try {
+          update = await req.json();
+        } catch {
+          return jsonResponse({ ok: false, error: "bad json" }, 400);
+        }
+
+        const msg = update.message;
+        const cbq = update.callback_query;
+        const chatId: number | undefined =
+          msg?.chat?.id ?? cbq?.message?.chat?.id;
+
+        // Якщо це звичайне повідомлення з текстом
+        const text: string | undefined = msg?.text;
+
+        // 3.1 Якщо є команда — роутимо через COMMANDS
+        const parsed = text ? parseCommand(text) : null;
+
+        if (parsed && chatId) {
+          const { cmd, args } = parsed;
+          const handler = (COMMANDS as any)[cmd];
+
+          if (typeof handler === "function") {
+            try {
+              const ctx = {
+                env,
+                update,
+                chatId,
+                text,
+                args,
+                sendMessage: (t: string, opts: Json = {}) => sendMessage(env, chatId, t, opts),
+              };
+              const res = await handler(ctx, args);
+              // якщо хендлер нічого не відправив — даємо м'яку відповідь
+              if (res === undefined) {
+                // нічого
+              }
+            } catch (e: any) {
+              await sendMessage(env, chatId, `⚠️ Помилка команди: ${e?.message || e}`);
+            }
+          } else {
+            // невідома команда
+            await sendMessage(env, chatId, "🙈 Невідома команда. Спробуй /help");
+          }
+
+          return jsonResponse({ ok: true });
+        }
+
+        // 3.2 Якщо вмикнено логіку очікування для wiki — делегуємо
+        if (!parsed && chatId && typeof wikiMaybeHandleFreeText === "function") {
+          const handled = await wikiMaybeHandleFreeText({
+            env,
+            update,
+            chatId,
+            text,
+            sendMessage: (t: string, opts: Json = {}) => sendMessage(env, chatId, t, opts),
+          });
+          if (handled) return jsonResponse({ ok: true, routed: "wiki-free-text" });
+        }
+
+        // 3.3 Інакше — мовчазно ок
+        return jsonResponse({ ok: true });
+      }
+
+      // 4) Якщо шлях невідомий
+      return jsonResponse({ ok: false, error: "not found" }, 404);
+    } catch (e: any) {
+      // Глобальний захист, щоб воркер не падав.
+      return jsonResponse({ ok: false, error: e?.message || String(e) }, 500);
     }
-
-    if (req.method === "POST" && url.pathname === WEBHOOK_PATH) {
-      const update = (await req.json()) as TgUpdate;
-      // без очікування відповіді Телеграму — віддамо 200 і обробимо у фоні
-      routeUpdate(env, update).catch((e) => console.error("routeUpdate fail:", e));
-      return new Response("OK");
-    }
-
-    return new Response("Not found", { status: 404 });
   },
-} satisfies ExportedHandler<Env>;
+};
