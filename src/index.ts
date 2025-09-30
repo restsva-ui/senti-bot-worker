@@ -20,38 +20,58 @@ function json(data: unknown, init?: ResponseInit) {
   });
 }
 
-function isCommandEntity(update: TgUpdate) {
-  const e = update.message?.entities?.[0];
-  return e && e.type === "bot_command" && e.offset === 0;
-}
-
-function pickCmdToken(text: string | undefined): string | null {
+// 1) Надійний дешифратор /команди
+function extractCommand(text: string | undefined, botUsername?: string): string | null {
   if (!text) return null;
-  const m = text.match(/^\/(\w+)(?:@[\w_]+)?/);
-  return (m?.[1] || "").toLowerCase() || null;
+  // варіант 1: починається з /cmd або /cmd@bot
+  const m = text.match(/^\/([a-zA-Z0-9_]+)(?:@([a-zA-Z0-9_]+))?/);
+  if (m) {
+    const [, name, atUser] = m;
+    if (!atUser || !botUsername || atUser.toLowerCase() === botUsername.toLowerCase()) {
+      return name.toLowerCase();
+    }
+  }
+  return null;
 }
 
 async function routeUpdate(env: Env, update: TgUpdate): Promise<void> {
-  try {
-    // вмикаємо/вимикаємо AI в реєстрі кожен апдейт (дешево і надійно)
-    attachAI(String(env.AI_ENABLED).toLowerCase() === "true");
+  // Увімк/вимкнути AI на кожному апдейті (дешево і просто)
+  attachAI(String(env.AI_ENABLED).toLowerCase() === "true");
 
-    if (isCommandEntity(update)) {
-      const cmd = pickCmdToken(update.message?.text);
-      const handler = cmd ? findCommandByName(cmd) : undefined;
-      if (handler) {
-        await handler(env as any, update);
-        return;
-      }
-    }
+  const msg = update.message;
+  const chatId = msg?.chat?.id;
 
-    // тут можна обробляти free-text (wiki-await) — додамо окремо
+  // username бота інколи Телеграм підкидає в текст /cmd@MyBot
+  // якщо ти його зберігаєш у змінних — додай; якщо ні, просто працюємо без нього
+  const botUsername = undefined;
 
-  } catch (err) {
-    console.error("routeUpdate error:", err);
-    const chatId = update.message?.chat?.id;
+  const text = msg?.text ?? "";
+  const cmd = extractCommand(text, botUsername);
+
+  console.log("update text =", text);
+  console.log("parsed cmd =", cmd);
+
+  if (!cmd) {
+    // сюди можна навісити вільний текст (wiki-await)
+    return;
+  }
+
+  const handler = findCommandByName(cmd);
+  console.log("handler found =", !!handler);
+
+  if (!handler) {
     if (chatId) {
-      await sendMessage(env as any, chatId, "❌ Помилка у виконанні команди.").catch(() => {});
+      await sendMessage(env as any, chatId, "❌ Невідома команда.");
+    }
+    return;
+  }
+
+  try {
+    await handler(env as any, update);
+  } catch (err) {
+    console.error("handler error:", err);
+    if (chatId) {
+      await sendMessage(env as any, chatId, "❌ Помилка у виконанні команди.");
     }
   }
 }
@@ -66,7 +86,8 @@ export default {
 
     if (req.method === "POST" && url.pathname === WEBHOOK_PATH) {
       const update = (await req.json()) as TgUpdate;
-      await routeUpdate(env, update);
+      // без очікування відповіді Телеграму — віддамо 200 і обробимо у фоні
+      routeUpdate(env, update).catch((e) => console.error("routeUpdate fail:", e));
       return new Response("OK");
     }
 
