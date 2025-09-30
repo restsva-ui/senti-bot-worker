@@ -1,111 +1,127 @@
 // src/diagnostics-ai.ts
-// Діагностичні ендпоїнти для AI-провайдерів (Cloudflare Worker).
-// Підтримує:
-//   GET  /ai/vision/cf?img=<URL>&q=<prompt>   -> простий sanity-check CF Vision (за твоєю логікою в providers)
-//   GET  /ai/models/gemini                     -> список моделей Gemini
-//   GET  /ai/text/gemini?q=...&model=...       -> простий текст через Gemini (JSON, діагностика)
-//   POST /ai/text/gemini                       -> { q, model } у тілі
-//   GET  /ai/text/openrouter                   -> повертає активного провайдера (як і було у тебе)
-//   GET  /diagnostics/ai/gemini/text           -> те саме, що /ai/text/gemini, для зручності діагностики
-//
-// ВАЖЛИВО: Експортуємо саме handleAIDiagnostics(request, env, url), бо diagnostics.ts викликає з 3-ма аргументами.
+// Діагностичні ендпоїнти для AI-провайдерів.
+// ВАЖЛИВО: ця функція викликається з /diagnostics, а тут ми
+// матчимо ШЛЯХИ, що починаються з /ai/... (тобто без /diagnostics).
 
-import {
-  cfVision,
-  aiTextRouter,
-  geminiListModels,
-  ok,
-  err,
-  // нова функція, яку ти додав у providers.ts
-  geminiText,
-} from "./ai/providers";
+import { ok, err } from "./ai/providers";
+import { aiTextRouter, cfVision, geminiListModels } from "./ai/providers";
 
-interface Env {
-  // базові ключі/флаги з твого проєкту (розширювано без Strict)
+type Env = {
+  AI_PROVIDER?: "gemini" | "openrouter" | "cf-vision";
   GEMINI_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
-  CF_VISION?: string;
-  CF_AI_GATEWAY_BASE?: string;
-  CLOUDFLARE_API_TOKEN?: string;
-  [k: string]: unknown;
+};
+
+// ---- OpenRouter: список моделей -------------------------------------------
+async function openrouterListModels(env: Env): Promise<Response> {
+  if (!env.OPENROUTER_API_KEY) {
+    return err("OpenRouter error: OPENROUTER_API_KEY is missing", 500);
+  }
+  try {
+    const r = await fetch("https://openrouter.ai/api/v1/models", {
+      headers: {
+        "Authorization": `Bearer ${env.OPENROUTER_API_KEY}`,
+        "Accept": "application/json",
+      },
+    });
+    const txt = await r.text();
+    if (!txt) return err("OpenRouter error: empty response", 502);
+
+    let json: unknown;
+    try {
+      json = JSON.parse(txt);
+    } catch {
+      return err("OpenRouter error: bad JSON from upstream", 502);
+    }
+    return ok({ provider: "openrouter", raw: json });
+  } catch (e: any) {
+    return err(`OpenRouter error: ${e?.message || String(e)}`, 500);
+  }
 }
 
-// Допоміжний хелпер для єдиного JSON-виходу без дублю коду
-function json(data: unknown, status = 200) {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8" },
-  });
+// ---- Gemini: простий текстовий тест ----------------------------------------
+async function geminiTextEcho(env: Env, q: string): Promise<Response> {
+  if (!env.GEMINI_API_KEY) {
+    return err("Gemini error: GEMINI_API_KEY is missing", 500);
+  }
+  try {
+    // Легкий ехо-запит до Gemini 2.0 Flash 001 (офіційний REST)
+    const url =
+      `https://generativelanguage.googleapis.com/v1beta/models/` +
+      `gemini-2.0-flash-001:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+
+    const body = {
+      contents: [{ parts: [{ text: `echo: ${q || "ping"}` }] }],
+      generationConfig: { temperature: 0.2 },
+    };
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const txt = await r.text();
+    if (!txt) return err("Gemini error: empty response", 502);
+
+    let json: any;
+    try {
+      json = JSON.parse(txt);
+    } catch {
+      return err("Gemini error: bad JSON from upstream", 502);
+    }
+
+    return ok({
+      provider: "gemini",
+      raw: {
+        success: r.ok,
+        status: r.status,
+        result:
+          json?.candidates?.[0]?.content?.parts?.[0]?.text ??
+          json?.candidates ?? null,
+        error: r.ok ? [] : [{ code: r.status, message: json?.error?.message || "HTTP " + r.status }],
+      },
+    });
+  } catch (e: any) {
+    return err(`Gemini error: ${e?.message || String(e)}`, 500);
+  }
 }
+
+// ---- Роутер усередині /diagnostics ----------------------------------------
+type Handler = (env: Env, req: Request, url: URL) => Promise<Response>;
+const HANDLERS: Record<string, Handler> = {
+  // Який провайдер зараз активний згідно ENV
+  "/ai/provider": (env) => aiTextRouter(env),
+
+  // Перелік моделей Gemini
+  "/ai/gemini/models": (env) => geminiListModels(env),
+
+  // Перевірка наявності CF Vision (прапорець CF_VISION)
+  "/ai/cf-vision": (env) => cfVision(env),
+
+  // Проста перевірка тексту в Gemini
+  "/ai/gemini/text": (env, _req, url) =>
+    geminiTextEcho(env, url.searchParams.get("q") || "ping"),
+
+  // Перелік моделей через OpenRouter
+  "/ai/openrouter/models": (env) => openrouterListModels(env),
+};
 
 export async function handleAIDiagnostics(
   request: Request,
   env: Env,
   url: URL
 ): Promise<Response | null> {
-  const path = url.pathname;
+  // Працюємо лише з префіксом /ai/ усередині /diagnostics
+  if (!url.pathname.startsWith("/ai/")) return null;
 
-  // ───────── CF Vision (GET) — sanity check присутності секрету/провайдера
-  // /ai/vision/cf?img=<URL>&q=<prompt>
-  if (request.method === "GET" && path === "/ai/vision/cf") {
-    // твій providers.cfVision вже повертає готовий Response (ok/err)
-    return cfVision(env as any);
+  const pathOnly = url.pathname; // вже вигляду /ai/...
+  const handler = HANDLERS[pathOnly];
+  if (!handler) {
+    return new Response(JSON.stringify({ ok: false, error: "not found" }), {
+      status: 404,
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
   }
-
-  // ───────── Gemini: список моделей (GET)
-  // /ai/models/gemini
-  if (request.method === "GET" && path === "/ai/models/gemini") {
-    return geminiListModels(env as any);
-  }
-
-  // ───────── Gemini: текст (GET)
-  // /ai/text/gemini?q=...&model=models/gemini-2.5-flash
-  if (request.method === "GET" && path === "/ai/text/gemini") {
-    const q = url.searchParams.get("q") || "ping from diagnostics";
-    const model = url.searchParams.get("model") || undefined;
-
-    const raw = await geminiText(env as any, q, model);
-    // Вирівнюємо відповідь у звичний формат твоїх діагностик
-    return ok({ provider: "gemini", raw });
-  }
-
-  // ───────── Gemini: текст (POST)
-  // body: { "q": "...", "model": "models/gemini-2.5-flash" }
-  if (request.method === "POST" && path === "/ai/text/gemini") {
-    let body: any = null;
-    try {
-      body = await request.json();
-    } catch {
-      return err("bad json", 400);
-    }
-
-    const q: string = body?.q ?? body?.prompt ?? "";
-    const model: string | undefined = body?.model || undefined;
-    if (!q) return err("missing 'q' in body", 400);
-
-    const raw = await geminiText(env as any, q, model);
-    return ok({ provider: "gemini", raw });
-  }
-
-  // ───────── OpenRouter: (як у тебе було) — просто повертаємо активного провайдера
-  // /ai/text/openrouter
-  if (request.method === "GET" && path === "/ai/text/openrouter") {
-    return aiTextRouter(env as any); // поверне {"provider": "..."} — як ти бачив у скрінах
-  }
-
-  // ───────── ДУБЛЬ-МАРШРУТ ДЛЯ ДІАГНОСТИКИ (зручний неймспейс)
-  // /diagnostics/ai/gemini/text?q=...&model=...
-  if (request.method === "GET" && path === "/diagnostics/ai/gemini/text") {
-    const q = url.searchParams.get("q") || "ping from diagnostics";
-    const model = url.searchParams.get("model") || undefined;
-
-    const raw = await geminiText(env as any, q, model);
-    return json({ ok: true, status: 200, data: { provider: "gemini", raw } }, 200);
-  }
-
-  // Не наш маршрут — віддаємо управління вищому роутеру
-  return null;
+  return handler(env, request, url);
 }
-
-// Для зворотної сумісності, якщо десь імпортувалось інше ім'я
-export const handleDiagnosticsAI = handleAIDiagnostics;
