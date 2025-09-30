@@ -1,59 +1,49 @@
 // src/commands/registry.ts
-// Єдиний реєстр команд із безпечними імпортами (працює і з default, і з named).
-// Експортує іменований об'єкт COMMANDS, щоб index.ts міг імпортувати: { COMMANDS }.
-// Також даємо допоміжні pickHandler / hasCommand — якщо десь використовуються.
+// Єдиний реєстр. Повертає мапу команд та дає findCommandByName.
+// Уніфікована сигнатура виклику команд: (env, update).
 
-type Handler = (ctx: any, args?: any) => Promise<any> | any;
+import type { TgUpdate } from "../types";
+import type { TgEnv } from "../utils/telegram";
 
-// Безпечні імпорти (named || default)
-import startNamed, { start as startExport } from "./start";
-const start: Handler = (startExport as any) ?? (startNamed as any);
-
-import helpNamed, { help as helpExport } from "./help";
-const help: Handler = (helpExport as any) ?? (helpNamed as any);
-
-import pingNamed, { ping as pingExport } from "./ping";
-const ping: Handler = (pingExport as any) ?? (pingNamed as any);
-
-import healthNamed, { health as healthExport } from "./health";
-const health: Handler = (healthExport as any) ?? (healthNamed as any);
-
-// Wiki — наші нові іменовані експорти
-import wikiDefault, {
-  wiki as wikiExport,
-  wikiSetAwait,
-  wikiMaybeHandleFreeText,
-} from "./wiki";
-const wiki: Handler = (wikiExport as any) ?? (wikiDefault as any);
-
-// AI (може бути відключений змінною середовища, але в реєстрі лишимо)
-import aiNamed, { ai as aiExport } from "./ai";
-const ai: Handler | undefined = (aiExport as any) ?? (aiNamed as any);
-
-// Карта доступних команд (імена рівно такі, як ви очікуєте у /help)
-export const COMMANDS: Record<string, Handler> = {
-  start,
-  help,
-  ping,
-  health,
-  wiki,
-  // додаткові службові "не командні", але корисні в роутингу:
-  // їх НЕ оголошуємо як видимі команди, проте експортуємо окремо нижче
-};
-
-// Окремо експортуємо wiki-сервісні хелпери (потрібні іншим місцям)
-export { wikiSetAwait, wikiMaybeHandleFreeText };
-
-// AI команду додаємо акуратно: якщо файл є — вона в реєстрі, якщо ні — ні.
-if (ai) {
-  (COMMANDS as any).ai = ai;
+// Імпорти команд (ми їх лагодитимемо на етапі 2)
+import start from "./start";
+import help from "./help";
+import ping from "./ping";
+import wiki from "./wiki";
+// ai підʼєднаємо тільки коли AI_ENABLED=true і файл не зламаний
+let ai: ((env: TgEnv, update: TgUpdate) => Promise<void>) | undefined;
+try {
+  // @ts-ignore
+  const mod = await import("./ai");
+  ai = (mod.ai ?? mod.default) as any;
+} catch (_) {
+  ai = undefined;
 }
 
-// Дрібні утиліти (можуть використовуватись у index.ts або інших частинах)
-export function pickHandler(name: string): Handler | undefined {
-  return (COMMANDS as any)[name];
+export type CommandFn = (env: TgEnv, update: TgUpdate) => Promise<void>;
+
+const REGISTRY = new Map<string, CommandFn>();
+
+function register(name: string, fn: any) {
+  if (typeof fn === "function") REGISTRY.set(name, fn as CommandFn);
 }
 
-export function hasCommand(name: string): boolean {
-  return typeof (COMMANDS as any)[name] === "function";
+// базовий набір
+register("start", start);
+register("help", help);
+register("ping", ping);
+register("wiki", wiki);
+
+// умовно додаємо ai
+export function attachAI(enabled: boolean) {
+  if (enabled && ai) REGISTRY.set("ai", ai as CommandFn);
+  else REGISTRY.delete("ai");
+}
+
+export function getCommands(): Map<string, CommandFn> {
+  return REGISTRY;
+}
+
+export function findCommandByName(name: string): CommandFn | undefined {
+  return REGISTRY.get(name.toLowerCase());
 }
