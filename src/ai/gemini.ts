@@ -1,26 +1,95 @@
 // src/ai/gemini.ts
-export async function geminiText(prompt: string, env: Env, f: typeof fetch = fetch) {
-  const key = env.GEMINI_API_KEY;
-  if (!key) throw new Error("GEMINI_API_KEY is missing");
-  const model = env.GEMINI_MODEL || "models/gemini-2.5-flash"; // дефолт, без зміни секретів
+import { ok, err, type Env } from "./providers";
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${key}`;
+type TextIn = {
+  prompt?: string;
+  model?: string;
+};
 
-  const body = JSON.stringify({
-    contents: [{ role: "user", parts: [{ text: String(prompt || "").slice(0, 4000) }]}],
-    generationConfig: { temperature: 0.7, topP: 0.95, maxOutputTokens: 512 }
-  });
+/**
+ * Виклик Gemini generateContent для діагностики тексту.
+ * GET:  /diagnostics/ai/gemini/text?q=hello&model=models/gemini-2.0-flash-001
+ * POST: /diagnostics/ai/gemini/text { "prompt": "hello", "model": "models/gemini-2.0-flash-001" }
+ */
+export async function geminiText(request: Request, env: Env): Promise<Response> {
+  if (!env.GEMINI_API_KEY) {
+    return err("Gemini error: GEMINI_API_KEY is missing", 500);
+  }
 
-  const resp = await f(url, { method: "POST", headers: { "content-type": "application/json" }, body });
-  const raw = await resp.text();                // уникаємо "Unexpected end of JSON input"
-  if (!resp.ok) throw new Error(`Gemini ${resp.status}: ${raw || "empty body"}`);
+  // читаємо prompt/model з query або з JSON body
+  const url = new URL(request.url);
+  const q = url.searchParams.get("q") ?? undefined;
+  const m = url.searchParams.get("model") ?? undefined;
 
-  let data: any = raw ? JSON.parse(raw) : null;
-  const parts = data?.candidates?.[0]?.content?.parts;
-  const text =
-    Array.isArray(parts) ? parts.map((p: any) => p?.text || "").join("") :
-    data?.candidates?.[0]?.text || data?.text || "";
+  let bodyJson: TextIn = {};
+  if (request.method === "POST") {
+    try {
+      const raw = await request.text();
+      if (raw) bodyJson = JSON.parse(raw);
+    } catch {
+      // ігноруємо — просто не було JSON або він порожній
+    }
+  }
 
-  if (!text) throw new Error("Gemini returned no text");
-  return text.trim();
+  const prompt = bodyJson.prompt ?? q ?? "ping";
+  // Безпечний стабільний дефолт (є у твоєму списку моделей)
+  const model =
+    bodyJson.model ??
+    m ??
+    "models/gemini-2.0-flash-001";
+
+  const base =
+    (env.CF_AI_GATEWAY_BASE && env.CF_AI_GATEWAY_BASE.replace(/\/+$/, "")) ||
+    "https://generativelanguage.googleapis.com";
+
+  const endpoint = `${base}/v1beta/${encodeURIComponent(
+    model,
+  )}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+
+  // Мінімальний payload для тексту
+  const payload = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: String(prompt) }],
+      },
+    ],
+  };
+
+  try {
+    const r = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const txt = await r.text();
+    if (!txt) return err("Gemini error: Unexpected end of JSON input", 502);
+
+    let json: any;
+    try {
+      json = JSON.parse(txt);
+    } catch {
+      return err("Gemini error: Bad JSON from upstream", 502);
+    }
+
+    // Витягуємо перший текст, якщо є
+    const first =
+      json?.candidates?.[0]?.content?.parts?.[0]?.text ??
+      json?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data ??
+      null;
+
+    return ok({
+      provider: "gemini",
+      model,
+      prompt,
+      result: first,
+      raw: json,
+    });
+  } catch (e: any) {
+    return err(`Gemini error: ${e?.message || String(e)}`, 500);
+  }
 }
