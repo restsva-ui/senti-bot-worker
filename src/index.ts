@@ -2,7 +2,7 @@
 import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { handleDiagnostics } from "./diagnostics";
-import { handleAIDiagnostics } from "./diagnostics-ai"; // ⬅️ NEW
+import { geminiGenerateText } from "./ai/gemini";
 
 export interface Env {
   BOT_TOKEN: string;
@@ -15,13 +15,12 @@ export interface Env {
   GEMINI_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
 
-  // ⬇️ NEW: щоб узгодити з diagnostics-ai/providers
+  // Необов’язково: щоб явно вказати провайдера
   AI_PROVIDER?: "gemini" | "openrouter" | "cf-vision";
-  CF_AI_GATEWAY_BASE?: string;
 }
 
 function json(res: unknown, status = 200) {
-  return new Response(JSON.stringify(res), {
+  return new Response(JSON.stringify(res, null, 2), {
     status,
     headers: { "content-type": "application/json; charset=utf-8" },
   });
@@ -36,11 +35,7 @@ export default {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // --- DIAGNOSTICS: AI first (маршрути /diagnostics/ai/*)
-    const aiDiag = await handleAIDiagnostics(request, env as any, url); // ⬅️ NEW
-    if (aiDiag) return aiDiag;
-
-    // --- DIAGNOSTICS: решта (/diagnostics/*)
+    // діагностика
     const diag = await handleDiagnostics(request, env as any, url);
     if (diag) return diag;
 
@@ -51,8 +46,7 @@ export default {
       if (expected) {
         const got =
           request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
-        if (got !== expected)
-          return json({ ok: false, error: "invalid secret" }, 403);
+        if (got !== expected) return json({ ok: false, error: "invalid secret" }, 403);
       }
 
       // Зчитуємо апдейт
@@ -68,12 +62,48 @@ export default {
         const msg = update?.message;
         const text: string | undefined = msg?.text;
         const chatId = msg?.chat?.id;
+
         if (text === "/ping" && chatId) {
           await pingCommand(env as any, chatId);
           return json({ ok: true, handled: "ping" });
         }
 
-        // callback
+        // Будь-який інший текст — генеруємо відповідь через Gemini
+        if (chatId && typeof text === "string" && !text.startsWith("/")) {
+          const prompt = text.trim();
+          if (prompt.length > 0) {
+            try {
+              // якщо явно не вказано AI_PROVIDER, але є ключ Gemini — вважаємо, що використовуємо Gemini
+              const provider = env.AI_PROVIDER ?? (env.GEMINI_API_KEY ? "gemini" : undefined);
+
+              if (provider === "gemini") {
+                const reply = await geminiGenerateText(env, prompt, {
+                  model: "gemini-2.5-flash", // можна замінити на будь-яку з /diagnostics/ai/gemini/models
+                  temperature: 0.7,
+                });
+                await tgSendMessage(env as any, chatId, reply);
+                return json({ ok: true, handled: "gemini" });
+              }
+
+              // Якщо провайдер інший або не заданий — просто no-op (щоб нічого не зламати)
+              await tgSendMessage(
+                env as any,
+                chatId,
+                "⚠️ AI не налаштований. Доступні діагностичні ендпоїнти: /diagnostics",
+              );
+              return json({ ok: true, handled: "no-ai" });
+            } catch (e: any) {
+              await tgSendMessage(
+                env as any,
+                chatId,
+                `❌ Помилка Gemini: ${e?.message || e}`,
+              );
+              return json({ ok: false, error: "gemini-failed" }, 500);
+            }
+          }
+        }
+
+        // callback query
         const cb = update?.callback_query;
         if (cb?.id && cb?.message?.chat?.id) {
           await tgSendMessage(
