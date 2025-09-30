@@ -2,6 +2,7 @@
 import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { handleDiagnostics } from "./diagnostics";
+import { handleAIDiagnostics } from "./diagnostics-ai"; // ⬅️ NEW
 
 export interface Env {
   BOT_TOKEN: string;
@@ -13,12 +14,16 @@ export interface Env {
   CLOUDFLARE_API_TOKEN: string;
   GEMINI_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
+
+  // ⬇️ NEW: щоб узгодити з diagnostics-ai/providers
+  AI_PROVIDER?: "gemini" | "openrouter" | "cf-vision";
+  CF_AI_GATEWAY_BASE?: string;
 }
 
 function json(res: unknown, status = 200) {
   return new Response(JSON.stringify(res), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json; charset=utf-8" },
   });
 }
 
@@ -31,7 +36,11 @@ export default {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // діагностика / ai
+    // --- DIAGNOSTICS: AI first (маршрути /diagnostics/ai/*)
+    const aiDiag = await handleAIDiagnostics(request, env as any, url); // ⬅️ NEW
+    if (aiDiag) return aiDiag;
+
+    // --- DIAGNOSTICS: решта (/diagnostics/*)
     const diag = await handleDiagnostics(request, env as any, url);
     if (diag) return diag;
 
