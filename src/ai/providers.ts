@@ -1,181 +1,165 @@
 // src/ai/providers.ts
+// Єдине місце для звернень до зовнішніх AI-провайдерів
+// і стандартних JSON-відповідей ok/err.
 
-export interface Env {
-  CF_VISION: string;                 // базовий URL до Cloudflare AI Gateway або /ai/run
-  CLOUDFLARE_API_TOKEN?: string;     // для /ai/token/verify (не обов'язково для Vision)
-  GEMINI_API_KEY?: string;           // Google Generative Language API key
-  OPENROUTER_API_KEY?: string;       // OpenRouter key (для DeepSeek та ін.)
-}
+export type TextProvider = "gemini" | "openrouter";
 
-export function ok(data: unknown, status = 200) {
+export function ok(data: unknown, status = 200): Response {
   return new Response(JSON.stringify({ ok: true, status, data }), {
     status,
     headers: { "content-type": "application/json" },
   });
 }
 
-export function err(error: unknown, status = 400) {
+export function err(error: unknown, status = 400): Response {
   const message =
     typeof error === "string"
       ? error
-      : (error as any)?.message || (error as any) || "error";
-  return new Response(
-    JSON.stringify({ ok: false, status, error: String(message) }),
-    {
-      status,
-      headers: { "content-type": "application/json" },
-    }
-  );
-}
-
-/**
- * CF Vision (images -> text). Проксі на твій CF AI Gateway або /ai/run.
- * Очікує model у шляху всередині CF_VISION, наприклад:
- *   https://api.cloudflare.com/client/v4/accounts/<acc>/ai/run/@cf/meta/llama-3.2-11b-vision-instruct
- */
-export async function runCfVision(env: Env, imageUrl: string, prompt = "") {
-  const body = {
-    prompt: prompt || "Опиши зображення двома словами.",
-    image_url: imageUrl,
-  };
-
-  const r = await fetch(env.CF_VISION, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      // якщо CF_VISION — це твій Gateway route, токен не потрібен
-      ...(env.CLOUDFLARE_API_TOKEN
-        ? { Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}` }
-        : {}),
-    },
-    body: JSON.stringify(body),
+      : (error as any)?.message || String(error);
+  return new Response(JSON.stringify({ ok: false, status, error: message }), {
+    status,
+    headers: { "content-type": "application/json" },
   });
-
-  const raw = await r.json().catch(() => ({}));
-  if (!r.ok || (raw && raw.success === false)) {
-    throw new Error(
-      `CF Vision ${r.status}: ${JSON.stringify(raw?.errors || raw)}`
-    );
-  }
-
-  // CF AI повертає різні структури. Нормалізуємо у text.
-  const text =
-    raw?.result?.response ||
-    raw?.result?.text ||
-    raw?.response ||
-    raw?.text ||
-    JSON.stringify(raw);
-
-  return { provider: "cf-vision", text, raw };
 }
 
-/**
- * Google Gemini (text). Працює з v1beta generateContent
- * Модель передається параметром; якщо не задано — пробуємо '-latest' варіант.
- */
-export async function runGemini(
-  env: Env,
+// ──────────────────────────────────────────────────────────────────────────────
+// Gemini: простий text completion
+export async function geminiText(
+  env: any,
   prompt: string,
-  model = "gemini-1.5-flash-latest"
+  model = "models/gemini-2.5-flash"
 ) {
-  if (!env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is missing");
+  const key = env.GEMINI_API_KEY;
+  if (!key) throw new Error("Missing GEMINI_API_KEY");
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+  const url = `https://generativelanguage.googleapis.com/v1beta/${encodeURIComponent(
     model
-  )}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+  )}:generateContent?key=${encodeURIComponent(key)}`;
 
-  const body = {
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: prompt }],
-      },
-    ],
-  };
-
-  const r = await fetch(endpoint, {
+  const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+    }),
   });
+  const raw = await res.json();
+  if (!res.ok) throw new Error(raw?.error?.message || res.statusText);
 
-  const raw = await r.json().catch(() => ({}));
-  if (!r.ok || raw?.error) {
-    throw new Error(
-      `Gemini ${r.status}: ${JSON.stringify(raw?.error || raw)}`
-    );
-  }
-
+  const parts = raw?.candidates?.[0]?.content?.parts || [];
   const text =
-    raw?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text)?.join("") ??
-    raw?.output_text ??
-    JSON.stringify(raw);
+    parts.map((p: any) => p?.text).filter(Boolean).join("") ||
+    raw?.candidates?.[0]?.content?.parts?.[0]?.text ||
+    "";
 
-  return { provider: "gemini", model, text, raw };
+  return { text, raw };
 }
 
-/**
- * Список моделей Gemini: GET v1beta/models
- */
-export async function geminiListModels(env: Env) {
-  if (!env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is missing");
+// Gemini: список моделей
+export async function geminiListModels(env: any) {
+  const key = env.GEMINI_API_KEY;
+  if (!key) throw new Error("Missing GEMINI_API_KEY");
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(
-    env.GEMINI_API_KEY
+  const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(
+    key
   )}`;
+  const res = await fetch(url);
+  const raw = await res.json();
+  if (!res.ok) throw new Error(raw?.error?.message || res.statusText);
 
-  const r = await fetch(endpoint, { headers: { accept: "application/json" } });
-  const raw = await r.json().catch(() => ({}));
-  if (!r.ok || raw?.error) {
-    throw new Error(
-      `Gemini listModels ${r.status}: ${JSON.stringify(raw?.error || raw)}`
-    );
-  }
-
-  // Тільки ті, що підтримують generateContent
-  const models =
-    raw?.models?.filter((m: any) =>
-      (m?.supportedGenerationMethods || []).includes("generateContent")
-    ) || raw?.models || [];
-
-  return { provider: "gemini", models, raw };
+  return { models: raw?.models || [], raw };
 }
 
-/**
- * OpenRouter: зручно тестувати безкоштовні/дешеві моделі (DeepSeek тощо).
- */
-export async function runOpenRouter(
-  env: Env,
+// ──────────────────────────────────────────────────────────────────────────────
+// OpenRouter: text completion
+export async function openrouterText(
+  env: any,
   prompt: string,
   model = "deepseek/deepseek-chat"
 ) {
-  if (!env.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY is missing");
+  const key = env.OPENROUTER_API_KEY;
+  if (!key) throw new Error("Missing OPENROUTER_API_KEY");
 
-  const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "authorization": `Bearer ${env.OPENROUTER_API_KEY}`,
-      "http-referer": "https://workers.dev",
-      "x-title": "senti-bot-worker",
+      Authorization: `Bearer ${key}`,
+      // невимогливо, але корисно для лімітів OR
+      "HTTP-Referer": "https://workers.dev",
+      "X-Title": "senti-bot-worker",
     },
     body: JSON.stringify({
       model,
       messages: [{ role: "user", content: prompt }],
     }),
   });
+  const raw = await res.json();
+  if (!res.ok) throw new Error(raw?.error?.message || res.statusText);
 
-  const raw = await r.json().catch(() => ({}));
-  if (!r.ok || raw?.error) {
-    throw new Error(
-      `OpenRouter ${r.status}: ${JSON.stringify(raw?.error || raw)}`
+  const text = raw?.choices?.[0]?.message?.content || "";
+  return { text, raw };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Уніфікований роутер для текстових провайдерів
+export async function aiTextRouter(
+  env: any,
+  provider: TextProvider,
+  prompt: string,
+  model?: string
+) {
+  if (provider === "gemini") return geminiText(env, prompt, model);
+  if (provider === "openrouter") return openrouterText(env, prompt, model);
+  throw new Error(`Unsupported provider: ${provider}`);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// CF Workers AI Vision (наприклад @cf/llava-hf/llava-1.5-7b)
+// Очікуємо, що env.CF_VISION = "@"-шлях моделі, напр. "@cf/llava-hf/llava-1.5-7b"
+export async function cfVision(env: any, imageUrl: string, prompt: string) {
+  const token = env.CLOUDFLARE_API_TOKEN;
+  const model = env.CF_VISION || "@cf/llava-hf/llava-1.5-7b";
+  if (!token) throw new Error("Missing CLOUDFLARE_API_TOKEN");
+
+  // 1) Дістаємо account id (cid) з verify, якщо не заданий явно
+  let accountId = env.CF_ACCOUNT_ID;
+  if (!accountId) {
+    const verify = await fetch(
+      "https://api.cloudflare.com/client/v4/user/tokens/verify",
+      { headers: { Authorization: `Bearer ${token}` } }
     );
+    const vj = await verify.json();
+    accountId = vj?.result?.cid || vj?.result?.account_id;
+    if (!accountId) throw new Error("Cannot resolve Cloudflare Account ID");
+  }
+
+  // 2) Викликаємо AI run
+  const runUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`;
+  const res = await fetch(runUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      // формат для LLaVA-сумісних моделей
+      prompt,
+      image: [imageUrl],
+    }),
+  });
+
+  const raw = await res.json();
+  if (!res.ok) {
+    const msg = raw?.errors?.[0]?.message || res.statusText;
+    throw new Error(msg);
   }
 
   const text =
-    raw?.choices?.[0]?.message?.content ??
-    raw?.output_text ??
-    JSON.stringify(raw);
+    raw?.result?.response ||
+    raw?.result?.description ||
+    raw?.result?.text ||
+    "";
 
-  return { provider: "openrouter", model, text, raw };
+  return { text, raw };
 }
