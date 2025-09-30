@@ -17,8 +17,11 @@ interface Env {
   [k: string]: unknown;
 }
 
-// ГОЛОВНИЙ ХЕНДЛЕР AI ДІАГНОСТИКИ
-export async function handleDiagnosticsAI(
+/**
+ * ГОЛОВНИЙ ХЕНДЛЕР AI ДІАГНОСТИКИ
+ * (ІМ'Я ФУНКЦІЇ — handleAIDiagnostics, щоб точно збігатися з імпортом)
+ */
+export async function handleAIDiagnostics(
   request: Request,
   env: Env,
   url: URL
@@ -106,5 +109,5 @@ export async function handleDiagnosticsAI(
   return null;
 }
 
-// Для зворотної сумісності з існуючим імпортом у diagnostics.ts:
-export { handleDiagnosticsAI as handleAIDiagnostics };
+// Для зворотної сумісності з можливими імпортами іншого імені:
+export const handleDiagnosticsAI = handleAIDiagnostics;
