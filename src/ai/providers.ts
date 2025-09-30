@@ -78,3 +78,80 @@ export async function cfVision(env: Env): Promise<Response> {
   }
   return ok({ provider: "cf-vision" });
 }
+
+/**
+ * /diagnostics/ai/gemini/text
+ * Проста перевірка генерації тексту через Gemini
+ */
+export async function geminiText(env: Env, text: string, modelName?: string) {
+  if (!env.GEMINI_API_KEY) {
+    return {
+      success: false,
+      error: [{ code: 401, message: "Missing GEMINI_API_KEY" }],
+      result: null,
+    };
+  }
+
+  const model = modelName || "models/gemini-2.5-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/${encodeURIComponent(
+    model
+  )}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+
+  const body = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text }],
+      },
+    ],
+  };
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const txt = await res.text();
+    let json: any = null;
+    try {
+      json = txt ? JSON.parse(txt) : null;
+    } catch {
+      return {
+        success: false,
+        error: [{ code: 500, message: "Gemini text: invalid JSON from API" }],
+        result: null,
+      };
+    }
+
+    if (!res.ok) {
+      const msg =
+        (json && (json.error?.message || json.message)) ||
+        `HTTP ${res.status}`;
+      return {
+        success: false,
+        error: [{ code: res.status, message: msg }],
+        result: null,
+      };
+    }
+
+    const candidate = json?.candidates?.[0];
+    const parts = candidate?.content?.parts || [];
+    const out = parts
+      .map((p: any) => (typeof p?.text === "string" ? p.text : ""))
+      .join("");
+
+    return {
+      success: true,
+      error: [],
+      result: { text: out, raw: json },
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      error: [{ code: 500, message: `Gemini fetch error: ${err?.message || err}` }],
+      result: null,
+    };
+  }
+}
