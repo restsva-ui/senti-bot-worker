@@ -4,9 +4,29 @@ export interface Env {
   OPENROUTER_API_KEY?: string;
 }
 
+/** Дуже проста евристика визначення мови запиту */
+function detectLang(prompt: string): "uk" | "ru" | "en" {
+  const hasUk = /[іІїЇєЄґҐ]/.test(prompt);
+  const hasCyr = /[а-яА-ЯёЁ]/.test(prompt);
+  if (hasUk) return "uk";
+  if (hasCyr) return "ru";
+  return "en";
+}
+
+function languageSystem(lang: "uk" | "ru" | "en"): string {
+  switch (lang) {
+    case "uk":
+      return "Відповідай українською мовою. Коротко і чітко, без зайвої балаканини.";
+    case "ru":
+      return "Отвечай по-русски. Кратко и по делу.";
+    default:
+      return "Answer in the user's language. Default to concise English.";
+  }
+}
+
 /**
- * Запит через OpenRouter. За замовчуванням ставимо "openrouter/auto",
- * щоб провайдер сам підбирав модель (стабільно і без прив’язки до конкретної).
+ * Запит через OpenRouter. model=openrouter/auto — стабільний варіант.
+ * Додаємо system-повідомлення з інструкцією щодо мови.
  */
 export async function openrouterAskText(
   env: Env,
@@ -17,11 +37,12 @@ export async function openrouterAskText(
   }
 
   const url = "https://openrouter.ai/api/v1/chat/completions";
+  const lang = detectLang(prompt);
 
   const body = {
     model: "openrouter/auto",
     messages: [
-      { role: "system", content: "You are a helpful assistant." },
+      { role: "system", content: languageSystem(lang) },
       { role: "user", content: prompt },
     ],
   };
@@ -31,7 +52,6 @@ export async function openrouterAskText(
     headers: {
       "content-type": "application/json",
       Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
-      // опціональні, але корисні для OpenRouter
       "HTTP-Referer": "https://github.com/restsva/senti-bot-worker",
       "X-Title": "Senti Bot",
     },
