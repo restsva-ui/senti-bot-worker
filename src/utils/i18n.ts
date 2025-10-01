@@ -5,9 +5,7 @@
  */
 export type Lang = "uk" | "ru" | "de" | "en";
 
-/**
- * Людська назва мови (для логів/діагностики за бажанням).
- */
+/** Людська назва мови (для логів/діагностики). */
 export function langName(lang: Lang): string {
   switch (lang) {
     case "uk":
@@ -22,29 +20,42 @@ export function langName(lang: Lang): string {
   }
 }
 
-/**
- * Невеликий набір частих слів/символів для евристичного скорингу.
- * Не прагнемо до ідеальної класифікації — лише покращуємо базову,
- * щоб уникнути ситуації, коли будь-яка кирилиця = RU.
- */
-const RU_LETTERS = /[ёыэ]/i; // російські специфічні
-const UK_LETTERS = /[ієїґ]/i; // українські специфічні
+/* ===== евристики ===== */
+
+const RU_LETTERS = /[ёыэ]/i;
+const UK_LETTERS = /[ієїґ]/i;
 const DE_DIACRITICS = /[äöüß]/i;
 
-const RU_COMMON = /\b(что|это|как|когда|почему|просто|например|сеть|данн|сервер|быстрее|основн|котор|пользовател)/i;
-const UK_COMMON = /\b(що|це|як|коли|чому|наприклад|мереж|даних|сервер|швидш|основн|який|користувач)/i;
-const DE_COMMON = /\b(und|ist|nicht|ein|eine|einem|einer|was|warum|zum|mit|für|Netzwerk|Server|Inhalt)/i;
-const EN_COMMON = /\b(and|is|are|what|why|with|for|content|network|server|users?)\b/i;
+const RU_COMMON = /\b(что|это|как|когда|почему|например|сеть|данн|сервер|быстр(ее|ей)|основн|котор|пользовател[ья])/i;
+const UK_COMMON = /\b(що|це|як|коли|чому|наприклад|мереж|дан(их|і)|сервер|швидш|основн|який|користувач)/i;
 
-/**
- * Підрахунок символів зі скриптів.
- */
+// для DE додаємо варіанти без умлаутів + базові службові слова
+const DE_COMMON =
+  /\b(und|ist|nicht|ein|eine|einem|einer|was|warum|wie|mit|für|zum|zur|bitte|kurz|erklaere|erkläre|erklaeren|erklären|beispiel|netzwerk|server|inhalt|benutz(er|ern)?)\b/i;
+
+const EN_COMMON = /\b(and|is|are|what|why|how|with|for|content|network|server|user?s?)\b/i;
+
 const CYRILLIC = /\p{Script=Cyrillic}/u;
 const LATIN = /\p{Script=Latin}/u;
 
+/** Вирізаємо службові префікси / команди Telegram з початку тексту. */
+function stripCommand(raw: string): string {
+  let t = (raw || "").trim();
+
+  // прибрати початкову команду типу /ask, /ask_openrouter, /start, /help, /ping
+  t = t.replace(/^\/[a-zA-Z_]+(?:@[A-Za-z0-9_]+)?\s*/i, "");
+
+  // інколи люди вставляють двокрапку після команди
+  t = t.replace(/^[:\-–—]\s*/, "");
+
+  // зайві пробіли
+  t = t.trim();
+
+  return t;
+}
+
 /**
- * Повертає підказку для системного/інструкційного промпта,
- * яка змушує модель відповідати обраною мовою.
+ * Повертає інструкцію для системного промпта під вибрану мову.
  */
 export function languageInstruction(lang: Lang): string {
   switch (lang) {
@@ -62,30 +73,29 @@ export function languageInstruction(lang: Lang): string {
 
 /**
  * Нормалізація/визначення мови:
- *  - спершу враховуємо Telegram `language_code` (як слабку підказку),
- *  - далі — скоринг тексту за ознаками,
- *  - у випадку рівності/невизначеності — EN як нейтральний fallback.
- *
- * Важливо: ця функція не робить зовнішніх запитів і не ламає існуючу логіку.
+ *  1) ігноруємо префікс-команду (/ask, /ask_openrouter, ...),
+ *  2) враховуємо Telegram language_code як м’який нахил,
+ *  3) скоримо текст за літерами/частими словами,
+ *  4) fallback — en.
  */
-export function normalizeLang(text: string, tgLanguageCode?: string): Lang {
-  const t = (text || "").trim();
+export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
+  const t = stripCommand(input);
 
-  // 1) Telegram language_code як "легкий нахил" (але не жорстка прив'язка)
+  // нахил від telegram language_code
   const tg = (tgLanguageCode || "").split("-")[0].toLowerCase();
   let tgBias: Partial<Record<Lang, number>> = {};
-  if (tg === "uk") tgBias.uk = 0.75;
-  else if (tg === "ru") tgBias.ru = 0.75;
-  else if (tg === "de") tgBias.de = 0.75;
-  else if (tg === "en") tgBias.en = 0.75;
+  if (tg === "uk") tgBias.uk = 0.9;
+  else if (tg === "ru") tgBias.ru = 0.9;
+  else if (tg === "de") tgBias.de = 0.9;
+  else if (tg === "en") tgBias.en = 0.9;
 
-  // 2) Порожній або дуже короткий текст — схиляємось до мови інтерфейсу або EN
+  // дуже короткий текст — віддаємо tg або en
   if (t.length < 3) {
     const guess = (Object.keys(tgBias)[0] as Lang | undefined) || "en";
     return guess;
   }
 
-  // 3) Базові підрахунки сценаріїв письма
+  // підрахунок скриптів
   let latinCount = 0;
   let cyrCount = 0;
   for (const ch of t) {
@@ -93,40 +103,38 @@ export function normalizeLang(text: string, tgLanguageCode?: string): Lang {
     else if (CYRILLIC.test(ch)) cyrCount++;
   }
 
-  // 4) Початкові бали
+  // початкові бали
   const score: Record<Lang, number> = { uk: 0, ru: 0, de: 0, en: 0 };
 
-  // 5) Рос/Укр явні букви
-  if (RU_LETTERS.test(t)) score.ru += 3;
-  if (UK_LETTERS.test(t)) score.uk += 3;
+  // явні букви
+  if (RU_LETTERS.test(t)) score.ru += 4;
+  if (UK_LETTERS.test(t)) score.uk += 4;
 
-  // 6) Діакритика німецької
-  if (DE_DIACRITICS.test(t)) score.de += 2;
+  // діакритики німецької
+  if (DE_DIACRITICS.test(t)) score.de += 2.5;
 
-  // 7) Часті слова
-  if (RU_COMMON.test(t)) score.ru += 1.5;
-  if (UK_COMMON.test(t)) score.uk += 1.5;
-  if (DE_COMMON.test(t)) score.de += 1.5;
-  if (EN_COMMON.test(t)) score.en += 1.0;
+  // частотні слова
+  if (RU_COMMON.test(t)) score.ru += 2;
+  if (UK_COMMON.test(t)) score.uk += 2;
+  if (DE_COMMON.test(t)) score.de += 2;
+  if (EN_COMMON.test(t)) score.en += 1.3;
 
-  // 8) За домінуванням скрипту
-  if (cyrCount > latinCount * 1.2) {
-    // кирилиця домінує — змагаються UA vs RU
-    score.uk += 1.2;
-    score.ru += 1.2;
-  } else if (latinCount > cyrCount * 1.2) {
-    // латиниця домінує — змагаються EN vs DE
-    score.en += 1.0;
-    score.de += 1.0;
+  // домінування скрипту
+  if (cyrCount > latinCount * 1.1) {
+    score.uk += 1.4;
+    score.ru += 1.4;
+  } else if (latinCount > cyrCount * 1.1) {
+    score.en += 1.2;
+    score.de += 1.2;
   }
 
-  // 9) Нахил від телеграм-коду (якщо був)
+  // нахил від телеграм-коду
   if (tgBias.uk) score.uk += tgBias.uk;
   if (tgBias.ru) score.ru += tgBias.ru;
   if (tgBias.de) score.de += tgBias.de;
   if (tgBias.en) score.en += tgBias.en;
 
-  // 10) Вирішуємо переможця
+  // вибір переможця
   let winner: Lang = "en";
   let best = -Infinity;
   (["uk", "ru", "de", "en"] as Lang[]).forEach((l) => {
@@ -136,11 +144,13 @@ export function normalizeLang(text: string, tgLanguageCode?: string): Lang {
     }
   });
 
-  // Дрібна правка: якщо латиниця значно домінує, але виграла RU/UK — перевага DE/EN.
-  if (latinCount > cyrCount * 2) {
-    if (winner === "ru" || winner === "uk") {
-      winner = score.de >= score.en ? "de" : "en";
-    }
+  // Якщо кирилиця є, але переміг EN — переоцінюємо на користь UK/RU
+  if (cyrCount > 0 && latinCount === 0 && winner === "en") {
+    winner = score.uk >= score.ru ? "uk" : "ru";
+  }
+  if (cyrCount > latinCount * 0.8 && winner === "en") {
+    // є помітна кирилиця — підштовхнемо до укр/ру
+    winner = score.uk >= score.ru ? "uk" : "ru";
   }
 
   return winner;
