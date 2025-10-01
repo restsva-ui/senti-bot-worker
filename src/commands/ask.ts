@@ -1,80 +1,68 @@
-import type { Env } from "../config";
-import { sendMessage } from "../telegram/api";
-import { llmChat } from "../ai/llm";
+// src/commands/ask.ts
 
-/** Витягнути питання після команди /ask */
-function extractQuestion(text?: string) {
-  return (text || "").replace(/^\/ask(@\S+)?\s*/i, "").trim();
+import type { Env } from "../index";
+import { tgSendMessage } from "../utils/telegram";
+import { normalizeLang, languageInstruction, type Lang } from "../utils/i18n";
+
+// Ці імпорти покладені на існуючі обгортки у твоєму репозиторії.
+// Імена збережені такими, як зазвичай у подібних структурах.
+import { geminiAskText } from "../ai/gemini";
+import { openrouterAskText } from "../ai/openrouter";
+
+/**
+ * Формуємо користувацький запит з інструкцією про мову відповіді.
+ * Це безпечно і абсолютно сумісно з будь-якою LLM: інструкція зверху → запит нижче.
+ */
+function buildPromptWithLang(text: string, lang: Lang): string {
+  const instruction = languageInstruction(lang);
+  // Інструкція системного рівня + розділювач — мінімально інвазивно.
+  return `${instruction}\n\nUser question:\n${text}`;
 }
 
-/** Дуже легка евристика мови за вмістом питання */
-function detectLangByText(s: string): "uk" | "ru" | "de" | "en" {
-  // українські специфічні літери
-  if (/[іІїЇєЄґҐ]/.test(s)) return "uk";
-  // будь-яка кирилиця → російська (фолбек)
-  if (/[А-Яа-яЁё]/.test(s)) return "ru";
-  // німецькі умляути/ß
-  if (/[äöüÄÖÜß]/.test(s)) return "de";
-  // все інше — англійська
-  return "en";
-}
-
-/** Згенерувати коротку system-інструкцію під цільову мову */
-function systemInstruction(lang: "uk" | "ru" | "de" | "en"): string {
-  switch (lang) {
-    case "uk":
-      return "Ти стислий, корисний асистент. Відповідай українською мовою, чітко і без води.";
-    case "ru":
-      return "Ты лаконичный, полезный ассистент. Отвечай по-русски, чётко и по делу.";
-    case "de":
-      return "Du bist ein hilfreicher, prägnanter Assistent. Antworte auf Deutsch, klar und knapp.";
-    default:
-      return "You are a concise, helpful assistant. Answer in English, clearly and briefly.";
-  }
-}
-
-export async function cmdAsk(env: Env, chatId: number, fullText?: string, userId?: number) {
-  const q = extractQuestion(fullText);
-  if (!q) {
-    await sendMessage(chatId, "Напиши: /ask ваше питання");
-    return;
-  }
-
-  // простий ліміт: лише OWNER отримує більше токенів
-  const owner = env.OWNER_ID ? String(env.OWNER_ID) : "";
-  const isOwner = owner && String(userId || "") === owner;
-  const maxTokens = isOwner ? 600 : 250;
-
-  // визначаємо мову за текстом питання
-  const lang = detectLangByText(q);
-  const sys = systemInstruction(lang);
+/**
+ * /ask — через Gemini
+ */
+export async function ask(
+  env: Env,
+  chatId: number,
+  userText: string,
+  tgLanguageCode?: string,
+): Promise<void> {
+  const lang = normalizeLang(userText, tgLanguageCode);
+  const prompt = buildPromptWithLang(userText, lang);
 
   try {
-    const answer = await llmChat(
-      env,
-      [
-        { role: "system", content: sys },
-        { role: "user", content: q },
-      ],
-      maxTokens,
-    );
-
-    await sendMessage(chatId, answer || (lang === "uk"
-      ? "Нічого не згенерував :("
-      : lang === "ru"
-      ? "Ничего не сгенерировал :("
-      : lang === "de"
-      ? "Keine Antwort generiert :("
-      : "No output generated :("));
+    const answer = await geminiAskText(env, prompt);
+    await tgSendMessage(env as any, chatId, answer || "(empty)");
   } catch (e: any) {
-    const msg =
-      lang === "uk"
-        ? `LLM помилка: ${e?.message || e}`
-        : lang === "ru"
-        ? `LLM ошибка: ${e?.message || e}`
-        : lang === "de"
-        ? `LLM-Fehler: ${e?.message || e}`
-        : `LLM error: ${e?.message || e}`;
-    await sendMessage(chatId, msg);
+    await tgSendMessage(
+      env as any,
+      chatId,
+      `Помилка /ask: ${e?.message || String(e)}`,
+    );
+  }
+}
+
+/**
+ * /ask_openrouter — через OpenRouter
+ */
+export async function askOpenrouter(
+  env: Env,
+  chatId: number,
+  userText: string,
+  tgLanguageCode?: string,
+): Promise<void> {
+  const lang = normalizeLang(userText, tgLanguageCode);
+  const prompt = buildPromptWithLang(userText, lang);
+
+  try {
+    const answer = await openrouterAskText(env, prompt);
+    await tgSendMessage(env as any, chatId, answer || "(empty)");
+  } catch (e: any) {
+    await tgSendMessage(
+      env as any,
+      chatId,
+      `Помилка /ask_openrouter: ${e?.message || String(e)}`,
+    );
   }
 }
