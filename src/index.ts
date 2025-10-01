@@ -70,4 +70,115 @@ export default {
 
     // healthcheck
     if (request.method === "GET" && url.pathname === "/health") {
-      return json({ ok: true, service:
+      return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
+    }
+
+    // діагностика (AI)
+    const diag = await handleDiagnostics(request, env as any, url);
+    if (diag) return diag;
+
+    // Telegram webhook
+    if (request.method === "POST" && url.pathname === "/webhook") {
+      // Перевірка секрету (fallback на WEBHOOK_SECRET)
+      const expected = env.TELEGRAM_SECRET_TOKEN || env.WEBHOOK_SECRET || "";
+      if (expected) {
+        const got = request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
+        if (got !== expected) return json({ ok: false, error: "invalid secret" }, 403);
+      }
+
+      // Зчитуємо апдейт
+      let update: any = null;
+      try {
+        update = await request.json();
+      } catch {
+        return json({ ok: false, error: "bad json" }, 400);
+      }
+
+      try {
+        const msg = update?.message;
+        const text: string | undefined = msg?.text;
+        const chatId = msg?.chat?.id;
+
+        // callback
+        const cb = update?.callback_query;
+        if (cb?.id && cb?.message?.chat?.id) {
+          await tgSendMessage(env as any, cb.message.chat.id, `tap: ${cb.data ?? ""}`);
+          return json({ ok: true, handled: "callback" });
+        }
+
+        if (typeof text === "string" && chatId) {
+          const lang: Lang = decideLang(text, update);
+
+          // /start, /help
+          if (/^\/start(?:@\w+)?$/i.test(text) || /^\/help(?:@\w+)?$/i.test(text)) {
+            await sendHelp(env as any, chatId, lang);
+            return json({ ok: true, handled: "help" });
+          }
+
+          // /ping
+          if (/^\/ping(?:@\w+)?$/i.test(text)) {
+            await pingCommand(env as any, chatId);
+            return json({ ok: true, handled: "ping" });
+          }
+
+          // /ask_openrouter <текст>
+          if (/^\/ask_openrouter(?:@\w+)?\b/i.test(text)) {
+            const q = extractArg(text, "ask_openrouter");
+            if (!q) {
+              await tgSendMessage(env as any, chatId, lang === "uk"
+                ? "Будь ласка, додай питання після команди."
+                : lang === "ru"
+                ? "Пожалуйста, добавь вопрос после команды."
+                : lang === "de"
+                ? "Bitte füge deine Frage nach dem Befehl hinzu."
+                : "Please add your question after the command."
+              );
+              return json({ ok: true, handled: "ask_openrouter:empty" });
+            }
+            const answer = await openrouterAskText(env, q, lang);
+            await tgSendMessage(env as any, chatId, answer);
+            return json({ ok: true, handled: "ask_openrouter" });
+          }
+
+          // /ask <текст> (Gemini)
+          if (/^\/ask(?:@\w+)?\b/i.test(text)) {
+            const q = extractArg(text, "ask");
+            if (!q) {
+              await tgSendMessage(env as any, chatId, lang === "uk"
+                ? "Будь ласка, додай питання після команди."
+                : lang === "ru"
+                ? "Пожалуйста, добавь вопрос после команды."
+                : lang === "de"
+                ? "Bitte füge deine Frage nach dem Befehl hinzu."
+                : "Please add your question after the command."
+              );
+              return json({ ok: true, handled: "ask:empty" });
+            }
+            const answer = await geminiAskText(env as any, q, lang);
+            await tgSendMessage(env as any, chatId, answer);
+            return json({ ok: true, handled: "ask" });
+          }
+
+          // 🔄 Fallback: якщо повідомлення БЕЗ слеша — трактуємо як /ask (Gemini).
+          // УВАГА: це навмисна зміна поведінки на краще (за твоїм запитом).
+          if (!text.startsWith("/")) {
+            const q = text.trim();
+            if (q) {
+              const answer = await geminiAskText(env as any, q, lang);
+              await tgSendMessage(env as any, chatId, answer);
+              return json({ ok: true, handled: "ask:plain-text" });
+            }
+          }
+        }
+
+        // no-op
+        return json({ ok: true, noop: true });
+      } catch (e: any) {
+        console.error("Webhook error:", e?.message || e);
+        return json({ ok: false, error: "internal" }, 500);
+      }
+    }
+
+    return json({ ok: false, error: "not found" }, 404);
+  },
+};
