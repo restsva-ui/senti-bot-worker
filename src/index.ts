@@ -3,8 +3,6 @@ import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { handleDiagnostics } from "./diagnostics";
 import { sendHelp } from "./commands/help";
-import { geminiAskText } from "./ai/gemini";
-import { openrouterAskText } from "./ai/openrouter";
 
 export interface Env {
   BOT_TOKEN: string;
@@ -34,13 +32,13 @@ export default {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // діагностика / ai
+    // діагностика
     const diag = await handleDiagnostics(request, env as any, url);
     if (diag) return diag;
 
     // Telegram webhook
     if (request.method === "POST" && url.pathname === "/webhook") {
-      // Перевірка секрету (fallback на WEBHOOK_SECRET)
+      // Перевірка секрету
       const expected = env.TELEGRAM_SECRET_TOKEN || env.WEBHOOK_SECRET || "";
       if (expected) {
         const got =
@@ -58,80 +56,24 @@ export default {
       }
 
       try {
-        // --- message-based
         const msg = update?.message;
         const text: string | undefined = msg?.text;
-        const chatId: number | undefined = msg?.chat?.id;
+        const chatId = msg?.chat?.id;
+        const langCode: string | undefined = msg?.from?.language_code;
 
-        if (chatId && typeof text === "string") {
-          const trimmed = text.trim();
-
-          // /ping
-          if (trimmed === "/ping") {
-            await pingCommand(env as any, chatId);
-            return json({ ok: true, handled: "ping" });
-          }
-
-          // /help або /start
-          if (trimmed === "/help" || trimmed === "/start") {
-            await sendHelp(env as any, chatId);
-            return json({ ok: true, handled: "help" });
-          }
-
-          // /ask <prompt> -> Gemini
-          if (trimmed.startsWith("/ask ")) {
-            const prompt = trimmed.slice(5).trim();
-            if (!prompt) {
-              await tgSendMessage(
-                env as any,
-                chatId,
-                "❗️Використання: `/ask <текст>`",
-                { parse_mode: "Markdown" },
-              );
-              return json({ ok: true, handled: "ask-usage" });
-            }
-            try {
-              const answer = await geminiAskText(env as any, prompt);
-              await tgSendMessage(env as any, chatId, answer);
-              return json({ ok: true, handled: "ask-gemini" });
-            } catch (e: any) {
-              await tgSendMessage(
-                env as any,
-                chatId,
-                `⚠️ Gemini: ${e?.message || "error"}`,
-              );
-              return json({ ok: false, error: "gemini-failed" }, 500);
-            }
-          }
-
-          // /ask_openrouter <prompt> -> OpenRouter
-          if (trimmed.startsWith("/ask_openrouter ")) {
-            const prompt = trimmed.slice("/ask_openrouter ".length).trim();
-            if (!prompt) {
-              await tgSendMessage(
-                env as any,
-                chatId,
-                "❗️Використання: `/ask_openrouter <текст>`",
-                { parse_mode: "Markdown" },
-              );
-              return json({ ok: true, handled: "ask_openrouter-usage" });
-            }
-            try {
-              const answer = await openrouterAskText(env as any, prompt);
-              await tgSendMessage(env as any, chatId, answer);
-              return json({ ok: true, handled: "ask-openrouter" });
-            } catch (e: any) {
-              await tgSendMessage(
-                env as any,
-                chatId,
-                `⚠️ OpenRouter: ${e?.message || "error"}`,
-              );
-              return json({ ok: false, error: "openrouter-failed" }, 500);
-            }
-          }
+        // /ping
+        if (text === "/ping" && chatId) {
+          await pingCommand(env as any, chatId);
+          return json({ ok: true, handled: "ping" });
         }
 
-        // --- callback_query (кнопки)
+        // /help або /start — локалізована довідка
+        if ((text === "/help" || text === "/start") && chatId) {
+          await sendHelp(env as any, chatId, langCode);
+          return json({ ok: true, handled: "help" });
+        }
+
+        // callback
         const cb = update?.callback_query;
         if (cb?.id && cb?.message?.chat?.id) {
           await tgSendMessage(
