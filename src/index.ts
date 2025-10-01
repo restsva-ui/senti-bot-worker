@@ -3,6 +3,8 @@ import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { handleDiagnostics } from "./diagnostics";
 import { sendHelp } from "./commands/help";
+import { geminiAskText } from "./ai/gemini";
+import { openrouterAskText } from "./ai/openrouter";
 
 export interface Env {
   BOT_TOKEN: string;
@@ -33,7 +35,6 @@ export default {
     }
 
     // діагностика / ai
-    // (handleDiagnostics сам повертає Response або null)
     const diag = await handleDiagnostics(request, env as any, url);
     if (diag) return diag;
 
@@ -77,10 +78,10 @@ export default {
             return json({ ok: true, handled: "help" });
           }
 
-          // /ask <prompt>
+          // /ask <prompt> -> Gemini
           if (trimmed.startsWith("/ask ")) {
             const prompt = trimmed.slice(5).trim();
-            if (prompt.length === 0) {
+            if (!prompt) {
               await tgSendMessage(
                 env as any,
                 chatId,
@@ -89,14 +90,24 @@ export default {
               );
               return json({ ok: true, handled: "ask-usage" });
             }
-            // існуюча логіка відповіді Gemini — лишається у твоєму коді
-            // якщо вона в іншому модулі — все ок, тут ми нічого не змінюємо
+            try {
+              const answer = await geminiAskText(env as any, prompt);
+              await tgSendMessage(env as any, chatId, answer);
+              return json({ ok: true, handled: "ask-gemini" });
+            } catch (e: any) {
+              await tgSendMessage(
+                env as any,
+                chatId,
+                `⚠️ Gemini: ${e?.message || "error"}`,
+              );
+              return json({ ok: false, error: "gemini-failed" }, 500);
+            }
           }
 
-          // /ask_openrouter <prompt>
+          // /ask_openrouter <prompt> -> OpenRouter
           if (trimmed.startsWith("/ask_openrouter ")) {
             const prompt = trimmed.slice("/ask_openrouter ".length).trim();
-            if (prompt.length === 0) {
+            if (!prompt) {
               await tgSendMessage(
                 env as any,
                 chatId,
@@ -105,7 +116,18 @@ export default {
               );
               return json({ ok: true, handled: "ask_openrouter-usage" });
             }
-            // існуюча логіка openrouter відповіді вже налаштована — ми її не чіпаємо
+            try {
+              const answer = await openrouterAskText(env as any, prompt);
+              await tgSendMessage(env as any, chatId, answer);
+              return json({ ok: true, handled: "ask-openrouter" });
+            } catch (e: any) {
+              await tgSendMessage(
+                env as any,
+                chatId,
+                `⚠️ OpenRouter: ${e?.message || "error"}`,
+              );
+              return json({ ok: false, error: "openrouter-failed" }, 500);
+            }
           }
         }
 
