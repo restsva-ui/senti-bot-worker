@@ -4,9 +4,31 @@ export interface Env {
   GEMINI_API_KEY?: string;
 }
 
+/** Дуже проста евристика визначення мови запиту */
+function detectLang(prompt: string): "uk" | "ru" | "en" {
+  const hasUk = /[іІїЇєЄґҐ]/.test(prompt);
+  const hasCyr = /[а-яА-ЯёЁ]/.test(prompt);
+  if (hasUk) return "uk";
+  if (hasCyr) return "ru";
+  return "en";
+}
+
+/** Повідомлення-інструкція для бажаної мови відповіді */
+function languageInstruction(lang: "uk" | "ru" | "en"): string {
+  switch (lang) {
+    case "uk":
+      return "Відповідай українською мовою. Якщо проситимуть іншу мову — перемикайся.";
+    case "ru":
+      return "Отвечай на том же языке, что и пользователь. Сейчас — по-русски.";
+    default:
+      return "Answer in the same language as the user. Default to English.";
+  }
+}
+
 /**
  * Простий виклик Gemini для текстової відповіді.
  * За замовчуванням використовує стабільний gemini-2.0-flash.
+ * Додаємо інструкцію щодо мови у контент користувача (найбезпечніше для API).
  */
 export async function geminiAskText(env: Env, prompt: string): Promise<string> {
   if (!env.GEMINI_API_KEY) {
@@ -18,8 +40,16 @@ export async function geminiAskText(env: Env, prompt: string): Promise<string> {
     env.GEMINI_API_KEY,
   )}`;
 
+  const lang = detectLang(prompt);
+  const instruction = languageInstruction(lang);
+
   const body = {
     contents: [
+      // даємо коротку інструкцію перед самим промптом
+      {
+        role: "user",
+        parts: [{ text: instruction }],
+      },
       {
         role: "user",
         parts: [{ text: prompt }],
