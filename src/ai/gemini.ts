@@ -1,48 +1,83 @@
 // src/ai/gemini.ts
+
+import { languageInstruction, type Lang } from "../utils/i18n";
+
+export interface Env {
+  GEMINI_API_KEY?: string;
+}
+
 /**
- * Проста обгортка для Gemini: приймає system + user,
- * щоб інструкція мови завжди спрацьовувала.
+ * Історичний fallback-детект, якщо зверху явно не передали lang.
+ * Лишаю для сумісності з іншими місцями, де можуть викликати без lang.
  */
-import type { Env } from "../index";
+function legacyDetectLang(prompt: string): "uk" | "ru" | "en" {
+  const hasUk = /[іІїЇєЄґҐ]/.test(prompt);
+  const hasCyr = /[а-яА-ЯёЁ]/.test(prompt);
+  if (hasUk) return "uk";
+  if (hasCyr) return "ru";
+  return "en";
+}
 
-const GEMINI_ENDPOINT =
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent";
-
-type GeminiPart = { text: string };
-type GeminiContent = { role?: string; parts: GeminiPart[] };
-
+/**
+ * Виклик Gemini для текстової відповіді.
+ * Якщо передано lang — кладемо інструкцію у `systemInstruction`.
+ * Якщо lang не передано — зберігаємо стару поведінку (fallback).
+ */
 export async function geminiAskText(
   env: Env,
-  system: string,
-  user: string,
+  prompt: string,
+  lang?: Lang,
 ): Promise<string> {
-  const key = env.GEMINI_API_KEY;
-  if (!key) throw new Error("GEMINI_API_KEY is missing");
+  if (!env.GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY is missing");
+  }
 
-  const body = {
-    // Важливо: системну інструкцію передаємо окремо
-    systemInstruction: { parts: [{ text: system }] },
+  const model = "gemini-2.0-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
+    env.GEMINI_API_KEY,
+  )}`;
+
+  // 1) Готуємо системну інструкцію (правильне поле: systemInstruction)
+  let systemInstr = languageInstruction(
+    lang ?? (legacyDetectLang(prompt) as Lang),
+  );
+
+  // 2) Додаємо дуже короткий дубль-підказку на початок юзерського тексту.
+  //    Якщо API раптом проігнорує systemInstruction, модель все одно
+  //    бачить вимогу щодо мови.
+  const reinforcedPrompt = `${systemInstr}\n\n${prompt}`;
+
+  const body: any = {
     contents: [
-      // user-повідомлення окремим об’єктом
-      { role: "user", parts: [{ text: user }] } as GeminiContent,
+      {
+        role: "user",
+        parts: [{ text: reinforcedPrompt }],
+      },
     ],
+    // ВАЖЛИВО: camelCase!
+    systemInstruction: {
+      parts: [{ text: systemInstr }],
+    },
   };
 
-  const res = await fetch(`${GEMINI_ENDPOINT}?key=${encodeURIComponent(key)}`, {
+  const res = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json; charset=UTF-8" },
     body: JSON.stringify(body),
   });
 
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`Gemini error ${res.status}: ${txt}`);
+  const json = await res.json();
+
+  // очікуваний формат: candidates[0].content.parts[].text
+  const parts: string[] =
+    json?.candidates?.[0]?.content?.parts
+      ?.map((p: any) => (typeof p?.text === "string" ? p.text : ""))
+      ?.filter((s: string) => s.length > 0) ?? [];
+
+  if (parts.length === 0) {
+    const err = json?.promptFeedback?.blockReason || json?.error?.message;
+    throw new Error(err || "Gemini returned no text");
   }
 
-  const data = await res.json();
-  const text =
-    data?.candidates?.[0]?.content?.parts?.[0]?.text ??
-    data?.candidates?.[0]?.content?.parts?.map((p: GeminiPart) => p.text).join("\n") ??
-    "";
-  return String(text || "").trim() || "(empty response)";
+  return parts.join("\n");
 }
