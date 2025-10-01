@@ -5,9 +5,7 @@ export type Env = {
   API_BASE_URL?: string;
 };
 
-const jsonHeaders = {
-  "content-type": "application/json",
-};
+const jsonHeaders = { "content-type": "application/json" };
 
 function tgBase(env: Env) {
   const base = (env.API_BASE_URL || "").trim() || "https://api.telegram.org";
@@ -16,23 +14,31 @@ function tgBase(env: Env) {
 
 const TG_MAX_LEN = 4096;
 
-/**
- * Розбиває текст на шматки ≤ TG_MAX_LEN.
- * Пріоритет розрізів: подвійний перенос → один перенос → пробіл → жорсткий зріз.
- * Старається не ламати код-блоки трійними бектиками.
- */
+/* ------------------------ helpers ------------------------ */
+
+/** Видаляє або знешкоджує проблемні Markdown-символи. */
+function sanitizeMarkdown(raw: string): string {
+  // Приберемо найчастіші причини "can't parse entities"
+  // _ * [ ] ( ) ~ ` > # + - = | { } . !
+  return raw
+    .replace(/[`]/g, "'")     // бектики замінимо на апостроф
+    .replace(/[_*[\]()~>#+=|{}.!]/g, (m) => {
+      if (m === "." || m === "!") return m; // залишимо їх
+      return " ";                           // інші — пробіл
+    })
+    .replace(/\s{2,}/g, " ");
+}
+
+/** Розбиває довгі тексти на шматки ≤ 4096, не рве ```код-блоки```. */
 function splitForTelegram(text: string, max = TG_MAX_LEN): string[] {
   if (!text || text.length <= max) return [text];
 
   const chunks: string[] = [];
   let rest = text;
-
-  // Стан відкритого код-блоку ```...```
   let codeOpen = false;
 
   while (rest.length > 0) {
     if (rest.length <= max) {
-      // Якщо відкритий код-блок — закриваємо в кінці
       if (codeOpen && !rest.trimEnd().endsWith("```")) {
         chunks.push(rest + "\n```");
       } else {
@@ -41,36 +47,21 @@ function splitForTelegram(text: string, max = TG_MAX_LEN): string[] {
       break;
     }
 
-    // кандидат на зріз
     let cut = max;
-
-    // Спроба — подвійний перенос
     let idx = rest.lastIndexOf("\n\n", max);
-    if (idx < max * 0.6) idx = -1; // не різати занадто рано
-    if (idx === -1) {
-      // один перенос
-      idx = rest.lastIndexOf("\n", max);
-    }
-    if (idx === -1) {
-      // пробіл
-      idx = rest.lastIndexOf(" ", max);
-    }
+    if (idx < Math.floor(max * 0.6)) idx = -1;
+    if (idx === -1) idx = rest.lastIndexOf("\n", max);
+    if (idx === -1) idx = rest.lastIndexOf(" ", max);
     if (idx !== -1) cut = idx;
 
     let piece = rest.slice(0, cut).trimEnd();
-    rest = rest.slice(cut).replace(/^\s+/, ""); // прибираємо ліві пробіли з нового шматка
+    rest = rest.slice(cut).replace(/^\s+/, "");
 
-    // Підрахунок трійних бектиків у шматку — щоб не розірвати код-блок
-    const ticksInPiece = (piece.match(/```/g) || []).length;
-    if (ticksInPiece % 2 === 1) {
-      // парність змінилась — ми всередині/поза блоком
-      codeOpen = !codeOpen;
-    }
+    const ticks = (piece.match(/```/g) || []).length;
+    if (ticks % 2 === 1) codeOpen = !codeOpen;
 
     if (codeOpen) {
-      // Якщо код-блок відкрито — закриваємо його в кінці цього чанку
       piece += "\n```";
-      // і відкриємо знову на початку наступного
       if (rest.length > 0) rest = "```\n" + rest;
     }
 
@@ -80,9 +71,47 @@ function splitForTelegram(text: string, max = TG_MAX_LEN): string[] {
   return chunks;
 }
 
+type TryResult = {
+  ok: boolean;
+  status: number;
+  data: any;
+  description?: string;
+};
+
+async function trySendMessage(
+  env: Env,
+  chat_id: number | string,
+  text: string,
+  extra: Record<string, unknown>
+): Promise<TryResult> {
+  const url = `${tgBase(env)}/sendMessage`;
+  const body = JSON.stringify({ chat_id, text, ...extra });
+  const res = await fetch(url, { method: "POST", headers: jsonHeaders, body });
+  let data: any = {};
+  try {
+    data = await res.json();
+  } catch {
+    // інколи Telegram може повернути не-JSON при помилці
+    data = {};
+  }
+  const ok = !!data?.ok && res.ok;
+  return {
+    ok,
+    status: res.status,
+    data,
+    description: data?.description || (ok ? undefined : "unknown error"),
+  };
+}
+
+/* ------------------------ public API ------------------------ */
+
 /**
- * Надсилає повідомлення у Telegram. Довгі тексти розбиває на кілька sendMessage.
- * extra — будь-які стандартні поля Telegram (parse_mode, reply_markup, тощо).
+ * Надсилає текст у Telegram. Довгі повідомлення діляться автоматично.
+ * Ретраї:
+ *  1) як є (extra),
+ *  2) без parse_mode,
+ *  3) з sanitizeMarkdown.
+ * Якщо всі спроби провалені — шле коротке службове повідомлення, а не кидає помилку.
  */
 export async function tgSendMessage(
   env: Env,
@@ -90,38 +119,53 @@ export async function tgSendMessage(
   text: string,
   extra: Record<string, unknown> = {}
 ) {
-  if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN is missing");
+  if (!env.BOT_TOKEN) {
+    throw new Error("BOT_TOKEN is missing");
+  }
 
-  // Дефолти можна перевизначити через extra
-  const baseExtra = {
+  // дефолти можна перевизначити ззовні
+  const baseExtra: Record<string, unknown> = {
     parse_mode: "Markdown",
     disable_web_page_preview: true,
     ...extra,
   };
 
-  const url = `${tgBase(env)}/sendMessage`;
-  const parts = splitForTelegram(text, TG_MAX_LEN);
-
-  let lastResp: any = null;
+  const parts = splitForTelegram(String(text), TG_MAX_LEN);
+  let lastOk: any = null;
 
   for (const part of parts) {
-    const body = JSON.stringify({ chat_id, text: part, ...baseExtra });
-    const res = await fetch(url, { method: "POST", headers: jsonHeaders, body });
-    const data = await res.json().catch(() => ({}));
-
-    if (!res.ok || (data && data.ok === false)) {
-      throw new Error(
-        `Telegram sendMessage failed: status=${res.status} body=${JSON.stringify(
-          data || {}
-        )}`
-      );
+    // 1) як є
+    let r = await trySendMessage(env, chat_id, part, baseExtra);
+    if (!r.ok && r.status === 400) {
+      // 2) без parse_mode
+      const noParse = { ...baseExtra };
+      delete (noParse as any).parse_mode;
+      r = await trySendMessage(env, chat_id, part, noParse);
+      if (!r.ok) {
+        // 3) sanitize
+        const cleaned = sanitizeMarkdown(part);
+        r = await trySendMessage(env, chat_id, cleaned, noParse);
+      }
     }
-    lastResp = data;
-    // Невелика пауза необов'язкова, але іноді корисна для дуже великих відповідей
-    // await new Promise(r => setTimeout(r, 30));
+
+    if (!r.ok) {
+      // фінальний м’який фолбек — коротке службове повідомлення
+      const note =
+        "Вибач, не вдалося надіслати одне з повідомлень (Telegram відхилив форматування). " +
+        "Я спробую надалі надсилати простіший текст.";
+      await trySendMessage(
+        env,
+        chat_id,
+        note,
+        { disable_web_page_preview: true } // без parse_mode
+      );
+      // і не валимо всю відповідь
+    } else {
+      lastOk = r.data;
+    }
   }
 
-  return lastResp;
+  return lastOk;
 }
 
 export async function tgAnswerCallbackQuery(
@@ -130,14 +174,13 @@ export async function tgAnswerCallbackQuery(
   text: string,
   show_alert = false
 ) {
-  if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN is missing");
-
+  if (!env.BOT_TOKEN) {
+    throw new Error("BOT_TOKEN is missing");
+  }
   const url = `${tgBase(env)}/answerCallbackQuery`;
   const body = JSON.stringify({ callback_query_id, text, show_alert });
-
   const res = await fetch(url, { method: "POST", headers: jsonHeaders, body });
   const data = await res.json().catch(() => ({}));
-
   if (!res.ok || (data && data.ok === false)) {
     throw new Error(
       `Telegram answerCallbackQuery failed: status=${res.status} body=${JSON.stringify(
