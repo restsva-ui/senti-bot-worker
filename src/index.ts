@@ -3,7 +3,7 @@ import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { sendHelp } from "./commands/help";
 import { handleDiagnostics } from "./diagnostics-ai";
-import { normalizeLang, type Lang } from "./utils/i18n";
+import { normalizeLang, languageInstruction, type Lang } from "./utils/i18n";
 
 export interface Env {
   // Telegram
@@ -59,14 +59,18 @@ async function geminiAskText(env: Env, prompt: string, lang: Lang): Promise<stri
   const endpoint =
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 
-  const systemInstruction = `You are a helpful assistant. Always answer in ${lang} language. Keep it clear and concise.`;
+  // ✅ Використовуємо правильну мовну інструкцію з i18n
+  const systemInstrText = languageInstruction(lang);
+
+  // Додаткове підсилення: коротко дублюємо інструкцію на початку промпта
+  const reinforcedPrompt = `${systemInstrText}\n\n${prompt}`;
 
   const body = {
-    systemInstruction: { role: "system", parts: [{ text: systemInstruction }] },
+    systemInstruction: { parts: [{ text: systemInstrText }] }, // camelCase важливо
     contents: [
       {
         role: "user",
-        parts: [{ text: prompt }],
+        parts: [{ text: reinforcedPrompt }],
       },
     ],
   };
@@ -103,15 +107,17 @@ async function openrouterAskText(
   }
 
   const endpoint = "https://openrouter.ai/api/v1/chat/completions";
+
+  // ✅ Та сама узгоджена мовна інструкція
+  const systemInstrText = languageInstruction(lang);
+
   const body = {
     model: "openrouter/auto",
     messages: [
-      {
-        role: "system",
-        content: `You are a helpful assistant. Always answer in ${lang} language. Keep it clear and concise.`,
-      },
+      { role: "system", content: systemInstrText },
       { role: "user", content: prompt },
     ],
+    temperature: 0.7,
   };
 
   const r = await fetch(endpoint, {
