@@ -59,14 +59,15 @@ async function geminiAskText(env: Env, prompt: string, lang: Lang): Promise<stri
   const endpoint =
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 
-  // ✅ Використовуємо правильну мовну інструкцію з i18n
+  // Використовуємо правильну інструкцію з i18n
   const systemInstrText = languageInstruction(lang);
 
-  // Додаткове підсилення: коротко дублюємо інструкцію на початку промпта
+  // Страховка: дублюємо інструкцію на початку промпта,
+  // якщо раптом API проігнорує systemInstruction
   const reinforcedPrompt = `${systemInstrText}\n\n${prompt}`;
 
   const body = {
-    systemInstruction: { parts: [{ text: systemInstrText }] }, // camelCase важливо
+    systemInstruction: { parts: [{ text: systemInstrText }] }, // важливо: camelCase
     contents: [
       {
         role: "user",
@@ -107,17 +108,15 @@ async function openrouterAskText(
   }
 
   const endpoint = "https://openrouter.ai/api/v1/chat/completions";
-
-  // ✅ Та сама узгоджена мовна інструкція
-  const systemInstrText = languageInstruction(lang);
-
   const body = {
     model: "openrouter/auto",
     messages: [
-      { role: "system", content: systemInstrText },
+      {
+        role: "system",
+        content: `You are a helpful assistant. Always answer in ${lang} language. Keep it clear and concise.`,
+      },
       { role: "user", content: prompt },
     ],
-    temperature: 0.7,
   };
 
   const r = await fetch(endpoint, {
@@ -180,22 +179,25 @@ export default {
       const lang = detectLang(update);
 
       try {
-        // /ping /help
+        // /ping /help /ask /ask_openrouter
         const msg = update?.message;
         const text: string | undefined = msg?.text;
         const chatId = msg?.chat?.id;
 
         if (typeof text === "string" && chatId) {
+          // /start, /help
           if (/^\/start(?:@\w+)?$/i.test(text) || /^\/help(?:@\w+)?$/i.test(text)) {
             await sendHelp(env as any, chatId, lang);
             return json({ ok: true, handled: "help" });
           }
 
+          // /ping
           if (/^\/ping(?:@\w+)?$/i.test(text)) {
             await pingCommand(env as any, chatId);
             return json({ ok: true, handled: "ping" });
           }
 
+          // /ask_openrouter <текст>
           if (/^\/ask_openrouter(?:@\w+)?\b/i.test(text)) {
             const q = extractArg(text, "ask_openrouter");
             if (!q) {
@@ -207,6 +209,7 @@ export default {
             return json({ ok: true, handled: "ask_openrouter" });
           }
 
+          // /ask <текст> (Gemini)
           if (/^\/ask(?:@\w+)?\b/i.test(text)) {
             const q = extractArg(text, "ask");
             if (!q) {
@@ -216,6 +219,14 @@ export default {
             const answer = await geminiAskText(env, q, lang);
             await tgSendMessage(env as any, chatId, answer);
             return json({ ok: true, handled: "ask" });
+          }
+
+          // ✅ Fallback: просто текст без команди → відпрацьовуємо як /ask (Gemini)
+          const plain = text.trim();
+          if (plain.length > 0) {
+            const answer = await geminiAskText(env, plain, lang);
+            await tgSendMessage(env as any, chatId, answer);
+            return json({ ok: true, handled: "ask:fallback" });
           }
         }
 
