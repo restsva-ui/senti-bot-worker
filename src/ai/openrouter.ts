@@ -1,19 +1,24 @@
 // src/ai/openrouter.ts
 /**
- * Обгортка для OpenRouter Chat Completions з підтримкою system-повідомлення.
+ * Обгортка для OpenRouter Chat Completions з підтримкою system-повідомлення
+ * та мовної інструкції.
  */
 import type { Env } from "../index";
+import { languageInstruction, type Lang } from "../utils/i18n";
 
 const OR_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_MODEL = "openrouter/auto"; // або за бажанням інший
+const DEFAULT_MODEL = "openrouter/auto"; // можна замінити на інший при бажанні
 
 export async function openrouterAskText(
   env: Env,
-  system: string,
   user: string,
+  lang: Lang,
 ): Promise<string> {
   const key = env.OPENROUTER_API_KEY;
   if (!key) throw new Error("OPENROUTER_API_KEY is missing");
+
+  // Системна інструкція на потрібній мові
+  const system = languageInstruction(lang);
 
   const body = {
     model: DEFAULT_MODEL,
@@ -29,6 +34,8 @@ export async function openrouterAskText(
     headers: {
       "content-type": "application/json",
       Authorization: `Bearer ${key}`,
+      "HTTP-Referer": "https://workers.cloudflare.com",
+      "X-Title": "Senti Bot",
     },
     body: JSON.stringify(body),
   });
