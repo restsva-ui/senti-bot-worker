@@ -1,93 +1,58 @@
 // src/ai/gemini.ts
 
-/**
- * Клієнт до Gemini API (Google Generative Language).
- * Використовує GEMINI_API_KEY з секретів воркера.
- */
-
 export interface Env {
   GEMINI_API_KEY?: string;
 }
 
-export type GeminiTextModel =
-  | "gemini-2.5-flash"
-  | "gemini-2.0-flash-001"
-  | "gemini-pro-latest";
-
-const DEFAULT_MODEL: GeminiTextModel = "gemini-2.5-flash";
-
-export type AskOptions = {
-  model?: GeminiTextModel;
-  system?: string;
-  temperature?: number;
-  topP?: number;
-  maxOutputTokens?: number;
-};
-
 /**
- * Основна функція: надсилає текстовий prompt у Gemini і повертає відповідь.
+ * Простий виклик Gemini для текстової відповіді.
+ * За замовчуванням використовує стабільний gemini-2.0-flash.
  */
-export async function geminiAskText(
-  env: Env,
-  prompt: string,
-  opts: AskOptions = {},
-): Promise<string> {
+export async function geminiAskText(env: Env, prompt: string): Promise<string> {
   if (!env.GEMINI_API_KEY) {
     throw new Error("GEMINI_API_KEY is missing");
   }
 
-  const model = opts.model ?? DEFAULT_MODEL;
-
+  const model = "gemini-2.0-flash"; // швидкий і недорогий
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
     env.GEMINI_API_KEY,
   )}`;
 
-  const body: any = {
+  const body = {
     contents: [
       {
         role: "user",
         parts: [{ text: prompt }],
       },
     ],
-    generationConfig: {
-      temperature: opts.temperature ?? 0.7,
-      topP: opts.topP ?? 0.95,
-      maxOutputTokens: opts.maxOutputTokens ?? 512,
-    },
   };
 
-  if (opts.system) {
-    body.systemInstruction = {
-      role: "system",
-      parts: [{ text: opts.system }],
-    };
-  }
-
-  const res = await fetch(url, {
+  const r = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
 
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`Gemini HTTP ${res.status}: ${text || "no body"}`);
-  }
+  const txt = await r.text();
+  if (!txt) throw new Error("Gemini empty response");
 
   let json: any;
   try {
-    json = JSON.parse(text);
+    json = JSON.parse(txt);
   } catch {
-    throw new Error("Gemini: bad JSON response");
+    throw new Error("Gemini bad JSON");
   }
 
-  const candidate = json?.candidates?.[0];
-  const parts: Array<{ text?: string }> = candidate?.content?.parts ?? [];
-  const out = parts.map((p) => p?.text ?? "").join("").trim();
+  // очікуваний формат: candidates[0].content.parts[].text
+  const parts: string[] =
+    json?.candidates?.[0]?.content?.parts
+      ?.map((p: any) => (typeof p?.text === "string" ? p.text : ""))
+      ?.filter((s: string) => s.length > 0) ?? [];
 
-  if (!out) {
-    throw new Error("Gemini: empty result");
+  if (parts.length === 0) {
+    const err = json?.promptFeedback?.blockReason || json?.error?.message;
+    throw new Error(err || "Gemini returned no text");
   }
 
-  return out;
+  return parts.join("\n");
 }
