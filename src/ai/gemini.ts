@@ -7,8 +7,8 @@ export interface Env {
 }
 
 /**
- * Історичний fallback-детект, якщо зверху явно не передали lang.
- * Лишаю для сумісності з іншими місцями, де можуть викликати без lang.
+ * Легасі-fallback, якщо зверху явно не передали lang.
+ * Лишаємо для сумісності з потенційними старими викликами.
  */
 function legacyDetectLang(prompt: string): "uk" | "ru" | "en" {
   const hasUk = /[іІїЇєЄґҐ]/.test(prompt);
@@ -20,8 +20,9 @@ function legacyDetectLang(prompt: string): "uk" | "ru" | "en" {
 
 /**
  * Виклик Gemini для текстової відповіді.
- * Якщо передано lang — кладемо інструкцію у `systemInstruction`.
- * Якщо lang не передано — зберігаємо стару поведінку (fallback).
+ * - Використовуємо правильне поле `systemInstruction` (camelCase).
+ * - Якщо lang передано — це джерело істини; інакше — fallback.
+ * - Додаємо коротку мовну підказку на початок prompt як страховку.
  */
 export async function geminiAskText(
   env: Env,
@@ -32,19 +33,17 @@ export async function geminiAskText(
     throw new Error("GEMINI_API_KEY is missing");
   }
 
-  const model = "gemini-2.0-flash";
+  // Стабільна швидка модель із діагностик: доступна у тебе
+  const model = "gemini-2.5-flash";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
     env.GEMINI_API_KEY,
   )}`;
 
-  // 1) Готуємо системну інструкцію (правильне поле: systemInstruction)
-  let systemInstr = languageInstruction(
-    lang ?? (legacyDetectLang(prompt) as Lang),
-  );
+  const targetLang: Lang = lang ?? (legacyDetectLang(prompt) as Lang);
+  const systemInstr = languageInstruction(targetLang);
 
-  // 2) Додаємо дуже короткий дубль-підказку на початок юзерського тексту.
-  //    Якщо API раптом проігнорує systemInstruction, модель все одно
-  //    бачить вимогу щодо мови.
+  // Страховка: дублюємо дуже коротку інструкцію на початку промпта,
+  // на випадок якщо API проігнорує systemInstruction.
   const reinforcedPrompt = `${systemInstr}\n\n${prompt}`;
 
   const body: any = {
@@ -54,7 +53,7 @@ export async function geminiAskText(
         parts: [{ text: reinforcedPrompt }],
       },
     ],
-    // ВАЖЛИВО: camelCase!
+    // ВАЖЛИВО: саме `systemInstruction` (camelCase), без role
     systemInstruction: {
       parts: [{ text: systemInstr }],
     },
@@ -66,18 +65,42 @@ export async function geminiAskText(
     body: JSON.stringify(body),
   });
 
-  const json = await res.json();
-
-  // очікуваний формат: candidates[0].content.parts[].text
-  const parts: string[] =
-    json?.candidates?.[0]?.content?.parts
-      ?.map((p: any) => (typeof p?.text === "string" ? p.text : ""))
-      ?.filter((s: string) => s.length > 0) ?? [];
-
-  if (parts.length === 0) {
-    const err = json?.promptFeedback?.blockReason || json?.error?.message;
-    throw new Error(err || "Gemini returned no text");
+  // Може повернутись не-JSON при помилці проксі/мережі
+  const raw = await res.text();
+  let json: any = {};
+  try {
+    json = raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new Error(`Gemini: bad JSON from upstream${raw ? ` — ${raw.slice(0, 160)}` : ""}`);
   }
 
-  return parts.join("\n");
+  if (!res.ok) {
+    const err = json?.error?.message || `HTTP ${res.status}`;
+    throw new Error(`Gemini error: ${err}`);
+  }
+
+  // Якщо відповідь заблокована політиками
+  const block = json?.promptFeedback?.blockReason;
+  if (block) {
+    throw new Error(`Gemini blocked: ${block}`);
+  }
+
+  // Витягуємо текст з усіх parts усіх кандидатів
+  const texts: string[] = [];
+  const candidates = Array.isArray(json?.candidates) ? json.candidates : [];
+  for (const c of candidates) {
+    const parts = c?.content?.parts || [];
+    for (const p of parts) {
+      if (typeof p?.text === "string" && p.text.trim()) {
+        texts.push(p.text);
+      }
+    }
+  }
+
+  const answer = texts.join("\n").trim();
+  if (!answer) {
+    throw new Error("Gemini returned no text");
+  }
+
+  return answer;
 }
