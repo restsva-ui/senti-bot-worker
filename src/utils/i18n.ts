@@ -63,18 +63,19 @@ function stripCommand(raw: string): string {
 
 /**
  * Повертає інструкцію для системного промпта під вибрану мову.
+ * Тут налаштовано дружній стиль без канцеляризмів.
  */
 export function languageInstruction(lang: Lang): string {
   switch (lang) {
     case "uk":
-      return "Відповідай українською мовою. Якщо питання іншою мовою — все одно відповідай українською.";
+      return "Відповідай українською у простому, дружньому стилі. Пиши так, ніби розмовляєш із другом — легко й зрозуміло, без зайвої офіційності.";
     case "ru":
-      return "Отвечай на русском языке. Если вопрос на другом языке — всё равно отвечай по-русски.";
+      return "Отвечай по-русски простым и дружеским тоном. Пиши так, будто говоришь с приятелем — ясно и без лишней официальности.";
     case "de":
-      return "Antworte auf Deutsch. Auch wenn die Frage in einer anderen Sprache ist, antworte bitte auf Deutsch.";
+      return "Antworte auf Deutsch in einem lockeren, freundlichen Stil. Schreib so, als würdest du mit einem Freund chatten – klar, natürlich, ohne Amtsdeutsch.";
     case "en":
     default:
-      return "Answer in English. Even if the question is in another language, reply in English.";
+      return "Answer in English in a friendly, conversational tone. Keep it natural and simple, like chatting with a friend — no stiff formalities.";
   }
 }
 
@@ -105,7 +106,6 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
     | "en"
     | "";
 
-  // Якщо інтерфейс Telegram англійський і кирилиці немає — форсимо EN.
   if (tg === "en" && cyrCount === 0) {
     return "en";
   }
@@ -116,29 +116,22 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
   else if (tg === "de") tgBias.de = 0.9;
   else if (tg === "en") tgBias.en = 0.9;
 
-  // Дуже короткий текст — віддаємо tg або en
   if (t.length < 3) {
     const guess = (Object.keys(tgBias)[0] as Lang | undefined) || "en";
     return guess;
   }
 
-  // Початкові бали
   const score: Record<Lang, number> = { uk: 0, ru: 0, de: 0, en: 0 };
 
-  // Явні букви
   if (RU_LETTERS.test(t)) score.ru += 4;
   if (UK_LETTERS.test(t)) score.uk += 4;
-
-  // Діакритики німецької
   if (DE_DIACRITICS.test(t)) score.de += 2.5;
 
-  // Частотні слова
   if (RU_COMMON.test(t)) score.ru += 2;
   if (UK_COMMON.test(t)) score.uk += 2;
-  if (DE_COMMON.test(t)) score.de += 1.8; // трохи менше, щоб не перебивати EN у латиниці
-  if (EN_COMMON.test(t)) score.en += 2.0; // підсилюємо EN-маркери
+  if (DE_COMMON.test(t)) score.de += 1.8;
+  if (EN_COMMON.test(t)) score.en += 2.0;
 
-  // Домінування скрипту
   if (cyrCount > latinCount * 1.1) {
     score.uk += 1.4;
     score.ru += 1.4;
@@ -147,18 +140,15 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
     score.de += 1.0;
   }
 
-  // Якщо латиниця і немає умлаутів — легкий бонус EN (зменшує хибні DE)
   if (latinCount > 0 && !DE_DIACRITICS.test(t)) {
     score.en += 0.6;
   }
 
-  // Нахил від телеграм-коду
   if (tgBias.uk) score.uk += tgBias.uk;
   if (tgBias.ru) score.ru += tgBias.ru;
   if (tgBias.de) score.de += tgBias.de;
   if (tgBias.en) score.en += tgBias.en;
 
-  // Вибір переможця
   let winner: Lang = "en";
   let best = -Infinity;
   (["uk", "ru", "de", "en"] as Lang[]).forEach((l) => {
@@ -168,7 +158,6 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
     }
   });
 
-  // Якщо кирилиця є, але переміг EN — переоцінюємо на користь UK/RU
   if (cyrCount > 0 && latinCount === 0 && winner === "en") {
     winner = score.uk >= score.ru ? "uk" : "ru";
   }
@@ -176,7 +165,6 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
     winner = score.uk >= score.ru ? "uk" : "ru";
   }
 
-  // Tie-break: якщо tg=en і різниця з найближчим суперником < 0.3 — обираємо EN
   if (tg === "en") {
     const sorted = (["uk", "ru", "de", "en"] as Lang[])
       .map((l) => [l, score[l]] as const)
