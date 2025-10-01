@@ -1,88 +1,48 @@
 // src/ai/gemini.ts
-
-export interface Env {
-  GEMINI_API_KEY?: string;
-}
-
-/** Дуже проста евристика визначення мови запиту */
-function detectLang(prompt: string): "uk" | "ru" | "en" {
-  const hasUk = /[іІїЇєЄґҐ]/.test(prompt);
-  const hasCyr = /[а-яА-ЯёЁ]/.test(prompt);
-  if (hasUk) return "uk";
-  if (hasCyr) return "ru";
-  return "en";
-}
-
-/** Повідомлення-інструкція для бажаної мови відповіді */
-function languageInstruction(lang: "uk" | "ru" | "en"): string {
-  switch (lang) {
-    case "uk":
-      return "Відповідай українською мовою. Якщо проситимуть іншу мову — перемикайся.";
-    case "ru":
-      return "Отвечай на том же языке, что и пользователь. Сейчас — по-русски.";
-    default:
-      return "Answer in the same language as the user. Default to English.";
-  }
-}
-
 /**
- * Простий виклик Gemini для текстової відповіді.
- * За замовчуванням використовує стабільний gemini-2.0-flash.
- * Додаємо інструкцію щодо мови у контент користувача (найбезпечніше для API).
+ * Проста обгортка для Gemini: приймає system + user,
+ * щоб інструкція мови завжди спрацьовувала.
  */
-export async function geminiAskText(env: Env, prompt: string): Promise<string> {
-  if (!env.GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY is missing");
-  }
+import type { Env } from "../index";
 
-  const model = "gemini-2.0-flash"; // швидкий і недорогий
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
-    env.GEMINI_API_KEY,
-  )}`;
+const GEMINI_ENDPOINT =
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent";
 
-  const lang = detectLang(prompt);
-  const instruction = languageInstruction(lang);
+type GeminiPart = { text: string };
+type GeminiContent = { role?: string; parts: GeminiPart[] };
+
+export async function geminiAskText(
+  env: Env,
+  system: string,
+  user: string,
+): Promise<string> {
+  const key = env.GEMINI_API_KEY;
+  if (!key) throw new Error("GEMINI_API_KEY is missing");
 
   const body = {
+    // Важливо: системну інструкцію передаємо окремо
+    systemInstruction: { parts: [{ text: system }] },
     contents: [
-      // даємо коротку інструкцію перед самим промптом
-      {
-        role: "user",
-        parts: [{ text: instruction }],
-      },
-      {
-        role: "user",
-        parts: [{ text: prompt }],
-      },
+      // user-повідомлення окремим об’єктом
+      { role: "user", parts: [{ text: user }] } as GeminiContent,
     ],
   };
 
-  const r = await fetch(url, {
+  const res = await fetch(`${GEMINI_ENDPOINT}?key=${encodeURIComponent(key)}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
 
-  const txt = await r.text();
-  if (!txt) throw new Error("Gemini empty response");
-
-  let json: any;
-  try {
-    json = JSON.parse(txt);
-  } catch {
-    throw new Error("Gemini bad JSON");
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Gemini error ${res.status}: ${txt}`);
   }
 
-  // очікуваний формат: candidates[0].content.parts[].text
-  const parts: string[] =
-    json?.candidates?.[0]?.content?.parts
-      ?.map((p: any) => (typeof p?.text === "string" ? p.text : ""))
-      ?.filter((s: string) => s.length > 0) ?? [];
-
-  if (parts.length === 0) {
-    const err = json?.promptFeedback?.blockReason || json?.error?.message;
-    throw new Error(err || "Gemini returned no text");
-  }
-
-  return parts.join("\n");
+  const data = await res.json();
+  const text =
+    data?.candidates?.[0]?.content?.parts?.[0]?.text ??
+    data?.candidates?.[0]?.content?.parts?.map((p: GeminiPart) => p.text).join("\n") ??
+    "";
+  return String(text || "").trim() || "(empty response)";
 }
