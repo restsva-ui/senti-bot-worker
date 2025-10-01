@@ -1,68 +1,112 @@
 // src/commands/ask.ts
-
-import type { Env } from "../index";
 import { tgSendMessage } from "../utils/telegram";
 import { normalizeLang, languageInstruction, type Lang } from "../utils/i18n";
+import type { Env } from "../index";
 
-// Ці імпорти покладені на існуючі обгортки у твоєму репозиторії.
-// Імена збережені такими, як зазвичай у подібних структурах.
+// Ці два імпорти очікують, що у тебе вже є прості текстові хелпери до провайдерів.
+// Вони повинні приймати (env, prompt: string) і повертати рядок з відповіддю.
 import { geminiAskText } from "../ai/gemini";
 import { openrouterAskText } from "../ai/openrouter";
 
 /**
- * Формуємо користувацький запит з інструкцією про мову відповіді.
- * Це безпечно і абсолютно сумісно з будь-якою LLM: інструкція зверху → запит нижче.
+ * Допоміжні підказки для випадків, коли текст після команди порожній.
  */
-function buildPromptWithLang(text: string, lang: Lang): string {
-  const instruction = languageInstruction(lang);
-  // Інструкція системного рівня + розділювач — мінімально інвазивно.
-  return `${instruction}\n\nUser question:\n${text}`;
-}
+function usageByLang(lang: Lang, which: "gemini" | "openrouter"): string {
+  const hint =
+    which === "openrouter"
+      ? {
+          uk: "Приклад: /ask_openrouter Поясни різницю між HTTP і HTTPS.",
+          ru: "Пример: /ask_openrouter Объясни разницу между HTTP и HTTPS.",
+          de: "Beispiel: /ask_openrouter Erkläre kurz den Unterschied zwischen HTTP und HTTPS.",
+          en: "Example: /ask_openrouter Explain the difference between HTTP and HTTPS.",
+        }
+      : {
+          uk: "Приклад: /ask Поясни різницю між HTTP і HTTPS.",
+          ru: "Пример: /ask Объясни разницу между HTTP и HTTPS.",
+          de: "Beispiel: /ask Erkläre kurz den Unterschied zwischen HTTP und HTTPS.",
+          en: "Example: /ask Explain the difference between HTTP and HTTPS.",
+        };
 
-/**
- * /ask — через Gemini
- */
-export async function ask(
-  env: Env,
-  chatId: number,
-  userText: string,
-  tgLanguageCode?: string,
-): Promise<void> {
-  const lang = normalizeLang(userText, tgLanguageCode);
-  const prompt = buildPromptWithLang(userText, lang);
-
-  try {
-    const answer = await geminiAskText(env, prompt);
-    await tgSendMessage(env as any, chatId, answer || "(empty)");
-  } catch (e: any) {
-    await tgSendMessage(
-      env as any,
-      chatId,
-      `Помилка /ask: ${e?.message || String(e)}`,
-    );
+  switch (lang) {
+    case "uk":
+      return `Надішли запит після команди.\n${hint.uk}`;
+    case "ru":
+      return `Отправь запрос после команды.\n${hint.ru}`;
+    case "de":
+      return `Sende deine Frage nach dem Befehl.\n${hint.de}`;
+    case "en":
+    default:
+      return `Send your question after the command.\n${hint.en}`;
   }
 }
 
 /**
- * /ask_openrouter — через OpenRouter
+ * /ask — питання через Gemini
  */
-export async function askOpenrouter(
-  env: Env,
-  chatId: number,
-  userText: string,
-  tgLanguageCode?: string,
-): Promise<void> {
-  const lang = normalizeLang(userText, tgLanguageCode);
-  const prompt = buildPromptWithLang(userText, lang);
+export async function handleAsk(env: Env, msg: any): Promise<void> {
+  const chatId = msg?.chat?.id;
+  const fullText: string = msg?.text ?? "";
+  const userText = fullText.replace(/^\/ask(@\S+)?\s*/i, "").trim();
+  const tgLangCode: string | undefined = msg?.from?.language_code;
 
-  try {
-    const answer = await openrouterAskText(env, prompt);
-    await tgSendMessage(env as any, chatId, answer || "(empty)");
-  } catch (e: any) {
-    await tgSendMessage(
-      env as any,
-      chatId,
-      `Помилка /ask_openrouter: ${e?.message || String(e)}`,
-    );
+  const lang: Lang = normalizeLang(userText, tgLangCode);
+  const sys = languageInstruction(lang);
+
+  if (!userText) {
+    await tgSendMessage(env as any, chatId, usageByLang(lang, "gemini"));
+    return;
   }
+
+  // Об’єднуємо системну інструкцію з текстом користувача
+  const prompt = `${sys}\n\nUser: ${userText}`;
+  let answer = "";
+  try {
+    answer = await geminiAskText(env as any, prompt);
+  } catch (e: any) {
+    answer =
+      lang === "uk"
+        ? "Помилка звернення до Gemini."
+        : lang === "ru"
+        ? "Ошибка обращения к Gemini."
+        : lang === "de"
+        ? "Fehler bei der Anfrage an Gemini."
+        : "Error while calling Gemini.";
+  }
+
+  await tgSendMessage(env as any, chatId, answer);
+}
+
+/**
+ * /ask_openrouter — питання через OpenRouter
+ */
+export async function handleAskOpenRouter(env: Env, msg: any): Promise<void> {
+  const chatId = msg?.chat?.id;
+  const fullText: string = msg?.text ?? "";
+  const userText = fullText.replace(/^\/ask_openrouter(@\S+)?\s*/i, "").trim();
+  const tgLangCode: string | undefined = msg?.from?.language_code;
+
+  const lang: Lang = normalizeLang(userText, tgLangCode);
+  const sys = languageInstruction(lang);
+
+  if (!userText) {
+    await tgSendMessage(env as any, chatId, usageByLang(lang, "openrouter"));
+    return;
+  }
+
+  const prompt = `${sys}\n\nUser: ${userText}`;
+  let answer = "";
+  try {
+    answer = await openrouterAskText(env as any, prompt);
+  } catch (e: any) {
+    answer =
+      lang === "uk"
+        ? "Помилка звернення до OpenRouter."
+        : lang === "ru"
+        ? "Ошибка обращения к OpenRouter."
+        : lang === "de"
+        ? "Fehler bei der Anfrage an OpenRouter."
+        : "Error while calling OpenRouter.";
+  }
+
+  await tgSendMessage(env as any, chatId, answer);
 }
