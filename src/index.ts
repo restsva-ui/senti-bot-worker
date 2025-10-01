@@ -3,6 +3,7 @@ import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { handleDiagnostics } from "./diagnostics";
 import { geminiAskText } from "./ai/gemini";
+import { openrouterAskText } from "./ai/openrouter";
 
 export interface Env {
   BOT_TOKEN: string;
@@ -66,7 +67,7 @@ export default {
           return json({ ok: true, handled: "ping" });
         }
 
-        // /ask <prompt>
+        // /ask <prompt> -> Gemini
         if (text?.startsWith("/ask") && chatId) {
           const prompt = text.replace(/^\/ask\s*/, "").trim();
           if (!prompt) {
@@ -85,6 +86,32 @@ export default {
               `⚠️ Gemini error: ${e?.message || String(e)}`,
             );
             return json({ ok: false, error: "gemini failed" }, 500);
+          }
+        }
+
+        // /ask_openrouter <prompt> -> OpenRouter
+        if (text?.startsWith("/ask_openrouter") && chatId) {
+          const prompt = text.replace(/^\/ask_openrouter\s*/, "").trim();
+          if (!prompt) {
+            await tgSendMessage(
+              env as any,
+              chatId,
+              "❗ Введи запит після /ask_openrouter",
+            );
+            return json({ ok: false, error: "empty prompt" }, 400);
+          }
+
+          try {
+            const answer = await openrouterAskText(env as any, prompt);
+            await tgSendMessage(env as any, chatId, answer);
+            return json({ ok: true, handled: "ask_openrouter" });
+          } catch (e: any) {
+            await tgSendMessage(
+              env as any,
+              chatId,
+              `⚠️ OpenRouter error: ${e?.message || String(e)}`,
+            );
+            return json({ ok: false, error: "openrouter failed" }, 500);
           }
         }
 
