@@ -1,76 +1,58 @@
 // src/ai/openrouter.ts
 
-/**
- * Простий клієнт до OpenRouter для текстових запитів.
- * Використовує Chat Completions API: https://openrouter.ai/docs
- */
-
-export interface OpenRouterEnv {
+export interface Env {
   OPENROUTER_API_KEY?: string;
 }
 
-type AskOpts = {
-  /** Яку модель використати. За замовчуванням — авто-вибір */
-  model?: string;
-  /** Необов'язковий системний промпт */
-  system?: string;
-};
-
+/**
+ * Запит через OpenRouter. За замовчуванням ставимо "openrouter/auto",
+ * щоб провайдер сам підбирав модель (стабільно і без прив’язки до конкретної).
+ */
 export async function openrouterAskText(
-  env: OpenRouterEnv,
+  env: Env,
   prompt: string,
-  opts: AskOpts = {},
 ): Promise<string> {
   if (!env.OPENROUTER_API_KEY) {
     throw new Error("OPENROUTER_API_KEY is missing");
   }
 
-  const model = opts.model || "openrouter/auto";
-  const system = opts.system?.trim();
+  const url = "https://openrouter.ai/api/v1/chat/completions";
 
-  const body: any = {
-    model,
+  const body = {
+    model: "openrouter/auto",
     messages: [
-      ...(system ? [{ role: "system", content: system }] : []),
+      { role: "system", content: "You are a helpful assistant." },
       { role: "user", content: prompt },
     ],
-    // небагато «обережних» параметрів за замовчуванням
-    temperature: 0.7,
   };
 
-  const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const r = await fetch(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+      // опціональні, але корисні для OpenRouter
+      "HTTP-Referer": "https://github.com/restsva/senti-bot-worker",
+      "X-Title": "Senti Bot",
     },
     body: JSON.stringify(body),
   });
 
   const txt = await r.text();
-  if (!txt) throw new Error("OpenRouter: empty response");
+  if (!txt) throw new Error("OpenRouter empty response");
 
   let json: any;
   try {
     json = JSON.parse(txt);
   } catch {
-    throw new Error("OpenRouter: bad JSON from upstream");
+    throw new Error("OpenRouter bad JSON");
   }
 
-  // Помилка у форматі OpenRouter
-  if (!r.ok) {
-    const msg = json?.error?.message || r.statusText || "unknown error";
-    throw new Error(`OpenRouter HTTP ${r.status}: ${msg}`);
-  }
-
-  const content =
-    json?.choices?.[0]?.message?.content ||
-    json?.choices?.[0]?.delta?.content ||
-    "";
-
+  const content: string | undefined = json?.choices?.[0]?.message?.content;
   if (!content) {
-    throw new Error("OpenRouter: no content in response");
+    const err =
+      json?.error?.message || json?.message || "OpenRouter returned no text";
+    throw new Error(err);
   }
-
-  return String(content).trim();
+  return content;
 }
