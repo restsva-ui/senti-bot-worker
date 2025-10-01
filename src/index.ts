@@ -8,14 +8,14 @@ import { normalizeLang, languageInstruction, type Lang } from "./utils/i18n";
 export interface Env {
   // Telegram
   BOT_TOKEN: string;
-  TELEGRAM_SECRET_TOKEN?: string;
-  WEBHOOK_SECRET?: string;
+  TELEGRAM_SECRET_TOKEN?: string; // якщо задано — звіряємо
+  WEBHOOK_SECRET?: string;        // альтернативне поле
 
   // AI keys
   GEMINI_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
 
-  // CF flags (як і було раніше; не використовуємо тут напряму)
+  // CF flags (зараз не використовуються тут)
   CF_VISION?: string;
   CLOUDFLARE_API_TOKEN?: string;
 }
@@ -27,47 +27,43 @@ function json(res: unknown, status = 200) {
   });
 }
 
-/** Обережне визначення мови з Telegram update */
+/** Акуратний детект мови: враховує і текст, і language_code */
 function detectLang(update: any): Lang {
   const code: string | undefined =
     update?.message?.from?.language_code ||
+    update?.edited_message?.from?.language_code ||
+    update?.channel_post?.from?.language_code ||
     update?.callback_query?.from?.language_code ||
     undefined;
 
-  // fallback: якщо нема тексту, передаємо порожній рядок
   const text: string =
     update?.message?.text ||
+    update?.edited_message?.text ||
+    update?.channel_post?.text ||
     update?.callback_query?.message?.text ||
     "";
 
   return normalizeLang(text, code);
 }
 
-/** Акуратне виділення тексту після команди */
+/** Виділяє слово після команди (/ask …) */
 function extractArg(text: string, command: string): string {
-  // приклади: "/ask Привіт", "/ask@YourBot Привіт"
   const noBot = text.replace(new RegExp(`^\\/${command}(?:@\\w+)?\\s*`, "i"), "");
   return noBot.trim();
 }
 
-/** Запит до Gemini з урахуванням мови */
-async function geminiAskText(env: Env, prompt: string, lang: Lang): Promise<string> {
-  if (!env.GEMINI_API_KEY) {
-    return "Gemini: API-ключ відсутній у воркері.";
-  }
+/** === Gemini === */
+async function askGemini(env: Env, prompt: string, lang: Lang): Promise<string> {
+  if (!env.GEMINI_API_KEY) return "Gemini: API-ключ відсутній у воркері.";
 
   const endpoint =
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 
-  // Використовуємо правильну інструкцію з i18n
   const systemInstrText = languageInstruction(lang);
-
-  // Страховка: дублюємо інструкцію на початку промпта,
-  // якщо раптом API проігнорує systemInstruction
   const reinforcedPrompt = `${systemInstrText}\n\n${prompt}`;
 
   const body = {
-    systemInstruction: { parts: [{ text: systemInstrText }] }, // важливо: camelCase
+    systemInstruction: { parts: [{ text: systemInstrText }] }, // ВАЖЛИВО: camelCase
     contents: [
       {
         role: "user",
@@ -83,29 +79,27 @@ async function geminiAskText(env: Env, prompt: string, lang: Lang): Promise<stri
     body: JSON.stringify(body),
   });
 
+  // читаємо текст спочатку, щоб впіймати не-JSON помилки
+  const raw = await r.text();
+  let data: any = {};
+  try { data = raw ? JSON.parse(raw) : {}; } catch { /* ignore */ }
+
   if (!r.ok) {
-    const errTxt = await r.text().catch(() => "");
-    return `Gemini: HTTP ${r.status}${errTxt ? ` — ${errTxt}` : ""}`;
+    const msg = data?.error?.message || raw || `HTTP ${r.status}`;
+    return `Gemini: ${msg}`;
   }
 
-  const data: any = await r.json().catch(() => ({}));
-  const text =
-    data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-    data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text).filter(Boolean).join("\n") ||
-    "";
+  const parts: string[] =
+    data?.candidates?.[0]?.content?.parts
+      ?.map((p: any) => (typeof p?.text === "string" ? p.text : ""))
+      ?.filter((s: string) => s) ?? [];
 
-  return text || "Gemini: порожня відповідь.";
+  return parts.join("\n").trim() || "Gemini: порожня відповідь.";
 }
 
-/** Запит до OpenRouter з урахуванням мови */
-async function openrouterAskText(
-  env: Env,
-  prompt: string,
-  lang: Lang,
-): Promise<string> {
-  if (!env.OPENROUTER_API_KEY) {
-    return "OpenRouter: API-ключ відсутній у воркері.";
-  }
+/** === OpenRouter === */
+async function askOpenRouter(env: Env, prompt: string, lang: Lang): Promise<string> {
+  if (!env.OPENROUTER_API_KEY) return "OpenRouter: API-ключ відсутній у воркері.";
 
   const endpoint = "https://openrouter.ai/api/v1/chat/completions";
   const body = {
@@ -117,6 +111,7 @@ async function openrouterAskText(
       },
       { role: "user", content: prompt },
     ],
+    temperature: 0.7,
   };
 
   const r = await fetch(endpoint, {
@@ -130,45 +125,68 @@ async function openrouterAskText(
     body: JSON.stringify(body),
   });
 
+  const raw = await r.text();
+  let data: any = {};
+  try { data = raw ? JSON.parse(raw) : {}; } catch { /* ignore */ }
+
   if (!r.ok) {
-    const errTxt = await r.text().catch(() => "");
-    return `OpenRouter: HTTP ${r.status}${errTxt ? ` — ${errTxt}` : ""}`;
+    const msg = data?.error?.message || raw || `HTTP ${r.status}`;
+    return `OpenRouter: ${msg}`;
   }
 
-  const data: any = await r.json().catch(() => ({}));
   const text =
     data?.choices?.[0]?.message?.content ||
     data?.choices?.map((c: any) => c?.message?.content).filter(Boolean).join("\n") ||
     "";
 
-  return text || "OpenRouter: порожня відповідь.";
+  return (text || "").trim() || "OpenRouter: порожня відповідь.";
+}
+
+/** Дістаємо з апдейта chatId і текст, враховуючи різні типи апдейтів */
+function getMessageInfo(update: any): { chatId?: number; text?: string } {
+  const msg =
+    update?.message ||
+    update?.edited_message ||
+    update?.channel_post ||
+    update?.callback_query?.message ||
+    null;
+
+  const chatId: number | undefined = msg?.chat?.id;
+  const text: string | undefined =
+    update?.message?.text ||
+    update?.edited_message?.text ||
+    update?.channel_post?.text ||
+    update?.callback_query?.message?.text ||
+    undefined;
+
+  return { chatId, text };
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // healthcheck
+    // Healthcheck
     if (request.method === "GET" && url.pathname === "/health") {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // діагностика (AI)
+    // Diagnostics
     const diag = await handleDiagnostics(request, env as any, url);
     if (diag) return diag;
 
     // Telegram webhook
     if (request.method === "POST" && url.pathname === "/webhook") {
-      // Перевірка секрету (fallback на WEBHOOK_SECRET)
-      const expected = env.TELEGRAM_SECRET_TOKEN || env.WEBHOOK_SECRET || "";
+      // Перевірка секрету: якщо задано хоча б одне поле — вимагаємо збіг
+      const expected = (env.TELEGRAM_SECRET_TOKEN || env.WEBHOOK_SECRET || "").trim();
       if (expected) {
-        const got =
-          request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
-        if (got !== expected)
+        const got = (request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "").trim();
+        if (got !== expected) {
           return json({ ok: false, error: "invalid secret" }, 403);
+        }
       }
 
-      // Зчитуємо апдейт
+      // Читаємо апдейт
       let update: any = null;
       try {
         update = await request.json();
@@ -176,16 +194,18 @@ export default {
         return json({ ok: false, error: "bad json" }, 400);
       }
 
+      const { chatId, text } = getMessageInfo(update);
       const lang = detectLang(update);
 
       try {
-        // /ping /help /ask /ask_openrouter
-        const msg = update?.message;
-        const text: string | undefined = msg?.text;
-        const chatId = msg?.chat?.id;
+        // Callback-кнопки — просто відповімо ехом
+        if (update?.callback_query?.id && chatId) {
+          await tgSendMessage(env as any, chatId, `tap: ${update?.callback_query?.data ?? ""}`);
+          return json({ ok: true, handled: "callback" });
+        }
 
         if (typeof text === "string" && chatId) {
-          // /start, /help
+          // /start | /help
           if (/^\/start(?:@\w+)?$/i.test(text) || /^\/help(?:@\w+)?$/i.test(text)) {
             await sendHelp(env as any, chatId, lang);
             return json({ ok: true, handled: "help" });
@@ -197,53 +217,50 @@ export default {
             return json({ ok: true, handled: "ping" });
           }
 
-          // /ask_openrouter <текст>
+          // /ask_openrouter …
           if (/^\/ask_openrouter(?:@\w+)?\b/i.test(text)) {
             const q = extractArg(text, "ask_openrouter");
-            if (!q) {
-              await tgSendMessage(env as any, chatId, "Будь ласка, додай питання після команди.");
-              return json({ ok: true, handled: "ask_openrouter:empty" });
-            }
-            const answer = await openrouterAskText(env, q, lang);
+            const answer = q
+              ? await askOpenRouter(env, q, lang)
+              : "Будь ласка, додай питання після команди.";
             await tgSendMessage(env as any, chatId, answer);
             return json({ ok: true, handled: "ask_openrouter" });
           }
 
-          // /ask <текст> (Gemini)
+          // /ask … (Gemini)
           if (/^\/ask(?:@\w+)?\b/i.test(text)) {
             const q = extractArg(text, "ask");
-            if (!q) {
-              await tgSendMessage(env as any, chatId, "Будь ласка, додай питання після команди.");
-              return json({ ok: true, handled: "ask:empty" });
-            }
-            const answer = await geminiAskText(env, q, lang);
+            const answer = q
+              ? await askGemini(env, q, lang)
+              : "Будь ласка, додай питання після команди.";
             await tgSendMessage(env as any, chatId, answer);
             return json({ ok: true, handled: "ask" });
           }
 
-          // ✅ Fallback: просто текст без команди → відпрацьовуємо як /ask (Gemini)
+          // Fallback: звичайний текст — як /ask (Gemini)
           const plain = text.trim();
           if (plain.length > 0) {
-            const answer = await geminiAskText(env, plain, lang);
+            const answer = await askGemini(env, plain, lang);
             await tgSendMessage(env as any, chatId, answer);
             return json({ ok: true, handled: "ask:fallback" });
           }
         }
 
-        // callback
-        const cb = update?.callback_query;
-        if (cb?.id && cb?.message?.chat?.id) {
-          await tgSendMessage(
-            env as any,
-            cb.message.chat.id,
-            `tap: ${cb.data ?? ""}`,
-          );
-          return json({ ok: true, handled: "callback" });
-        }
-
+        // Якщо сюди дійшли — нічого не зробили (не текст/нема chatId)
         return json({ ok: true, noop: true });
       } catch (e: any) {
-        console.error("Webhook error:", e?.message || e);
+        // Не мовчимо: намагаємось повідомити користувача про помилку
+        try {
+          if (chatId) {
+            await tgSendMessage(
+              env as any,
+              chatId,
+              `Вибач, сталася внутрішня помилка: ${e?.message || String(e)}`
+            );
+          }
+        } catch {
+          // ігноруємо, щоб точно не впасти
+        }
         return json({ ok: false, error: "internal" }, 500);
       }
     }
