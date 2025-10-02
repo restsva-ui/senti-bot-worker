@@ -1,5 +1,3 @@
-// src/utils/i18n.ts
-
 /**
  * Підтримувані мови для відповідей бота.
  */
@@ -87,36 +85,49 @@ const MANUAL_OVERRIDES: Record<string, Lang> = {
 };
 
 /**
- * Інструкція для системного промпта (дружній стиль)
- * + Заборона мета-коментарів про мови.
+ * Системна інструкція:
+ * — лише одна мова;
+ * — максимально коротко (1–2 речення для простих реплік);
+ * — без метакоментарів про мови/переклади;
+ * — дружній тон; списки — маркерами, до 5 пунктів;
+ * — за потреби рівно 1 уточнювальне запитання;
+ * — ніколи не вигадуй фактів.
  */
 export function composeSystemInstruction(lang: Lang): string {
-  const commonBan =
-    "Важливо: не перекладай і не пояснюй інші мови; не коментуй, якою мовою був запит; " +
-    "навіть якщо вхід одне слово або іншою мовою — відповідай повністю тут і зараз обраною мовою. " +
-    "Не пиши преамбули типу «я ШІ/ИИ/KI». Якщо просять список — використовуй маркери. " +
-    "Стиль: дружній, розмовний, прості короткі речення, без канцеляризмів.";
-
   switch (lang) {
     case "uk":
-      return `Відповідай українською мовою. ${commonBan}`;
+      return [
+        "Відповідай виключно українською.",
+        "Пиши коротко і дружньо: для привітань чи «так/ні» — 1 рядок; для пояснень — максимум 1–2 короткі речення.",
+        "Не перекладай запит і не коментуй, якою мовою він був. Без преамбул типу «я ШІ».",
+        "Якщо просять список — дай маркери (до 5). Якщо чогось бракує — задай 1 уточнювальне запитання.",
+        "Не вигадуй фактів і уникай канцеляризмів.",
+      ].join(" ");
     case "ru":
-      return `Отвечай на русском языке. ${commonBan.replace("українською", "русском")}`;
+      return [
+        "Отвечай исключительно на русском.",
+        "Пиши кратко и дружелюбно: для приветствий и «да/нет» — одна строка; для объяснений — не более 1–2 коротких предложений.",
+        "Не переводишь запрос и не комментируешь язык. Никаких преамбул вроде «я ИИ».",
+        "Если нужен список — маркеры (до 5). Если информации мало — ровно 1 уточняющий вопрос.",
+        "Не выдумывай факты и избегай канцелярита.",
+      ].join(" ");
     case "de":
-      return (
-        "Antworte ausschließlich auf Deutsch. " +
-        commonBan
-          .replace("українською", "Deutsch")
-          .replace("дружній, розмовний", "locker, freundlich")
-      );
+      return [
+        "Antworte ausschließlich auf Deutsch.",
+        "Schreibe kurz und freundlich: Bei Gruß oder Ja/Nein – eine Zeile; bei Erklärungen – höchstens 1–2 kurze Sätze.",
+        "Nicht übersetzen und nichts zum Spracheingang kommentieren. Keine Vorreden wie „ich bin eine KI“.",
+        "Bei Listen nutze Aufzählungszeichen (max. 5). Falls nötig, genau eine Rückfrage stellen.",
+        "Keine erfundenen Fakten.",
+      ].join(" ");
     case "en":
     default:
-      return (
-        "Answer exclusively in English. " +
-        commonBan
-          .replace("українською", "English")
-          .replace("дружній, розмовний", "friendly, conversational")
-      );
+      return [
+        "Answer exclusively in English.",
+        "Keep it short and friendly: for greetings or yes/no, one line; for explanations, at most 1–2 short sentences.",
+        "Do not translate or mention the input language. No preambles like “I’m an AI”.",
+        "Use bullet points (up to 5) when a list is requested. If context is missing, ask exactly one clarifying question.",
+        "Avoid fabrications.",
+      ].join(" ");
   }
 }
 
