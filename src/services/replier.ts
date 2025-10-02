@@ -1,4 +1,3 @@
-// src/services/replier.ts
 import { composeSystemInstruction, type Lang } from "../utils/i18n";
 
 /** Що очікує модуль у середовищі */
@@ -21,8 +20,7 @@ function norm(s: string): string {
 }
 
 /* ===== Швидкі відповіді (без звернення до LLM) =====
-   ВАЖЛИВО: кожен пакет містить ТІЛЬКИ слова цієї мови.
-   Це мінімізує плутанину при автодетекті.
+   ВАЖЛИВО: кожен пакет містить ТІЛЬКИ слова цієї мови — мінімізує плутанину.
 */
 const QUICK_PACKS: Record<Lang, Record<string, string>> = {
   uk: {
@@ -112,7 +110,7 @@ export function quickTemplateReply(lang: Lang, raw: string): string | null {
     const w = words[0].replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
     if (pack[w]) return pack[w];
   } else if (words.length === 2) {
-    // специфічні двослівні ключі
+    // специфічні двослівні ключі (напр. "thank you", "guten tag")
     const joined = words.join(" ");
     if (pack[joined]) return pack[joined];
   }
@@ -231,7 +229,6 @@ export async function askSmart(
   const availGemini = !!env.GEMINI_API_KEY;
   const availOR = !!env.OPENROUTER_API_KEY;
 
-  // Спершу Gemini, потім OR (якщо є ключі)
   if (availGemini) {
     try {
       const text = await askGemini(env, trimmed, lang);
@@ -249,7 +246,7 @@ export async function askSmart(
     return { text, from: "openrouter" };
   }
 
-  // Якщо немає ключів — м’який дефолт
+  // 3) Немає ключів — м’який дефолт
   return {
     text:
       lang === "uk"
