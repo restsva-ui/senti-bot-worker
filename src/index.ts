@@ -4,21 +4,23 @@ import { sendHelp } from "./commands/help";
 import { handleDiagnostics } from "./diagnostics-ai";
 import { normalizeLang, languageInstruction, type Lang } from "./utils/i18n";
 
+/* ===== типи середовища ===== */
 export interface Env {
   // Telegram
   BOT_TOKEN: string;
-  TELEGRAM_SECRET_TOKEN?: string; // якщо задано — звіряємо
-  WEBHOOK_SECRET?: string;        // альтернативне поле
+  TELEGRAM_SECRET_TOKEN?: string;
+  WEBHOOK_SECRET?: string;
 
   // AI keys
   GEMINI_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
 
-  // CF flags (зараз не використовуються тут)
+  // CF flags (не використовуємо тут напряму)
   CF_VISION?: string;
   CLOUDFLARE_API_TOKEN?: string;
 }
 
+/* ===== утиліти ===== */
 function json(res: unknown, status = 200) {
   return new Response(JSON.stringify(res), {
     status,
@@ -26,7 +28,7 @@ function json(res: unknown, status = 200) {
   });
 }
 
-/** Акуратний детект мови: враховує і текст, і language_code */
+/** Делікатне визначення мови з Telegram update */
 function detectLang(update: any): Lang {
   const code: string | undefined =
     update?.message?.from?.language_code ||
@@ -45,43 +47,41 @@ function detectLang(update: any): Lang {
   return normalizeLang(text, code);
 }
 
-/** Виділяє аргумент команди і знімає /<command> з КОЖНОГО рядка. */
+/** Виділяє аргумент після команди (/ask …) */
 function extractArg(text: string, command: string): string {
-  // прибираємо префікс з початку всього повідомлення
-  const dropFirst = text.replace(
-    new RegExp(`^\\/${command}(?:@\\w+)?\\s*`, "i"),
-    ""
-  );
-
-  // і знімаємо його з кожного подальшого рядка
-  const perLine = dropFirst
-    .split(/\r?\n/)
-    .map((line) =>
-      line.replace(new RegExp(`^\\/${command}(?:@\\w+)?\\s*`, "i"), "").trim()
-    )
-    .filter(Boolean)
-    .join("\n");
-
-  return perLine.trim();
+  const noBot = text.replace(new RegExp(`^\\/${command}(?:@\\w+)?\\s*`, "i"), "");
+  return noBot.trim();
 }
 
-/** === Gemini === */
+/**
+ * Розбиває “батч” у межах одного повідомлення.
+ * Підтримує формати:
+ *  - кілька рядків, де кожен може починатися з /ask
+ *  - рядки, розділені порожніми строками
+ */
+function parseMultiAsk(raw: string): string[] {
+  const lines = raw
+    .split(/\r?\n+/)
+    .map((l) => l.replace(/^\/ask(?:@\w+)?\s*/i, "").trim())
+    .filter((l) => l.length > 0);
+
+  return lines.length > 0 ? lines : [raw.trim()];
+}
+
+/* ===== звернення до моделей ===== */
+
+/** Gemini */
 async function askGemini(env: Env, prompt: string, lang: Lang): Promise<string> {
   if (!env.GEMINI_API_KEY) return "Gemini: API-ключ відсутній у воркері.";
 
   const endpoint =
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 
-  // Жорстка інструкція + страховка у самому промпті
   const systemInstrText = languageInstruction(lang);
-  const batchRules =
-    "Якщо у вхідному тексті кілька рядків, відповідай на КОЖЕН рядок окремою короткою відповіддю " +
-    "у тому ж порядку. Заборонено: будь-які заголовки/преамбули/цитування, фрази «Ось мої відповіді…», " +
-    "«Відповідь на …», розділювачі типу --- або ***. Просто дай послідовність відповідей рядок-у-рядок.";
-  const reinforcedPrompt = `${systemInstrText}\n${batchRules}\n\n${prompt}`;
+  const reinforcedPrompt = `${systemInstrText}\n\n${prompt}`;
 
   const body = {
-    systemInstruction: { parts: [{ text: `${systemInstrText}\n${batchRules}` }] }, // ВАЖЛИВО: camelCase
+    systemInstruction: { parts: [{ text: systemInstrText }] },
     contents: [
       {
         role: "user",
@@ -97,7 +97,6 @@ async function askGemini(env: Env, prompt: string, lang: Lang): Promise<string> 
     body: JSON.stringify(body),
   });
 
-  // читаємо text спочатку — інколи помилки приходять не-JSON
   const raw = await r.text();
   let data: any = {};
   try { data = raw ? JSON.parse(raw) : {}; } catch { /* ignore */ }
@@ -115,7 +114,7 @@ async function askGemini(env: Env, prompt: string, lang: Lang): Promise<string> 
   return parts.join("\n").trim() || "Gemini: порожня відповідь.";
 }
 
-/** === OpenRouter === */
+/** OpenRouter */
 async function askOpenRouter(env: Env, prompt: string, lang: Lang): Promise<string> {
   if (!env.OPENROUTER_API_KEY) return "OpenRouter: API-ключ відсутній у воркері.";
 
@@ -160,7 +159,7 @@ async function askOpenRouter(env: Env, prompt: string, lang: Lang): Promise<stri
   return (text || "").trim() || "OpenRouter: порожня відповідь.";
 }
 
-/** Дістаємо з апдейта chatId і текст, враховуючи різні типи апдейтів */
+/** Дістаємо chatId і текст для різних типів апдейтів */
 function getMessageInfo(update: any): { chatId?: number; text?: string } {
   const msg =
     update?.message ||
@@ -180,31 +179,30 @@ function getMessageInfo(update: any): { chatId?: number; text?: string } {
   return { chatId, text };
 }
 
+/* ===== воркер ===== */
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // Healthcheck
+    // healthcheck
     if (request.method === "GET" && url.pathname === "/health") {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // Diagnostics
+    // diagnostics (AI)
     const diag = await handleDiagnostics(request, env as any, url);
     if (diag) return diag;
 
     // Telegram webhook
     if (request.method === "POST" && url.pathname === "/webhook") {
-      // Перевірка секрету: якщо задано хоча б одне поле — вимагаємо збіг
+      // секрет (за наявності)
       const expected = (env.TELEGRAM_SECRET_TOKEN || env.WEBHOOK_SECRET || "").trim();
       if (expected) {
         const got = (request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "").trim();
-        if (got !== expected) {
-          return json({ ok: false, error: "invalid secret" }, 403);
-        }
+        if (got !== expected) return json({ ok: false, error: "invalid secret" }, 403);
       }
 
-      // Читаємо апдейт
+      // апдейт
       let update: any = null;
       try {
         update = await request.json();
@@ -213,10 +211,10 @@ export default {
       }
 
       const { chatId, text } = getMessageInfo(update);
-      const lang = detectLang(update);
+      const msgLang = detectLang(update); // мова всього повідомлення (на випадок одиночного рядка)
 
       try {
-        // Callback-кнопки — просто відповімо ехом
+        // callback
         if (update?.callback_query?.id && chatId) {
           await tgSendMessage(env as any, chatId, `tap: ${update?.callback_query?.data ?? ""}`);
           return json({ ok: true, handled: "callback" });
@@ -225,7 +223,7 @@ export default {
         if (typeof text === "string" && chatId) {
           // /start | /help
           if (/^\/start(?:@\w+)?$/i.test(text) || /^\/help(?:@\w+)?$/i.test(text)) {
-            await sendHelp(env as any, chatId, lang);
+            await sendHelp(env as any, chatId, msgLang);
             return json({ ok: true, handled: "help" });
           }
 
@@ -235,39 +233,59 @@ export default {
             return json({ ok: true, handled: "ping" });
           }
 
-          // /ask_openrouter …
+          // /ask_openrouter — може бути батч
           if (/^\/ask_openrouter(?:@\w+)?\b/i.test(text)) {
-            const q = extractArg(text, "ask_openrouter");
-            const answer = q
-              ? await askOpenRouter(env, q, lang)
-              : "Будь ласка, додай питання після команди.";
-            await tgSendMessage(env as any, chatId, answer);
-            return json({ ok: true, handled: "ask_openrouter" });
+            const qRaw = extractArg(text, "ask_openrouter");
+            const items = parseMultiAsk(qRaw);
+
+            if (items.length === 0) {
+              await tgSendMessage(env as any, chatId, "Будь ласка, додай питання після команди.");
+              return json({ ok: true, handled: "ask_openrouter:empty" });
+            }
+
+            const answers: string[] = [];
+            for (const item of items) {
+              const localLang = normalizeLang(item, update?.message?.from?.language_code);
+              const ans = await askOpenRouter(env, item, localLang);
+              answers.push(ans.trim());
+            }
+
+            await tgSendMessage(env as any, chatId, answers.join("\n\n"));
+            return json({ ok: true, handled: "ask_openrouter:batch" });
           }
 
-          // /ask … (Gemini)
+          // /ask (Gemini) — також батч
           if (/^\/ask(?:@\w+)?\b/i.test(text)) {
-            const q = extractArg(text, "ask");
-            const answer = q
-              ? await askGemini(env, q, lang)
-              : "Будь ласка, додай питання після команди.";
-            await tgSendMessage(env as any, chatId, answer);
-            return json({ ok: true, handled: "ask" });
+            const qRaw = extractArg(text, "ask");
+            const items = parseMultiAsk(qRaw);
+
+            if (items.length === 0) {
+              await tgSendMessage(env as any, chatId, "Будь ласка, додай питання після команди.");
+              return json({ ok: true, handled: "ask:empty" });
+            }
+
+            const answers: string[] = [];
+            for (const item of items) {
+              const localLang = normalizeLang(item, update?.message?.from?.language_code);
+              const ans = await askGemini(env, item, localLang);
+              answers.push(ans.trim());
+            }
+
+            await tgSendMessage(env as any, chatId, answers.join("\n\n"));
+            return json({ ok: true, handled: "ask:batch" });
           }
 
-          // Fallback: звичайний текст — як /ask (Gemini)
+          // звичайний текст → як /ask (Gemini), одиночний
           const plain = text.trim();
           if (plain.length > 0) {
-            const answer = await askGemini(env, plain, lang);
+            const answer = await askGemini(env, plain, msgLang);
             await tgSendMessage(env as any, chatId, answer);
             return json({ ok: true, handled: "ask:fallback" });
           }
         }
 
-        // Якщо сюди дійшли — нічого не зробили (не текст/нема chatId)
         return json({ ok: true, noop: true });
       } catch (e: any) {
-        // Не мовчимо: намагаємось повідомити користувача про помилку
         try {
           if (chatId) {
             await tgSendMessage(
@@ -276,9 +294,7 @@ export default {
               `Вибач, сталася внутрішня помилка: ${e?.message || String(e)}`
             );
           }
-        } catch {
-          // ігноруємо, щоб точно не впасти
-        }
+        } catch { /* ignore */ }
         return json({ ok: false, error: "internal" }, 500);
       }
     }
