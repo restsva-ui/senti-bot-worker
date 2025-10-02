@@ -140,68 +140,53 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
   if (UK_STRONG.test(stripped) && !RU_LETTERS.test(stripped)) return "uk";
   if (EN_STRONG.test(stripped) && /[a-z]/i.test(stripped) && !DE_DIACRITICS.test(stripped)) return "en";
 
-  // --- 0.2) Ранній вибір для кирилиці без явних букв
-  // Якщо кирилиця і матчиться RU_COMMON без явних UA-літер → RU
-  if (CYRILLIC.test(stripped)) {
-    if (RU_COMMON.test(stripped) && !UK_LETTERS.test(stripped)) return "ru";
-    if (UK_COMMON.test(stripped) && !RU_LETTERS.test(stripped)) return "uk";
-  }
-
-  // --- 1) Дуже короткий текст — ще не вирішуємо мовою Telegram
-  // (відкладемо tgLanguageCode на самий кінець)
-
-  // --- 2) Підрахунок скриптів
+  // --- 1) Підрахунок скриптів
   let latinCount = 0, cyrCount = 0;
   for (const ch of stripped) {
     if (LATIN.test(ch)) latinCount++;
     else if (CYRILLIC.test(ch)) cyrCount++;
   }
 
-  // --- 3) Набираємо бали
+  // --- 2) ЖОРСТКЕ правило для кирилиці (щоб не було міксу RU/UK)
+  if (cyrCount > 0) {
+    if (UK_LETTERS.test(stripped)) return "uk";
+    if (RU_LETTERS.test(stripped)) return "ru";
+    // Без явних літер: вирішуємо за частотою ключових слів; нічия -> ru
+    const ruBias = (stripped.match(RU_COMMON)?.length || 0);
+    const ukBias = (stripped.match(UK_COMMON)?.length || 0);
+    return ruBias >= ukBias ? "ru" : "uk";
+  }
+
+  // --- 3) Балова модель (переважно для латиниці/міксу)
   const score: Record<Lang, number> = { uk: 0, ru: 0, de: 0, en: 0 };
 
   if (RU_LETTERS.test(stripped)) score.ru += 3.0;
   if (UK_LETTERS.test(stripped)) score.uk += 3.0;
   if (DE_DIACRITICS.test(stripped)) score.de += 2.0;
 
-  // Підсилені ваги для спільнокореневих слів
-  if (RU_COMMON.test(stripped)) score.ru += 3.0; // було менше
+  if (RU_COMMON.test(stripped)) score.ru += 3.0;
   if (UK_COMMON.test(stripped)) score.uk += 3.0;
   if (DE_COMMON.test(stripped)) score.de += 1.6;
   if (EN_COMMON.test(stripped)) score.en += 1.6;
 
-  if (cyrCount > latinCount * 1.2) { score.uk += 1.2; score.ru += 1.2; }
-  else if (latinCount > cyrCount * 1.2) { score.en += 1.0; score.de += 0.9; }
+  if (latinCount > cyrCount * 1.2) { score.en += 1.0; score.de += 0.9; }
 
   if (latinCount > 0 && !DE_DIACRITICS.test(stripped)) score.en += 0.4;
 
-  // --- 4) Переможець за балами
   const order = (["uk","ru","de","en"] as Lang[])
     .map(l => [l, score[l]] as const)
     .sort((a,b) => b[1] - a[1]);
 
   const [winLang, winScore] = order[0];
   const [, secondScore] = order[1];
-
-  // поріг «явної переваги»
   const MARGIN = 0.25;
   if (winScore - secondScore >= MARGIN) return winLang;
 
-  // --- 5) Якщо кирилиця і бали близькі — розв’язуємо між uk/ru за наявністю літер
-  if (cyrCount > 0 && Math.abs(winScore - secondScore) < MARGIN) {
-    if (UK_LETTERS.test(stripped)) return "uk";
-    if (RU_LETTERS.test(stripped)) return "ru";
-    // якщо все одно нічия — вибираємо за частотою тригерів
-    const ruBias = (stripped.match(RU_COMMON)?.length || 0);
-    const ukBias = (stripped.match(UK_COMMON)?.length || 0);
-    if (ruBias !== ukBias) return ruBias > ukBias ? "ru" : "uk";
-  }
-
-  // --- 6) Telegram language_code як останній fallback
+  // --- 4) Telegram language_code як останній fallback
   const tg = (tgLanguageCode || "").split("-")[0].toLowerCase() as Lang | "";
   if ((["uk","ru","de","en"] as Lang[]).includes(tg)) return tg as Lang;
 
-  // --- 7) Фінальний fallback
+  // --- 5) Фінальний fallback
   return "en";
 }
 
