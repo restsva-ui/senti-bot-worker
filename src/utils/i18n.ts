@@ -26,18 +26,21 @@ const RU_LETTERS = /[ёыэ]/i;       // характерні для RU
 const UK_LETTERS = /[ієїґ]/i;      // характерні для UK
 const DE_DIACRITICS = /[äöüß]/i;   // характерні для DE
 
+// Додали короткі відповіді (да/нет/ок/окей) — краще впізнає короткі репліки
 const RU_COMMON =
-  /\b(что|это|как|когда|почему|например|сеть|данн|сервер|быстр(ее|ей)|основн|котор|пользовател[ья])\b/i;
+  /\b(да|нет|ок(?:ей)?|что|это|как|когда|почему|например|сеть|данн|сервер|быстр(ее|ей)|основн|котор|пользовател[ья])\b/i;
 
+// Додали короткі відповіді (так/ні/ок/окей)
 const UK_COMMON =
-  /\b(що|це|як|коли|чому|наприклад|мереж|дан(их|і)|сервер|швидш|основн|який|користувач)\b/i;
+  /\b(так|ні|ок(?:ей)?|що|це|як|коли|чому|наприклад|мереж|дан(их|і)|сервер|швидш|основн|який|користувач)\b/i;
 
-/** DE: без "was" (конфліктує з англ. "was"), додані типові слова. */
+/** DE: без "was" (конфліктує з англ. "was"), додані короткі відповіді ja/nein */
 const DE_COMMON =
-  /\b(und|ist|nicht|ein|eine|einem|einer|warum|wie|mit|für|zum|zur|bitte|kurz|erklaere|erkläre|erklaeren|erklären|beispiel|dass|sind|gerne|möchte|moechte|vielleicht|deshalb|darum|netzwerk|server|inhalt|benutz(er|ern)?)\b/i;
+  /\b(ja|nein|und|ist|nicht|ein|eine|einem|einer|warum|wie|mit|für|zum|zur|bitte|kurz|erklaere|erkläre|erklaeren|erklären|beispiel|dass|sind|gerne|möchte|moechte|vielleicht|deshalb|darum|netzwerk|server|inhalt|benutz(er|ern)?)\b/i;
 
+// Додали короткі відповіді (ok/okay/yes/no/hi/hey)
 const EN_COMMON =
-  /\b(and|is|are|what|why|how|with|for|content|network|server|user?s?|please|quick|hello|hi|thanks?)\b/i;
+  /\b(ok(?:ay)?|yes|no|hi|hey|and|is|are|what|why|how|with|for|content|network|server|user?s?|please|quick|hello|thanks?)\b/i;
 
 const CYRILLIC = /\p{Script=Cyrillic}/u;
 const LATIN = /\p{Script=Latin}/u;
@@ -59,7 +62,7 @@ function stripCommand(raw: string): string {
  * Інструкція для системного промпта (дружній, розмовний стиль)
  * + ЖОРСТКА заборона мета-коментарів про мови.
  *
- * Правила які усувають “Да — це так по-російськи” тощо:
+ * Правила, які усувають “Да — це так по-російськи” тощо:
  *  - відповідай ТІЛЬКИ вибраною мовою;
  *  - не перекладай і не пояснюй інші мови;
  *  - не коментуй, якою мовою було написано вхід;
@@ -102,15 +105,14 @@ export function languageInstruction(lang: Lang): string {
  *
  * Алгоритм:
  *  1) Аналізуємо текст (без команд) і рахуємо бали для uk/ru/de/en.
- *  2) Якщо є явний переможець (відрив ≥ 0.5) — повертаємо його.
- *  3) Якщо неоднозначно (різниця < 0.5 або текст дуже короткий) —
- *     тоді використовуємо Telegram language_code як м’який fallback.
+ *  2) Якщо є явний переможець — повертаємо його.
+ *  3) Якщо неоднозначно або дуже коротко — беремо Telegram language_code як м’який fallback.
  *  4) Фінальний fallback — "en".
  */
 export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
   const t = stripCommand(input);
 
-  // дуже короткий текст — одразу йдемо в fallback на підставі Telegram або EN
+  // дуже короткий текст — одразу fallback від Telegram або EN
   if (t.length < 3) {
     const tg = (tgLanguageCode || "").split("-")[0].toLowerCase() as Lang | "";
     return (["uk", "ru", "de", "en"] as Lang[]).includes(tg as Lang) ? (tg as Lang) : "en";
@@ -162,7 +164,8 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
   const [winLang, winScore] = order[0];
   const [, secondScore] = order[1];
 
-  const MARGIN = 0.5; // поріг «явної переваги» мови тексту
+  // поріг «явної переваги» знижено — краще ловить короткі репліки
+  const MARGIN = 0.35;
 
   // 1) якщо текст дав чітку перевагу — беремо переможця
   if (winScore - secondScore >= MARGIN) {
