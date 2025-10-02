@@ -22,7 +22,6 @@ function norm(s: string): string {
 
 /* ===== Швидкі відповіді (без звернення до LLM) =====
    ВАЖЛИВО: кожен пакет містить ТІЛЬКИ слова цієї мови.
-   Ніяких англ/рос/укр ключів у німецькому пакеті тощо — це мінімізує плутанину.
 */
 const QUICK_PACKS: Record<Lang, Record<string, string>> = {
   uk: {
@@ -71,20 +70,19 @@ export function quickTemplateReply(lang: Lang, raw: string): string | null {
   const key = norm(raw);
   if (!key) return null;
 
-  // Підтримуємо і однословні, і дуже короткі двослівні фрази типу "thank you"
   const pack = QUICK_PACKS[lang];
   if (!pack) return null;
 
   // Пряме співпадіння
   if (pack[key]) return pack[key];
 
-  // Якщо користувач ввів на кшталт "ок!" або "Привіт:)" — повторно нормалізуємо слово за словом
+  // Якщо ввели "ок!" чи "Привіт:)" — ще раз чистимо краї
   const words = key.split(/\s+/).filter(Boolean);
   if (words.length === 1) {
     const w = words[0].replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
     if (pack[w]) return pack[w];
   } else if (words.length === 2) {
-    // специфічний кейс для en: "thank you"
+    // спецкейс: en "thank you"
     const joined = words.join(" ");
     if (pack[joined]) return pack[joined];
   }
@@ -184,9 +182,12 @@ function kvKey(lang: Lang, q: string) {
   return `tpl:${lang}:${q.trim().toLowerCase()}`;
 }
 
+/* Тимчасові/квотні помилки Gemini, при яких треба робити фолбек на OpenRouter */
+const TRANSIENT_ERR = /(quota|rate[-\s]?limit|exceed|overload|overloaded|model is overloaded|busy|unavailable|temporar|try again later|timeout|timed out|429|500|503)/i;
+
 /* ===== Основний роутер =====
    1) KV-кеш коротких реплік → миттєва відповідь
-   2) Gemini (якщо є ключ). Якщо ліміт — фолбек на OpenRouter.
+   2) Gemini (якщо є ключ). Якщо ліміт/перевантаження — фолбек на OpenRouter.
    3) OpenRouter (якщо є ключ)
 */
 export async function askSmart(
@@ -210,10 +211,13 @@ export async function askSmart(
       const text = await askGemini(env, trimmed, lang);
       return { text, from: "gemini" };
     } catch (e: any) {
-      // Якщо саме ліміт — пробуємо OR
       const msg = String(e?.message || e || "");
-      const isQuota = /quota|rate[-\s]?limit|exceeded/i.test(msg);
-      if (!isQuota || !availOR) throw e;
+      const isTransient = TRANSIENT_ERR.test(msg);
+      if (!isTransient || !availOR) {
+        // якщо немає OR або помилка не тимчасова — кидаємо далі, хай індекс повідомить користувача
+        throw e;
+      }
+      // інакше — фолбек на OR нижче
     }
   }
 
@@ -222,7 +226,7 @@ export async function askSmart(
     return { text, from: "openrouter" };
   }
 
-  // Якщо немає ключів — м’який дефолт
+  // Якщо немає ключів — м’який дефолт локальною мовою
   return {
     text:
       lang === "uk"
