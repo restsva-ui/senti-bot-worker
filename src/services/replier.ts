@@ -1,4 +1,5 @@
-import { composeSystemInstruction, type Lang } from "../utils/i18n";
+// src/services/replier.ts
+import { composeSystemInstruction, normalizeLang, type Lang } from "../utils/i18n";
 
 /** Що очікує модуль у середовищі */
 export interface ReplierEnv {
@@ -20,7 +21,8 @@ function norm(s: string): string {
 }
 
 /* ===== Швидкі відповіді (без звернення до LLM) =====
-   ВАЖЛИВО: кожен пакет містить ТІЛЬКИ слова цієї мови — мінімізує плутанину.
+   ВАЖЛИВО: кожен пакет містить ТІЛЬКИ слова цієї мови.
+   Це мінімізує плутанину при автодетекті.
 */
 const QUICK_PACKS: Record<Lang, Record<string, string>> = {
   uk: {
@@ -110,7 +112,7 @@ export function quickTemplateReply(lang: Lang, raw: string): string | null {
     const w = words[0].replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
     if (pack[w]) return pack[w];
   } else if (words.length === 2) {
-    // специфічні двослівні ключі (напр. "thank you", "guten tag")
+    // специфічні двослівні ключі
     const joined = words.join(" ");
     if (pack[joined]) return pack[joined];
   }
@@ -129,10 +131,9 @@ async function askGemini(env: ReplierEnv, prompt: string, lang: Lang): Promise<s
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
 
   const system = composeSystemInstruction(lang);
-  const reinforced = `${system}\n\n${prompt}`;
 
   const body = {
-    contents: [{ role: "user", parts: [{ text: reinforced }] }],
+    contents: [{ role: "user", parts: [{ text: prompt }] }], // НЕ дублюємо system у user
     // ВАЖЛИВО: саме camelCase
     systemInstruction: { parts: [{ text: system }] },
   };
@@ -208,11 +209,23 @@ function kvKey(lang: Lang, q: string) {
   return `tpl:${lang}:${q.trim().toLowerCase()}`;
 }
 
+/** Жорстко підсилює користувацький prompt вимогою мови */
+function reinforcePrompt(prompt: string, lang: Lang): string {
+  const label =
+    lang === "uk" ? "ВІДПОВІДАЙ ЛИШЕ УКРАЇНСЬКОЮ. НЕ ПЕРЕКЛАДАЙ."
+  : lang === "ru" ? "ОТВЕЧАЙ ТОЛЬКО НА РУССКОМ. НЕ ПЕРЕВОДИ."
+  : lang === "de" ? "ANTWORTE NUR AUF DEUTSCH. NICHT ÜBERSETZEN."
+  : "ANSWER ONLY IN ENGLISH. DO NOT TRANSLATE.";
+
+  return `${label}\n\n${prompt}`;
+}
+
 /**
  * Основний роутер:
  *  1) KV-кеш коротких реплік → миттєва відповідь
  *  2) Gemini (якщо є ключ). Якщо ліміт/перевантаження — фолбек на OpenRouter.
  *  3) OpenRouter (якщо є ключ)
+ *  + Перевірка мови відповіді; за потреби 1 ретрай із жорстким підсиленням.
  */
 export async function askSmart(
   env: ReplierEnv,
@@ -225,37 +238,56 @@ export async function askSmart(
   const cached = await env.SENTI_CACHE?.get(kvKey(lang, trimmed));
   if (cached) return { text: cached, from: "kv" };
 
-  // 2) Провайдери
   const availGemini = !!env.GEMINI_API_KEY;
   const availOR = !!env.OPENROUTER_API_KEY;
 
-  if (availGemini) {
-    try {
-      const text = await askGemini(env, trimmed, lang);
-      return { text, from: "gemini" };
-    } catch (e: any) {
-      // Якщо саме ліміт/перевантаження — пробуємо OR
-      const msg = String(e?.message || e || "");
-      const isQuota = /quota|rate[-\s]?limit|exceeded|overload/i.test(msg);
-      if (!isQuota || !availOR) throw e;
+  // локальний хелпер виклику провайдера
+  const callProvider = async (p: string): Promise<{ text: string; from: "gemini" | "openrouter" }> => {
+    if (availGemini) {
+      try {
+        const text = await askGemini(env, p, lang);
+        return { text, from: "gemini" };
+      } catch (e: any) {
+        const msg = String(e?.message || e || "");
+        const isQuota = /quota|rate[-\s]?limit|exceeded|overload/i.test(msg);
+        if (!isQuota || !availOR) throw e;
+      }
     }
-  }
-
-  if (availOR) {
-    const text = await askOpenRouter(env, trimmed, lang);
-    return { text, from: "openrouter" };
-  }
-
-  // 3) Немає ключів — м’який дефолт
-  return {
-    text:
-      lang === "uk"
-        ? "Зараз зовнішній провайдер недоступний. Спробуй коротшими запитами або пізніше. 🙂"
-        : lang === "ru"
-        ? "Сейчас внешний провайдер недоступен. Попробуй короче либо позже. 🙂"
-        : lang === "de"
-        ? "Der externe Dienst ist gerade nicht verfügbar. Versuch es kurz oder später. 🙂"
-        : "The external provider is currently unavailable. Try shorter prompts or later. 🙂",
-    from: "kv",
+    if (availOR) {
+      const text = await askOpenRouter(env, p, lang);
+      return { text, from: "openrouter" };
+    }
+    // Якщо немає ключів — м’який дефолт
+    return {
+      text:
+        lang === "uk"
+          ? "Зараз зовнішній провайдер недоступний. Спробуй коротшими запитами або пізніше. 🙂"
+          : lang === "ru"
+          ? "Сейчас внешний провайдер недоступен. Попробуй короче либо позже. 🙂"
+          : lang === "de"
+          ? "Der externe Dienst ist gerade nicht verfügbar. Versuch es kurz oder später. 🙂"
+          : "The external provider is currently unavailable. Try shorter prompts or later. 🙂",
+      from: "gemini",
+    };
   };
+
+  // 2) Перша спроба
+  let { text, from } = await callProvider(trimmed);
+
+  // 3) Перевіряємо мову відповіді
+  const detected = normalizeLang(text || "", undefined);
+  if (detected !== lang) {
+    // 3.1) Одна повторна спроба із жорстким підсиленням
+    const reinforced = reinforcePrompt(trimmed, lang);
+    const retry = await callProvider(reinforced);
+
+    const detected2 = normalizeLang(retry.text || "", undefined);
+    if (detected2 === lang) {
+      text = retry.text;
+      from = retry.from;
+    }
+    // якщо ні — лишаємо перший варіант (зазвичай ретраю вистачає)
+  }
+
+  return { text, from };
 }
