@@ -1,7 +1,7 @@
 // src/utils/i18n.ts
 
 /**
- * Підтримувані мови для відповідей бота.
+ * Підтримувані мови.
  */
 export type Lang = "uk" | "ru" | "de" | "en";
 
@@ -20,175 +20,104 @@ export function langName(lang: Lang): string {
   }
 }
 
-/* ===== евристики для визначення мови тексту ===== */
-
-const RU_LETTERS = /[ёыэ]/i;       // характерні для RU
-const UK_LETTERS = /[ієїґ]/i;      // характерні для UK
-const DE_DIACRITICS = /[äöüß]/i;   // характерні для DE
-
-// RU — додані короткі відповіді (да/нет/ок/окей)
-const RU_COMMON =
-  /\b(да|нет|ок(?:ей)?|что|это|как|когда|почему|например|сеть|данн|сервер|быстр(ее|ей)|основн|котор|пользовател[ья])\b/i;
-
-// UK — додані короткі відповіді (так/ні/ок/окей)
-const UK_COMMON =
-  /\b(так|ні|ок(?:ей)?|що|це|як|коли|чому|наприклад|мереж|дан(их|і)|сервер|швидш|основн|який|користувач)\b/i;
-
-// DE — без "was"; додані ja/nein
-const DE_COMMON =
-  /\b(ja|nein|und|ist|nicht|ein|eine|einem|einer|warum|wie|mit|für|zum|zur|bitte|kurz|erklaere|erkläre|erklaeren|erklären|beispiel|dass|sind|gerne|möchte|moechte|vielleicht|deshalb|darum|netzwerk|server|inhalt|benutz(er|ern)?)\b/i;
-
-// EN — додані ok/okay/yes/no/hi/hey
-const EN_COMMON =
-  /\b(ok(?:ay)?|yes|no|hi|hey|and|is|are|what|why|how|with|for|content|network|server|user?s?|please|quick|hello|thanks?)\b/i;
+/* ====================== евристики/ознаки ====================== */
 
 const CYRILLIC = /\p{Script=Cyrillic}/u;
 const LATIN = /\p{Script=Latin}/u;
 
-/** Прибираємо службовий префікс-команди з початку тексту. */
+const RU_LETTERS = /[ёыэ]/i;         // характерні для RU
+const UK_LETTERS = /[ієїґ]/i;        // характерні для UK
+const DE_DIACRITICS = /[äöüß]/i;     // характерні для DE
+
+// Короткі слова (жорсткий мапінг на мову)
+const SHORT_MAP: Record<Lang, string[]> = {
+  uk: ["так", "ні", "ок", "окей", "привіт", "йо", "гаразд"],
+  ru: ["да", "нет", "ок", "окей", "привет"],
+  de: ["ja", "nein", "hallo", "servus", "moin"],
+  en: ["ok", "okay", "yes", "no", "hi", "hey", "hello"],
+};
+
+// Поширені слова/корені (бал за «схожість»)
+const RU_COMMON =
+  /\b(да|нет|что|это|как|когда|почему|например|данн|сервер|сеть|основн|котор|пользовател[ья])\b/i;
+const UK_COMMON =
+  /\b(так|ні|що|це|як|коли|чому|наприклад|дан(их|і)|сервер|мереж|основн|який|користувач)\b/i;
+const DE_COMMON =
+  /\b(ja|nein|und|ist|nicht|ein|eine|einem|einer|warum|wie|mit|für|zum|zur|bitte|kurz|beispiel|dass|sind|gerne|möchte|moechte|vielleicht|deshalb|darum|netzwerk|server|inhalt)\b/i;
+const EN_COMMON =
+  /\b(ok(?:ay)?|yes|no|and|is|are|what|why|how|with|for|user?s?|please|quick|hello|hi|hey|network|server|content|thanks?)\b/i;
+
+/** Прибираємо службову команду з початку тексту. */
 function stripCommand(raw: string): string {
   let t = (raw || "").trim();
-  // прибираємо початкову команду типу /ask, /ask_openrouter, /start, /help, /ping
   t = t.replace(/^\/[a-zA-Z_]+(?:@[A-Za-z0-9_]+)?\s*/i, "");
-  // деколи після команди ставлять двокрапку/тире
   t = t.replace(/^[:\-–—]\s*/, "");
   return t.trim();
 }
 
-/* ===== додано: жорсткий мапінг коротких слів ===== */
-
-/** Нормалізує слово: до нижнього регістру + обрізає пунктуацію з країв. */
-function normToken(s: string): string {
-  return (s || "")
-    .toLowerCase()
-    .replace(/^[\s"'«»„”“’‚`~.,:;!?()[\]{}<>+=\-_/\\|^%#*@]+/g, "")
-    .replace(/[\s"'«»„”“’‚`~.,:;!?()[\]{}<>+=\-_/\\|^%#*@]+$/g, "");
-}
-
-/** Короткі слова → однозначна мова. (латиниця/кирилиця окремо) */
-const SHORT_MAP: Record<string, Lang> = {
-  // English
-  "hi": "en",
-  "hello": "en",
-  "hey": "en",
-  "yes": "en",
-  "no": "en",
-  "ok": "en",
-  "okay": "en",
-
-  // Deutsch
-  "ja": "de",
-  "nein": "de",
-  "hallo": "de",
-
-  // Русский
-  "да": "ru",
-  "нет": "ru",
-  "привет": "ru",
-
-  // Українська
-  "так": "uk",
-  "ні": "uk",
-  "привіт": "uk",
-  // За бажанням можна додати "гаразд", але це вже не «коротке слово»
-};
+/* ====================== інструкції стилю ====================== */
 
 /**
- * Якщо рядок містить 1–2 дуже коротких токени, і вони всі з однієї мови —
- * повертаємо цю мову. Інакше — null (далі працюють евристики).
+ * Єдина «ядрова» інструкція: однакова для Gemini й OpenRouter.
+ * Важливо: жорстка заборона мета-коментарів про мови.
  */
-function shortTokensLang(text: string): Lang | null {
-  const tokens = text
-    .split(/\s+/)
-    .map(normToken)
-    .filter(Boolean);
-
-  // Обмежимося невеликими короткими запитами
-  const totalLen = tokens.join("").length;
-  if (tokens.length === 0 || tokens.length > 2 || totalLen > 10) {
-    return null;
-  }
-
-  const langs = new Set<Lang>();
-  for (const tok of tokens) {
-    const mapped = SHORT_MAP[tok];
-    if (!mapped) return null; // якщо хоч одне слово не відомо — не фіксуємо
-    langs.add(mapped);
-  }
-
-  if (langs.size === 1) {
-    return [...langs][0];
-  }
-  return null;
-}
-
-/**
- * Інструкція для системного промпта (дружній, розмовний стиль)
- * + ЖОРСТКА заборона мета-коментарів про мови.
- *
- * Правила, які усувають “Да — це так по-російськи” тощо:
- *  - відповідай ТІЛЬКИ вибраною мовою;
- *  - не перекладай і не пояснюй інші мови;
- *  - не коментуй, якою мовою було написано вхід;
- *  - навіть якщо користувач надіслав одне слово або іншу мову — відповідай повністю в обраній мові.
- */
-export function languageInstruction(lang: Lang): string {
-  const commonBan =
-    "Важливо: не перекладай і не пояснюй інші мови; не коментуй, якою мовою був запит; " +
-    "навіть якщо вхід одне слово або іншою мовою — відповідай повністю тут і зараз обраною мовою. " +
-    "Не пиши преамбули типу «я ШІ/ИИ/KI». Якщо просять список — використовуй маркери. " +
-    "Стиль: дружній, розмовний, прості короткі речення, без канцеляризмів.";
+export function composeSystemInstruction(lang: Lang): string {
+  const common =
+    "Правила: відповідай ТІЛЬКИ вибраною мовою; не перекладай і не пояснюй інші мови; " +
+    "не коментуй, якою мовою був запит; навіть якщо запит дуже короткий або іншою мовою — " +
+    "відповідай повністю обраною мовою. Пиши дружньо, природно, короткими простими реченнями, " +
+    "без канцеляризмів і без преамбул на кшталт «я ШІ/ИИ/KI». Якщо просять список — використовуй маркери.";
 
   switch (lang) {
     case "uk":
-      return `Відповідай українською мовою. ${commonBan}`;
+      return `Відповідай українською мовою. ${common}`;
     case "ru":
-      return `Отвечай на русском языке. ${commonBan.replace("українською", "русском")}`;
+      return `Отвечай на русском языке. ${common}`;
     case "de":
-      return (
-        "Antworte ausschließlich auf Deutsch. " +
-        commonBan
-          .replace("українською", "Deutsch")
-          .replace("дружній, розмовний", "locker, freundlich")
-      );
+      return `Antworte ausschließlich auf Deutsch. ${common}`
+        .replace("дружньо, природно", "locker und freundlich")
+        .replace("короткими простими реченнями", "in kurzen, klaren Sätzen");
     case "en":
     default:
-      return (
-        "Answer exclusively in English. " +
-        commonBan
-          .replace("українською", "English")
-          .replace("дружній, розмовний", "friendly, conversational")
-      );
+      return `Answer exclusively in English. ${common}`
+        .replace("дружньо, природно", "friendly and natural")
+        .replace("короткими простими реченнями", "in short, clear sentences");
   }
 }
 
-/* ===== основна функція визначення мови ===== */
+/* ====================== визначення мови ====================== */
 
 /**
- * Визначення мови з пріоритетом на МОВУ ПОВІДОМЛЕННЯ.
+ * Нормалізація/визначення мови за текстом.
  *
- * Порядок:
- *  0) спроба «жорсткого» мапінгу для коротких фраз (hi/да/ja/ok…);
- *  1) евристики за літерами/словами/скриптом;
- *  2) якщо неоднозначно або дуже коротко — беремо Telegram language_code як м’який fallback;
- *  3) фінальний fallback — "en".
+ * Пріоритети:
+ * 1) Якщо збіг із SHORT_MAP (типові короткі слова) — повертаємо відповідну мову.
+ * 2) Інакше скоримо текст за літерами/частими словами та домінуванням скрипту.
+ * 3) Якщо різниця між топ-2 мовами достатня (>= 0.4) — беремо переможця.
+ * 4) Якщо неоднозначно, але видно домінування скрипту — вибираємо всередині пари (uk/ru або en/de).
+ * 5) Якщо взагалі немає ознак — беремо Telegram language_code, інакше — 'en'.
  */
 export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
   const t = stripCommand(input);
+  const lowered = t.toLowerCase();
 
-  // 0) спеціальна обробка коротких фраз
-  const short = shortTokensLang(t);
-  if (short) return short;
-
-  // 1) дуже короткий текст — одразу fallback від Telegram або EN
-  if (t.length < 3) {
-    const tg = (tgLanguageCode || "").split("-")[0].toLowerCase() as Lang | "";
-    return (["uk", "ru", "de", "en"] as Lang[]).includes(tg as Lang)
-      ? (tg as Lang)
-      : "en";
+  // 1) Жорстке розпізнавання коротких/типових слів
+  const single = lowered.replace(/[^\p{L}]+/gu, " ").trim();
+  if (single.length > 0) {
+    for (const lang of Object.keys(SHORT_MAP) as Lang[]) {
+      for (const w of SHORT_MAP[lang]) {
+        if (new RegExp(`\\b${w}\\b`, "i").test(single)) return lang;
+      }
+    }
   }
 
-  // підрахунок скриптів
+  // 2) Дуже короткий текст — дивимось на TG або EN
+  if (t.length < 3) {
+    const tg = (tgLanguageCode || "").split("-")[0].toLowerCase() as Lang | "";
+    return (["uk", "ru", "de", "en"] as Lang[]).includes(tg) ? tg : "en";
+  }
+
+  // 3) Підрахунок скриптів
   let latinCount = 0;
   let cyrCount = 0;
   for (const ch of t) {
@@ -196,58 +125,47 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
     else if (CYRILLIC.test(ch)) cyrCount++;
   }
 
-  // базові бали зі зміщенням на ознаки тексту
+  // 4) Бал за ознаки
   const score: Record<Lang, number> = { uk: 0, ru: 0, de: 0, en: 0 };
 
-  // явні букви
-  if (RU_LETTERS.test(t)) score.ru += 3.0;
   if (UK_LETTERS.test(t)) score.uk += 3.0;
+  if (RU_LETTERS.test(t)) score.ru += 3.0;
+  if (DE_DIACRITICS.test(t)) score.de += 2.2;
 
-  // діакритики DE
-  if (DE_DIACRITICS.test(t)) score.de += 2.0;
-
-  // частотні слова
-  if (RU_COMMON.test(t)) score.ru += 1.8;
   if (UK_COMMON.test(t)) score.uk += 1.8;
+  if (RU_COMMON.test(t)) score.ru += 1.8;
   if (DE_COMMON.test(t)) score.de += 1.6;
   if (EN_COMMON.test(t)) score.en += 1.6;
 
-  // домінування скрипту
-  if (cyrCount > latinCount * 1.2) {
+  if (cyrCount > latinCount * 1.15) {
     score.uk += 1.2;
     score.ru += 1.2;
-  } else if (latinCount > cyrCount * 1.2) {
+  } else if (latinCount > cyrCount * 1.15) {
     score.en += 1.0;
     score.de += 0.9;
+    if (!DE_DIACRITICS.test(t)) score.en += 0.3; // латиниця без умлаутів — схиляємо до EN
   }
 
-  // якщо латиниця і немає умлаутів — легкий бонус EN (менше хибних DE)
-  if (latinCount > 0 && !DE_DIACRITICS.test(t)) {
-    score.en += 0.4;
-  }
-
-  // визначаємо топ-2
+  // 5) Вибір переможця
   const order = (["uk", "ru", "de", "en"] as Lang[])
     .map((l) => [l, score[l]] as const)
     .sort((a, b) => b[1] - a[1]);
 
   const [winLang, winScore] = order[0];
   const [, secondScore] = order[1];
+  const DIFF = 0.4;
 
-  // поріг «явної переваги» — компроміс для коротких реплік
-  const MARGIN = 0.35;
+  if (winScore - secondScore >= DIFF) return winLang;
 
-  // якщо текст дав чітку перевагу — беремо переможця
-  if (winScore - secondScore >= MARGIN) {
-    return winLang;
+  // 6) Якщо неоднозначно, але скрипт домінує — вибираємо всередині пари
+  if (cyrCount > latinCount * 1.05) {
+    return score.uk >= score.ru ? "uk" : "ru";
+  }
+  if (latinCount > cyrCount * 1.05) {
+    return score.en >= score.de ? "en" : "de";
   }
 
-  // 2) якщо неоднозначно — дивимось на Telegram language_code
+  // 7) Крайні випадки — Telegram мова або EN
   const tg = (tgLanguageCode || "").split("-")[0].toLowerCase() as Lang | "";
-  if ((["uk", "ru", "de", "en"] as Lang[]).includes(tg as Lang)) {
-    return tg as Lang;
-  }
-
-  // 3) фінальний fallback
-  return "en";
+  return (["uk", "ru", "de", "en"] as Lang[]).includes(tg) ? tg : "en";
 }
