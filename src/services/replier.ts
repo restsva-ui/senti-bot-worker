@@ -3,87 +3,96 @@ import { composeSystemInstruction, type Lang } from "../utils/i18n";
 
 /** Що очікує модуль у середовищі */
 export interface ReplierEnv {
+  // Ключі провайдерів (будь-який може бути відсутнім)
   GEMINI_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
+  // KV кеш для безкоштовних (і швидких) відповідей
   SENTI_CACHE?: KVNamespace;
 }
 
+/* ===== Допоміжне ===== */
+
+/** Нормалізує короткий текст: нижній регістр + прибирає просту пунктуацію з країв. */
+function norm(s: string): string {
+  return (s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^[\s.,!?()[\]{}"'«»„“”‘’`~]+|[\s.,!?()[\]{}"'«»„“”‘’`~]+$/g, "");
+}
+
+/* ===== Швидкі відповіді (без звернення до LLM) =====
+   ВАЖЛИВО: кожен пакет містить ТІЛЬКИ слова цієї мови.
+   Ніяких англ/рос/укр ключів у німецькому пакеті тощо — це мінімізує плутанину.
+*/
+const QUICK_PACKS: Record<Lang, Record<string, string>> = {
+  uk: {
+    "так": "Так, чудово! 💪",
+    "ні": "Гаразд, прийнято. 🙂",
+    "привіт": "Привіт! 👋 Як справи?",
+    "дякую": "Будь ласка! 😉",
+    "ок": "Окей! 🙂",
+    "окей": "Окей! 🙂",
+    "гаразд": "Гаразд! 🙂",
+    "вітаю": "Вітаю! 👋",
+  },
+  ru: {
+    "да": "Да, супер! 💪",
+    "нет": "Окей, принял. 🙂",
+    "привет": "Привет! 👋 Как дела?",
+    "спасибо": "Пожалуйста! 😉",
+    "ок": "Окей! 🙂",
+    "окей": "Окей! 🙂",
+    "хорошо": "Хорошо! 🙂",
+  },
+  de: {
+    "ja": "Alles klar! 🙂",
+    "nein": "Verstanden. 🙂",
+    "hallo": "Hallo! 👋 Wie geht’s?",
+    "danke": "Gerne! 😉",
+    "ok": "Okay! 🙂",
+    "okay": "Okay! 🙂",
+    "servus": "Servus! 👋",
+    "moin": "Moin! 👋",
+  },
+  en: {
+    "yes": "Great! 👍",
+    "no": "Okay, noted. 🙂",
+    "hi": "Hi there! 👋",
+    "hello": "Hey there! 👋",
+    "thanks": "You’re welcome! 😉",
+    "thank you": "You’re welcome! 😉",
+    "ok": "Okay! 🙂",
+    "okay": "Okay! 🙂",
+  },
+};
+
 /** Маленький шаблонізатор для дуже коротких реплік (без звернень до LLM) */
 export function quickTemplateReply(lang: Lang, raw: string): string | null {
-  const t = (raw || "").trim().toLowerCase();
+  const key = norm(raw);
+  if (!key) return null;
 
-  // Усі відповіді — мовою `lang`, навіть якщо тригер іншою мовою.
-  const packs: Record<Lang, Record<string, string>> = {
-    uk: {
-      // українські тригери
-      "так": "Так, чудово! 💪",
-      "ні": "Гаразд, прийнято. 🙂",
-      "привіт": "Привіт! 👋 Як справи?",
-      "ок": "Окей! 🙂",
-      "дякую": "Будь ласка! 😉",
-      // інші мови як тригери → українська відповідь
-      "hi": "Привіт! 👋 Як справи?",
-      "hello": "Привіт! 👋 Як справи?",
-      "yes": "Так, чудово! 💪",
-      "no": "Гаразд, прийнято. 🙂",
-      "ja": "Гаразд, зрозуміло. 🙂",
-      "nein": "Зрозуміло. 🙂",
-      "да": "Так, чудово! 💪",
-      "нет": "Гаразд, прийнято. 🙂",
-    },
-    ru: {
-      "да": "Да, супер! 💪",
-      "нет": "Окей, принял. 🙂",
-      "привет": "Привет! 👋 Как дела?",
-      "ок": "Окей! 🙂",
-      "окей": "Окей! 🙂",
-      // иностранные триггеры → ответ по-русски
-      "hi": "Привет! 👋 Как дела?",
-      "hello": "Привет! 👋 Как дела?",
-      "yes": "Да, супер! 💪",
-      "no": "Окей, принял. 🙂",
-      "ja": "Понял. 🙂",
-      "nein": "Понял. 🙂",
-      "так": "Да, супер! 💪",
-      "ні": "Окей, принял. 🙂",
-    },
-    de: {
-      "ja": "Alles klar! 🙂",
-      "nein": "Verstanden. 🙂",
-      "hallo": "Hallo! 👋 Wie geht’s?",
-      "ok": "Okay! 🙂",
-      "okay": "Okay! 🙂",
-      // fremde Trigger → deutsche Antwort
-      "hi": "Hallo! 👋 Wie geht’s?",
-      "hello": "Hallo! 👋 Wie geht’s?",
-      "yes": "Alles klar! 🙂",
-      "no": "Verstanden. 🙂",
-      "да": "Alles klar! 🙂",
-      "нет": "Verstanden. 🙂",
-      "так": "Alles klar! 🙂",
-      "ні": "Verstanden. 🙂",
-    },
-    en: {
-      "yes": "Great! 👍",
-      "no": "Okay, noted. 🙂",
-      "hi": "Hi there! 👋",
-      "hello": "Hey there! 👋",
-      "ok": "Okay! 🙂",
-      "okay": "Okay! 🙂",
-      // foreign triggers → English reply
-      "привіт": "Hi there! 👋",
-      "да": "Great! 👍",
-      "нет": "Okay, noted. 🙂",
-      "ja": "All right! 🙂",
-      "nein": "Got it. 🙂",
-      "так": "Great! 👍",
-      "ні": "Okay, noted. 🙂",
-    },
-  };
+  // Підтримуємо і однословні, і дуже короткі двослівні фрази типу "thank you"
+  const pack = QUICK_PACKS[lang];
+  if (!pack) return null;
 
-  const m = packs[lang]?.[t];
-  return m || null;
+  // Пряме співпадіння
+  if (pack[key]) return pack[key];
+
+  // Якщо користувач ввів на кшталт "ок!" або "Привіт:)" — повторно нормалізуємо слово за словом
+  const words = key.split(/\s+/).filter(Boolean);
+  if (words.length === 1) {
+    const w = words[0].replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+    if (pack[w]) return pack[w];
+  } else if (words.length === 2) {
+    // специфічний кейс для en: "thank you"
+    const joined = words.join(" ");
+    if (pack[joined]) return pack[joined];
+  }
+
+  return null;
 }
+
+/* ===== LLM-провайдери ===== */
 
 /** Проста обгортка для Gemini */
 async function askGemini(env: ReplierEnv, prompt: string, lang: Lang): Promise<string> {
@@ -91,14 +100,17 @@ async function askGemini(env: ReplierEnv, prompt: string, lang: Lang): Promise<s
   if (!key) throw new Error("Gemini key missing");
 
   const model = "gemini-2.5-flash";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
+    key,
+  )}`;
 
   const system = composeSystemInstruction(lang);
   const reinforced = `${system}\n\n${prompt}`;
 
   const body = {
     contents: [{ role: "user", parts: [{ text: reinforced }] }],
-    systemInstruction: { parts: [{ text: system }] }, // camelCase обов’язково
+    // ВАЖЛИВО: саме camelCase поле
+    systemInstruction: { parts: [{ text: system }] },
   };
 
   const r = await fetch(url, {
@@ -167,11 +179,16 @@ async function askOpenRouter(env: ReplierEnv, prompt: string, lang: Lang): Promi
   return (txt || "").trim() || "(empty)";
 }
 
-/** KV-кеш: ключ з урахуванням мови */
+/* ===== KV-кеш ключ ===== */
 function kvKey(lang: Lang, q: string) {
   return `tpl:${lang}:${q.trim().toLowerCase()}`;
 }
 
+/* ===== Основний роутер =====
+   1) KV-кеш коротких реплік → миттєва відповідь
+   2) Gemini (якщо є ключ). Якщо ліміт — фолбек на OpenRouter.
+   3) OpenRouter (якщо є ключ)
+*/
 export async function askSmart(
   env: ReplierEnv,
   prompt: string,
@@ -193,6 +210,7 @@ export async function askSmart(
       const text = await askGemini(env, trimmed, lang);
       return { text, from: "gemini" };
     } catch (e: any) {
+      // Якщо саме ліміт — пробуємо OR
       const msg = String(e?.message || e || "");
       const isQuota = /quota|rate[-\s]?limit|exceeded/i.test(msg);
       if (!isQuota || !availOR) throw e;
@@ -208,9 +226,9 @@ export async function askSmart(
   return {
     text:
       lang === "uk"
-        ? "Зараз недоступний зовнішній провайдер відповіді. Спробуй коротшими запитами або пізніше. 🙂"
+        ? "Зараз зовнішній провайдер відповіді недоступний. Спробуй коротшими запитами або пізніше. 🙂"
         : lang === "ru"
-        ? "Сейчас недоступен внешний провайдер ответа. Попробуй короче либо позже. 🙂"
+        ? "Сейчас внешний провайдер ответа недоступен. Попробуй короче либо позже. 🙂"
         : lang === "de"
         ? "Der externe Antwortdienst ist gerade nicht verfügbar. Versuch es kurz oder später. 🙂"
         : "The external answer provider is currently unavailable. Try shorter prompts or later. 🙂",
