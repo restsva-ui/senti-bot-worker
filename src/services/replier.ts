@@ -1,14 +1,18 @@
+// src/services/replier.ts
 import { composeSystemInstruction, type Lang } from "../utils/i18n";
 
 /** Що очікує модуль у середовищі */
 export interface ReplierEnv {
+  // Ключі провайдерів (будь-який може бути відсутнім)
   GEMINI_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
-  SENTI_CACHE?: KVNamespace; // KV кеш миттєвих відповідей
+  // KV кеш для миттєвих/безкоштовних відповідей
+  SENTI_CACHE?: KVNamespace;
 }
 
 /* ===== Допоміжне ===== */
 
+/** Нормалізує короткий текст: нижній регістр + прибирає просту пунктуацію з країв. */
 function norm(s: string): string {
   return (s || "")
     .trim()
@@ -17,7 +21,7 @@ function norm(s: string): string {
 }
 
 /* ===== Швидкі відповіді (без звернення до LLM) =====
-   Кожен пакет містить ТІЛЬКИ слова відповідної мови.
+   ВАЖЛИВО: кожен пакет містить ТІЛЬКИ слова відповідної мови.
 */
 const QUICK_PACKS: Record<Lang, Record<string, string>> = {
   uk: {
@@ -52,6 +56,7 @@ const QUICK_PACKS: Record<Lang, Record<string, string>> = {
     "здравствуй": "Здравствуй! 👋",
     "добрый день": "Добрый день! 👋",
     "неа": "Понял. 🙂",
+    "спс": "Пожалуйста! 😉",
   },
   de: {
     "ja": "Alles klar! 🙂",
@@ -66,6 +71,7 @@ const QUICK_PACKS: Record<Lang, Record<string, string>> = {
     "moin": "Moin! 👋",
     "danke": "Gerne! 😉",
     "danke schön": "Sehr gern! 😉",
+    "danke dir": "Gerne! 😉",
     "ok": "Okay! 🙂",
     "okay": "Okay! 🙂",
   },
@@ -90,6 +96,7 @@ const QUICK_PACKS: Record<Lang, Record<string, string>> = {
   },
 };
 
+/** Маленький шаблонізатор для дуже коротких реплік (без звернень до LLM) */
 export function quickTemplateReply(lang: Lang, raw: string): string | null {
   const key = norm(raw);
   if (!key) return null;
@@ -97,6 +104,7 @@ export function quickTemplateReply(lang: Lang, raw: string): string | null {
   const pack = QUICK_PACKS[lang];
   if (!pack) return null;
 
+  // Пряме співпадіння
   if (pack[key]) return pack[key];
 
   // «ок!», «привіт:)» → повторна нормалізація
@@ -114,19 +122,23 @@ export function quickTemplateReply(lang: Lang, raw: string): string | null {
 
 /* ===== LLM-провайдери ===== */
 
+/** Проста обгортка для Gemini */
 async function askGemini(env: ReplierEnv, prompt: string, lang: Lang): Promise<string> {
   const key = env.GEMINI_API_KEY;
   if (!key) throw new Error("Gemini key missing");
 
   const model = "gemini-2.5-flash";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
+    key,
+  )}`;
 
   const system = composeSystemInstruction(lang);
   const reinforced = `${system}\n\n${prompt}`;
 
   const body = {
     contents: [{ role: "user", parts: [{ text: reinforced }] }],
-    systemInstruction: { parts: [{ text: system }] }, // ВАЖЛИВО: camelCase
+    // ВАЖЛИВО: саме camelCase поле
+    systemInstruction: { parts: [{ text: system }] },
   };
 
   const r = await fetch(url, {
@@ -137,7 +149,7 @@ async function askGemini(env: ReplierEnv, prompt: string, lang: Lang): Promise<s
 
   const raw = await r.text();
   let data: any = {};
-  try { data = raw ? JSON.parse(raw) : {}; } catch {}
+  try { data = raw ? JSON.parse(raw) : {}; } catch { /* ignore */ }
 
   if (!r.ok) {
     const msg = data?.error?.message || raw || `HTTP ${r.status}`;
@@ -152,6 +164,7 @@ async function askGemini(env: ReplierEnv, prompt: string, lang: Lang): Promise<s
   return parts.join("\n").trim() || "(empty)";
 }
 
+/** Проста обгортка для OpenRouter */
 async function askOpenRouter(env: ReplierEnv, prompt: string, lang: Lang): Promise<string> {
   const key = env.OPENROUTER_API_KEY;
   if (!key) throw new Error("OpenRouter key missing");
@@ -179,7 +192,7 @@ async function askOpenRouter(env: ReplierEnv, prompt: string, lang: Lang): Promi
 
   const raw = await r.text();
   let data: any = {};
-  try { data = raw ? JSON.parse(raw) : {}; } catch {}
+  try { data = raw ? JSON.parse(raw) : {}; } catch { /* ignore */ }
 
   if (!r.ok) {
     const msg = data?.error?.message || raw || `HTTP ${r.status}`;
@@ -199,7 +212,11 @@ function kvKey(lang: Lang, q: string) {
   return `tpl:${lang}:${q.trim().toLowerCase()}`;
 }
 
-/* ===== Основний роутер ===== */
+/* ===== Основний роутер =====
+   1) KV-кеш коротких реплік → миттєва відповідь
+   2) Gemini (якщо є ключ). Якщо ліміт/перевантаження — фолбек на OpenRouter.
+   3) OpenRouter (якщо є ключ)
+*/
 export async function askSmart(
   env: ReplierEnv,
   prompt: string,
@@ -218,6 +235,8 @@ export async function askSmart(
   if (availGemini) {
     try {
       const text = await askGemini(env, trimmed, lang);
+      // кешуємо відповідь LLM на годину
+      await env.SENTI_CACHE?.put(kvKey(lang, trimmed), text, { expirationTtl: 3600 });
       return { text, from: "gemini" };
     } catch (e: any) {
       // якщо ліміт/перевантаження — пробуємо OR
@@ -229,6 +248,8 @@ export async function askSmart(
 
   if (availOR) {
     const text = await askOpenRouter(env, trimmed, lang);
+    // кешуємо відповідь на годину
+    await env.SENTI_CACHE?.put(kvKey(lang, trimmed), text, { expirationTtl: 3600 });
     return { text, from: "openrouter" };
   }
 
