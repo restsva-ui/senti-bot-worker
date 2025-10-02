@@ -1,27 +1,65 @@
 // src/ai/openrouter.ts
+/**
+ * Уніфікована обгортка OpenRouter Chat Completions з тією ж мовною інструкцією,
+ * що й у Gemini. Відповіді повинні бути однаково дружні та без мовних коментарів.
+ */
 import type { Env } from "../index";
 import { composeSystemInstruction, type Lang } from "../utils/i18n";
+
+/** Коротка стилістична підказка — така ж, як у gemini.ts */
+function styleHint(lang: Lang): string {
+  switch (lang) {
+    case "uk":
+      return "Пиши коротко, дружньо й по суті. Без канцеляризмів. Для списків — маркери.";
+    case "ru":
+      return "Пиши коротко, дружелюбно и по делу. Без канцелярита. Для списков — маркеры.";
+    case "de":
+      return "Schreibe kurz, freundlich und auf den Punkt. Keine Amtsfloskeln. Für Listen: Aufzählungen.";
+    case "en":
+    default:
+      return "Write briefly, friendly, and to the point. No corporate jargon. Use bullets for lists.";
+  }
+}
+
+/** Санітизуємо відповідь від AI-преамбул і мовних ремарок */
+function sanitizeAnswer(text: string): string {
+  const lines = (text || "").split(/\r?\n/);
+  const dropPatterns: RegExp[] = [
+    /^\s*i['’]?m an ai.*$/i,
+    /^\s*as an ai.*$/i,
+    /^\s*я\s+штучний\s+інтелект.*$/i,
+    /^\s*как\s+искусственный\s+интеллект.*$/i,
+    /^\s*als\s+ki.*$/i,
+    /\bпо(-|\s)?(рус|українськ|немецк|німецьк|английск|англійськ)\b/i,
+    /\b(in|auf)\s+(english|englisch|deutsch|russian|ukrainian)\b/i,
+  ];
+  const filtered = lines.filter((l) => !dropPatterns.some((re) => re.test(l)));
+  return filtered.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
 
 const OR_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_MODEL = "openrouter/auto";
 
 export async function openrouterAskText(
   env: Env,
-  user: string,
+  userPrompt: string,
   lang: Lang,
 ): Promise<string> {
   const key = env.OPENROUTER_API_KEY;
   if (!key) throw new Error("OPENROUTER_API_KEY is missing");
 
-  const system = composeSystemInstruction(lang);
+  const system = `${composeSystemInstruction(lang)}\n${styleHint(lang)}`;
+
+  // Підсилюємо інструкцію в user-повідомленні аналогічно Gemini
+  const reinforced = `${system}\n\nВідповідай згідно інструкції вище.\n\n${userPrompt}`;
 
   const body = {
     model: DEFAULT_MODEL,
     messages: [
       { role: "system", content: system },
-      { role: "user", content: `${system}\n\n${user}` }, // дублюємо як легку страховку
+      { role: "user", content: reinforced },
     ],
-    temperature: 0.7,
+    temperature: 0.4, // трохи знижено для більш стабільних, лаконічних відповідей
   };
 
   const res = await fetch(OR_ENDPOINT, {
@@ -36,14 +74,24 @@ export async function openrouterAskText(
   });
 
   const raw = await res.text();
-  if (!res.ok) throw new Error(`OpenRouter error ${res.status}: ${raw}`);
-
   let data: any = {};
-  try { data = raw ? JSON.parse(raw) : {}; } catch { /* ignore */ }
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new Error(`OpenRouter: bad JSON${raw ? ` — ${raw.slice(0, 180)}` : ""}`);
+  }
 
-  const text: string =
+  if (!res.ok) {
+    const err = data?.error?.message || `HTTP ${res.status}`;
+    throw new Error(`OpenRouter error: ${err}`);
+  }
+
+  const text =
     data?.choices?.[0]?.message?.content ??
-    (Array.isArray(data?.choices) ? data.choices.map((c: any) => c?.message?.content).filter(Boolean).join("\n") : "");
+    (Array.isArray(data?.choices) ? data.choices.map((c: any) => c?.message?.content || "").join("\n") : "");
 
-  return (text || "(empty response)").trim();
+  const out = sanitizeAnswer(String(text || "").trim());
+  if (!out) throw new Error("OpenRouter returned no text");
+
+  return out;
 }
