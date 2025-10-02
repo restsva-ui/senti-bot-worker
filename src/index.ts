@@ -1,4 +1,3 @@
-// src/index.ts
 import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { sendHelp } from "./commands/help";
@@ -46,10 +45,24 @@ function detectLang(update: any): Lang {
   return normalizeLang(text, code);
 }
 
-/** Виділяє слово після команди (/ask …) */
+/** Виділяє аргумент команди і знімає /<command> з КОЖНОГО рядка. */
 function extractArg(text: string, command: string): string {
-  const noBot = text.replace(new RegExp(`^\\/${command}(?:@\\w+)?\\s*`, "i"), "");
-  return noBot.trim();
+  // прибираємо префікс з початку всього повідомлення
+  const dropFirst = text.replace(
+    new RegExp(`^\\/${command}(?:@\\w+)?\\s*`, "i"),
+    ""
+  );
+
+  // і знімаємо його з кожного подальшого рядка
+  const perLine = dropFirst
+    .split(/\r?\n/)
+    .map((line) =>
+      line.replace(new RegExp(`^\\/${command}(?:@\\w+)?\\s*`, "i"), "").trim()
+    )
+    .filter(Boolean)
+    .join("\n");
+
+  return perLine.trim();
 }
 
 /** === Gemini === */
@@ -59,11 +72,16 @@ async function askGemini(env: Env, prompt: string, lang: Lang): Promise<string> 
   const endpoint =
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 
+  // Жорстка інструкція + страховка у самому промпті
   const systemInstrText = languageInstruction(lang);
-  const reinforcedPrompt = `${systemInstrText}\n\n${prompt}`;
+  const batchRules =
+    "Якщо у вхідному тексті кілька рядків, відповідай на КОЖЕН рядок окремою короткою відповіддю " +
+    "у тому ж порядку. Заборонено: будь-які заголовки/преамбули/цитування, фрази «Ось мої відповіді…», " +
+    "«Відповідь на …», розділювачі типу --- або ***. Просто дай послідовність відповідей рядок-у-рядок.";
+  const reinforcedPrompt = `${systemInstrText}\n${batchRules}\n\n${prompt}`;
 
   const body = {
-    systemInstruction: { parts: [{ text: systemInstrText }] }, // ВАЖЛИВО: camelCase
+    systemInstruction: { parts: [{ text: `${systemInstrText}\n${batchRules}` }] }, // ВАЖЛИВО: camelCase
     contents: [
       {
         role: "user",
@@ -79,7 +97,7 @@ async function askGemini(env: Env, prompt: string, lang: Lang): Promise<string> 
     body: JSON.stringify(body),
   });
 
-  // читаємо текст спочатку, щоб впіймати не-JSON помилки
+  // читаємо text спочатку — інколи помилки приходять не-JSON
   const raw = await r.text();
   let data: any = {};
   try { data = raw ? JSON.parse(raw) : {}; } catch { /* ignore */ }
