@@ -51,10 +51,26 @@ function getMessageInfo(update: any): { chatId?: number; text?: string; fromLang
   return { chatId, text, fromLangCode };
 }
 
-/** Виділяє слово після команди (/ask …) */
-function extractArg(text: string, command: string): string {
-  const noBot = text.replace(new RegExp(`^\\/${command}(?:@\\w+)?\\s*`, "i"), "");
-  return noBot.trim();
+/** Витягує блоки після кожного /ask ... у межах одного повідомлення */
+function extractAskBlocks(source: string): string[] {
+  const t = (source || "").trim();
+  const re = /\/ask(?:@\w+)?\s*/gi;
+  const idxs: number[] = [];
+  let m: RegExpExecArray | null;
+
+  while ((m = re.exec(t))) {
+    idxs.push(m.index);
+  }
+  if (idxs.length === 0) return [];
+
+  const blocks: string[] = [];
+  for (let i = 0; i < idxs.length; i++) {
+    const start = idxs[i] + (t.slice(idxs[i]).match(/^\/ask(?:@\w+)?\s*/i)?.[0].length || 0);
+    const end = i + 1 < idxs.length ? idxs[i + 1] : t.length;
+    const chunk = t.slice(start, end).trim();
+    if (chunk) blocks.push(chunk);
+  }
+  return blocks;
 }
 
 export default {
@@ -103,7 +119,6 @@ export default {
 
           // /start | /help
           if (/^\/start(?:@\w+)?$/i.test(trimmed) || /^\/help(?:@\w+)?$/i.test(trimmed)) {
-            // Визначати мову для допомоги немає сенсу по кожній лінії, досить загальної
             const langForHelp: Lang = normalizeLang(trimmed, fromLangCode);
             await sendHelp(env as any, chatId, langForHelp);
             return json({ ok: true, handled: "help" });
@@ -115,32 +130,34 @@ export default {
             return json({ ok: true, handled: "ping" });
           }
 
-          // /ask … → smart router (шаблони → KV → Gemini → OpenRouter)
-          if (/^\/ask(?:@\w+)?\b/i.test(trimmed)) {
-            const q = extractArg(trimmed, "ask");
-            const question = q || trimmed.replace(/^\/ask(?:@\w+)?\b/i, "").trim();
-
-            if (!question) {
+          // ===== /ask ... (може бути КІЛЬКА разів у одному повідомленні) =====
+          if (/\/ask(?:@\w+)?\b/i.test(trimmed)) {
+            const blocks = extractAskBlocks(trimmed);
+            if (blocks.length === 0) {
               await tgSendMessage(env as any, chatId, "Будь ласка, додай питання після команди.");
               return json({ ok: true, handled: "ask:empty" });
             }
 
-            // >>> Ключове: мову визначаємо ПО КОНКРЕТНОМУ ЗАПИТУ
-            const qLang: Lang = normalizeLang(question, fromLangCode);
+            const answers: string[] = [];
+            for (const q of blocks) {
+              const qLang: Lang = normalizeLang(q, fromLangCode);
 
-            // миттєва відповідь для дуже коротких реплік (на мові qLang)
-            const quick = quickTemplateReply(qLang, question);
-            if (quick) {
-              await tgSendMessage(env as any, chatId, quick);
-              return json({ ok: true, handled: "template" });
+              const quick = quickTemplateReply(qLang, q);
+              if (quick) {
+                answers.push(quick);
+                continue;
+              }
+
+              const { text: answer } = await askSmart(env, q, qLang);
+              answers.push(answer);
             }
 
-            const { text: answer } = await askSmart(env, question, qLang);
-            await tgSendMessage(env as any, chatId, answer);
-            return json({ ok: true, handled: "ask" });
+            const response = answers.join("\n— — —\n");
+            await tgSendMessage(env as any, chatId, response);
+            return json({ ok: true, handled: `ask:${blocks.length}` });
           }
 
-          // Fallback: звичайний текст — як /ask
+          // Fallback: звичайний текст — як один /ask
           if (trimmed.length > 0) {
             const msgLang: Lang = normalizeLang(trimmed, fromLangCode);
 
