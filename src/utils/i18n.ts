@@ -33,8 +33,7 @@ const UK_COMMON =
   /\b(що|це|як|коли|чому|наприклад|мереж|дан(их|і)|сервер|швидш|основн|який|користувач)\b/i;
 
 /**
- * DE: прибрали "was" (надто конфліктує з англ. "was"),
- * додали деякі характерні слова/форми з умлаутами/ß.
+ * DE: без «was», щоб не конфліктувало з англ. «was».
  */
 const DE_COMMON =
   /\b(und|ist|nicht|ein|eine|einem|einer|warum|wie|mit|für|zum|zur|bitte|kurz|erklaere|erkläre|erklaeren|erklären|beispiel|dass|sind|gerne|möchte|moechte|vielleicht|deshalb|darum|netzwerk|server|inhalt|benutz(er|ern)?)\b/i;
@@ -62,8 +61,7 @@ function stripCommand(raw: string): string {
 }
 
 /**
- * Повертає інструкцію для системного промпта під вибрану мову.
- * Тут налаштовано дружній стиль без канцеляризмів.
+ * Інструкція для системного промпта: дружній, розмовний тон.
  */
 export function languageInstruction(lang: Lang): string {
   switch (lang) {
@@ -81,11 +79,13 @@ export function languageInstruction(lang: Lang): string {
 
 /**
  * Нормалізація/визначення мови:
- *  1) ігноруємо префікс-команду (/ask, /ask_openrouter, ...),
- *  2) враховуємо Telegram language_code як м’який (інколи — сильний) нахил,
- *  3) скоримо текст за літерами/частими словами,
- *  4) tie-break на користь EN, якщо tg=en і бали близькі,
- *  5) fallback — en.
+ *  1) Бере Telegram language_code як базову підказку.
+ *  2) Якщо в тексті є **сильні ознаки іншої мови** — перемагає текст.
+ *  3) Якщо ознаки невиразні — лишається мова з Telegram.
+ *  4) Fallback — en.
+ *
+ * Це означає: якщо у користувача інтерфейс RU, але він пише українською,
+ * детектор коректно переключиться на "uk".
  */
 export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
   const t = stripCommand(input);
@@ -106,26 +106,21 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
     | "en"
     | "";
 
-  if (tg === "en" && cyrCount === 0) {
-    return "en";
-  }
-
-  let tgBias: Partial<Record<Lang, number>> = {};
-  if (tg === "uk") tgBias.uk = 0.9;
-  else if (tg === "ru") tgBias.ru = 0.9;
-  else if (tg === "de") tgBias.de = 0.9;
-  else if (tg === "en") tgBias.en = 0.9;
-
+  // Дуже короткий текст — віддаємо tg або en
   if (t.length < 3) {
-    const guess = (Object.keys(tgBias)[0] as Lang | undefined) || "en";
-    return guess;
+    return (tg as Lang) || "en";
   }
 
+  // Початкові бали за ознаками в тексті
   const score: Record<Lang, number> = { uk: 0, ru: 0, de: 0, en: 0 };
 
-  if (RU_LETTERS.test(t)) score.ru += 4;
-  if (UK_LETTERS.test(t)) score.uk += 4;
-  if (DE_DIACRITICS.test(t)) score.de += 2.5;
+  const hasUkLetters = UK_LETTERS.test(t);
+  const hasRuLetters = RU_LETTERS.test(t);
+  const hasDeDia = DE_DIACRITICS.test(t);
+
+  if (hasRuLetters) score.ru += 4;
+  if (hasUkLetters) score.uk += 4;
+  if (hasDeDia) score.de += 2.5;
 
   if (RU_COMMON.test(t)) score.ru += 2;
   if (UK_COMMON.test(t)) score.uk += 2;
@@ -140,40 +135,46 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
     score.de += 1.0;
   }
 
-  if (latinCount > 0 && !DE_DIACRITICS.test(t)) {
-    score.en += 0.6;
+  if (latinCount > 0 && !hasDeDia) {
+    score.en += 0.6; // латиниця без умляутів → легкий нахил у EN
   }
 
-  if (tgBias.uk) score.uk += tgBias.uk;
-  if (tgBias.ru) score.ru += tgBias.ru;
-  if (tgBias.de) score.de += tgBias.de;
-  if (tgBias.en) score.en += tgBias.en;
-
-  let winner: Lang = "en";
+  // Кандидат за текстом
+  let textWinner: Lang = "en";
   let best = -Infinity;
   (["uk", "ru", "de", "en"] as Lang[]).forEach((l) => {
     if (score[l] > best) {
       best = score[l];
-      winner = l;
+      textWinner = l;
     }
   });
 
+  // БАЗОВЕ ПРАВИЛО: Telegram мова як дефолт
+  let winner: Lang = (tg as Lang) || "en";
+
+  // СИЛЬНЕ ПРАВИЛО ПЕРЕМИКАННЯ:
+  // Якщо в тексті є явні ознаки іншої мови — переключаємось, навіть якщо tg каже інше.
+  // (напр., інтерфейс RU, але є українські літери/слова — беремо "uk")
+  const strongSwitch =
+    (winner === "ru" && (hasUkLetters || UK_COMMON.test(t))) ||
+    (winner === "uk" && (hasRuLetters || RU_COMMON.test(t))) ||
+    (winner === "en" && (hasDeDia || DE_COMMON.test(t))) ||
+    (winner === "de" && EN_COMMON.test(t) && !hasDeDia && latinCount > cyrCount * 1.5);
+
+  // М’ЯКЕ ПРАВИЛО ПЕРЕМИКАННЯ:
+  // Якщо текстовий кандидат значно (>= 1.0 бала) перевищує мову з Telegram — теж переключимось.
+  const diff = score[textWinner] - (score[winner] || 0);
+
+  if (strongSwitch || diff >= 1.0) {
+    winner = textWinner;
+  }
+
+  // Коли є кирилиця, але виграв EN — підправимо у бік uk/ru
   if (cyrCount > 0 && latinCount === 0 && winner === "en") {
     winner = score.uk >= score.ru ? "uk" : "ru";
   }
   if (cyrCount > latinCount * 0.8 && winner === "en") {
     winner = score.uk >= score.ru ? "uk" : "ru";
-  }
-
-  if (tg === "en") {
-    const sorted = (["uk", "ru", "de", "en"] as Lang[])
-      .map((l) => [l, score[l]] as const)
-      .sort((a, b) => b[1] - a[1]);
-    const [topL, topS] = sorted[0];
-    const [, secondS] = sorted[1];
-    if (topL !== "en" && topS - secondS < 0.3) {
-      winner = "en";
-    }
   }
 
   return winner;
