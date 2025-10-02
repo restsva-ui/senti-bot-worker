@@ -1,0 +1,26 @@
+name: Run Lang Tests
+
+on:
+  workflow_dispatch: {}   # запуск руками з вкладки Actions
+  push:
+    paths:
+      - "src/utils/i18n.ts"
+      - "scripts/lang-autotest.ts"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/test.yml"
+  pull_request:
+    paths:
+      - "src/utils/i18n.ts"
+      - "scripts/lang-autotest.ts"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm i
+      - run: npm run test:lang
