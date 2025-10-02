@@ -24,33 +24,8 @@ function json(res: unknown, status = 200) {
   });
 }
 
-/** Акуратний детект мови: враховує і текст, і language_code */
-function detectLang(update: any): Lang {
-  const code: string | undefined =
-    update?.message?.from?.language_code ||
-    update?.edited_message?.from?.language_code ||
-    update?.channel_post?.from?.language_code ||
-    update?.callback_query?.from?.language_code ||
-    undefined;
-
-  const text: string =
-    update?.message?.text ||
-    update?.edited_message?.text ||
-    update?.channel_post?.text ||
-    update?.callback_query?.message?.text ||
-    "";
-
-  return normalizeLang(text, code);
-}
-
-/** Виділяє слово після команди (/ask …) */
-function extractArg(text: string, command: string): string {
-  const noBot = text.replace(new RegExp(`^\\/${command}(?:@\\w+)?\\s*`, "i"), "");
-  return noBot.trim();
-}
-
 /** Дістаємо з апдейта chatId і текст, враховуючи різні типи апдейтів */
-function getMessageInfo(update: any): { chatId?: number; text?: string } {
+function getMessageInfo(update: any): { chatId?: number; text?: string; fromLangCode?: string } {
   const msg =
     update?.message ||
     update?.edited_message ||
@@ -66,52 +41,21 @@ function getMessageInfo(update: any): { chatId?: number; text?: string } {
     update?.callback_query?.message?.text ||
     undefined;
 
-  return { chatId, text };
+  const fromLangCode: string | undefined =
+    update?.message?.from?.language_code ||
+    update?.edited_message?.from?.language_code ||
+    update?.channel_post?.from?.language_code ||
+    update?.callback_query?.from?.language_code ||
+    undefined;
+
+  return { chatId, text, fromLangCode };
 }
 
-/* ---------- НОВЕ: по-рядкова обробка ---------- */
-
-/** Розбиває повідомлення користувача на «рядки-кандидати» для окремих відповідей. */
-function splitUserLines(s: string): string[] {
-  return (s || "")
-    .split(/\r?\n+/)
-    .map(t => t.trim())
-    .filter(t => t.length > 0);
+/** Виділяє слово після команди (/ask …) */
+function extractArg(text: string, command: string): string {
+  const noBot = text.replace(new RegExp(`^\\/${command}(?:@\\w+)?\\s*`, "i"), "");
+  return noBot.trim();
 }
-
-/** Відповідь для одного рядка з окремим визначенням мови. */
-async function answerOneLine(env: Env, line: string, tgLangCode?: string): Promise<string> {
-  const lineLang = normalizeLang(line, tgLangCode);
-
-  // Миттєвий шаблон — якщо спрацює, не звертаємось до моделей.
-  const quick = quickTemplateReply(lineLang, line);
-  if (quick) return quick;
-
-  const { text } = await askSmart(env, line, lineLang);
-  return (text || "").trim();
-}
-
-/** Послідовно обробляє всі рядки, щоб не ловити rate-limit і зберегти порядок. */
-async function answerMultiLine(env: Env, text: string, tgLangCode?: string): Promise<string> {
-  const lines = splitUserLines(text);
-  if (lines.length === 0) return "";
-
-  const parts: string[] = [];
-  for (const ln of lines) {
-    try {
-      const ans = await answerOneLine(env, ln, tgLangCode);
-      parts.push(ans);
-    } catch (e: any) {
-      parts.push(`⚠️ ${e?.message || String(e)}`);
-    }
-  }
-
-  // Акуратний розділювач між відповідями, як у прикладах
-  const sep = "\n— — —\n";
-  return parts.join(sep).replace(/\n{3,}/g, "\n\n").trim();
-}
-
-/* ------------------------------------------------ */
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -145,13 +89,7 @@ export default {
         return json({ ok: false, error: "bad json" }, 400);
       }
 
-      const { chatId, text } = getMessageInfo(update);
-      const lang = detectLang(update); // базова мова (для help/ping та ін.)
-      const tgLangCode: string | undefined =
-        update?.message?.from?.language_code ||
-        update?.edited_message?.from?.language_code ||
-        update?.callback_query?.from?.language_code ||
-        undefined;
+      const { chatId, text, fromLangCode } = getMessageInfo(update);
 
       try {
         // Callback-кнопки — просте echo
@@ -165,7 +103,9 @@ export default {
 
           // /start | /help
           if (/^\/start(?:@\w+)?$/i.test(trimmed) || /^\/help(?:@\w+)?$/i.test(trimmed)) {
-            await sendHelp(env as any, chatId, lang);
+            // Визначати мову для допомоги немає сенсу по кожній лінії, досить загальної
+            const langForHelp: Lang = normalizeLang(trimmed, fromLangCode);
+            await sendHelp(env as any, chatId, langForHelp);
             return json({ ok: true, handled: "help" });
           }
 
@@ -175,7 +115,7 @@ export default {
             return json({ ok: true, handled: "ping" });
           }
 
-          // /ask … — по-рядкова відповідь
+          // /ask … → smart router (шаблони → KV → Gemini → OpenRouter)
           if (/^\/ask(?:@\w+)?\b/i.test(trimmed)) {
             const q = extractArg(trimmed, "ask");
             const question = q || trimmed.replace(/^\/ask(?:@\w+)?\b/i, "").trim();
@@ -185,16 +125,34 @@ export default {
               return json({ ok: true, handled: "ask:empty" });
             }
 
-            const answer = await answerMultiLine(env, question, tgLangCode);
+            // >>> Ключове: мову визначаємо ПО КОНКРЕТНОМУ ЗАПИТУ
+            const qLang: Lang = normalizeLang(question, fromLangCode);
+
+            // миттєва відповідь для дуже коротких реплік (на мові qLang)
+            const quick = quickTemplateReply(qLang, question);
+            if (quick) {
+              await tgSendMessage(env as any, chatId, quick);
+              return json({ ok: true, handled: "template" });
+            }
+
+            const { text: answer } = await askSmart(env, question, qLang);
             await tgSendMessage(env as any, chatId, answer);
-            return json({ ok: true, handled: "ask:multiline" });
+            return json({ ok: true, handled: "ask" });
           }
 
-          // Fallback: звичайний текст — теж по-рядково
+          // Fallback: звичайний текст — як /ask
           if (trimmed.length > 0) {
-            const answer = await answerMultiLine(env, trimmed, tgLangCode);
+            const msgLang: Lang = normalizeLang(trimmed, fromLangCode);
+
+            const quick = quickTemplateReply(msgLang, trimmed);
+            if (quick) {
+              await tgSendMessage(env as any, chatId, quick);
+              return json({ ok: true, handled: "template:plain" });
+            }
+
+            const { text: answer } = await askSmart(env, trimmed, msgLang);
             await tgSendMessage(env as any, chatId, answer);
-            return json({ ok: true, handled: "ask:fallback:multiline" });
+            return json({ ok: true, handled: "ask:fallback" });
           }
         }
 
@@ -203,10 +161,11 @@ export default {
       } catch (e: any) {
         // Не мовчимо: намагаємось повідомити користувача про помилку
         try {
-          if (chatId) {
+          const { chatId: safeChat } = getMessageInfo(update);
+          if (safeChat) {
             await tgSendMessage(
               env as any,
-              chatId,
+              safeChat,
               `Вибач, сталася внутрішня помилка: ${e?.message || String(e)}`
             );
           }
