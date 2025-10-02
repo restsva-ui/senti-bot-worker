@@ -81,6 +81,7 @@ export function composeSystemInstruction(lang: Lang): string {
         "Коротко і дружньо: для привітань/«так/ні» — 1 рядок; для пояснень — 1–2 короткі речення.",
         "Не перекладай і не коментуй мову запиту, без преамбул. Якщо потрібен список — маркери (до 5).",
         "Якщо інформації бракує — задай рівно 1 уточнювальне запитання. Без вигадок.",
+        "Ніколи не перемикай мову відповіді.",
       ].join(" ");
     case "ru":
       return [
@@ -88,6 +89,7 @@ export function composeSystemInstruction(lang: Lang): string {
         "Кратко и дружелюбно: приветствия/«да/нет» — 1 строка; объяснения — 1–2 коротких предложения.",
         "Не переводить и не комментировать язык запроса. Списки — маркерами (до 5).",
         "Если данных мало — задай ровно 1 уточняющий вопрос. Ничего не выдумывай.",
+        "Никогда не переключай язык ответа.",
       ].join(" ");
     case "de":
       return [
@@ -95,6 +97,7 @@ export function composeSystemInstruction(lang: Lang): string {
         "Kurz und freundlich: Gruß/Ja–Nein – 1 Zeile; Erklärungen – 1–2 kurze Sätze.",
         "Keine Kommentare zur Eingangssprache. Listen mit Aufzählungen (max. 5).",
         "Bei fehlendem Kontext genau eine Rückfrage. Nichts erfinden.",
+        "Wechsle die Sprache nie.",
       ].join(" ");
     case "en":
     default:
@@ -103,6 +106,7 @@ export function composeSystemInstruction(lang: Lang): string {
         "Keep it short and friendly: greetings/yes–no — one line; explanations — 1–2 short sentences.",
         "Do not mention or translate the input language. Use bullet points (up to 5) for lists.",
         "If context is missing, ask exactly one clarifying question. Avoid fabrications.",
+        "Never switch the reply language.",
       ].join(" ");
   }
 }
