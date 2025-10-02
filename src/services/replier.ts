@@ -1,171 +1,202 @@
 // src/services/replier.ts
-import type { Lang } from "../utils/i18n";
-import { geminiAskText } from "../ai/gemini";
-import { openrouterAskText } from "../ai/openrouter";
+import { composeSystemInstruction, type Lang } from "../utils/i18n";
 
-/** Env, потрібний саме цьому сервісу */
+/** Що очікує модуль у середовищі */
 export interface ReplierEnv {
+  // Ключі провайдерів (будь-який може бути відсутнім)
   GEMINI_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
-  RESPONSES_KV?: KVNamespace; // optional
+  // KV кеш для безкоштовних (і швидких) відповідей
+  SENTI_CACHE?: KVNamespace;
 }
 
-/** Прості локальні відповіді для коротких реплік, без звернення до API */
-const TEMPLATES: Record<
-  Lang,
-  { patterns: RegExp[]; responses: string[] }
-> = {
-  uk: {
-    patterns: [
-      /^\s*(так)\s*$/i,
-      /^\s*(ні|не)\s*$/i,
-      /^\s*(привіт|хай|здраст(е|уй))\s*$/i,
-      /^\s*(ок(?:ей)?|гаразд)\s*$/i,
-      /^\s*(дякую|спасибі)\s*$/i,
-    ],
-    responses: [
-      "Так, звісно!",
-      "Ні, на жаль.",
-      "Привіт! Як справи?",
-      "Окей, без проблем.",
-      "Дякую! Радо допоможу.",
-    ],
-  },
-  ru: {
-    patterns: [
-      /^\s*(да)\s*$/i,
-      /^\s*(нет)\s*$/i,
-      /^\s*(привет|здравствуй|здравствуйте)\s*$/i,
-      /^\s*(ок(?:ей)?|хорошо|ладно)\s*$/i,
-      /^\s*(спасибо|благодарю)\s*$/i,
-    ],
-    responses: [
-      "Да, конечно!",
-      "Нет, к сожалению.",
-      "Привет! Как дела?",
-      "Окей, без проблем.",
-      "Спасибо! Рад помочь.",
-    ],
-  },
-  de: {
-    patterns: [
-      /^\s*(ja)\s*$/i,
-      /^\s*(nein)\s*$/i,
-      /^\s*(hallo|hi)\s*$/i,
-      /^\s*(ok(?:ay)?|gut)\s*$/i,
-      /^\s*(danke)\s*$/i,
-    ],
-    responses: [
-      "Ja, gerne!",
-      "Nein, leider nicht.",
-      "Hallo! Wie geht's dir?",
-      "Okay, kein Problem.",
-      "Danke! Gern geschehen.",
-    ],
-  },
-  en: {
-    patterns: [
-      /^\s*(yes)\s*$/i,
-      /^\s*(no)\s*$/i,
-      /^\s*(hi|hello|hey)\s*$/i,
-      /^\s*(ok(?:ay)?|fine)\s*$/i,
-      /^\s*(thanks|thank you)\s*$/i,
-    ],
-    responses: [
-      "Yes, sure!",
-      "No, unfortunately not.",
-      "Hi there! How can I help?",
-      "Okay, no problem.",
-      "Thanks! Happy to help.",
-    ],
-  },
-};
+/** Маленький шаблонізатор для дуже коротких реплік (без звернень до LLM) */
+export function quickTemplateReply(lang: Lang, raw: string): string | null {
+  const t = (raw || "").trim().toLowerCase();
 
-/** Якщо коротка репліка збігається з шаблоном — повертаємо миттєву відповідь */
-export function quickTemplateReply(lang: Lang, text: string): string | null {
-  const t = (text || "").trim();
-  if (!t || t.length > 12) return null; // обмежимося справді короткими
+  const packs: Record<Lang, Record<string, string>> = {
+    uk: {
+      "так": "Так, чудово! 💪",
+      "ні": "Гаразд, прийнято. 🙂",
+      "привіт": "Привіт! 👋 Як справи?",
+      "ок": "Окей! 🙂",
+      "дякую": "Будь ласка! 😉",
+      "hi": "Hi there! 👋", "hello": "Hi there! 👋",
+      "ja": "Alles klar! 🙂", "nein": "Verstanden. 🙂",
+      "yes": "Great! 👍", "no": "Okay, got it. 🙂",
+    },
+    ru: {
+      "да": "Да, супер! 💪",
+      "нет": "Окей, принял. 🙂",
+      "привет": "Привет! 👋 Как дела?",
+      "ок": "Окей! 🙂", "окей": "Окей! 🙂",
+      "hi": "Hi there! 👋", "hello": "Hi there! 👋",
+      "ja": "Alles klar! 🙂", "nein": "Понял. 🙂",
+      "yes": "Great! 👍", "no": "Okay, got it. 🙂",
+    },
+    de: {
+      "ja": "Alles klar! 🙂",
+      "nein": "Verstanden. 🙂",
+      "hallo": "Hallo! 👋 Wie geht’s?",
+      "ok": "Okay! 🙂", "okay": "Okay! 🙂",
+      "hi": "Hi there! 👋", "hello": "Hi there! 👋",
+      "да": "Да, супер! 💪", "нет": "Окей, принял. 🙂",
+      "так": "Так, чудово! 💪", "ні": "Гаразд, прийнято. 🙂",
+      "yes": "Great! 👍", "no": "Okay, got it. 🙂",
+    },
+    en: {
+      "yes": "Great! 👍",
+      "no": "Okay, noted. 🙂",
+      "hi": "Hi there! 👋",
+      "hello": "Hey there! 👋",
+      "ok": "Okay! 🙂", "okay": "Okay! 🙂",
+      "привіт": "Привіт! 👋", "да": "Да, супер! 💪", "нет": "Окей, принял. 🙂",
+      "ja": "Alles klar! 🙂", "nein": "Verstanden. 🙂",
+    },
+  };
 
-  const set = TEMPLATES[lang];
-  for (let i = 0; i < set.patterns.length; i++) {
-    if (set.patterns[i].test(t)) return set.responses[i];
-  }
-  return null;
+  const m = packs[lang]?.[t];
+  return m || null;
 }
 
-/** Простий хеш для ключа KV */
-function simpleHash(s: string): string {
-  let h = 2166136261 >>> 0;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619) >>> 0;
+/** Проста обгортка для Gemini */
+async function askGemini(env: ReplierEnv, prompt: string, lang: Lang): Promise<string> {
+  const key = env.GEMINI_API_KEY;
+  if (!key) throw new Error("Gemini key missing");
+
+  const model = "gemini-2.5-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
+    key,
+  )}`;
+
+  const system = composeSystemInstruction(lang);
+  const reinforced = `${system}\n\n${prompt}`;
+
+  const body = {
+    contents: [{ role: "user", parts: [{ text: reinforced }] }],
+    systemInstruction: { parts: [{ text: system }] }, // ВАЖЛИВО: camelCase
+  };
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json; charset=UTF-8" },
+    body: JSON.stringify(body),
+  });
+
+  const raw = await r.text();
+  let data: any = {};
+  try { data = raw ? JSON.parse(raw) : {}; } catch { /* ignore */ }
+
+  if (!r.ok) {
+    const msg = data?.error?.message || raw || `HTTP ${r.status}`;
+    throw new Error(`Gemini: ${msg}`);
   }
-  return "h" + h.toString(36);
+
+  const parts: string[] =
+    data?.candidates?.[0]?.content?.parts
+      ?.map((p: any) => (typeof p?.text === "string" ? p.text : ""))
+      ?.filter(Boolean) ?? [];
+
+  return parts.join("\n").trim() || "(empty)";
 }
 
-/** Експоненційний backoff з невеликим джитером */
-async function withRetry<T>(
-  fn: () => Promise<T>,
-  attempts = 2,
-): Promise<T> {
-  let n = 0;
-  while (true) {
-    try {
-      return await fn();
-    } catch (e) {
-      n++;
-      if (n >= attempts) throw e;
-      const wait = Math.pow(2, n) * 200 + Math.random() * 150;
-      await new Promise((r) => setTimeout(r, wait));
-    }
+/** Проста обгортка для OpenRouter */
+async function askOpenRouter(env: ReplierEnv, prompt: string, lang: Lang): Promise<string> {
+  const key = env.OPENROUTER_API_KEY;
+  if (!key) throw new Error("OpenRouter key missing");
+
+  const system = composeSystemInstruction(lang);
+  const body = {
+    model: "openrouter/auto",
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: prompt },
+    ],
+    temperature: 0.7,
+  };
+
+  const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      Authorization: `Bearer ${key}`,
+      "HTTP-Referer": "https://workers.cloudflare.com",
+      "X-Title": "Senti Bot",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const raw = await r.text();
+  let data: any = {};
+  try { data = raw ? JSON.parse(raw) : {}; } catch { /* ignore */ }
+
+  if (!r.ok) {
+    const msg = data?.error?.message || raw || `HTTP ${r.status}`;
+    throw new Error(`OpenRouter: ${msg}`);
   }
+
+  const txt =
+    data?.choices?.[0]?.message?.content ||
+    data?.choices?.map((c: any) => c?.message?.content).filter(Boolean).join("\n") ||
+    "";
+
+  return (txt || "").trim() || "(empty)";
+}
+
+/** KV-кеш: ключ з урахуванням мови */
+function kvKey(lang: Lang, q: string) {
+  return `tpl:${lang}:${q.trim().toLowerCase()}`;
 }
 
 /**
- * Головний роутер відповіді:
- * 1) локальний шаблон;
- * 2) KV-кеш (RESPONSES_KV) з TTL;
- * 3) Gemini з retry;
- * 4) fallback на OpenRouter з retry.
+ * Основний роутер:
+ *  1) KV-кеш коротких реплік → миттєва відповідь
+ *  2) Gemini (якщо є ключ). Якщо ліміт — фолбек на OpenRouter.
+ *  3) OpenRouter (якщо є ключ)
  */
 export async function askSmart(
   env: ReplierEnv,
   prompt: string,
   lang: Lang,
-  opts?: { cacheTtlSec?: number }
-): Promise<{ text: string; source: "template" | "cache" | "gemini" | "openrouter" }> {
-  const ttl = Math.max(60, opts?.cacheTtlSec ?? 3600); // за замовчуванням 1 година
+): Promise<{ text: string; from: "kv" | "gemini" | "openrouter" }> {
+  const trimmed = prompt.trim();
 
-  // 1) локальний шаблон
-  const templ = quickTemplateReply(lang, prompt);
-  if (templ) return { text: templ, source: "template" };
+  // 1) KV як безкоштовний/миттєвий шар
+  const cached = await env.SENTI_CACHE?.get(kvKey(lang, trimmed));
+  if (cached) return { text: cached, from: "kv" };
 
-  const keyBase = `${lang}:${prompt}`;
-  const key = simpleHash(keyBase);
+  // 2) Провайдери
+  const availGemini = !!env.GEMINI_API_KEY;
+  const availOR = !!env.OPENROUTER_API_KEY;
 
-  // 2) KV-кеш
-  if (env.RESPONSES_KV) {
+  // Спершу Gemini, потім OR (якщо є ключі)
+  if (availGemini) {
     try {
-      const cached = await env.RESPONSES_KV.get(key);
-      if (cached) return { text: String(cached), source: "cache" };
-    } catch {
-      // ігноруємо помилки KV
+      const text = await askGemini(env, trimmed, lang);
+      return { text, from: "gemini" };
+    } catch (e: any) {
+      // Якщо саме ліміт — пробуємо OR
+      const msg = String(e?.message || e || "");
+      const isQuota = /quota|rate[-\s]?limit|exceeded/i.test(msg);
+      if (!isQuota || !availOR) throw e;
     }
   }
 
-  // 3) Gemini (primary)
-  try {
-    const text = await withRetry(() => geminiAskText(env as any, prompt, lang), 2);
-    if (env.RESPONSES_KV && text && text.length < 16000) {
-      await env.RESPONSES_KV.put(key, text, { expirationTtl: ttl }).catch(() => {});
-    }
-    return { text, source: "gemini" };
-  } catch {
-    // 4) OpenRouter (fallback)
-    const text = await withRetry(() => openrouterAskText(env as any, prompt, lang), 2);
-    if (env.RESPONSES_KV && text && text.length < 16000) {
-      await env.RESPONSES_KV.put(key, text, { expirationTtl: ttl }).catch(() => {});
-    }
-    return { text, source: "openrouter" };
+  if (availOR) {
+    const text = await askOpenRouter(env, trimmed, lang);
+    return { text, from: "openrouter" };
   }
+
+  // Якщо немає ключів — м’який дефолт
+  return {
+    text:
+      lang === "uk"
+        ? "Зараз недоступний зовнішній провайдер відповіді. Спробуй коротшими запитами або пізніше. 🙂"
+        : lang === "ru"
+        ? "Сейчас недоступен внешний провайдер ответа. Попробуй короче либо позже. 🙂"
+        : lang === "de"
+        ? "Der externe Antwortdienst ist gerade nicht verfügbar. Versuch es kurz oder später. 🙂"
+        : "The external answer provider is currently unavailable. Try shorter prompts or later. 🙂",
+    from: "kv",
+  };
 }
