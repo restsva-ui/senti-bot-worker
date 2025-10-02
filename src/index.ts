@@ -69,6 +69,50 @@ function getMessageInfo(update: any): { chatId?: number; text?: string } {
   return { chatId, text };
 }
 
+/* ---------- НОВЕ: по-рядкова обробка ---------- */
+
+/** Розбиває повідомлення користувача на «рядки-кандидати» для окремих відповідей. */
+function splitUserLines(s: string): string[] {
+  return (s || "")
+    .split(/\r?\n+/)
+    .map(t => t.trim())
+    .filter(t => t.length > 0);
+}
+
+/** Відповідь для одного рядка з окремим визначенням мови. */
+async function answerOneLine(env: Env, line: string, tgLangCode?: string): Promise<string> {
+  const lineLang = normalizeLang(line, tgLangCode);
+
+  // Миттєвий шаблон — якщо спрацює, не звертаємось до моделей.
+  const quick = quickTemplateReply(lineLang, line);
+  if (quick) return quick;
+
+  const { text } = await askSmart(env, line, lineLang);
+  return (text || "").trim();
+}
+
+/** Послідовно обробляє всі рядки, щоб не ловити rate-limit і зберегти порядок. */
+async function answerMultiLine(env: Env, text: string, tgLangCode?: string): Promise<string> {
+  const lines = splitUserLines(text);
+  if (lines.length === 0) return "";
+
+  const parts: string[] = [];
+  for (const ln of lines) {
+    try {
+      const ans = await answerOneLine(env, ln, tgLangCode);
+      parts.push(ans);
+    } catch (e: any) {
+      parts.push(`⚠️ ${e?.message || String(e)}`);
+    }
+  }
+
+  // Акуратний розділювач між відповідями, як у прикладах
+  const sep = "\n— — —\n";
+  return parts.join(sep).replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/* ------------------------------------------------ */
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -102,7 +146,12 @@ export default {
       }
 
       const { chatId, text } = getMessageInfo(update);
-      const lang = detectLang(update);
+      const lang = detectLang(update); // базова мова (для help/ping та ін.)
+      const tgLangCode: string | undefined =
+        update?.message?.from?.language_code ||
+        update?.edited_message?.from?.language_code ||
+        update?.callback_query?.from?.language_code ||
+        undefined;
 
       try {
         // Callback-кнопки — просте echo
@@ -126,7 +175,7 @@ export default {
             return json({ ok: true, handled: "ping" });
           }
 
-          // /ask … → smart router (шаблони → KV → Gemini → OpenRouter)
+          // /ask … — по-рядкова відповідь
           if (/^\/ask(?:@\w+)?\b/i.test(trimmed)) {
             const q = extractArg(trimmed, "ask");
             const question = q || trimmed.replace(/^\/ask(?:@\w+)?\b/i, "").trim();
@@ -136,29 +185,16 @@ export default {
               return json({ ok: true, handled: "ask:empty" });
             }
 
-            // миттєва відповідь для дуже коротких реплік
-            const quick = quickTemplateReply(lang, question);
-            if (quick) {
-              await tgSendMessage(env as any, chatId, quick);
-              return json({ ok: true, handled: "template" });
-            }
-
-            const { text: answer } = await askSmart(env, question, lang);
+            const answer = await answerMultiLine(env, question, tgLangCode);
             await tgSendMessage(env as any, chatId, answer);
-            return json({ ok: true, handled: "ask" });
+            return json({ ok: true, handled: "ask:multiline" });
           }
 
-          // Fallback: звичайний текст — як /ask
+          // Fallback: звичайний текст — теж по-рядково
           if (trimmed.length > 0) {
-            const quick = quickTemplateReply(lang, trimmed);
-            if (quick) {
-              await tgSendMessage(env as any, chatId, quick);
-              return json({ ok: true, handled: "template:plain" });
-            }
-
-            const { text: answer } = await askSmart(env, trimmed, lang);
+            const answer = await answerMultiLine(env, trimmed, tgLangCode);
             await tgSendMessage(env as any, chatId, answer);
-            return json({ ok: true, handled: "ask:fallback" });
+            return json({ ok: true, handled: "ask:fallback:multiline" });
           }
         }
 
