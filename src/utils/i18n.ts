@@ -23,10 +23,10 @@ const UK_LETTERS = /[ієїґ]/i;       // характерні для UK
 const DE_DIACRITICS = /[äöüß]/i;    // характерні для DE
 
 const RU_COMMON =
-  /\b(да|нет|ок(?:ей)?|что|это|как|когда|почему|например|сеть|данн|сервер|быстр(ее|ей)|основн|котор|помож(ь|ешь)|совет|пользовател[ья])\b/i;
+  /\b(да|нет|ок(?:ей)?|что|это|как|когда|почему|например|сеть|данн|сервер|быстр(ее|ей)|основн|котор|помож(ь|ешь|ете)|совет(?:ы|а)?|пользовател[ья])\b/i;
 
 const UK_COMMON =
-  /\b(так|ні|ок(?:ей)?|що|це|як|коли|чому|наприклад|мереж|дан(их|і)|сервер|швидш|основн|який|допомогти|поради|користувач)\b/i;
+  /\b(так|ні|ок(?:ей)?|що|це|як|коли|чому|наприклад|мереж|дан(их|і)|сервер|швидш|основн|який|користувач|порада|пораду|поради|допомож(еш|ете)|допомогти|налаштува\w+|завданн|плануй|плануйте)\b/i;
 
 const DE_COMMON =
   /\b(ja|nein|und|ist|nicht|ein|eine|einem|einer|warum|wie|mit|für|zum|zur|bitte|kurz|erklaere|erkläre|erklaeren|erklären|beispiel|dass|sind|gerne|möchte|moechte|vielleicht|deshalb|darum|netzwerk|server|inhalt|benutz(er|ern)?)\b/i;
@@ -39,7 +39,7 @@ const LATIN = /\p{Script=Latin}/u;
 
 /** СИЛЬНІ тригери (перекривають фолбеки) */
 const RU_STRONG = /\b(привет|совет(?:а|ы)?|помочь|поможешь|пожалуйста|как дела)\b/i;
-const UK_STRONG = /\b(привіт|поради|будь ласка|допомогти|як справи)\b/i;
+const UK_STRONG = /\b(привіт|порада|пораду|поради|будь ласка|допомогти|допоможеш|допоможете|як справи)\b/i;
 const DE_STRONG = /\b(hallo|guten tag|servus|moin|danke|tipps?)\b/i;
 const EN_STRONG = /\b(hi|hello|thanks?|tip(s)?|please)\b/i;
 
@@ -118,7 +118,6 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
     const w = words[0];
     if (MANUAL_OVERRIDES[w]) return MANUAL_OVERRIDES[w];
 
-    // коротке слово: визначаємо за алфавітом
     if (w.length <= 5) {
       const hasLatin = /[a-z]/i.test(w);
       const hasCyr = /[а-яёіїєґ]/i.test(w);
@@ -140,24 +139,20 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
   if (UK_STRONG.test(stripped) && !RU_LETTERS.test(stripped)) return "uk";
   if (EN_STRONG.test(stripped) && /[a-z]/i.test(stripped) && !DE_DIACRITICS.test(stripped)) return "en";
 
-  // --- 1) Підрахунок скриптів
+  // --- 0.2) Ранній вибір для кирилиці за частотними словами
+  if (CYRILLIC.test(stripped)) {
+    if (RU_COMMON.test(stripped) && !UK_LETTERS.test(stripped)) return "ru";
+    if (UK_COMMON.test(stripped) && !RU_LETTERS.test(stripped)) return "uk";
+  }
+
+  // --- 2) Підрахунок скриптів
   let latinCount = 0, cyrCount = 0;
   for (const ch of stripped) {
     if (LATIN.test(ch)) latinCount++;
     else if (CYRILLIC.test(ch)) cyrCount++;
   }
 
-  // --- 2) ЖОРСТКЕ правило для кирилиці (щоб не було міксу RU/UK)
-  if (cyrCount > 0) {
-    if (UK_LETTERS.test(stripped)) return "uk";
-    if (RU_LETTERS.test(stripped)) return "ru";
-    // Без явних літер: вирішуємо за частотою ключових слів; нічия -> ru
-    const ruBias = (stripped.match(RU_COMMON)?.length || 0);
-    const ukBias = (stripped.match(UK_COMMON)?.length || 0);
-    return ruBias >= ukBias ? "ru" : "uk";
-  }
-
-  // --- 3) Балова модель (переважно для латиниці/міксу)
+  // --- 3) Набираємо бали
   const score: Record<Lang, number> = { uk: 0, ru: 0, de: 0, en: 0 };
 
   if (RU_LETTERS.test(stripped)) score.ru += 3.0;
@@ -169,10 +164,12 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
   if (DE_COMMON.test(stripped)) score.de += 1.6;
   if (EN_COMMON.test(stripped)) score.en += 1.6;
 
-  if (latinCount > cyrCount * 1.2) { score.en += 1.0; score.de += 0.9; }
+  if (cyrCount > latinCount * 1.2) { score.uk += 1.2; score.ru += 1.2; }
+  else if (latinCount > cyrCount * 1.2) { score.en += 1.0; score.de += 0.9; }
 
   if (latinCount > 0 && !DE_DIACRITICS.test(stripped)) score.en += 0.4;
 
+  // --- 4) Переможець за балами
   const order = (["uk","ru","de","en"] as Lang[])
     .map(l => [l, score[l]] as const)
     .sort((a,b) => b[1] - a[1]);
@@ -180,13 +177,23 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
   const [winLang, winScore] = order[0];
   const [, secondScore] = order[1];
   const MARGIN = 0.25;
+
   if (winScore - secondScore >= MARGIN) return winLang;
 
-  // --- 4) Telegram language_code як останній fallback
+  // --- 5) Якщо кирилиця і бали близькі — розв’язуємо між uk/ru за наявністю форм
+  if (cyrCount > 0) {
+    if (UK_LETTERS.test(stripped)) return "uk";
+    if (RU_LETTERS.test(stripped)) return "ru";
+    const ruBias = (stripped.match(RU_COMMON)?.length || 0);
+    const ukBias = (stripped.match(UK_COMMON)?.length || 0);
+    if (ruBias !== ukBias) return ruBias > ukBias ? "ru" : "uk";
+  }
+
+  // --- 6) Telegram language_code як останній fallback
   const tg = (tgLanguageCode || "").split("-")[0].toLowerCase() as Lang | "";
   if ((["uk","ru","de","en"] as Lang[]).includes(tg)) return tg as Lang;
 
-  // --- 5) Фінальний fallback
+  // --- 7) Фінальний fallback
   return "en";
 }
 
