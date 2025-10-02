@@ -1,4 +1,3 @@
-// src/services/replier.ts
 import { composeSystemInstruction, type Lang } from "../utils/i18n";
 
 /** Що очікує модуль у середовищі */
@@ -22,46 +21,76 @@ function norm(s: string): string {
 
 /* ===== Швидкі відповіді (без звернення до LLM) =====
    ВАЖЛИВО: кожен пакет містить ТІЛЬКИ слова цієї мови.
+   Це мінімізує плутанину при автодетекті.
 */
 const QUICK_PACKS: Record<Lang, Record<string, string>> = {
   uk: {
     "так": "Так, чудово! 💪",
+    "ага": "Ага! 😉",
+    "угу": "Угу! 🙂",
     "ні": "Гаразд, прийнято. 🙂",
-    "привіт": "Привіт! 👋 Як справи?",
-    "дякую": "Будь ласка! 😉",
+    "добре": "Добре! 🙂",
+    "добренько": "Домовились! 🙂",
+    "гаразд": "Гаразд! 🙂",
     "ок": "Окей! 🙂",
     "окей": "Окей! 🙂",
-    "гаразд": "Гаразд! 🙂",
+    "дякую": "Будь ласка! 😉",
+    "спасибі": "Будь ласка! 😉",
+    "привіт": "Привіт! 👋 Як справи?",
+    "привіт-привіт": "Привіт-привіт! 👋",
     "вітаю": "Вітаю! 👋",
+    "добрий день": "Добрий день! 👋",
   },
   ru: {
     "да": "Да, супер! 💪",
+    "ага": "Ага! 😉",
+    "угу": "Угу! 🙂",
     "нет": "Окей, принял. 🙂",
-    "привет": "Привет! 👋 Как дела?",
-    "спасибо": "Пожалуйста! 😉",
+    "хорошо": "Хорошо! 🙂",
+    "ладно": "Ладно! 🙂",
     "ок": "Окей! 🙂",
     "окей": "Окей! 🙂",
-    "хорошо": "Хорошо! 🙂",
+    "спасибо": "Пожалуйста! 😉",
+    "привет": "Привет! 👋 Как дела?",
+    "привет-привет": "Привет-привет! 👋",
+    "здравствуй": "Здравствуй! 👋",
+    "добрый день": "Добрый день! 👋",
+    "неа": "Понял. 🙂",
   },
   de: {
     "ja": "Alles klar! 🙂",
+    "genau": "Genau! 🙂",
+    "klar": "Klar! 🙂",
+    "passt": "Passt! 🙂",
     "nein": "Verstanden. 🙂",
+    "nee": "Alles klar. 🙂",
     "hallo": "Hallo! 👋 Wie geht’s?",
-    "danke": "Gerne! 😉",
-    "ok": "Okay! 🙂",
-    "okay": "Okay! 🙂",
+    "guten tag": "Guten Tag! 👋",
     "servus": "Servus! 👋",
     "moin": "Moin! 👋",
+    "danke": "Gerne! 😉",
+    "danke schön": "Sehr gern! 😉",
+    "ok": "Okay! 🙂",
+    "okay": "Okay! 🙂",
   },
   en: {
     "yes": "Great! 👍",
+    "yeah": "Yeah! 👍",
+    "yup": "Yup! 🙂",
+    "sure": "Sure! 🙂",
+    "absolutely": "Absolutely! 👍",
     "no": "Okay, noted. 🙂",
+    "nope": "Got it. 🙂",
     "hi": "Hi there! 👋",
     "hello": "Hey there! 👋",
+    "hey": "Hey! 👋",
+    "howdy": "Howdy! 👋",
     "thanks": "You’re welcome! 😉",
     "thank you": "You’re welcome! 😉",
+    "thx": "You’re welcome! 😉",
     "ok": "Okay! 🙂",
     "okay": "Okay! 🙂",
+    "alright": "Alright! 🙂",
   },
 };
 
@@ -76,13 +105,13 @@ export function quickTemplateReply(lang: Lang, raw: string): string | null {
   // Пряме співпадіння
   if (pack[key]) return pack[key];
 
-  // Якщо ввели "ок!" чи "Привіт:)" — ще раз чистимо краї
+  // Дозволяємо «ок!», «привіт:)» тощо
   const words = key.split(/\s+/).filter(Boolean);
   if (words.length === 1) {
     const w = words[0].replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
     if (pack[w]) return pack[w];
   } else if (words.length === 2) {
-    // спецкейс: en "thank you"
+    // специфічні двослівні ключі
     const joined = words.join(" ");
     if (pack[joined]) return pack[joined];
   }
@@ -146,7 +175,7 @@ async function askOpenRouter(env: ReplierEnv, prompt: string, lang: Lang): Promi
       { role: "system", content: system },
       { role: "user", content: prompt },
     ],
-    temperature: 0.7,
+    temperature: 0.5,
   };
 
   const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -182,9 +211,6 @@ function kvKey(lang: Lang, q: string) {
   return `tpl:${lang}:${q.trim().toLowerCase()}`;
 }
 
-/* Тимчасові/квотні помилки Gemini, при яких треба робити фолбек на OpenRouter */
-const TRANSIENT_ERR = /(quota|rate[-\s]?limit|exceed|overload|overloaded|model is overloaded|busy|unavailable|temporar|try again later|timeout|timed out|429|500|503)/i;
-
 /* ===== Основний роутер =====
    1) KV-кеш коротких реплік → миттєва відповідь
    2) Gemini (якщо є ключ). Якщо ліміт/перевантаження — фолбек на OpenRouter.
@@ -205,19 +231,15 @@ export async function askSmart(
   const availGemini = !!env.GEMINI_API_KEY;
   const availOR = !!env.OPENROUTER_API_KEY;
 
-  // Спершу Gemini, потім OR (якщо є ключі)
   if (availGemini) {
     try {
       const text = await askGemini(env, trimmed, lang);
       return { text, from: "gemini" };
     } catch (e: any) {
+      // Якщо саме ліміт/перевантаження — пробуємо OR
       const msg = String(e?.message || e || "");
-      const isTransient = TRANSIENT_ERR.test(msg);
-      if (!isTransient || !availOR) {
-        // якщо немає OR або помилка не тимчасова — кидаємо далі, хай індекс повідомить користувача
-        throw e;
-      }
-      // інакше — фолбек на OR нижче
+      const isQuota = /quota|rate[-\s]?limit|exceeded|overload/i.test(msg);
+      if (!isQuota || !availOR) throw e;
     }
   }
 
@@ -226,16 +248,16 @@ export async function askSmart(
     return { text, from: "openrouter" };
   }
 
-  // Якщо немає ключів — м’який дефолт локальною мовою
+  // Якщо немає ключів — м’який дефолт
   return {
     text:
       lang === "uk"
-        ? "Зараз зовнішній провайдер відповіді недоступний. Спробуй коротшими запитами або пізніше. 🙂"
+        ? "Зараз зовнішній провайдер недоступний. Спробуй коротшими запитами або пізніше. 🙂"
         : lang === "ru"
-        ? "Сейчас внешний провайдер ответа недоступен. Попробуй короче либо позже. 🙂"
+        ? "Сейчас внешний провайдер недоступен. Попробуй короче либо позже. 🙂"
         : lang === "de"
-        ? "Der externe Antwortdienst ist gerade nicht verfügbar. Versuch es kurz oder später. 🙂"
-        : "The external answer provider is currently unavailable. Try shorter prompts or later. 🙂",
+        ? "Der externe Dienst ist gerade nicht verfügbar. Versuch es kurz oder später. 🙂"
+        : "The external provider is currently unavailable. Try shorter prompts or later. 🙂",
     from: "kv",
   };
 }
