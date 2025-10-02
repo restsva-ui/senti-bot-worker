@@ -45,11 +45,46 @@ const LATIN = /\p{Script=Latin}/u;
 function stripCommand(raw: string): string {
   let t = (raw || "").trim();
 
-  t = t.replace(/^\/[a-zA-Z_]+(?:@[A-Za-z0-9_]+)?\s*/i, ""); // прибираємо команду
-  t = t.replace(/^[:\-–—]\s*/, ""); // прибираємо двокрапку/тире
+  // прибираємо команду (/ask, /start тощо)
+  t = t.replace(/^\/[a-zA-Z_]+(?:@[A-Za-z0-9_]+)?\s*/i, "");
+  // прибираємо двокрапку/тире після команди
+  t = t.replace(/^[:\-–—]\s*/, "");
 
   return t.trim();
 }
+
+/** Нормалізує слово: нижній регістр + прибирає просту пунктуацію з країв. */
+function normWord(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/^[\s.,!?()[\]{}"'«»„“”‘’`~]+|[\s.,!?()[\]{}"'«»„“”‘’`~]+$/g, "");
+}
+
+/** Manual overrides для коротких слів/привітань (однозначна мова). */
+const MANUAL_OVERRIDES: Record<string, Lang> = {
+  // Ukrainian
+  "так": "uk",
+  "ні": "uk",
+  "привіт": "uk",
+
+  // Russian
+  "да": "ru",
+  "нет": "ru",
+  "привет": "ru",
+
+  // English (латиниця)
+  "hi": "en",
+  "hello": "en",
+  "yes": "en",
+  "no": "en",
+  "ok": "en",
+  "okay": "en",
+
+  // German
+  "ja": "de",
+  "nein": "de",
+  "hallo": "de",
+};
 
 /**
  * Інструкція для системного промпта (дружній стиль)
@@ -87,30 +122,66 @@ export function composeSystemInstruction(lang: Lang): string {
 
 /* ===== основна функція визначення мови ===== */
 export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
-  const t = stripCommand(input);
+  const stripped = stripCommand(input);
+  const tLower = stripped.toLowerCase();
 
-  if (t.length < 3) {
+  // --- 0) Manual override для однословних і дуже коротких запитів
+  const words = tLower.split(/\s+/).filter(Boolean).map(normWord).filter(Boolean);
+
+  if (words.length === 1) {
+    const w = words[0];
+
+    // якщо слово чітко відоме — повертаємо мову негайно
+    if (MANUAL_OVERRIDES[w]) {
+      return MANUAL_OVERRIDES[w];
+    }
+
+    // для 1 короткого слова (<= 5 символів) надаємо перевагу явним літерам:
+    // якщо є суто кирилиця — між uk/ru, якщо латиниця — між en/de
+    if (w.length <= 5) {
+      const hasLatin = /[a-z]/i.test(w);
+      const hasCyr = /[а-яёіїєґ]/i.test(w);
+
+      if (hasCyr && !hasLatin) {
+        // вирішуємо між uk/ru по буквах
+        if (UK_LETTERS.test(w)) return "uk";
+        if (RU_LETTERS.test(w)) return "ru";
+      }
+      if (hasLatin && !hasCyr) {
+        // якщо містить умлаут/ß — DE, інакше EN
+        if (DE_DIACRITICS.test(w)) return "de";
+        // спеціальний кейс: "hallo" → DE
+        if (w === "hallo") return "de";
+        return "en";
+      }
+    }
+  }
+
+  // --- 1) Дуже короткий текст загалом — fallback від Telegram або EN
+  if (stripped.length < 3) {
     const tg = (tgLanguageCode || "").split("-")[0].toLowerCase() as Lang | "";
     return (["uk", "ru", "de", "en"] as Lang[]).includes(tg) ? (tg as Lang) : "en";
   }
 
+  // --- 2) Підрахунок скриптів
   let latinCount = 0;
   let cyrCount = 0;
-  for (const ch of t) {
+  for (const ch of stripped) {
     if (LATIN.test(ch)) latinCount++;
     else if (CYRILLIC.test(ch)) cyrCount++;
   }
 
+  // --- 3) Набираємо бали за ознаками
   const score: Record<Lang, number> = { uk: 0, ru: 0, de: 0, en: 0 };
 
-  if (RU_LETTERS.test(t)) score.ru += 3.0;
-  if (UK_LETTERS.test(t)) score.uk += 3.0;
-  if (DE_DIACRITICS.test(t)) score.de += 2.0;
+  if (RU_LETTERS.test(stripped)) score.ru += 3.0;
+  if (UK_LETTERS.test(stripped)) score.uk += 3.0;
+  if (DE_DIACRITICS.test(stripped)) score.de += 2.0;
 
-  if (RU_COMMON.test(t)) score.ru += 1.8;
-  if (UK_COMMON.test(t)) score.uk += 1.8;
-  if (DE_COMMON.test(t)) score.de += 1.6;
-  if (EN_COMMON.test(t)) score.en += 1.6;
+  if (RU_COMMON.test(stripped)) score.ru += 1.8;
+  if (UK_COMMON.test(stripped)) score.uk += 1.8;
+  if (DE_COMMON.test(stripped)) score.de += 1.6;
+  if (EN_COMMON.test(stripped)) score.en += 1.6;
 
   if (cyrCount > latinCount * 1.2) {
     score.uk += 1.2;
@@ -120,10 +191,11 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
     score.de += 0.9;
   }
 
-  if (latinCount > 0 && !DE_DIACRITICS.test(t)) {
+  if (latinCount > 0 && !DE_DIACRITICS.test(stripped)) {
     score.en += 0.4;
   }
 
+  // --- 4) Переможець за балами
   const order = (["uk", "ru", "de", "en"] as Lang[])
     .map((l) => [l, score[l]] as const)
     .sort((a, b) => b[1] - a[1]);
@@ -131,15 +203,18 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
   const [winLang, winScore] = order[0];
   const [, secondScore] = order[1];
 
+  // поріг «явної переваги» — краще ловить короткі репліки
   const MARGIN = 0.35;
 
   if (winScore - secondScore >= MARGIN) return winLang;
 
+  // --- 5) Неоднозначно — дивимось на Telegram language_code
   const tg = (tgLanguageCode || "").split("-")[0].toLowerCase() as Lang | "";
   if ((["uk", "ru", "de", "en"] as Lang[]).includes(tg)) {
     return tg as Lang;
   }
 
+  // --- 6) Фінальний fallback
   return "en";
 }
 
