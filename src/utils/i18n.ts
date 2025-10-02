@@ -37,7 +37,7 @@ const DE_COMMON =
   /\b(und|ist|nicht|ein|eine|einem|einer|warum|wie|mit|für|zum|zur|bitte|kurz|erklaere|erkläre|erklaeren|erklären|beispiel|dass|sind|gerne|möchte|moechte|vielleicht|deshalb|darum|netzwerk|server|inhalt|benutz(er|ern)?)\b/i;
 
 const EN_COMMON =
-  /\b(and|is|are|what|why|how|with|for|content|network|server|user?s?|please|quick|hello|hi|thanks?)\b/i;
+  /\b(and|is|are|what|why|how|with|for|content|network|server|user?s?|please|quick|hello|hi|thanks?|ok|hey)\b/i;
 
 const CYRILLIC = /\p{Script=Cyrillic}/u;
 const LATIN = /\p{Script=Latin}/u;
@@ -53,6 +53,80 @@ function stripCommand(raw: string): string {
   t = t.replace(/^[:\-–—]\s*/, "");
 
   return t.trim();
+}
+
+/* ===== “швидка доріжка” для коротких повідомлень ===== */
+
+/**
+ * Словники коротких/частих слів, що однозначно вказують на мову.
+ * Всі слова в нижньому регістрі без пунктуації.
+ */
+const SHORT_LEXEMES: Record<Lang, Set<string>> = {
+  uk: new Set([
+    "так", "ні", "привіт", "дякую", "дяка", "гаразд", "ок", "йо", "ага",
+    "прив", "вітаю"
+  ]),
+  ru: new Set([
+    "да", "нет", "привет", "спасибо", "ок", "ага", "здорово", "здарова",
+    "прив", "окей"
+  ]),
+  de: new Set([
+    "ja", "nein", "hallo", "danke", "servus", "moin", "ok", "okay", "wie", "und"
+  ]),
+  en: new Set([
+    "hi", "hello", "hey", "yes", "no", "ok", "okay", "yo", "yup", "nope", "hey!"
+  ]),
+};
+
+/** Нормалізуємо рядок: лишаємо букви/цифри/пробіли, зводимо до нижнього регістру. */
+function normalizeTiny(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ") // викидаємо пунктуацію/емоції
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+/**
+ * Повертає мову, якщо коротке повідомлення складається переважно з лексем однієї мови.
+ * Інакше — null (йдемо в загальну евристику).
+ */
+function detectShortUtteranceLang(t: string): Lang | null {
+  const norm = normalizeTiny(t);
+  if (!norm) return null;
+
+  // обмежимося дуже короткими випадками (до 8 символів або ≤3 слів)
+  const words = norm.split(/\s+/);
+  const charLimit = 8;
+  if (norm.length > charLimit && words.length > 3) return null;
+
+  // підрахунок збігів по словниках
+  const counts: Record<Lang, number> = { uk: 0, ru: 0, de: 0, en: 0 };
+  for (const w of words) {
+    (Object.keys(SHORT_LEXEMES) as Lang[]).forEach((lang) => {
+      if (SHORT_LEXEMES[lang].has(w)) counts[lang] += 1;
+    });
+  }
+
+  // якщо якась мова має явну перевагу — повертаємо її
+  const ordered = (Object.keys(counts) as Lang[]).sort(
+    (a, b) => counts[b] - counts[a]
+  );
+  const best = ordered[0];
+  const second = ordered[1];
+
+  if (counts[best] > 0 && counts[best] >= counts[second] + 1) {
+    return best;
+  }
+
+  // Додаткові правила для одиничних слів кирилицею: “так/ні/да/нет”
+  if (words.length === 1 && CYRILLIC.test(words[0])) {
+    const w = words[0];
+    if (w === "так" || w === "ні") return "uk";
+    if (w === "да" || w === "нет") return "ru";
+  }
+
+  return null;
 }
 
 /**
@@ -78,21 +152,20 @@ export function languageInstruction(lang: Lang): string {
  * Визначення мови з пріоритетом на МОВУ ПОВІДОМЛЕННЯ.
  *
  * Алгоритм:
- *  1) Аналізуємо текст (без команд) і рахуємо бали для uk/ru/de/en.
- *  2) Якщо є явний переможець (відрив ≥ 0.5) — повертаємо його.
- *  3) Якщо неоднозначно (різниця < 0.5 або текст дуже короткий) —
- *     тоді використовуємо Telegram language_code як м’який fallback.
- *  4) Фінальний fallback — "en".
+ *  1) Fast-path для коротких реплік (словниковий збіг).
+ *  2) Якщо не спрацювало — скоринг за літерами/словниками/скриптом.
+ *  3) Якщо явний переможець (відрив ≥ 0.5) — повертаємо його.
+ *  4) Якщо неоднозначно — беремо Telegram language_code як м’який fallback.
+ *  5) Фінальний fallback — "en".
  */
 export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
   const t = stripCommand(input);
 
-  // дуже короткий текст — одразу йдемо в fallback на підставі Telegram або EN
-  if (t.length < 3) {
-    const tg = (tgLanguageCode || "").split("-")[0].toLowerCase() as Lang | "";
-    return (["uk", "ru", "de", "en"] as Lang[]).includes(tg as Lang) ? (tg as Lang) : "en";
-  }
+  // 1) Спроба швидкої ідентифікації коротких реплік
+  const shortGuess = detectShortUtteranceLang(t);
+  if (shortGuess) return shortGuess;
 
+  // 2) Загальна евристика
   // підрахунок скриптів
   let latinCount = 0;
   let cyrCount = 0;
@@ -141,17 +214,17 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
 
   const MARGIN = 0.5; // поріг «явної переваги» мови тексту
 
-  // 1) якщо текст дав чітку перевагу — беремо переможця
+  // 3) якщо текст дав чітку перевагу — беремо переможця
   if (winScore - secondScore >= MARGIN) {
     return winLang;
   }
 
-  // 2) якщо неоднозначно — дивимось на Telegram language_code
+  // 4) якщо неоднозначно — дивимось на Telegram language_code
   const tg = (tgLanguageCode || "").split("-")[0].toLowerCase() as Lang | "";
   if ((["uk", "ru", "de", "en"] as Lang[]).includes(tg as Lang)) {
     return tg as Lang;
   }
 
-  // 3) фінальний fallback
+  // 5) фінальний fallback
   return "en";
 }
