@@ -6,7 +6,7 @@ export interface ReplierEnv {
   // Ключі провайдерів (будь-який може бути відсутнім)
   GEMINI_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
-  // KV кеш для миттєвих/безкоштовних відповідей
+  // KV кеш для безкоштовних (і швидких) відповідей
   SENTI_CACHE?: KVNamespace;
 }
 
@@ -21,7 +21,8 @@ function norm(s: string): string {
 }
 
 /* ===== Швидкі відповіді (без звернення до LLM) =====
-   ВАЖЛИВО: кожен пакет містить ТІЛЬКИ слова відповідної мови.
+   ВАЖЛИВО: кожен пакет містить ТІЛЬКИ слова цієї мови.
+   Це мінімізує плутанину при автодетекті.
 */
 const QUICK_PACKS: Record<Lang, Record<string, string>> = {
   uk: {
@@ -56,7 +57,6 @@ const QUICK_PACKS: Record<Lang, Record<string, string>> = {
     "здравствуй": "Здравствуй! 👋",
     "добрый день": "Добрый день! 👋",
     "неа": "Понял. 🙂",
-    "спс": "Пожалуйста! 😉",
   },
   de: {
     "ja": "Alles klar! 🙂",
@@ -71,7 +71,6 @@ const QUICK_PACKS: Record<Lang, Record<string, string>> = {
     "moin": "Moin! 👋",
     "danke": "Gerne! 😉",
     "danke schön": "Sehr gern! 😉",
-    "danke dir": "Gerne! 😉",
     "ok": "Okay! 🙂",
     "okay": "Okay! 🙂",
   },
@@ -107,12 +106,13 @@ export function quickTemplateReply(lang: Lang, raw: string): string | null {
   // Пряме співпадіння
   if (pack[key]) return pack[key];
 
-  // «ок!», «привіт:)» → повторна нормалізація
+  // «ок!», «привіт:)» → повторна нормалізація слова
   const words = key.split(/\s+/).filter(Boolean);
   if (words.length === 1) {
     const w = words[0].replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
     if (pack[w]) return pack[w];
   } else if (words.length === 2) {
+    // специфічні двослівні ключі
     const joined = words.join(" ");
     if (pack[joined]) return pack[joined];
   }
@@ -128,16 +128,14 @@ async function askGemini(env: ReplierEnv, prompt: string, lang: Lang): Promise<s
   if (!key) throw new Error("Gemini key missing");
 
   const model = "gemini-2.5-flash";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
-    key,
-  )}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
 
   const system = composeSystemInstruction(lang);
   const reinforced = `${system}\n\n${prompt}`;
 
   const body = {
     contents: [{ role: "user", parts: [{ text: reinforced }] }],
-    // ВАЖЛИВО: саме camelCase поле
+    // ВАЖЛИВО: саме camelCase
     systemInstruction: { parts: [{ text: system }] },
   };
 
@@ -207,16 +205,17 @@ async function askOpenRouter(env: ReplierEnv, prompt: string, lang: Lang): Promi
   return (txt || "").trim() || "(empty)";
 }
 
-/* ===== KV-кеш ключ ===== */
+/** KV-кеш: ключ з урахуванням мови */
 function kvKey(lang: Lang, q: string) {
   return `tpl:${lang}:${q.trim().toLowerCase()}`;
 }
 
-/* ===== Основний роутер =====
-   1) KV-кеш коротких реплік → миттєва відповідь
-   2) Gemini (якщо є ключ). Якщо ліміт/перевантаження — фолбек на OpenRouter.
-   3) OpenRouter (якщо є ключ)
-*/
+/**
+ * Основний роутер:
+ *  1) KV-кеш коротких реплік → миттєва відповідь
+ *  2) Gemini (якщо є ключ). Якщо ліміт/перевантаження — фолбек на OpenRouter.
+ *  3) OpenRouter (якщо є ключ)
+ */
 export async function askSmart(
   env: ReplierEnv,
   prompt: string,
@@ -232,14 +231,13 @@ export async function askSmart(
   const availGemini = !!env.GEMINI_API_KEY;
   const availOR = !!env.OPENROUTER_API_KEY;
 
+  // Спершу Gemini, потім OR (якщо є ключі)
   if (availGemini) {
     try {
       const text = await askGemini(env, trimmed, lang);
-      // кешуємо відповідь LLM на годину
-      await env.SENTI_CACHE?.put(kvKey(lang, trimmed), text, { expirationTtl: 3600 });
       return { text, from: "gemini" };
     } catch (e: any) {
-      // якщо ліміт/перевантаження — пробуємо OR
+      // Якщо саме ліміт/перевантаження — пробуємо OR
       const msg = String(e?.message || e || "");
       const isQuota = /quota|rate[-\s]?limit|exceeded|overload/i.test(msg);
       if (!isQuota || !availOR) throw e;
@@ -248,12 +246,10 @@ export async function askSmart(
 
   if (availOR) {
     const text = await askOpenRouter(env, trimmed, lang);
-    // кешуємо відповідь на годину
-    await env.SENTI_CACHE?.put(kvKey(lang, trimmed), text, { expirationTtl: 3600 });
     return { text, from: "openrouter" };
   }
 
-  // 3) Немає ключів — м’який дефолт
+  // Якщо немає ключів — м’який дефолт
   return {
     text:
       lang === "uk"
