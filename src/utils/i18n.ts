@@ -1,3 +1,5 @@
+// src/utils/i18n.ts
+
 /**
  * Підтримувані мови для відповідей бота.
  */
@@ -20,33 +22,41 @@ const RU_LETTERS = /[ёыэ]/i;       // характерні для RU
 const UK_LETTERS = /[ієїґ]/i;       // характерні для UK
 const DE_DIACRITICS = /[äöüß]/i;    // характерні для DE
 
-// Поширені слова/основи (для бального детектора)
 const RU_COMMON =
-  /\b(да|нет|ок(?:ей)?|что|это|как|когда|почему|например|сеть|данн|сервер|быстр(ее|ей)|основн|котор|пользовател[ья]|совет|учеб|памят|привет)\b/i;
+  /\b(да|нет|ок(?:ей)?|что|это|как|когда|почему|например|сеть|данн|сервер|быстр(?:ее|ей)|основн|котор|пользовател[ья]|учеб|совет|задач|пожалуйста)\b/i;
 
 const UK_COMMON =
-  /\b(так|ні|ок(?:ей)?|що|це|як|коли|чому|наприклад|мереж|дан(их|і)|сервер|швидш|основн|який|користувач|порада|привіт)\b/i;
+  /\b(так|ні|ок(?:ей)?|що|це|як|коли|чому|наприклад|мереж|дан(?:их|і)|сервер|швидш|основн|який|користувач|поради?|будь ласка|завдан)\b/i;
 
 const DE_COMMON =
-  /\b(ja|nein|und|ist|nicht|ein|eine|einem|einer|warum|wie|mit|für|zum|zur|bitte|kurz|erklaere|erkläre|erklaeren|erklären|beispiel|dass|sind|gerne|möchte|moechte|vielleicht|deshalb|darum|netzwerk|server|inhalt|benutz(er|ern)?|tipps?)\b/i;
+  /\b(ja|nein|und|ist|nicht|ein|eine|einem|einer|warum|wie|mit|für|zum|zur|bitte|kurz|erklaere|erkläre|erklaeren|erklären|beispiel|dass|sind|gerne|möchte|moechte|vielleicht|deshalb|darum|netzwerk|server|inhalt|benutz(?:er|ern)?)\b/i;
 
 const EN_COMMON =
-  /\b(ok(?:ay)?|yes|no|hi|hey|and|is|are|what|why|how|with|for|content|network|server|user?s?|please|quick|hello|thanks?|tip|tips?)\b/i;
+  /\b(ok(?:ay)?|yes|no|hi|hey|and|is|are|what|why|how|with|for|content|network|server|user?s?|please|quick|hello|thanks?)\b/i;
 
 const CYRILLIC = /\p{Script=Cyrillic}/u;
 const LATIN = /\p{Script=Latin}/u;
 
-/** СИЛЬНІ тригери (чіткі маркери мови; перекривають фолбеки) */
-const RU_STRONG = /\b(привет|совет(?:а|ы)?|помочь|пожалуйста|как дела)\b/i;
-const UK_STRONG = /\b(привіт|поради?|будь ласка|допомогти|як справи)\b/i;
-const DE_STRONG = /\b(hallo|guten tag|servus|moin|danke|tipps?)\b/i;
-const EN_STRONG = /\b(hi|hello|thanks?|tip|tips|please)\b/i;
+/** СИЛЬНІ тригери (перекривають фолбеки/tgLanguageCode) */
+const RU_STRONG =
+  /\b(привет|совет(?:а|ы)?|помочь|пожалуйста|как дела|учеб|урок|задани(?:е|я)|выполнить|начинай?|планируй?)\b/i;
+
+const UK_STRONG =
+  /\b(привіт|поради?|будь ласка|допомогти|як справи|завдан|плануй?|починай?)\b/i;
+
+const DE_STRONG =
+  /\b(hallo|guten tag|servus|moin|danke|tipps?|zeitmanagement)\b/i;
+
+const EN_STRONG =
+  /\b(hi|hello|thanks?|tip|tips|please|productivity)\b/i;
 
 /** Прибираємо службовий префікс-команди з початку тексту. */
 function stripCommand(raw: string): string {
   let t = (raw || "").trim();
-  t = t.replace(/^\/[a-zA-Z_]+(?:@[A-Za-z0-9_]+)?\s*/i, ""); // /ask, /start…
-  t = t.replace(/^[:\-–—]\s*/, "");                           // двокрапка/тире після команди
+  // прибираємо команду (/ask, /start тощо)
+  t = t.replace(/^\/[a-zA-Z_]+(?:@[A-Za-z0-9_]+)?\s*/i, "");
+  // прибираємо двокрапку/тире після команди
+  t = t.replace(/^[:\-–—]\s*/, "");
   return t.trim();
 }
 
@@ -70,7 +80,13 @@ const MANUAL_OVERRIDES: Record<string, Lang> = {
 };
 
 /**
- * Системна інструкція (одна мова, лаконічно, без мета-коментарів).
+ * Системна інструкція:
+ * — одна мова;
+ * — максимально коротко (1–2 речення);
+ * — без метакоментарів про мови/переклади;
+ * — дружній тон; списки — маркерами (до 5);
+ * — за потреби рівно 1 уточнювальне запитання;
+ * — без вигадок.
  */
 export function composeSystemInstruction(lang: Lang): string {
   switch (lang) {
@@ -78,34 +94,34 @@ export function composeSystemInstruction(lang: Lang): string {
       return [
         "Відповідай виключно українською.",
         "Коротко і дружньо: для привітань/«так-ні» — 1 рядок; для пояснень — 1–2 короткі речення.",
-        "Не перекладай і не коментуй мову запиту. Без преамбул типу «я ШІ».",
-        "Списки — маркери (до 5). Якщо бракує контексту — постав рівно 1 уточнювальне запитання.",
+        "Не перекладай запит і не коментуй мову. Без преамбул типу «я ШІ».",
+        "Якщо просять список — маркери (до 5). Якщо бракує контексту — рівно 1 уточнювальне запитання.",
         "Не вигадуй фактів.",
       ].join(" ");
     case "ru":
       return [
         "Отвечай исключительно на русском.",
-        "Коротко и дружелюбно: приветствие/«да-нет» — 1 строка; объяснение — 1–2 коротких предложения.",
-        "Не переводить и не комментировать язык запроса; без преамбул.",
-        "Списки — маркерами (до 5). При нехватке данных — ровно 1 уточняющий вопрос.",
+        "Кратко и дружелюбно: приветствия/«да-нет» — 1 строка; объяснения — 1–2 коротких предложения.",
+        "Не переводить запрос и не комментировать язык. Без преамбул вроде «я ИИ».",
+        "Если нужен список — маркеры (до 5). Если мало данных — ровно 1 уточняющий вопрос.",
         "Без выдумок.",
       ].join(" ");
     case "de":
       return [
         "Antworte ausschließlich auf Deutsch.",
         "Kurz und freundlich: Gruß/Ja–Nein – 1 Zeile; Erklärungen – 1–2 kurze Sätze.",
-        "Keine Übersetzungen oder Sprachkommentare; keine Vorreden.",
-        "Listen als Aufzählung (max. 5). Fehlt Kontext, stelle genau eine Rückfrage.",
-        "Keine erfundenen Fakten.",
+        "Keine Übersetzungen oder Sprachkommentare. Keine Vorreden wie „ich bin eine KI“.",
+        "Bei Listen Aufzählungen (max. 5). Falls nötig, genau eine Rückfrage.",
+        "Nichts erfinden.",
       ].join(" ");
     case "en":
     default:
       return [
         "Answer exclusively in English.",
         "Keep it short and friendly: greetings/yes–no — one line; explanations — 1–2 short sentences.",
-        "Do not translate or comment on the input language. No preambles.",
+        "Do not translate or mention the input language. No preambles like “I’m an AI”.",
         "Use bullet points (up to 5). If context is missing, ask exactly one clarifying question.",
-        "No fabrications.",
+        "Avoid fabrications.",
       ].join(" ");
   }
 }
@@ -115,16 +131,22 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
   const stripped = stripCommand(input);
   const tLower = stripped.toLowerCase();
 
-  // 0) Manual override для однословних і дуже коротких
+  // --- 0) Manual override для однословних і дуже коротких запитів
   const words = tLower.split(/\s+/).filter(Boolean).map(normWord).filter(Boolean);
+
   if (words.length === 1) {
     const w = words[0];
-    if (MANUAL_OVERRIDES[w]) return MANUAL_OVERRIDES[w];
 
-    // для 1 короткого слова (<=5) — пріоритет скрипту
+    // якщо слово чітко відоме — повертаємо мову негайно
+    if (MANUAL_OVERRIDES[w]) {
+      return MANUAL_OVERRIDES[w];
+    }
+
+    // для 1 короткого слова (<= 5 символів) надаємо перевагу явним літерам
     if (w.length <= 5) {
       const hasLatin = /[a-z]/i.test(w);
       const hasCyr = /[а-яёіїєґ]/i.test(w);
+
       if (hasCyr && !hasLatin) {
         if (UK_LETTERS.test(w)) return "uk";
         if (RU_LETTERS.test(w)) return "ru";
@@ -137,58 +159,85 @@ export function normalizeLang(input: string, tgLanguageCode?: string): Lang {
     }
   }
 
-  // 0.1) СИЛЬНІ ТРИГЕРИ (перекривають усе, навіть tgLanguageCode)
+  // --- 0.1) СИЛЬНІ ТРИГЕРИ (перебивають усе, включно з tgLanguageCode)
   if (DE_DIACRITICS.test(stripped) || DE_STRONG.test(stripped)) return "de";
   if (RU_STRONG.test(stripped) && !UK_LETTERS.test(stripped)) return "ru";
   if (UK_STRONG.test(stripped) && !RU_LETTERS.test(stripped)) return "uk";
   if (EN_STRONG.test(stripped) && /[a-z]/i.test(stripped) && !DE_DIACRITICS.test(stripped)) return "en";
 
-  // 1) Дуже короткий рядок — дозволяємо фолбек на tgLanguageCode
+  // --- 1) Дуже короткий текст загалом — fallback від Telegram або EN
   if (stripped.length < 3) {
     const tg = (tgLanguageCode || "").split("-")[0].toLowerCase() as Lang | "";
-    return (["uk","ru","de","en"] as Lang[]).includes(tg) ? (tg as Lang) : "en";
+    return (["uk", "ru", "de", "en"] as Lang[]).includes(tg) ? (tg as Lang) : "en";
   }
 
-  // 2) Підрахунок скриптів
-  let latinCount = 0, cyrCount = 0;
+  // --- 2) Підрахунок скриптів
+  let latinCount = 0;
+  let cyrCount = 0;
   for (const ch of stripped) {
     if (LATIN.test(ch)) latinCount++;
     else if (CYRILLIC.test(ch)) cyrCount++;
   }
 
-  // 3) Набираємо бали
+  // --- 3) Набираємо бали за ознаками
   const score: Record<Lang, number> = { uk: 0, ru: 0, de: 0, en: 0 };
 
-  if (RU_LETTERS.test(stripped)) score.ru += 3.0;
-  if (UK_LETTERS.test(stripped)) score.uk += 3.0;
+  if (RU_LETTERS.test(stripped)) score.ru += 3.2;   // трохи підсилено
+  if (UK_LETTERS.test(stripped)) score.uk += 3.2;
   if (DE_DIACRITICS.test(stripped)) score.de += 2.0;
 
-  if (RU_COMMON.test(stripped)) score.ru += 2.2; // підсилено RU
-  if (UK_COMMON.test(stripped)) score.uk += 1.8;
+  if (RU_COMMON.test(stripped)) score.ru += 2.2;    // підсилено RU
+  if (UK_COMMON.test(stripped)) score.uk += 1.9;
   if (DE_COMMON.test(stripped)) score.de += 1.6;
   if (EN_COMMON.test(stripped)) score.en += 1.6;
 
-  if (cyrCount > latinCount * 1.2) { score.uk += 1.2; score.ru += 1.2; }
-  else if (latinCount > cyrCount * 1.2) { score.en += 1.0; score.de += 0.9; }
+  if (cyrCount > latinCount * 1.2) {
+    score.uk += 1.2;
+    score.ru += 1.2;
+  } else if (latinCount > cyrCount * 1.2) {
+    score.en += 1.0;
+    score.de += 0.9;
+  }
 
-  if (latinCount > 0 && !DE_DIACRITICS.test(stripped)) score.en += 0.4;
+  if (latinCount > 0 && !DE_DIACRITICS.test(stripped)) {
+    score.en += 0.4;
+  }
 
-  // 4) Переможець за балами
-  const order = (["uk","ru","de","en"] as Lang[])
-    .map(l => [l, score[l]] as const)
-    .sort((a,b) => b[1]-a[1]);
+  // --- 4) Переможець за балами
+  const order = (["uk", "ru", "de", "en"] as Lang[])
+    .map((l) => [l, score[l]] as const)
+    .sort((a, b) => b[1] - a[1]);
 
   const [winLang, winScore] = order[0];
   const [, secondScore] = order[1];
-  const MARGIN = 0.25; // менш суворий поріг
 
+  // поріг «явної переваги» — зменшено, щоб частіше фіксувати RU/UK
+  const MARGIN = 0.2;
   if (winScore - secondScore >= MARGIN) return winLang;
 
-  // 5) Неоднозначно — пробуємо tgLanguageCode
-  const tg = (tgLanguageCode || "").split("-")[0].toLowerCase() as Lang | "";
-  if ((["uk","ru","de","en"] as Lang[]).includes(tg)) return tg as Lang;
+  // --- 4.1) Додатковий RU/UK вибір для кирилиці при малій різниці
+  if (cyrCount > 0 && cyrCount >= latinCount) {
+    // явні літери — найсильніший індикатор
+    if (RU_LETTERS.test(stripped) && !UK_LETTERS.test(stripped)) return "ru";
+    if (UK_LETTERS.test(stripped) && !RU_LETTERS.test(stripped)) return "uk";
+    // ключові слова
+    if (RU_COMMON.test(stripped) && !UK_COMMON.test(stripped)) return "ru";
+    if (UK_COMMON.test(stripped) && !RU_COMMON.test(stripped)) return "uk";
+  }
 
-  // 6) Фінальний fallback
+  // --- 5) Неоднозначно — дивимось на Telegram language_code (як м’який пріоритет)
+  const tg = (tgLanguageCode || "").split("-")[0].toLowerCase() as Lang | "";
+  if ((["uk", "ru", "de", "en"] as Lang[]).includes(tg)) {
+    // але не якщо суперечить явним кириличним літерам
+    if (tg === "uk" && RU_LETTERS.test(stripped)) return "ru";
+    if (tg === "ru" && UK_LETTERS.test(stripped)) return "uk";
+    return tg as Lang;
+  }
+
+  // --- 6) Фінальний fallback
+  // Якщо кирилиці явно більше — виберемо ru як більш поширений дефолт,
+  // інакше — en.
+  if (cyrCount > latinCount * 1.1) return "ru";
   return "en";
 }
 
