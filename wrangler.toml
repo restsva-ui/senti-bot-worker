@@ -10,17 +10,28 @@ compatibility_date = "2024-09-01"
 minify = false
 
 # ===== KV namespaces =====
+# існуючий KV (не чіпаю)
 [[kv_namespaces]]
 binding = "LIKES_KV"                           # має збігатися з env.LIKES_KV у коді
 id = "7b32e2d1f60846ddb1c653eb52180bf7"        # <- твій реальний KV ID (senti-state)
+
+# новий KV для швидких/безкоштовних відповідей (використовується services/replier.ts)
+[[kv_namespaces]]
+binding = "SENTI_CACHE"                        # має збігатися з env.SENTI_CACHE у коді
+id = "REPLACE_WITH_YOUR_SENTI_CACHE_ID"        # заміни на ID після створення namespace
 
 # ===== Vars (змінні оточення) =====
 [vars]
 API_BASE_URL = "https://api.telegram.org"
 OWNER_ID = "784869835"                          # твій чат/юзер id
+# За потреби можеш також додати тут дефолти (не секрети), але ключі краще як secrets:
+# ASK_PROVIDER = "auto"                         # опційно: "gemini" | "openrouter" | "auto"
 
 # ===== Секрети =====
-# Додано окремо: wrangler secret put BOT_TOKEN
+# Додаються окремо командами (НЕ у файл):
+# wrangler secret put BOT_TOKEN
+# wrangler secret put GEMINI_API_KEY           # якщо використовуєш Gemini
+# wrangler secret put OPENROUTER_API_KEY       # якщо використовуєш OpenRouter
 # значення з чек-листа: 8405753130:AAGrDrmi-cXMU6A_H_Y0-a9p-gDowMYu2xw
 
 # ===== Observability (щоб не ловити 10023 на free плані) =====
