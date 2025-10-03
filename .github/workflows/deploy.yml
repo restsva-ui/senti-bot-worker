@@ -23,6 +23,8 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
       - name: Deploy to Cloudflare Workers
-        run: wrangler deploy --config wrangler.toml --keep-vars true
+        run: |
+          wrangler deploy --config wrangler.toml --keep-vars true
+          echo "✅ Deploy finished successfully at $(date -u)"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
