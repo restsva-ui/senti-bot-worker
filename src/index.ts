@@ -8,6 +8,7 @@ import { askSmart, quickTemplateReply, type ReplierEnv } from "./services/replie
 import { likesCommand, likesCanHandleCallback, likesOnCallback } from "./commands/likes";
 import { statsCommand } from "./commands/stats";
 import { menuCommand, menuOnCallback } from "./commands/menu";
+import { syncCommands, commandsList } from "./commands/sync";
 
 export interface Env extends ReplierEnv {
   // Telegram
@@ -24,7 +25,7 @@ export interface Env extends ReplierEnv {
   SENTI_CACHE?: KVNamespace;  // prefs/кеш (на майбутнє)
 }
 
-/* ---------------------------------------------------- */
+/* ------------------------- helpers ------------------------- */
 
 function json(res: unknown, status = 200) {
   return new Response(JSON.stringify(res), {
@@ -88,7 +89,7 @@ async function seenUpdateRecently(env: Env, updateId: number | string, ttlSec = 
   return false;
 }
 
-/** Обмежений reader для запитів: захист від випадково величезних тіл. */
+/** Безпечне читання JSON (1MB ліміт), щоб не ловити "Body already used". */
 async function readJsonSafe(req: Request, maxBytes = 1024 * 1024 /* 1MB */) {
   const ct = req.headers.get("content-type") || "";
   if (!/application\/json/i.test(ct)) throw new Error("bad content-type");
@@ -98,7 +99,7 @@ async function readJsonSafe(req: Request, maxBytes = 1024 * 1024 /* 1MB */) {
   return JSON.parse(text);
 }
 
-/* ---------------------------------------------------- */
+/* --------------------------- worker --------------------------- */
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -109,9 +110,20 @@ export default {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // Діагностика/панель (якщо підключена)
-    const diag = await handleDiagnostics(request, env as any, url);
+    // Діагностика (важливо: передаємо clone(), щоб не "використати" body)
+    const diag = await handleDiagnostics(request.clone(), env as any, url);
     if (diag) return diag;
+
+    // ---- Sync bot commands (GET) ----
+    if (request.method === "GET" && url.pathname === "/sync-commands") {
+      // проста перевірка по секрету у query
+      const secret = url.searchParams.get("secret") || "";
+      if ((env.WEBHOOK_SECRET || "") && secret !== env.WEBHOOK_SECRET) {
+        return json({ ok: false, error: "forbidden" }, 403);
+      }
+      const res = await syncCommands(env as any);
+      return json({ ok: true, updated: res?.ok ?? true, commands: commandsList() });
+    }
 
     // Webhook
     if (url.pathname === "/webhook") {
@@ -122,14 +134,13 @@ export default {
       // Перевірка секрету Telegram Webhook
       const expected = (env.WEBHOOK_SECRET || "").trim();
       if (expected) {
-        const got =
-          (request.headers.get("x-telegram-bot-api-secret-token") || "").trim();
+        const got = (request.headers.get("x-telegram-bot-api-secret-token") || "").trim();
         if (got !== expected) {
           return json({ ok: false, error: "invalid secret" }, 403);
         }
       }
 
-      // Читаємо update
+      // Читаємо update без повторного читання body
       let update: any;
       try {
         update = await readJsonSafe(request);
@@ -209,11 +220,10 @@ export default {
               const quick = quickTemplateReply(qLang, q);
               if (quick) {
                 answers.push(quick);
-                continue;
+              } else {
+                const { text: answer } = await askSmart(env, q, qLang);
+                answers.push(answer);
               }
-
-              const { text: answer } = await askSmart(env, q, qLang);
-              answers.push(answer);
             }
 
             await tgSendMessage(env as any, chatId, answers.join("\n— — —\n"));
@@ -242,11 +252,7 @@ export default {
         try {
           const { chatId: safeChat } = getMessageInfo(update);
           if (safeChat) {
-            await tgSendMessage(
-              env as any,
-              safeChat,
-              `Вибач, сталася внутрішня помилка: ${e?.message || String(e)}`
-            );
+            await tgSendMessage(env as any, safeChat, `Вибач, сталася внутрішня помилка: ${e?.message || String(e)}`);
           }
         } catch {}
         return json({ ok: false, error: "internal" }, 500);
