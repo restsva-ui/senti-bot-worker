@@ -1,5 +1,5 @@
 // src/commands/menu.ts
-import { tgSendMessage, tgEditMessageReplyMarkup } from "../utils/telegram";
+import { tgSendMessage } from "../utils/telegram";
 import type { Env } from "../index";
 import { wikiSetAwait } from "./registry";
 import { likesCommand } from "./likes";
@@ -19,12 +19,10 @@ const DEFAULT_SETTINGS: Required<UserSettings> = {
 };
 
 function cache(env: Env): KVNamespace | undefined {
-  // використаємо SENTI_CACHE, якщо присутній
   return (env as any).SENTI_CACHE as KVNamespace | undefined;
 }
 const skey = (userId: number) => `prefs:${userId}`;
 
-/** зчитати налаштування користувача (або дефолт) */
 async function readSettings(env: Env, userId: number): Promise<Required<UserSettings>> {
   const kv = cache(env);
   if (!kv) return { ...DEFAULT_SETTINGS };
@@ -36,10 +34,9 @@ async function readSettings(env: Env, userId: number): Promise<Required<UserSett
   }
 }
 
-/** зберегти налаштування (якщо є KV) */
 async function writeSettings(env: Env, userId: number, patch: Partial<UserSettings>): Promise<void> {
   const kv = cache(env);
-  if (!kv) return; // тихо ігноруємо, якщо нема KV
+  if (!kv) return;
   const cur = await readSettings(env, userId);
   const next = { ...cur, ...patch };
   await kv.put(skey(userId), JSON.stringify(next));
@@ -106,7 +103,6 @@ export async function menuCommand(env: Env, chatId: number) {
 
 export async function menuOnCallback(env: Env, update: any) {
   const data = update?.callback_query?.data as string | undefined;
-  const messageId = update?.callback_query?.message?.message_id as number | undefined;
   const chatId = update?.callback_query?.message?.chat?.id as number | undefined;
   const userId =
     update?.callback_query?.from?.id ??
@@ -115,69 +111,50 @@ export async function menuOnCallback(env: Env, update: any) {
 
   if (!chatId || !data) return;
 
-  // Допоміжники для оновлення клавіатури під тим же повідомленням
-  const safeEditMarkup = async (markup: any) => {
-    if (!messageId) {
-      await tgSendMessage(env as any, chatId, "📍 Меню:", { reply_markup: markup });
-      return;
-    }
-    try {
-      await tgEditMessageReplyMarkup(env as any, chatId, messageId, markup);
-    } catch {
-      // якщо не вдалось — надішлемо нове повідомлення
-      await tgSendMessage(env as any, chatId, "📍 Меню:", { reply_markup: markup });
-    }
-  };
-
-  // ---- Роутинг по кнопках ----
-  if (data === "menu:ask") {
-    await tgSendMessage(env as any, chatId, "Введи своє питання з /ask ...");
-    return;
-  }
-
-  if (data === "menu:wiki") {
-    // вмикаємо режим очікування терміну для wiki
-    try {
-      await wikiSetAwait({ env }, update as any);
-      await tgSendMessage(env as any, chatId, "Увімкнено вікі-режим. Напиши термін 👇");
-    } catch {
-      await tgSendMessage(env as any, chatId, "Увімкнено вікі-режим. Напиши термін 👇");
-    }
-    return;
-  }
-
-  if (data === "menu:likes") {
-    // відкриємо одразу модуль лайків
-    await likesCommand(env as any, { message: { chat: { id: chatId } } });
-    return;
-  }
-
-  if (data === "menu:settings") {
+  // Замість редагування старого повідомлення — шлемо нове
+  const showMain = async () =>
+    tgSendMessage(env as any, chatId, "📍 Головне меню:", { reply_markup: mainKeyboard() });
+  const showSettings = async () => {
     const s = await readSettings(env, userId);
     await tgSendMessage(env as any, chatId, "⚙️ Налаштування:", {
       reply_markup: settingsKeyboard(s),
     });
+  };
+
+  if (data === "menu:ask") {
+    await tgSendMessage(env as any, chatId, "Введи своє питання з /ask ...");
     return;
   }
-
+  if (data === "menu:wiki") {
+    try {
+      await wikiSetAwait({ env }, update as any);
+    } catch {}
+    await tgSendMessage(env as any, chatId, "Увімкнено вікі-режим. Напиши термін 👇");
+    return;
+  }
+  if (data === "menu:likes") {
+    await likesCommand(env as any, { message: { chat: { id: chatId } } });
+    return;
+  }
+  if (data === "menu:settings") {
+    await showSettings();
+    return;
+  }
   if (data === "menu:help") {
     await sendHelp(env as any, chatId, "uk" as any);
     return;
   }
-
   if (data === "menu:back") {
-    await safeEditMarkup(mainKeyboard());
+    await showMain();
     return;
   }
 
   // ---- Зміна налаштувань ----
   if (data.startsWith("settings:set:")) {
-    // data прикладу: settings:set:lang:uk | settings:set:theme:dark | settings:set:notify:on
     const parts = data.split(":"); // ["settings","set","<field>","<value>"]
     const field = parts[2];
     const value = parts[3];
 
-    const cur = await readSettings(env, userId);
     if (field === "lang" && (value === "uk" || value === "en")) {
       await writeSettings(env, userId, { lang: value });
     } else if (field === "theme" && (value === "light" || value === "dark")) {
@@ -185,12 +162,9 @@ export async function menuOnCallback(env: Env, update: any) {
     } else if (field === "notify" && (value === "on" || value === "off")) {
       await writeSettings(env, userId, { notify: value === "on" });
     }
-
-    const next = await readSettings(env, userId);
-    await safeEditMarkup(settingsKeyboard(next));
+    await showSettings();
     return;
   }
 
-  // Фолбек — покажемо дані
   await tgSendMessage(env as any, chatId, `tap: ${data}`);
 }
