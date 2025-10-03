@@ -1,43 +1,41 @@
-// src/features/photos/vision.ts
-import { tgGetFileUrl } from "../../utils/telegram";
+import { Env } from "../../index";
+import { tgSendMessage } from "../../utils/telegram";
 
-export async function processPhotoWithGemini(env: any, chatId: number, prompt: string) {
-  if (!env.SENTI_CACHE) return { text: "⚠️ Нема кешу для фото." };
-  if (!env.CF_VISION) return { text: "⚠️ Не задано CF_VISION ключ." };
+export async function processPhotoWithGemini(env: Env, chatId: number, prompt: string): Promise<{ text: string }> {
+  if (!env.SENTI_CACHE) return { text: "⚠️ Немає кешу для фото." };
 
   const fileId = await env.SENTI_CACHE.get(`lastPhoto:${chatId}`);
-  if (!fileId) return { text: "⚠️ Спочатку надішли фото." };
+  if (!fileId) return { text: "⚠️ Фото не знайдено. Спочатку надішли фото." };
 
-  // отримати URL фото з Telegram
-  const fileInfo = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`).then(r => r.json());
-  const path = fileInfo?.result?.file_path;
-  if (!path) return { text: "⚠️ Не вдалося отримати фото." };
+  // ⚡️ Будуємо URL до фото
+  const url = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${fileId}`;
 
-  const photoUrl = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${path}`;
-  const img = await fetch(photoUrl).then(r => r.arrayBuffer());
-  const base64 = btoa(String.fromCharCode(...new Uint8Array(img)));
-
-  // виклик Gemini Vision
-  const body = {
-    contents: [
-      {
-        parts: [
-          { text: prompt },
-          { inline_data: { mime_type: "image/jpeg", data: base64 } }
-        ]
-      }
+  // 🔑 Використовуємо Cloudflare AI (Gemini Vision)
+  const model = "@cf/google/gemini-1.5-flash-001";
+  const input = {
+    messages: [
+      { role: "system", content: "Ти — помічник, що аналізує фото і відповідає коротко." },
+      { role: "user", content: [
+        { type: "input_text", text: prompt },
+        { type: "input_image", image_url: url }
+      ]}
     ]
   };
 
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-vision:generateContent?key=${env.CF_VISION}`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body)
-    }
-  ).then(r => r.json());
+  const resp = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/ai/run/${model}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(input),
+  });
 
-  const text = res?.candidates?.[0]?.content?.parts?.[0]?.text || "⚠️ Gemini Vision не відповів.";
-  return { text };
+  if (!resp.ok) {
+    const errText = await resp.text();
+    return { text: `⚠️ AI error: ${errText}` };
+  }
+
+  const data = await resp.json();
+  return { text: data?.result?.response || "🤔 Не вдалося отримати відповідь." };
 }
