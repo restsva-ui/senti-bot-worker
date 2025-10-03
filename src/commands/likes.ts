@@ -1,108 +1,106 @@
-import type { TgUpdate } from "../types";
+// src/commands/likes.ts
+type EnvLike = {
+  BOT_TOKEN: string;
+  API_BASE_URL?: string;
+  LIKES_KV?: KVNamespace;
+};
 
-/** Кнопка-лайк */
-function likeKeyboard(count: number) {
-  return { inline_keyboard: [[{ text: `❤️ ${count}`, callback_data: "like" }]] };
-}
+type Update = any;
 
-async function tgCall(
-  env: { BOT_TOKEN: string; API_BASE_URL?: string },
-  method: string,
-  payload: Record<string, unknown>
-) {
-  const api = env.API_BASE_URL || "https://api.telegram.org";
-  const res = await fetch(`${api}/bot${env.BOT_TOKEN}/${method}`, {
+const KEY = (chatId: number) => `likes:${chatId}`;
+
+async function tgFetch(env: EnvLike, method: string, body: Record<string, any>) {
+  const base = env.API_BASE_URL || "https://api.telegram.org";
+  const url = `${base}/bot${env.BOT_TOKEN}/${method}`;
+  const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    console.error("tgCall error", method, res.status, t);
+  return res.json();
+}
+
+function keyboard(up: number, down: number) {
+  return {
+    inline_keyboard: [
+      [
+        { text: `👍 ${up}`, callback_data: "likes:+1" },
+        { text: `👎 ${down}`, callback_data: "likes:-1" },
+      ],
+    ],
+  };
+}
+
+async function readCounters(env: EnvLike, chatId: number) {
+  const raw = (await env.LIKES_KV?.get(KEY(chatId))) || '{"up":0,"down":0}';
+  try {
+    const parsed = JSON.parse(raw);
+    return { up: Number(parsed.up) || 0, down: Number(parsed.down) || 0 };
+  } catch {
+    return { up: 0, down: 0 };
   }
-  return res.json().catch(() => ({}));
 }
 
-export const likesCommand = {
-  name: "likes",
-  description: "Показує кнопку ❤️ та рахує натискання",
-  async execute(env: { BOT_TOKEN: string; API_BASE_URL?: string }, update: TgUpdate) {
-    const chatId = update.message?.chat?.id;
-    if (!chatId) return;
-    await tgCall(env, "sendMessage", {
-      chat_id: chatId,
-      text: "Лайкни це повідомлення:",
-      reply_markup: likeKeyboard(0),
-    });
-  },
-} as const;
-
-export function likesCanHandleCallback(data: string) {
-  return data === "like";
+async function writeCounters(env: EnvLike, chatId: number, up: number, down: number) {
+  await env.LIKES_KV?.put(KEY(chatId), JSON.stringify({ up, down }));
 }
 
-export async function likesOnCallback(
-  env: { BOT_TOKEN: string; API_BASE_URL?: string; LIKES_KV: any },
-  update: TgUpdate
-) {
-  const cb = update.callback_query!;
-  const msg = cb.message;
-  const chatId = msg?.chat?.id;
-  const msgId = msg?.message_id;
-  if (!chatId || !msgId) return;
+export async function likesCommand(env: EnvLike, update: Update) {
+  const chatId: number | undefined =
+    update?.message?.chat?.id ||
+    update?.edited_message?.chat?.id ||
+    update?.callback_query?.message?.chat?.id;
 
-  const key = `likes:${chatId}:${msgId}`;
-  const raw = (await env.LIKES_KV.get(key)) ?? "0";
-  const current = Number.parseInt(raw) || 0;
-  const next = current + 1;
-  await env.LIKES_KV.put(key, String(next));
+  if (!chatId) return;
 
-  await tgCall(env, "editMessageReplyMarkup", {
+  const { up, down } = await readCounters(env, chatId);
+
+  const text = `❤️ Лайки цього чату\n\n👍: ${up}\n👎: ${down}\n\nТисни кнопки нижче.`;
+  await tgFetch(env, "sendMessage", {
     chat_id: chatId,
-    message_id: msgId,
-    reply_markup: likeKeyboard(next),
-  });
-
-  await tgCall(env, "answerCallbackQuery", {
-    callback_query_id: cb.id,
-    text: `❤️ ${next}`,
-    show_alert: false,
+    text,
+    reply_markup: keyboard(up, down),
+    parse_mode: "Markdown",
+    disable_web_page_preview: true,
   });
 }
 
-export const likesStatsCommand = {
-  name: "stats",
-  description: "Показує суму всіх ❤️ у чаті та кількість повідомлень із лайками",
-  async execute(env: { BOT_TOKEN: string; API_BASE_URL?: string; LIKES_KV: any }, update: TgUpdate) {
-    const chatId = update.message?.chat?.id;
-    if (!chatId) return;
+export function likesCanHandleCallback(data?: string) {
+  return typeof data === "string" && data.startsWith("likes:");
+}
 
-    let total = 0;
-    let messagesWithLikes = 0;
+export async function likesOnCallback(env: EnvLike, update: Update) {
+  const cb = update?.callback_query;
+  const data: string | undefined = cb?.data;
+  const msg = cb?.message;
+  const chatId: number | undefined = msg?.chat?.id;
+  const messageId: number | undefined = msg?.message_id;
 
-    const prefix = `likes:${chatId}:`;
-    let cursor: string | undefined = undefined;
-    do {
-      const page = await env.LIKES_KV.list({ prefix, cursor });
-      cursor = page.cursor;
-      for (const key of page.keys) {
-        const val = await env.LIKES_KV.get(key.name);
-        const n = Number.parseInt(val ?? "0") || 0;
-        if (n > 0) messagesWithLikes += 1;
-        total += n;
-      }
-    } while (cursor);
+  if (!chatId || !messageId || !data) return;
 
-    const text = [
-      "📊 <b>Статистика лайків</b>",
-      `Повідомлень із лайками: <b>${messagesWithLikes}</b>`,
-      `Усього ❤️: <b>${total}</b>`,
-    ].join("\n");
+  const { up, down } = await readCounters(env, chatId);
 
-    await tgCall(env, "sendMessage", {
-      chat_id: chatId,
-      text,
-      parse_mode: "HTML",
-    });
-  },
-} as const;
+  let nu = up, nd = down;
+  if (data === "likes:+1") nu = up + 1;
+  if (data === "likes:-1") nd = down + 1;
+
+  await writeCounters(env, chatId, nu, nd);
+
+  // коротка “вспливаюча” нотифікація на кнопці
+  await tgFetch(env, "answerCallbackQuery", {
+    callback_query_id: cb.id,
+    show_alert: false,
+    text: data === "likes:+1" ? "Дякую за 👍" : "Прийнято 👎",
+  });
+
+  // оновлюємо повідомлення
+  const newText = `❤️ Лайки цього чату\n\n👍: ${nu}\n👎: ${nd}\n\nТисни кнопки нижче.`;
+  await tgFetch(env, "editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text: newText,
+    reply_markup: keyboard(nu, nd),
+    parse_mode: "Markdown",
+    disable_web_page_preview: true,
+  });
+}
