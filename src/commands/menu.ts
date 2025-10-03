@@ -3,7 +3,7 @@ import { tgSendMessage } from "../utils/telegram";
 import type { Env } from "../index";
 import { sendHelp } from "./help";
 
-// ===== Типи та KV-хелпери =====
+// (залишаємо можливість зберігати префи, але без клавіатур)
 type UserSettings = {
   lang?: "uk" | "en";
   theme?: "light" | "dark";
@@ -40,59 +40,27 @@ async function writeSettings(env: Env, userId: number, patch: Partial<UserSettin
   await kv.put(skey(userId), JSON.stringify(next));
 }
 
-// ===== Клавіатури =====
-function mainKeyboard() {
-  return {
-    inline_keyboard: [
-      [{ text: "🧠 Задати питання", callback_data: "menu:ask" }],
-      [{ text: "⚙️ Налаштування", callback_data: "menu:settings" }],
-      [{ text: "ℹ️ Допомога", callback_data: "menu:help" }],
-    ],
-  };
-}
-
-function settingsKeyboard(s: Required<UserSettings>) {
-  const mark = (ok: boolean) => (ok ? "✅" : "☑️");
-  return {
-    inline_keyboard: [
-      [
-        {
-          text: `${mark(s.lang === "uk")} Мова: Українська`,
-          callback_data: "settings:set:lang:uk",
-        },
-        {
-          text: `${mark(s.lang === "en")} Language: English`,
-          callback_data: "settings:set:lang:en",
-        },
-      ],
-      [
-        {
-          text: `${mark(s.theme === "light")} Тема: Світла`,
-          callback_data: "settings:set:theme:light",
-        },
-        {
-          text: `${mark(s.theme === "dark")} Тема: Темна`,
-          callback_data: "settings:set:theme:dark",
-        },
-      ],
-      [
-        {
-          text: `${mark(s.notify)} Нотифікації: ${s.notify ? "Увімкн." : "Вимкн."}`,
-          callback_data: `settings:set:notify:${s.notify ? "off" : "on"}`,
-        },
-      ],
-      [{ text: "⬅️ Назад", callback_data: "menu:back" }],
-    ],
-  };
-}
-
 // ===== Публічні хендлери =====
+
+// /menu – просто текст без клавіатури
 export async function menuCommand(env: Env, chatId: number) {
-  await tgSendMessage(env as any, chatId, "📍 Головне меню:", {
-    reply_markup: mainKeyboard(),
-  });
+  await tgSendMessage(
+    env as any,
+    chatId,
+    [
+      "📍 Головне меню",
+      "",
+      "Напиши повідомлення, або скористайся командами:",
+      "• /ask <текст>",
+      "• /ping",
+      "• /stats",
+      "• /help",
+    ].join("\n")
+  );
 }
 
+// Обробка callback'ів тут формально лишається, але *без* інлайн-кнопок:
+// якщо раптом прилетів старий callback — відповімо текстом.
 export async function menuOnCallback(env: Env, update: any) {
   const data = update?.callback_query?.data as string | undefined;
   const chatId = update?.callback_query?.message?.chat?.id as number | undefined;
@@ -103,51 +71,33 @@ export async function menuOnCallback(env: Env, update: any) {
 
   if (!chatId || !data) return;
 
-  const showMain = async () =>
-    tgSendMessage(env as any, chatId, "📍 Головне меню:", { reply_markup: mainKeyboard() });
-
-  const showSettings = async () => {
-    const s = await readSettings(env, userId);
-    await tgSendMessage(env as any, chatId, "⚙️ Налаштування:", {
-      reply_markup: settingsKeyboard(s),
-    });
-  };
-
-  // Мінімалістичні дії меню
-  if (data === "menu:ask") {
-    await tgSendMessage(env as any, chatId, "Напиши своє питання, або використай /ask <текст>.");
-    return;
+  // Псевдо-налаштування без клавіатур
+  if (data.startsWith("settings:set:")) {
+    const parts = data.split(":");
+    const field = parts[2];
+    const value = parts[3];
+    if (field === "lang" && (value === "uk" || value === "en")) {
+      await writeSettings(env, userId, { lang: value });
+      await tgSendMessage(env as any, chatId, `✅ Мову збережено: ${value}`);
+      return;
+    }
+    if (field === "theme" && (value === "light" || value === "dark")) {
+      await writeSettings(env, userId, { theme: value });
+      await tgSendMessage(env as any, chatId, `✅ Тему збережено: ${value}`);
+      return;
+    }
+    if (field === "notify" && (value === "on" || value === "off")) {
+      await writeSettings(env, userId, { notify: value === "on" });
+      await tgSendMessage(env as any, chatId, `✅ Нотифікації: ${value === "on" ? "увімкн." : "вимкн."}`);
+      return;
+    }
   }
-  if (data === "menu:settings") {
-    await showSettings();
-    return;
-  }
+
   if (data === "menu:help") {
     await sendHelp(env as any, chatId, "uk" as any);
     return;
   }
-  if (data === "menu:back") {
-    await showMain();
-    return;
-  }
 
-  // Зміна налаштувань
-  if (data.startsWith("settings:set:")) {
-    const parts = data.split(":"); // ["settings","set","<field>","<value>"]
-    const field = parts[2];
-    const value = parts[3];
-
-    if (field === "lang" && (value === "uk" || value === "en")) {
-      await writeSettings(env, userId, { lang: value });
-    } else if (field === "theme" && (value === "light" || value === "dark")) {
-      await writeSettings(env, userId, { theme: value });
-    } else if (field === "notify" && (value === "on" || value === "off")) {
-      await writeSettings(env, userId, { notify: value === "on" });
-    }
-    await showSettings();
-    return;
-  }
-
-  // дефолт
-  await tgSendMessage(env as any, chatId, `tap: ${data}`);
+  // Дефолт — просто підкажемо користувачу
+  await tgSendMessage(env as any, chatId, "Напиши питання або скористайся /help.");
 }
