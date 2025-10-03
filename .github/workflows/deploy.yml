@@ -30,7 +30,17 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
       - name: Notify in Telegram
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
         run: |
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
-            -d chat_id=${{ secrets.OWNER_ID }} \
-            -d text="🚀 Senti деплой завершено успішно ✅"
+          set -e
+          echo "Sending Telegram notification to chat_id=${OWNER_ID}"
+          RESP=$(curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -d chat_id="${OWNER_ID}" \
+            --data-urlencode text="🚀 Senti деплой завершено успішно ✅
+Repo: ${GITHUB_REPOSITORY}
+Commit: ${GITHUB_SHA::7}
+Time (UTC): $(date -u +'%Y-%m-%d %H:%M:%S')" )
+          echo "Telegram API response: $RESP"
+          echo "$RESP" | grep -q '"ok":true'
