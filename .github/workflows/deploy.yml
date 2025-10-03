@@ -34,12 +34,13 @@ jobs:
           wrangler deploy --config wrangler.toml --keep-vars true
           echo "Deploy finished at $(date -u)"
 
-      # ---- опційно: повністю чистимо та задаємо мінімальні /commands у BotFather API ----
+      # --- опційно: повністю чистимо команди та ставимо мінімальні ---
       - name: Reset & set bot commands
         if: ${{ secrets.BOT_TOKEN != '' }}
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
+          set -euo pipefail
           API="https://api.telegram.org/bot${BOT_TOKEN}"
 
           # повне очищення у всіх основних scope
@@ -47,8 +48,7 @@ jobs:
           curl -s -X POST "$API/setMyCommands" -d 'scope={"type":"all_private_chats"}' -d 'commands=[]' > /dev/null
           curl -s -X POST "$API/setMyCommands" -d 'scope={"type":"all_group_chats"}'   -d 'commands=[]' > /dev/null
           curl -s -X POST "$API/setMyCommands" -d 'scope={"type":"all_chat_administrators"}' -d 'commands=[]' > /dev/null
-
-          # (якщо треба локалізовані — додаси окремими викликами з language_code)
+          # якщо були локалізовані списки — розкоментуй:
           # curl -s -X POST "$API/setMyCommands" -d 'language_code=uk' -d 'commands=[]' > /dev/null
           # curl -s -X POST "$API/setMyCommands" -d 'language_code=en' -d 'commands=[]' > /dev/null
 
