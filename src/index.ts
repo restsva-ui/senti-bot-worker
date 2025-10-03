@@ -1,3 +1,4 @@
+// src/index.ts
 import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { sendHelp } from "./commands/help";
@@ -5,16 +6,20 @@ import { handleDiagnostics } from "./diagnostics-ai";
 import { normalizeLang, type Lang } from "./utils/i18n";
 import { askSmart, quickTemplateReply, type ReplierEnv } from "./services/replier";
 import { wikiSetAwait, wikiMaybeHandleFreeText } from "./commands/registry";
+import { likesCommand, likesCanHandleCallback, likesOnCallback } from "./commands/likes";
 
 export interface Env extends ReplierEnv {
   // Telegram
   BOT_TOKEN: string;
-  TELEGRAM_SECRET_TOKEN?: string; // якщо задано — звіряємо
-  WEBHOOK_SECRET?: string;        // альтернативне поле
+  TELEGRAM_SECRET_TOKEN?: string;
+  WEBHOOK_SECRET?: string;
 
-  // Інше (не обов’язково використовуються тут)
+  // Infra
   CF_VISION?: string;
   CLOUDFLARE_API_TOKEN?: string;
+
+  // KV
+  LIKES_KV?: KVNamespace;
 }
 
 function json(res: unknown, status = 200) {
@@ -24,7 +29,6 @@ function json(res: unknown, status = 200) {
   });
 }
 
-/** Дістаємо з апдейта chatId і текст, враховуючи різні типи апдейтів */
 function getMessageInfo(update: any): { chatId?: number; text?: string; fromLangCode?: string } {
   const msg =
     update?.message ||
@@ -51,16 +55,13 @@ function getMessageInfo(update: any): { chatId?: number; text?: string; fromLang
   return { chatId, text, fromLangCode };
 }
 
-/** Витягує блоки після кожного /ask ... у межах одного повідомлення */
 function extractAskBlocks(source: string): string[] {
   const t = (source || "").trim();
   const re = /\/ask(?:@\w+)?\s*/gi;
   const idxs: number[] = [];
   let m: RegExpExecArray | null;
 
-  while ((m = re.exec(t))) {
-    idxs.push(m.index);
-  }
+  while ((m = re.exec(t))) idxs.push(m.index);
   if (idxs.length === 0) return [];
 
   const blocks: string[] = [];
@@ -88,16 +89,12 @@ export default {
 
     // Telegram webhook
     if (request.method === "POST" && url.pathname === "/webhook") {
-      // Перевірка секрету
       const expected = (env.TELEGRAM_SECRET_TOKEN || env.WEBHOOK_SECRET || "").trim();
       if (expected) {
         const got = (request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "").trim();
-        if (got !== expected) {
-          return json({ ok: false, error: "invalid secret" }, 403);
-        }
+        if (got !== expected) return json({ ok: false, error: "invalid secret" }, 403);
       }
 
-      // Читаємо апдейт
       let update: any = null;
       try {
         update = await request.json();
@@ -108,10 +105,19 @@ export default {
       const { chatId, text, fromLangCode } = getMessageInfo(update);
 
       try {
-        // Callback-кнопки — просте echo
+        // ===== Callback кнопки =====
         if (update?.callback_query?.id && chatId) {
-          await tgSendMessage(env as any, chatId, `tap: ${update?.callback_query?.data ?? ""}`);
-          return json({ ok: true, handled: "callback" });
+          const data = update?.callback_query?.data as string | undefined;
+
+          // 1) Лайки
+          if (likesCanHandleCallback(data)) {
+            await likesOnCallback(env as any, update as any);
+            return json({ ok: true, handled: "likes:callback" });
+          }
+
+          // 2) За замовчуванням — echo
+          await tgSendMessage(env as any, chatId, `tap: ${data ?? ""}`);
+          return json({ ok: true, handled: "callback:echo" });
         }
 
         if (typeof text === "string" && chatId) {
@@ -130,13 +136,19 @@ export default {
             return json({ ok: true, handled: "ping" });
           }
 
-          // ===== /wiki =====
+          // /likes
+          if (/^\/likes(?:@\w+)?$/i.test(trimmed)) {
+            await likesCommand(env as any, { message: { chat: { id: chatId } } });
+            return json({ ok: true, handled: "likes" });
+          }
+
+          // /wiki
           if (trimmed === "/wiki" || trimmed.startsWith("/wiki ")) {
             await wikiSetAwait({ env }, update as any);
             return json({ ok: true, handled: "wiki" });
           }
 
-          // ===== /ask ... =====
+          // /ask ...
           if (/\/ask(?:@\w+)?\b/i.test(trimmed)) {
             const blocks = extractAskBlocks(trimmed);
             if (blocks.length === 0) {
@@ -163,13 +175,13 @@ export default {
             return json({ ok: true, handled: `ask:${blocks.length}` });
           }
 
-          // ===== Вільний текст — може бути wiki-запит =====
+          // wiki: вільний текст
           if (!trimmed.startsWith("/")) {
             const handled = await wikiMaybeHandleFreeText({ env }, update as any);
             if (handled) return json({ ok: true, handled: "wiki:free" });
           }
 
-          // Fallback: звичайний текст — як один /ask
+          // fallback → один /ask
           if (trimmed.length > 0) {
             const msgLang: Lang = normalizeLang(trimmed, fromLangCode);
 
@@ -185,7 +197,6 @@ export default {
           }
         }
 
-        // Якщо сюди дійшли — нічого не зробили
         return json({ ok: true, noop: true });
       } catch (e: any) {
         try {
