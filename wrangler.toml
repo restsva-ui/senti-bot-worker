@@ -1,33 +1,27 @@
-# wrangler.toml — стабільний шаблон
 name = "senti-bot-worker"
 main = "src/index.ts"
 workers_dev = true
 
-# 🔒 Обовʼязково змініть на свій
-account_id = "<YOUR_CLOUDFLARE_ACCOUNT_ID>"
-
-# Стабільна дата сумісності
+account_id = "2cf6e316af8623546c95c0354bc3aa00"
 compatibility_date = "2024-09-01"
-
 minify = false
 
-# ===== KV namespaces =====
-# Створіть свою namespace у Cloudflare → KV, вставте ID нижче
+# ===== KV namespaces (з твоїх скрінів) =====
 [[kv_namespaces]]
 binding = "LIKES_KV"
-id = "<YOUR_PROD_KV_ID>"
-preview_id = "<YOUR_PREVIEW_KV_ID>"
+id = "7b32e2d1f60846ddb1c653eb52180bf7"   # senti-state
 
-# ===== Observability (free план: вимкнено) =====
+[[kv_namespaces]]
+binding = "DEDUP_KV"
+id = "20d81d7b68fa4ac6b9913e2fbd3465d5"   # senti-dedup
+
+[[kv_namespaces]]
+binding = "SENTI_CACHE"
+id = "497eac980691495ea2a0bc8611892d65"   # senti-cache
+
 [observability]
 enabled = false
 
-# ===== Dev (локально/preview, опційно) =====
 [dev]
 port = 8787
 local_protocol = "https"
-
-# ===== (опційно) маршрути під свою зону =====
-# [routes]
-# pattern = "bot.example.com/webhook*"
-# zone_id = "<YOUR_ZONE_ID>"
