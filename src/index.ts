@@ -8,7 +8,7 @@ import { askSmart, quickTemplateReply, type ReplierEnv } from "./services/replie
 import { wikiSetAwait, wikiMaybeHandleFreeText } from "./commands/registry";
 import { likesCommand, likesCanHandleCallback, likesOnCallback } from "./commands/likes";
 import { statsCommand } from "./commands/stats";
-import { menuCommand, menuOnCallback } from "./commands/menu";   // 🆕 меню
+import { menuCommand, menuOnCallback } from "./commands/menu"; // меню
 
 export interface Env extends ReplierEnv {
   // Telegram
@@ -22,7 +22,8 @@ export interface Env extends ReplierEnv {
 
   // KV
   LIKES_KV?: KVNamespace;
-  DEDUP_KV?: KVNamespace; // антидубль
+  DEDUP_KV?: KVNamespace;   // антидубль
+  SENTI_CACHE?: KVNamespace; // ⚠️ додано: KV для налаштувань/кешу меню
 }
 
 function json(res: unknown, status = 200) {
