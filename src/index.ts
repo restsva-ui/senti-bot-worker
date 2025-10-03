@@ -1,6 +1,8 @@
+// src/index.ts
 import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { sendHelp } from "./commands/help";
+import { handleDiagnostics } from "./diagnostics-ai";
 import { normalizeLang, type Lang } from "./utils/i18n";
 import { askSmart, quickTemplateReply, type ReplierEnv } from "./services/replier";
 import { likesCommand, likesCanHandleCallback, likesOnCallback } from "./commands/likes";
@@ -11,13 +13,17 @@ import {
   resetChatCommands, syncChatCommands, forceEmptyAllCommands, snapshotChatCommands
 } from "./commands/sync";
 import { idCommand } from "./commands/id";
-import { handleDiagnostics } from "./diagnostics-ai";
 
 export interface Env extends ReplierEnv {
+  // Telegram
   BOT_TOKEN: string;
   WEBHOOK_SECRET?: string;
+
+  // Infra
   CF_VISION?: string;
   CLOUDFLARE_API_TOKEN?: string;
+
+  // KV
   LIKES_KV?: KVNamespace;
   DEDUP_KV?: KVNamespace;
   SENTI_CACHE?: KVNamespace;
@@ -40,25 +46,68 @@ async function readJsonSafe(req: Request, maxBytes = 1024 * 1024) {
   return JSON.parse(text);
 }
 
-function getMessageInfo(update: any): { chatId?: number; text?: string; fromLangCode?: string; fromId?: number } {
-  const msg = update?.message || update?.edited_message || update?.channel_post || update?.callback_query?.message || null;
+function getMessageInfo(update: any): {
+  chatId?: number; text?: string; fromLangCode?: string; fromId?: number;
+} {
+  const msg =
+    update?.message || update?.edited_message || update?.channel_post || update?.callback_query?.message || null;
 
-  return {
-    chatId: msg?.chat?.id,
-    text: update?.message?.text ??
-      update?.edited_message?.text ??
-      update?.channel_post?.text ??
-      update?.callback_query?.message?.text,
-    fromLangCode: update?.message?.from?.language_code ??
-      update?.edited_message?.from?.language_code ??
-      update?.channel_post?.from?.language_code ??
-      update?.callback_query?.from?.language_code,
-    fromId: update?.message?.from?.id ??
-      update?.edited_message?.from?.id ??
-      update?.channel_post?.from?.id ??
-      update?.callback_query?.from?.id,
-  };
+  const chatId: number | undefined = msg?.chat?.id;
+
+  const text: string | undefined =
+    update?.message?.text ??
+    update?.edited_message?.text ??
+    update?.channel_post?.text ??
+    update?.callback_query?.message?.text ??
+    undefined;
+
+  const fromLangCode: string | undefined =
+    update?.message?.from?.language_code ??
+    update?.edited_message?.from?.language_code ??
+    update?.channel_post?.from?.language_code ??
+    update?.callback_query?.from?.language_code ??
+    undefined;
+
+  const fromId: number | undefined =
+    update?.message?.from?.id ??
+    update?.edited_message?.from?.id ??
+    update?.channel_post?.from?.id ??
+    update?.callback_query?.from?.id ??
+    undefined;
+
+  return { chatId, text, fromLangCode, fromId };
 }
+
+function extractAskBlocks(source: string): string[] {
+  const t = (source || "").trim();
+  const re = /\/ask(?:@\w+)?\s*/gi;
+  const idxs: number[] = [];
+  let m: RegExpExecArray | null;
+
+  while ((m = re.exec(t))) idxs.push(m.index);
+  if (idxs.length === 0) return [];
+
+  const blocks: string[] = [];
+  for (let i = 0; i < idxs.length; i++) {
+    const start = idxs[i] + (t.slice(idxs[i]).match(/^\/ask(?:@\w+)?\s*/i)?.[0].length || 0);
+    const end = i + 1 < idxs.length ? idxs[i + 1] : t.length;
+    const chunk = t.slice(start, end).trim();
+    if (chunk) blocks.push(chunk);
+  }
+  return blocks;
+}
+
+async function seenUpdateRecently(env: Env, updateId: number | string, ttlSec = 300): Promise<boolean> {
+  if (!env.DEDUP_KV) return false;
+  const key = `upd:${updateId}`;
+  const existed = await env.DEDUP_KV.get(key);
+  if (existed) return true;
+  await env.DEDUP_KV.put(key, "1", { expirationTtl: ttlSec });
+  return false;
+}
+
+const TG = (token: string, method: string) =>
+  `https://api.telegram.org/bot${token}/${method}`;
 
 /* ------------ worker ------------ */
 export default {
@@ -66,17 +115,181 @@ export default {
     const url = new URL(request.url);
 
     // Health
-    if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
+    if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/")) {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // Діагностика — лише GET (не чіпає body)
+    // 🛡️ Діагностика: лише GET і не на /webhook (щоб не зчитати body)
     if (request.method === "GET" && url.pathname !== "/webhook") {
       const diag = await handleDiagnostics(request, env as any, url);
       if (diag) return diag;
     }
 
-    // ---- Webhook ----
+    /* ---------- Guard для службових GET-ендпоінтів ---------- */
+    const guardOK = () => (env.WEBHOOK_SECRET || "") === (url.searchParams.get("secret") || "");
+    const needAuth = () => {
+      if (!guardOK()) return json({ ok: false, error: "forbidden" }, 403);
+      if (!env.BOT_TOKEN) return json({ ok: false, error: "BOT_TOKEN missing" }, 500);
+      return null;
+    };
+
+    /* ---------- Діагностичний echo ---------- */
+    if (request.method === "GET" && url.pathname === "/echo") {
+      const deny = needAuth(); if (deny) return deny;
+      const chatIdStr = url.searchParams.get("chat_id");
+      return json({ ok: true, chatIdStr, asNumber: chatIdStr ? Number(chatIdStr) : null });
+    }
+
+    /* ---------- Нові ручки: керування командами (chat/local) ---------- */
+    if (request.method === "GET" && url.pathname === "/set-commands") {
+      const deny = needAuth(); if (deny) return deny;
+      const chatIdStr = url.searchParams.get("chat_id");
+      const commands = [
+        { command: "start", description: "Запустити бота" },
+        { command: "help", description: "Довідка" },
+        { command: "ping", description: "Перевірка зв'язку" },
+        { command: "likes", description: "Керувати вподобайками" },
+        { command: "stats", description: "Статистика" },
+        { command: "menu", description: "Меню" },
+        { command: "ask", description: "Запит до ШІ" },
+      ];
+
+      const scope = chatIdStr
+        ? { type: "chat", chat_id: Number(chatIdStr) }
+        : { type: "default" as const };
+
+      try {
+        const res = await fetch(TG(env.BOT_TOKEN, "setMyCommands"), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ commands, scope }),
+        }).then(r => r.json());
+        return json({ ok: true, result: res, scope });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/delete-commands") {
+      const deny = needAuth(); if (deny) return deny;
+      const chatIdStr = url.searchParams.get("chat_id");
+      const scope = chatIdStr
+        ? { type: "chat", chat_id: Number(chatIdStr) }
+        : { type: "default" as const };
+
+      try {
+        const res = await fetch(TG(env.BOT_TOKEN, "deleteMyCommands"), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ scope }),
+        }).then(r => r.json());
+        return json({ ok: true, result: res, scope });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/get-commands") {
+      const deny = needAuth(); if (deny) return deny;
+      const chatIdStr = url.searchParams.get("chat_id");
+      const scope = chatIdStr
+        ? { type: "chat", chat_id: Number(chatIdStr) }
+        : { type: "default" as const };
+
+      try {
+        // getMyCommands приймає scope як JSON у query
+        const qs = new URLSearchParams({ scope: JSON.stringify(scope) }).toString();
+        const res = await fetch(`${TG(env.BOT_TOKEN, "getMyCommands")}?${qs}`).then(r => r.json());
+        return json({ ok: true, result: res, scope });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
+    }
+
+    /* ---------- Старі службові (snapshot/reset/sync) ---------- */
+    if (request.method === "GET" && url.pathname === "/reset-commands") {
+      const deny = needAuth(); if (deny) return deny;
+      try {
+        const res = await resetAllCommands(env as any);
+        return json({ ok: true, ...res });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/sync-commands") {
+      const deny = needAuth(); if (deny) return deny;
+      try {
+        const res = await syncCommands(env as any);
+        return json({ ok: true, ...res, commands: commandsList() });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/force-empty-commands") {
+      const deny = needAuth(); if (deny) return deny;
+      try {
+        const res = await forceEmptyAllCommands(env as any);
+        return json({ ok: true, ...res, emptied: true });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/debug-commands") {
+      const deny = needAuth(); if (deny) return deny;
+      try {
+        const all = await snapshotCommands(env as any);
+        return json({ ok: true, snapshot: all });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/debug-commands-chat") {
+      const deny = needAuth(); if (deny) return deny;
+      const chatIdStr = url.searchParams.get("chat_id");
+      if (!chatIdStr) return json({ ok: false, error: "chat_id required" }, 400);
+      const chatId = Number(chatIdStr);
+      if (Number.isNaN(chatId)) return json({ ok: false, error: "chat_id must be number" }, 400);
+      try {
+        const snap = await snapshotChatCommands(env as any, chatId);
+        return json({ ok: true, snapshot: snap });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/reset-commands-chat") {
+      const deny = needAuth(); if (deny) return deny;
+      const chatIdStr = url.searchParams.get("chat_id");
+      if (!chatIdStr) return json({ ok: false, error: "chat_id required" }, 400);
+      const chatId = Number(chatIdStr);
+      if (Number.isNaN(chatId)) return json({ ok: false, error: "chat_id must be number" }, 400);
+      try {
+        const res = await resetChatCommands(env as any, chatId);
+        return json({ ok: true, ...res, chatId });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/sync-commands-chat") {
+      const deny = needAuth(); if (deny) return deny;
+      const chatIdStr = url.searchParams.get("chat_id");
+      if (!chatIdStr) return json({ ok: false, error: "chat_id required" }, 400);
+      const chatId = Number(chatIdStr);
+      if (Number.isNaN(chatId)) return json({ ok: false, error: "chat_id must be number" }, 400);
+      try {
+        const res = await syncChatCommands(env as any, chatId);
+        return json({ ok: true, ...res, chatId, commands: commandsList() });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
+    }
+
+    /* ---------- Webhook ---------- */
     if (url.pathname === "/webhook") {
       if (request.method !== "POST") return json({ ok: false, error: "method not allowed" }, 405);
 
@@ -88,24 +301,124 @@ export default {
 
       let update: any;
       try {
-        update = await readJsonSafe(request); // читаємо body тільки тут
+        update = await readJsonSafe(request); // body читаємо тільки тут
       } catch (e: any) {
         return json({ ok: false, error: e?.message || "bad json" }, 400);
       }
 
-      const { chatId, text } = getMessageInfo(update);
-
-      // приклад: /id
-      if (text && /^\/id/.test(text) && chatId) {
-        await idCommand(env as any, chatId, update?.message?.from?.id);
-        return json({ ok: true, handled: "id" });
+      const uid: number | string | undefined = update?.update_id;
+      if (uid !== undefined && (await seenUpdateRecently(env, uid, 300))) {
+        return json({ ok: true, dedup: true });
       }
 
-      // інші команди... (ping/help/likes/stats/menu/ask)
+      const { chatId, text, fromLangCode, fromId } = getMessageInfo(update);
 
-      return json({ ok: true, noop: true });
+      try {
+        // /id
+        if (typeof text === "string" && chatId && /^\/id(?:@\w+)?$/i.test(text.trim())) {
+          await idCommand(env as any, chatId, fromId);
+          return json({ ok: true, handled: "id" });
+        }
+
+        // Callback
+        if (update?.callback_query?.id && chatId) {
+          const data: string | undefined = update?.callback_query?.data ?? undefined;
+
+          if (likesCanHandleCallback(data)) {
+            await likesOnCallback(env as any, update as any);
+            return json({ ok: true, handled: "likes:callback" });
+          }
+
+          if (data?.startsWith("menu:") || data?.startsWith("settings:")) {
+            await menuOnCallback(env as any, update as any);
+            return json({ ok: true, handled: "menu:callback" });
+          }
+
+          await tgSendMessage(env as any, chatId, `tap: ${data ?? ""}`);
+          return json({ ok: true, handled: "callback:echo" });
+        }
+
+        // Text / Commands
+        if (typeof text === "string" && chatId) {
+          const trimmed = text.trim();
+
+          if (/^\/start(?:@\w+)?$/i.test(trimmed) || /^\/help(?:@\w+)?$/i.test(trimmed)) {
+            const langForHelp: Lang = normalizeLang(trimmed, fromLangCode);
+            await sendHelp(env as any, chatId, langForHelp);
+            return json({ ok: true, handled: "help" });
+          }
+
+          if (/^\/ping(?:@\w+)?$/i.test(trimmed)) {
+            await pingCommand(env as any, chatId);
+            return json({ ok: true, handled: "ping" });
+          }
+
+          if (/^\/likes(?:@\w+)?$/i.test(trimmed)) {
+            await likesCommand(env as any, { message: { chat: { id: chatId } } });
+            return json({ ok: true, handled: "likes" });
+          }
+
+          if (/^\/stats(?:@\w+)?$/i.test(trimmed)) {
+            await statsCommand(env as any, { message: { chat: { id: chatId } } });
+            return json({ ok: true, handled: "stats" });
+          }
+
+          if (/^\/menu(?:@\w+)?$/i.test(trimmed)) {
+            await menuCommand(env as any, chatId);
+            return json({ ok: true, handled: "menu" });
+          }
+
+          // ===== /ask (може бути кілька разів у одному повідомленні) =====
+          if (/\/ask(?:@\w+)?\b/i.test(trimmed)) {
+            const blocks = extractAskBlocks(trimmed);
+            if (blocks.length === 0) {
+              await tgSendMessage(env as any, chatId, "Будь ласка, додай питання після команди.");
+              return json({ ok: true, handled: "ask:empty" });
+            }
+
+            const answers: string[] = [];
+            for (const q of blocks) {
+              const qLang: Lang = normalizeLang(q, fromLangCode);
+              const quick = quickTemplateReply(qLang, q);
+              if (quick) answers.push(quick);
+              else {
+                const { text: answer } = await askSmart(env, q, qLang);
+                answers.push(answer);
+              }
+            }
+
+            await tgSendMessage(env as any, chatId, answers.join("\n— — —\n"));
+            return json({ ok: true, handled: `ask:${blocks.length}` });
+          }
+
+          // fallback → один /ask
+          if (trimmed.length > 0) {
+            const msgLang: Lang = normalizeLang(trimmed, fromLangCode);
+
+            const quick = quickTemplateReply(msgLang, trimmed);
+            if (quick) {
+              await tgSendMessage(env as any, chatId, quick);
+              return json({ ok: true, handled: "template:plain" });
+            }
+
+            const { text: answer } = await askSmart(env, trimmed, msgLang);
+            await tgSendMessage(env as any, chatId, answer);
+            return json({ ok: true, handled: "ask:fallback" });
+          }
+        }
+
+        return json({ ok: true, noop: true });
+      } catch (e: any) {
+        try {
+          const { chatId: safeChat } = getMessageInfo(update);
+          if (safeChat) {
+            await tgSendMessage(env as any, safeChat, `Вибач, сталася внутрішня помилка: ${e?.message || String(e)}`);
+          }
+        } catch {}
+        return json({ ok: false, error: "internal" }, 500);
+      }
     }
 
     return json({ ok: false, error: "not found" }, 404);
-  }
+  },
 };
