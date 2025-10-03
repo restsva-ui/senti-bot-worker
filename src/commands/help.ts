@@ -1,6 +1,6 @@
 // src/commands/help.ts
 import { tgSendMessage } from "../utils/telegram";
-import { normalizeLang, type Lang } from "../utils/i18n";
+import type { Lang } from "../utils/i18n";
 
 export interface Env {
   BOT_TOKEN: string;
@@ -14,6 +14,9 @@ const HELP_TEXTS: Record<Lang, string> = {
     "• /ping — перевірка звʼязку",
     "• /ask <текст> — питання до Gemini",
     "• /ask_openrouter <текст> — питання через OpenRouter",
+    "• /likes — лайки чату",
+    "• /stats — статистика (демо)",
+    "• /menu — головне меню",
     "• /help — цей список",
     "",
     "Діагностика (GET у браузері):",
@@ -33,6 +36,9 @@ const HELP_TEXTS: Record<Lang, string> = {
     "• /ping — проверка связи",
     "• /ask <текст> — вопрос к Gemini",
     "• /ask_openrouter <текст> — вопрос через OpenRouter",
+    "• /likes — лайки чата",
+    "• /stats — статистика (демо)",
+    "• /menu — главное меню",
     "• /help — этот список",
     "",
     "Диагностика (GET в браузере):",
@@ -52,6 +58,9 @@ const HELP_TEXTS: Record<Lang, string> = {
     "• /ping — Verbindungstest",
     "• /ask <Text> — Frage an Gemini",
     "• /ask_openrouter <Text> — Frage über OpenRouter",
+    "• /likes — Chat-Likes",
+    "• /stats — Statistik (Demo)",
+    "• /menu — Hauptmenü",
     "• /help — diese Liste",
     "",
     "Diagnose (GET im Browser):",
@@ -71,6 +80,9 @@ const HELP_TEXTS: Record<Lang, string> = {
     "• /ping — connectivity check",
     "• /ask <text> — question to Gemini",
     "• /ask_openrouter <text> — question via OpenRouter",
+    "• /likes — chat likes",
+    "• /stats — statistics (demo)",
+    "• /menu — main menu",
     "• /help — this list",
     "",
     "Diagnostics (GET in browser):",
@@ -84,9 +96,22 @@ const HELP_TEXTS: Record<Lang, string> = {
   ].join("\n"),
 };
 
-/** Надсилає довідку з урахуванням мови користувача */
-export async function sendHelp(env: Env, chatId: number, langCode?: string) {
-  const lang = normalizeLang(langCode);
+/** Надсилає довідку + інлайн-кнопки для швидкого відкриття меню/розділів */
+export async function sendHelp(env: Env, chatId: number, lang: Lang = "uk") {
   const text = HELP_TEXTS[lang] ?? HELP_TEXTS.en;
-  await tgSendMessage(env as any, chatId, text);
+
+  await tgSendMessage(env as any, chatId, text, {
+    disable_web_page_preview: true,
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🔘 Відкрити меню", callback_data: "menu:open" }],
+        [
+          { text: "📖 Вікі", callback_data: "menu:wiki" },
+          { text: "👍 Лайки", callback_data: "menu:likes" },
+        ],
+      ],
+    },
+  });
 }
+
+export default sendHelp;
