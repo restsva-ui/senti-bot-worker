@@ -7,12 +7,11 @@ import { normalizeLang, type Lang } from "./utils/i18n";
 import { askSmart, quickTemplateReply, type ReplierEnv } from "./services/replier";
 import { likesCommand, likesCanHandleCallback, likesOnCallback } from "./commands/likes";
 import { statsCommand } from "./commands/stats";
-import { menuCommand, menuOnCallback } from "./commands/menu"; // мінімалістичне меню
+import { menuCommand, menuOnCallback } from "./commands/menu";
 
 export interface Env extends ReplierEnv {
   // Telegram
   BOT_TOKEN: string;
-  TELEGRAM_SECRET_TOKEN?: string;
   WEBHOOK_SECRET?: string;
 
   // Infra
@@ -21,14 +20,16 @@ export interface Env extends ReplierEnv {
 
   // KV
   LIKES_KV?: KVNamespace;
-  DEDUP_KV?: KVNamespace;   // антидубль
-  SENTI_CACHE?: KVNamespace; // prefs/кеш (на майбутнє)
+  DEDUP_KV?: KVNamespace;     // антидубль
+  SENTI_CACHE?: KVNamespace;  // prefs/кеш (на майбутнє)
 }
+
+/* ---------------------------------------------------- */
 
 function json(res: unknown, status = 200) {
   return new Response(JSON.stringify(res), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json; charset=utf-8" },
   });
 }
 
@@ -41,18 +42,19 @@ function getMessageInfo(update: any): { chatId?: number; text?: string; fromLang
     null;
 
   const chatId: number | undefined = msg?.chat?.id;
+
   const text: string | undefined =
-    update?.message?.text ||
-    update?.edited_message?.text ||
-    update?.channel_post?.text ||
-    update?.callback_query?.message?.text ||
+    update?.message?.text ??
+    update?.edited_message?.text ??
+    update?.channel_post?.text ??
+    update?.callback_query?.message?.text ??
     undefined;
 
   const fromLangCode: string | undefined =
-    update?.message?.from?.language_code ||
-    update?.edited_message?.from?.language_code ||
-    update?.channel_post?.from?.language_code ||
-    update?.callback_query?.from?.language_code ||
+    update?.message?.from?.language_code ??
+    update?.edited_message?.from?.language_code ??
+    update?.channel_post?.from?.language_code ??
+    update?.callback_query?.from?.language_code ??
     undefined;
 
   return { chatId, text, fromLangCode };
@@ -86,31 +88,56 @@ async function seenUpdateRecently(env: Env, updateId: number | string, ttlSec = 
   return false;
 }
 
+/** Обмежений reader для запитів: захист від випадково величезних тіл. */
+async function readJsonSafe(req: Request, maxBytes = 1024 * 1024 /* 1MB */) {
+  const ct = req.headers.get("content-type") || "";
+  if (!/application\/json/i.test(ct)) throw new Error("bad content-type");
+  const ab = await req.arrayBuffer();
+  if (ab.byteLength > maxBytes) throw new Error("payload too large");
+  const text = new TextDecoder().decode(ab);
+  return JSON.parse(text);
+}
+
+/* ---------------------------------------------------- */
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    if (request.method === "GET" && url.pathname === "/health") {
+    // Health
+    if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/")) {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
+    // Діагностика/панель (якщо підключена)
     const diag = await handleDiagnostics(request, env as any, url);
     if (diag) return diag;
 
-    if (request.method === "POST" && url.pathname === "/webhook") {
-      const expected = (env.TELEGRAM_SECRET_TOKEN || env.WEBHOOK_SECRET || "").trim();
+    // Webhook
+    if (url.pathname === "/webhook") {
+      if (request.method !== "POST") {
+        return json({ ok: false, error: "method not allowed" }, 405);
+      }
+
+      // Перевірка секрету Telegram Webhook
+      const expected = (env.WEBHOOK_SECRET || "").trim();
       if (expected) {
-        const got = (request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "").trim();
-        if (got !== expected) return json({ ok: false, error: "invalid secret" }, 403);
+        const got =
+          (request.headers.get("x-telegram-bot-api-secret-token") || "").trim();
+        if (got !== expected) {
+          return json({ ok: false, error: "invalid secret" }, 403);
+        }
       }
 
-      let update: any = null;
+      // Читаємо update
+      let update: any;
       try {
-        update = await request.json();
-      } catch {
-        return json({ ok: false, error: "bad json" }, 400);
+        update = await readJsonSafe(request);
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || "bad json" }, 400);
       }
 
+      // Антидубль
       const uid: number | string | undefined = update?.update_id;
       if (uid !== undefined && (await seenUpdateRecently(env, uid, 300))) {
         return json({ ok: true, dedup: true });
@@ -121,24 +148,23 @@ export default {
       try {
         // ==== Callback ====
         if (update?.callback_query?.id && chatId) {
-          const data = update?.callback_query?.data as string | undefined;
+          const data: string | undefined = update?.callback_query?.data ?? undefined;
 
           if (likesCanHandleCallback(data)) {
             await likesOnCallback(env as any, update as any);
             return json({ ok: true, handled: "likes:callback" });
           }
 
-          // на майбутнє: якщо колись повернемо кнопки — обробимо тут
           if (data?.startsWith("menu:") || data?.startsWith("settings:")) {
             await menuOnCallback(env as any, update as any);
             return json({ ok: true, handled: "menu:callback" });
           }
 
-          // за замовчуванням — тихо ігноруємо або echo:
           await tgSendMessage(env as any, chatId, `tap: ${data ?? ""}`);
           return json({ ok: true, handled: "callback:echo" });
         }
 
+        // ==== Text / Commands ====
         if (typeof text === "string" && chatId) {
           const trimmed = text.trim();
 
@@ -190,8 +216,7 @@ export default {
               answers.push(answer);
             }
 
-            const response = answers.join("\n— — —\n");
-            await tgSendMessage(env as any, chatId, response);
+            await tgSendMessage(env as any, chatId, answers.join("\n— — —\n"));
             return json({ ok: true, handled: `ask:${blocks.length}` });
           }
 
@@ -213,6 +238,7 @@ export default {
 
         return json({ ok: true, noop: true });
       } catch (e: any) {
+        // Мʼяко повідомляємо користувачу й не валимо webhook
         try {
           const { chatId: safeChat } = getMessageInfo(update);
           if (safeChat) {
@@ -227,6 +253,7 @@ export default {
       }
     }
 
+    // Неіснуючі шляхи
     return json({ ok: false, error: "not found" }, 404);
   },
 };
