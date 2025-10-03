@@ -1,10 +1,10 @@
-// src/index.ts
 import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { sendHelp } from "./commands/help";
 import { handleDiagnostics } from "./diagnostics-ai";
 import { normalizeLang, type Lang } from "./utils/i18n";
 import { askSmart, quickTemplateReply, type ReplierEnv } from "./services/replier";
+import { wikiSetAwait, wikiMaybeHandleFreeText } from "./commands/registry";
 
 export interface Env extends ReplierEnv {
   // Telegram
@@ -88,7 +88,7 @@ export default {
 
     // Telegram webhook
     if (request.method === "POST" && url.pathname === "/webhook") {
-      // Перевірка секрету: якщо задано хоча б одне поле — вимагаємо збіг
+      // Перевірка секрету
       const expected = (env.TELEGRAM_SECRET_TOKEN || env.WEBHOOK_SECRET || "").trim();
       if (expected) {
         const got = (request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "").trim();
@@ -130,7 +130,13 @@ export default {
             return json({ ok: true, handled: "ping" });
           }
 
-          // ===== /ask ... (може бути КІЛЬКА разів у одному повідомленні) =====
+          // ===== /wiki =====
+          if (trimmed === "/wiki" || trimmed.startsWith("/wiki ")) {
+            await wikiSetAwait({ env }, update as any);
+            return json({ ok: true, handled: "wiki" });
+          }
+
+          // ===== /ask ... =====
           if (/\/ask(?:@\w+)?\b/i.test(trimmed)) {
             const blocks = extractAskBlocks(trimmed);
             if (blocks.length === 0) {
@@ -157,6 +163,12 @@ export default {
             return json({ ok: true, handled: `ask:${blocks.length}` });
           }
 
+          // ===== Вільний текст — може бути wiki-запит =====
+          if (!trimmed.startsWith("/")) {
+            const handled = await wikiMaybeHandleFreeText({ env }, update as any);
+            if (handled) return json({ ok: true, handled: "wiki:free" });
+          }
+
           // Fallback: звичайний текст — як один /ask
           if (trimmed.length > 0) {
             const msgLang: Lang = normalizeLang(trimmed, fromLangCode);
@@ -173,10 +185,9 @@ export default {
           }
         }
 
-        // Якщо сюди дійшли — нічого не зробили (не текст/нема chatId)
+        // Якщо сюди дійшли — нічого не зробили
         return json({ ok: true, noop: true });
       } catch (e: any) {
-        // Не мовчимо: намагаємось повідомити користувача про помилку
         try {
           const { chatId: safeChat } = getMessageInfo(update);
           if (safeChat) {
@@ -186,9 +197,7 @@ export default {
               `Вибач, сталася внутрішня помилка: ${e?.message || String(e)}`
             );
           }
-        } catch {
-          // ігноруємо, щоб точно не впасти
-        }
+        } catch {}
         return json({ ok: false, error: "internal" }, 500);
       }
     }
