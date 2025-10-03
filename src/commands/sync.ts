@@ -38,7 +38,6 @@ export async function resetAllCommands(env: Env) {
 /** Виставити новий список для всіх scope і мов. */
 export async function syncCommands(env: Env) {
   const commands = commandsList();
-
   for (const s of SCOPES) {
     await deleteMyCommands(env as any, s as any, undefined);
     for (const lng of LANGS) {
@@ -48,7 +47,7 @@ export async function syncCommands(env: Env) {
   return { ok: true };
 }
 
-/** Для діагностики: показати команди по всіх scope/lang. */
+/** Діагностика: отримати команди по всіх scope/lang. */
 export async function snapshotCommands(env: Env) {
   const out: Record<string, any> = {};
   for (const s of SCOPES) {
@@ -62,7 +61,7 @@ export async function snapshotCommands(env: Env) {
   return out;
 }
 
-/** Опційно: скинути/виставити для конкретного чату. */
+/** Скинути/виставити для конкретного чату. */
 export async function resetChatCommands(env: Env, chatId: number | string) {
   const scopes = [
     { type: "chat", chat_id: chatId },
@@ -87,6 +86,17 @@ export async function syncChatCommands(env: Env, chatId: number | string) {
     await deleteMyCommands(env as any, s as any, undefined);
     for (const lng of LANGS) {
       await setMyCommands(env as any, commands, s as any, lng as any);
+    }
+  }
+  return { ok: true };
+}
+
+/** 🔥 Форс: виставити ПОВНІСТЮ ПОРОЖНІ команди у всіх scope/мовах. */
+export async function forceEmptyAllCommands(env: Env) {
+  for (const s of SCOPES) {
+    await setMyCommands(env as any, [], s as any, undefined);
+    for (const lng of LANGS) {
+      await setMyCommands(env as any, [], s as any, lng as any);
     }
   }
   return { ok: true };
