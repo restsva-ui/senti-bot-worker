@@ -7,6 +7,7 @@ import { normalizeLang, type Lang } from "./utils/i18n";
 import { askSmart, quickTemplateReply, type ReplierEnv } from "./services/replier";
 import { wikiSetAwait, wikiMaybeHandleFreeText } from "./commands/registry";
 import { likesCommand, likesCanHandleCallback, likesOnCallback } from "./commands/likes";
+import { statsCommand } from "./commands/stats";
 
 export interface Env extends ReplierEnv {
   // Telegram
@@ -140,6 +141,12 @@ export default {
           if (/^\/likes(?:@\w+)?$/i.test(trimmed)) {
             await likesCommand(env as any, { message: { chat: { id: chatId } } });
             return json({ ok: true, handled: "likes" });
+          }
+
+          // /stats
+          if (/^\/stats(?:@\w+)?$/i.test(trimmed)) {
+            await statsCommand(env as any, { message: { chat: { id: chatId } } });
+            return json({ ok: true, handled: "stats" });
           }
 
           // /wiki
