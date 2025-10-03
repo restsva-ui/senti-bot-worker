@@ -18,6 +18,10 @@ id = "7b32e2d1f60846ddb1c653eb52180bf7"        # senti-state
 binding = "SENTI_CACHE"                        # новий кеш
 id = "497eac980691495ea2a0bc8611892d65"        # senti-cache
 
+[[kv_namespaces]]
+binding = "DEDUP_KV"                           # для антидублю update_id
+id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"        # створи нову KV у Cloudflare Dashboard і встав сюди id
+
 # ===== Vars (змінні оточення) =====
 [vars]
 API_BASE_URL = "https://api.telegram.org"
