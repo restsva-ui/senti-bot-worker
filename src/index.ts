@@ -8,24 +8,19 @@ import { askSmart, quickTemplateReply, type ReplierEnv } from "./services/replie
 import { likesCommand, likesCanHandleCallback, likesOnCallback } from "./commands/likes";
 import { statsCommand } from "./commands/stats";
 import { menuCommand, menuOnCallback } from "./commands/menu";
-import { syncCommands, commandsList } from "./commands/sync";
+import { syncCommands, commandsList, resetAllCommands } from "./commands/sync";
 
 export interface Env extends ReplierEnv {
-  // Telegram
   BOT_TOKEN: string;
   WEBHOOK_SECRET?: string;
 
-  // Infra
   CF_VISION?: string;
   CLOUDFLARE_API_TOKEN?: string;
 
-  // KV
   LIKES_KV?: KVNamespace;
-  DEDUP_KV?: KVNamespace;     // антидубль
-  SENTI_CACHE?: KVNamespace;  // prefs/кеш (на майбутнє)
+  DEDUP_KV?: KVNamespace;
+  SENTI_CACHE?: KVNamespace;
 }
-
-/* ------------------------- helpers ------------------------- */
 
 function json(res: unknown, status = 200) {
   return new Response(JSON.stringify(res), {
@@ -89,8 +84,7 @@ async function seenUpdateRecently(env: Env, updateId: number | string, ttlSec = 
   return false;
 }
 
-/** Безпечне читання JSON (1MB ліміт), щоб не ловити "Body already used". */
-async function readJsonSafe(req: Request, maxBytes = 1024 * 1024 /* 1MB */) {
+async function readJsonSafe(req: Request, maxBytes = 1024 * 1024) {
   const ct = req.headers.get("content-type") || "";
   if (!/application\/json/i.test(ct)) throw new Error("bad content-type");
   const ab = await req.arrayBuffer();
@@ -98,8 +92,6 @@ async function readJsonSafe(req: Request, maxBytes = 1024 * 1024 /* 1MB */) {
   const text = new TextDecoder().decode(ab);
   return JSON.parse(text);
 }
-
-/* --------------------------- worker --------------------------- */
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -110,19 +102,28 @@ export default {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // Діагностика (важливо: передаємо clone(), щоб не "використати" body)
+    // Діагностика (важливо: clone(), щоб не витратити body)
     const diag = await handleDiagnostics(request.clone(), env as any, url);
     if (diag) return diag;
 
-    // ---- Sync bot commands (GET) ----
+    // ---- Reset commands (DELETE all scopes/langs) ----
+    if (request.method === "GET" && url.pathname === "/reset-commands") {
+      const secret = url.searchParams.get("secret") || "";
+      if ((env.WEBHOOK_SECRET || "") && secret !== env.WEBHOOK_SECRET) {
+        return json({ ok: false, error: "forbidden" }, 403);
+      }
+      const res = await resetAllCommands(env as any);
+      return json({ ok: true, ...res });
+    }
+
+    // ---- Sync commands (delete + set across scopes/langs) ----
     if (request.method === "GET" && url.pathname === "/sync-commands") {
-      // проста перевірка по секрету у query
       const secret = url.searchParams.get("secret") || "";
       if ((env.WEBHOOK_SECRET || "") && secret !== env.WEBHOOK_SECRET) {
         return json({ ok: false, error: "forbidden" }, 403);
       }
       const res = await syncCommands(env as any);
-      return json({ ok: true, updated: res?.ok ?? true, commands: commandsList() });
+      return json({ ok: true, ...res, commands: commandsList() });
     }
 
     // Webhook
@@ -131,16 +132,12 @@ export default {
         return json({ ok: false, error: "method not allowed" }, 405);
       }
 
-      // Перевірка секрету Telegram Webhook
       const expected = (env.WEBHOOK_SECRET || "").trim();
       if (expected) {
         const got = (request.headers.get("x-telegram-bot-api-secret-token") || "").trim();
-        if (got !== expected) {
-          return json({ ok: false, error: "invalid secret" }, 403);
-        }
+        if (got !== expected) return json({ ok: false, error: "invalid secret" }, 403);
       }
 
-      // Читаємо update без повторного читання body
       let update: any;
       try {
         update = await readJsonSafe(request);
@@ -148,7 +145,6 @@ export default {
         return json({ ok: false, error: e?.message || "bad json" }, 400);
       }
 
-      // Антидубль
       const uid: number | string | undefined = update?.update_id;
       if (uid !== undefined && (await seenUpdateRecently(env, uid, 300))) {
         return json({ ok: true, dedup: true });
@@ -248,7 +244,6 @@ export default {
 
         return json({ ok: true, noop: true });
       } catch (e: any) {
-        // Мʼяко повідомляємо користувачу й не валимо webhook
         try {
           const { chatId: safeChat } = getMessageInfo(update);
           if (safeChat) {
@@ -259,7 +254,6 @@ export default {
       }
     }
 
-    // Неіснуючі шляхи
     return json({ ok: false, error: "not found" }, 404);
   },
 };
