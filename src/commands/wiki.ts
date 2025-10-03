@@ -7,81 +7,77 @@ type WikiState =
   | { step: "await_topic" }
   | { step: "await_question"; topic: string; lang: Lang };
 
-const WIKI_TTL = 60 * 30; // 30 хвилин
+const WIKI_TTL = 60 * 30; // 30 хв
 const key = (chatId: number) => `wiki:${chatId}`;
 
-function getKV(env: Env): KVNamespace | undefined {
+function kv(env: Env): KVNamespace | undefined {
   return (env as any).SENTI_CACHE as KVNamespace | undefined;
 }
-
-async function readState(env: Env, chatId: number): Promise<WikiState | null> {
-  const kv = getKV(env);
-  if (!kv) return null;
-  try {
-    return (await kv.get(key(chatId), "json")) as WikiState | null;
-  } catch {
-    return null;
-  }
+async function readState(env: Env, chatId: number) {
+  try { return await kv(env)?.get(key(chatId), "json") as WikiState | null; } catch { return null; }
 }
 async function writeState(env: Env, chatId: number, state: WikiState) {
-  const kv = getKV(env);
-  if (!kv) return;
-  await kv.put(key(chatId), JSON.stringify(state), { expirationTtl: WIKI_TTL });
+  await kv(env)?.put(key(chatId), JSON.stringify(state), { expirationTtl: WIKI_TTL });
 }
 async function clearState(env: Env, chatId: number) {
-  const kv = getKV(env);
-  if (!kv) return;
-  await kv.delete(key(chatId));
+  await kv(env)?.delete(key(chatId));
 }
 
-function pickWikiDomain(lang: Lang): string {
-  switch (lang) {
-    case "uk":
-      return "uk.wikipedia.org";
-    case "ru":
-      return "ru.wikipedia.org";
-    case "de":
-      return "de.wikipedia.org";
-    default:
-      return "en.wikipedia.org";
-  }
+function wikiDomain(lang: Lang) {
+  return lang === "uk" ? "uk.wikipedia.org"
+       : lang === "ru" ? "ru.wikipedia.org"
+       : lang === "de" ? "de.wikipedia.org"
+       : "en.wikipedia.org";
 }
 
+const baseHeaders = (lang: Lang) => ({
+  "accept": "application/json",
+  "user-agent": "SentiBot/1.0 (+https://senti-bot-worker.restsva.workers.dev/health)",
+  "accept-language": lang
+});
+
+/** Повертає summary для терміну з вибраної вікі або null */
 async function fetchSummary(lang: Lang, title: string) {
-  const domain = pickWikiDomain(lang);
-  const enc = encodeURIComponent(title.trim().replace(/\s+/g, "_"));
-  // 1) summary за прямою назвою
-  let url = `https://${domain}/api/rest_v1/page/summary/${enc}`;
-  let res = await fetch(url, { headers: { "accept": "application/json" } });
-  if (res.ok) return { json: await res.json(), url };
+  const domains = [wikiDomain(lang), "en.wikipedia.org"]; // fallback на EN
+  const wanted = title.trim();
+  const encPage = encodeURIComponent(wanted.replace(/\s+/g, "_"));
 
-  // 2) пошук title → перший результат
-  const searchUrl = `https://${domain}/w/rest.php/v1/search/title?q=${encodeURIComponent(
-    title
-  )}&limit=1`;
-  const s = await fetch(searchUrl, { headers: { accept: "application/json" } });
-  if (s.ok) {
-    const j = await s.json();
-    const first = j?.pages?.[0]?.key as string | undefined;
-    if (first) {
-      url = `https://${domain}/api/rest_v1/page/summary/${encodeURIComponent(first)}`;
-      res = await fetch(url, { headers: { accept: "application/json" } });
-      if (res.ok) return { json: await res.json(), url };
+  for (const domain of domains) {
+    // 1) пряма сторінка
+    let url = `https://${domain}/api/rest_v1/page/summary/${encPage}`;
+    let res = await fetch(url, { headers: baseHeaders(lang) });
+    if (res.ok) return { json: await res.json(), url, domain };
+
+    // 2) пошук першого title
+    const search = `https://${domain}/w/rest.php/v1/search/title?q=${encodeURIComponent(wanted)}&limit=1`;
+    const sRes = await fetch(search, { headers: baseHeaders(lang) });
+    if (sRes.ok) {
+      const j = await sRes.json();
+      const key = j?.pages?.[0]?.key as string | undefined;
+      if (key) {
+        url = `https://${domain}/api/rest_v1/page/summary/${encodeURIComponent(key)}`;
+        res = await fetch(url, { headers: baseHeaders(lang) });
+        if (res.ok) return { json: await res.json(), url, domain };
+      }
     }
   }
   return null;
 }
 
-function buildAnswer(summary: any, topic: string, lang: Lang): string {
-  const title = summary?.title || topic;
+function htmlAnswer(summary: any, fallbackTitle: string) {
+  const title = summary?.title || fallbackTitle;
   const extract = summary?.extract || "Нічого не знайшов у Вікіпедії.";
-  const url = summary?.content_urls?.desktop?.page || summary?.uri || summary?.url;
-  return `📚 *${title}*\n\n${extract}\n\n🔗 ${url ?? ""}`;
+  const url =
+    summary?.content_urls?.desktop?.page ||
+    summary?.uri ||
+    summary?.url ||
+    "";
+  // HTML щоб не екранити підкреслення
+  return `📚 <b>${title}</b><br/><br/>${extract}<br/><br/>🔗 <a href="${url}">Відкрити у Вікіпедії</a>`;
 }
 
-// ============= Публічні API, які викликає index.ts / registry.ts =============
+// ============== Публічні API, які використовує index.ts =================
 
-/** /wiki або натискання кнопки — вмикаємо режим очікування теми */
 export async function wikiSetAwait(ctx: { env: Env }, update: any) {
   const chatId: number | undefined =
     update?.message?.chat?.id ||
@@ -89,21 +85,12 @@ export async function wikiSetAwait(ctx: { env: Env }, update: any) {
     update?.callback_query?.message?.chat?.id;
   if (!chatId) return;
 
-  const lang = normalizeLang(
-    update?.message?.from?.language_code ||
-      update?.edited_message?.from?.language_code ||
-      update?.callback_query?.from?.language_code
-  );
-
   await writeState(ctx.env, chatId, { step: "await_topic" });
   await tgSendMessage(ctx.env as any, chatId, "Увімкнено вікі-режим. Напиши термін 👇", {
-    reply_markup: {
-      inline_keyboard: [[{ text: "❌ Вийти з вікі", callback_data: "menu:back" }]],
-    },
+    reply_markup: { inline_keyboard: [[{ text: "❌ Вийти з вікі", callback_data: "menu:back" }]] }
   });
 }
 
-/** Обробка вільного тексту, коли ми у вікі-режимі. Повертає true, якщо перехопили. */
 export async function wikiMaybeHandleFreeText(ctx: { env: Env }, update: any): Promise<boolean> {
   const msg = update?.message || update?.edited_message || null;
   const chatId: number | undefined = msg?.chat?.id;
@@ -113,49 +100,36 @@ export async function wikiMaybeHandleFreeText(ctx: { env: Env }, update: any): P
   const state = await readState(ctx.env, chatId);
   if (!state) return false;
 
-  // Вихід з режиму
   if (/^(exit|вийти|stop|стоп)$/i.test(text)) {
     await clearState(ctx.env, chatId);
     await tgSendMessage(ctx.env as any, chatId, "Вікі-режим вимкнено.");
     return true;
   }
 
-  // Крок 1: користувач вводить тему
   if (state.step === "await_topic") {
-    const lang = normalizeLang(
-      msg?.from?.language_code ||
-        update?.edited_message?.from?.language_code ||
-        update?.callback_query?.from?.language_code
-    );
+    const lang = normalizeLang(msg?.from?.language_code);
     const topic = text;
     await writeState(ctx.env, chatId, { step: "await_question", topic, lang });
-    await tgSendMessage(ctx.env as any, chatId, `Що саме про *${topic}* цікавить?`, {
-      parse_mode: "Markdown",
-    });
+    await tgSendMessage(ctx.env as any, chatId, `Що саме про <b>${topic}</b> цікавить?`, { parse_mode: "HTML" });
     return true;
   }
 
-  // Крок 2: маємо topic, користувач ставить запитання
   if (state.step === "await_question") {
-    const topic = state.topic;
-    const lang = state.lang ?? "uk";
-    // На перший запит просто віддаємо summary сторінки про topic.
-    // Уточнюючі питання можна ігнорувати — це швидкий варіант без LLM.
-    const sum = await fetchSummary(lang, topic);
+    // На перше уточнення показуємо summary теми (швидка відповідь)
+    const sum = await fetchSummary(state.lang ?? "uk", state.topic);
     if (!sum) {
       await tgSendMessage(ctx.env as any, chatId, "Не знайшов сторінку у Вікіпедії.");
       return true;
     }
-    const answer = buildAnswer(sum.json, topic, lang);
-    await tgSendMessage(ctx.env as any, chatId, answer, { parse_mode: "Markdown" });
-    // режим залишається активним — можна задавати наступні уточнення
+    const html = htmlAnswer(sum.json, state.topic);
+    await tgSendMessage(ctx.env as any, chatId, html, { parse_mode: "HTML" });
     return true;
   }
 
   return false;
 }
 
-/** Повноцінна команда (на випадок, якщо хтось імпортує як /wiki <term>) */
+/** Підтримка варіанту /wiki <термін> */
 export async function wiki(ctx: { env: Env }, chatId: number, raw?: string, lang?: Lang) {
   const term = (raw || "").trim();
   const usedLang = lang ?? "uk";
@@ -170,7 +144,7 @@ export async function wiki(ctx: { env: Env }, chatId: number, raw?: string, lang
     await tgSendMessage(ctx.env as any, chatId, "Не знайшов сторінку у Вікіпедії.");
     return;
   }
-  const answer = buildAnswer(sum.json, term, usedLang);
-  await tgSendMessage(ctx.env as any, chatId, answer, { parse_mode: "Markdown" });
+  const html = htmlAnswer(sum.json, term);
+  await tgSendMessage(ctx.env as any, chatId, html, { parse_mode: "HTML" });
 }
 export default wiki;
