@@ -22,7 +22,7 @@ export interface Env extends ReplierEnv {
   // KV
   LIKES_KV?: KVNamespace;
   DEDUP_KV?: KVNamespace;   // антидубль
-  SENTI_CACHE?: KVNamespace; // prefs/кеш
+  SENTI_CACHE?: KVNamespace; // prefs/кеш (на майбутнє)
 }
 
 function json(res: unknown, status = 200) {
@@ -128,11 +128,13 @@ export default {
             return json({ ok: true, handled: "likes:callback" });
           }
 
+          // на майбутнє: якщо колись повернемо кнопки — обробимо тут
           if (data?.startsWith("menu:") || data?.startsWith("settings:")) {
             await menuOnCallback(env as any, update as any);
             return json({ ok: true, handled: "menu:callback" });
           }
 
+          // за замовчуванням — тихо ігноруємо або echo:
           await tgSendMessage(env as any, chatId, `tap: ${data ?? ""}`);
           return json({ ok: true, handled: "callback:echo" });
         }
