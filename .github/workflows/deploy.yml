@@ -1,50 +1,21 @@
-# .github/workflows/deploy.yml
-name: Deploy to Cloudflare Workers
-
-on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Wrangler
-        run: npm install -g wrangler
-
-      - name: Cloudflare whoami
-        run: wrangler whoami
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-
-      - name: Deploy
-        run: |
-          wrangler deploy --config wrangler.toml --keep-vars true
-          echo "Deploy finished at $(date -u)"
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-
-      - name: Telegram getMe
-        if: env.BOT_TOKEN != ''
+- name: Reset ALL bot commands (scopes + languages)
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
-          echo "Calling getMe..."
-          curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getMe" || true
+          API="https://api.telegram.org/bot${BOT_TOKEN}"
+          # повне очищення у всіх основних scope
+          curl -s -X POST "$API/setMyCommands" -d 'commands=[]' > /dev/null
+          curl -s -X POST "$API/setMyCommands" -d 'scope={"type":"all_private_chats"}&commands=[]' > /dev/null
+          curl -s -X POST "$API/setMyCommands" -d 'scope={"type":"all_group_chats"}&commands=[]' > /dev/null
+          curl -s -X POST "$API/setMyCommands" -d 'scope={"type":"all_chat_administrators"}&commands=[]' > /dev/null
+          # якщо колись задавали мовні списки — чистимо теж
+          curl -s -X POST "$API/setMyCommands" -d 'language_code=uk&commands=[]' > /dev/null
+          curl -s -X POST "$API/setMyCommands" -d 'language_code=en&commands=[]' > /dev/null
 
-      - name: Notify Telegram
-        if: env.BOT_TOKEN != '' && env.OWNER_ID != ''
+      - name: Set minimal command list (ask, ping, help)
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          OWNER_ID: ${{ secrets.OWNER_ID }}
         run: |
-          echo "Sending Telegram notify to ${OWNER_ID}"
-          RESP=$(curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-            -d chat_id="${OWNER_ID}" \
-            --data-urlencode text="Senti deploy finished")
-          echo "Telegram API response: $RESP"
+          API="https://api.telegram.org/bot${BOT_TOKEN}"
+          CMDS='[{"command":"ask","description":"question to the model"},{"command":"ping","description":"connectivity check"},{"command":"help","description":"this list"}]'
+          curl -s -X POST "$API/setMyCommands" -d "commands=${CMDS}" > /dev/null
