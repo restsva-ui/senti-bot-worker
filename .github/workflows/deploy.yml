@@ -44,8 +44,16 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
-          set -e
+          set -euo pipefail
           API="https://api.telegram.org/bot${BOT_TOKEN}"
-          CMDS='[{"command":"ping","description":"перевірка звʼязку"},{"command":"ask","description":"постав запитання ІІ"},{"command":"help","description":"список команд"}]'
-          curl -sS -X POST "$API/setMyCommands" -d "commands=$CMDS" > /dev/null
-          echo "Bot commands updated"
+
+          # Коректно формуємо JSON команд в heredoc (уникаємо проблем з лапками/Unicode)
+          read -r -d '' CMDS <<'JSON' || true
+          [{"command":"ping","description":"перевірка зв'язку"},{"command":"ask","description":"постав запитання ІІ"},{"command":"help","description":"список команд"}]
+          JSON
+
+          # Надсилаємо запит і виводимо відповідь для діагностики (не ховаємо вивід)
+          resp=$(curl -sS -X POST "$API/setMyCommands" -H "Content-Type: application/json" -d "$CMDS")
+          echo "Telegram response: $resp"
+          # Якщо Telegram API повернув ok: false, то curl повертає код 0 — додатково перевіримо поле ok
+          echo "$resp" | grep -q '"ok":true' || (echo "Telegram setMyCommands failed" && exit 1)
