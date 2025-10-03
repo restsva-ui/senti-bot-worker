@@ -3,7 +3,7 @@
 
 export type Env = {
   BOT_TOKEN: string;
-  API_BASE_URL?: string; // опційно: свій endpoint
+  API_BASE_URL?: string; // опційно: свій endpoint (наприклад, проксі)
 };
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
@@ -32,16 +32,22 @@ export async function tgSendMessage(
   text: string,
   extra: Record<string, any> = {}
 ) {
-  if ((text ?? "").length > TG_MAX_LEN) {
+  const full = text ?? "";
+  if (full.length > TG_MAX_LEN) {
     const chunks: string[] = [];
-    for (let i = 0; i < text.length; i += TG_MAX_LEN) chunks.push(text.slice(i, i + TG_MAX_LEN));
-    for (const [idx, chunk] of chunks.entries()) {
+    for (let i = 0; i < full.length; i += TG_MAX_LEN) chunks.push(full.slice(i, i + TG_MAX_LEN));
+    for (let i = 0; i < chunks.length; i++) {
       // eslint-disable-next-line no-await-in-loop
-      await tgFetch(env, "sendMessage", { chat_id, text: (idx ? `\n(продовження ${idx + 1}/${chunks.length})\n` : "") + chunk, parse_mode: "HTML", ...extra });
+      await tgFetch(env, "sendMessage", {
+        chat_id,
+        text: (i ? `\n(${i + 1}/${chunks.length})\n` : "") + chunks[i],
+        parse_mode: "HTML",
+        ...extra,
+      });
     }
     return;
   }
-  return tgFetch(env, "sendMessage", { chat_id, text, parse_mode: "HTML", ...extra });
+  return tgFetch(env, "sendMessage", { chat_id, text: full, parse_mode: "HTML", ...extra });
 }
 
 export async function answerCallbackQuery(env: Env, callback_query_id: string, text = "", show_alert = false) {
@@ -84,24 +90,20 @@ export async function setMyCommands(
   return tgFetch(env, "setMyCommands", body);
 }
 
-export async function deleteMyCommands(
-  env: Env,
-  scope?: Record<string, any>,
-  language_code?: string
-) {
+export async function deleteMyCommands(env: Env, scope?: Record<string, any>, language_code?: string) {
   const body: any = {};
   if (scope) body.scope = scope;
   if (language_code) body.language_code = language_code;
   return tgFetch(env, "deleteMyCommands", body);
 }
 
-export async function getMyCommands(
-  env: Env,
-  scope?: Record<string, any>,
-  language_code?: string
-) {
+export async function getMyCommands(env: Env, scope?: Record<string, any>, language_code?: string) {
   const body: any = {};
   if (scope) body.scope = scope;
   if (language_code) body.language_code = language_code;
-  return tgFetch<{ ok: boolean; result: Array<{ command: string; description: string }> }>(env, "getMyCommands", body);
+  return tgFetch<{ ok: boolean; result: Array<{ command: string; description: string }> }>(
+    env,
+    "getMyCommands",
+    body
+  );
 }
