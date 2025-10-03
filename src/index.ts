@@ -113,8 +113,8 @@ export default {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // Діагностика лише для не-/webhook, щоб не зачіпати body
-    if (url.pathname !== "/webhook") {
+    // 🛡️ Діагностика запускаємо ТІЛЬКИ для GET і не на /webhook (щоб не читати body)
+    if (request.method === "GET" && url.pathname !== "/webhook") {
       const diag = await handleDiagnostics(request, env as any, url);
       if (diag) return diag;
     }
