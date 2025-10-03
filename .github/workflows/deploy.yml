@@ -29,18 +29,16 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
-      # --- DEBUG Telegram: показати хто цей бот (перевірка токена)
-      - name: Telegram getMe (soft)
-        if: ${{ secrets.BOT_TOKEN != '' }}
+      - name: Telegram getMe
+        if: env.BOT_TOKEN != ''
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
           echo "Calling getMe..."
           curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getMe" || true
 
-      # --- Надіслати повідомлення і завжди показати відповідь API у логах
-      - name: Notify Telegram (soft)
-        if: ${{ secrets.BOT_TOKEN != '' && secrets.OWNER_ID != '' }}
+      - name: Notify Telegram
+        if: env.BOT_TOKEN != '' && env.OWNER_ID != ''
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           OWNER_ID: ${{ secrets.OWNER_ID }}
