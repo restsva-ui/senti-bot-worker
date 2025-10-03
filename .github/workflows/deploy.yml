@@ -45,5 +45,4 @@ Time (UTC): $(date -u +'%Y-%m-%d %H:%M:%S')" )
 
           # Якщо повідомлення не надіслалось — тільки виводимо ⚠️, але не валимо деплой
           if ! echo "$RESP" | grep -q '"ok":true'; then
-            echo "⚠️ Telegram notify failed!"
-          fi
+            echo "⚠️ Telegram notify failed! 
