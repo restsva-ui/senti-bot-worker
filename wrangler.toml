@@ -15,12 +15,12 @@ binding = "LIKES_KV"                           # для збереження л�
 id = "7b32e2d1f60846ddb1c653eb52180bf7"        # senti-state
 
 [[kv_namespaces]]
-binding = "SENTI_CACHE"                        # новий кеш
+binding = "SENTI_CACHE"                        # кеш швидких відповідей
 id = "497eac980691495ea2a0bc8611892d65"        # senti-cache
 
 [[kv_namespaces]]
-binding = "DEDUP_KV"                           # для антидублю update_id
-id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"        # створи нову KV у Cloudflare Dashboard і встав сюди id
+binding = "DEDUP_KV"                           # антидубль update_id
+id = "20d81d7b68fa4ac6b9913e2fbd3465d5"        # senti-dedup
 
 # ===== Vars (змінні оточення) =====
 [vars]
