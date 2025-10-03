@@ -6,19 +6,12 @@ type Handler = (ctx: any, args?: any) => Promise<any> | any;
 // ---- Імпорти команд ----
 import { ping } from "./ping";
 
-import {
-  wiki as wikiExport,
-  wikiSetAwait,
-  wikiMaybeHandleFreeText,
-} from "./wiki";
-
 // AI (опціонально)
 import { ai as aiExport } from "./ai";
 
 // ---- Базовий набір без слеша ----
 const base: Record<string, Handler> = {
   ping,
-  wiki: wikiExport as Handler,
 };
 
 // Додаємо версії з префіксом "/"
@@ -37,9 +30,6 @@ export const COMMANDS: Record<string, Handler> = {
   ...base,
   ...withSlash,
 };
-
-// Експортуємо wiki-хелпери
-export { wikiSetAwait, wikiMaybeHandleFreeText };
 
 // Утиліти
 export function pickHandler(name: string): Handler | undefined {
