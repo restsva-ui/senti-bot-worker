@@ -8,7 +8,15 @@ import { askSmart, quickTemplateReply, type ReplierEnv } from "./services/replie
 import { likesCommand, likesCanHandleCallback, likesOnCallback } from "./commands/likes";
 import { statsCommand } from "./commands/stats";
 import { menuCommand, menuOnCallback } from "./commands/menu";
-import { syncCommands, commandsList, resetAllCommands, snapshotCommands, resetChatCommands, syncChatCommands } from "./commands/sync";
+import {
+  syncCommands,
+  commandsList,
+  resetAllCommands,
+  snapshotCommands,
+  resetChatCommands,
+  syncChatCommands,
+  forceEmptyAllCommands,
+} from "./commands/sync";
 
 export interface Env extends ReplierEnv {
   BOT_TOKEN: string;
@@ -22,50 +30,34 @@ export interface Env extends ReplierEnv {
   SENTI_CACHE?: KVNamespace;
 }
 
-/* --------------- helpers --------------- */
+/* ------------ helpers ------------ */
 function json(res: unknown, status = 200) {
   return new Response(JSON.stringify(res), {
     status,
     headers: { "content-type": "application/json; charset=utf-8" },
   });
 }
-
 function getMessageInfo(update: any): { chatId?: number; text?: string; fromLangCode?: string } {
   const msg =
-    update?.message ||
-    update?.edited_message ||
-    update?.channel_post ||
-    update?.callback_query?.message ||
-    null;
-
+    update?.message || update?.edited_message || update?.channel_post || update?.callback_query?.message || null;
   const chatId: number | undefined = msg?.chat?.id;
-
   const text: string | undefined =
-    update?.message?.text ??
-    update?.edited_message?.text ??
-    update?.channel_post?.text ??
-    update?.callback_query?.message?.text ??
-    undefined;
-
+    update?.message?.text ?? update?.edited_message?.text ?? update?.channel_post?.text ?? update?.callback_query?.message?.text ?? undefined;
   const fromLangCode: string | undefined =
     update?.message?.from?.language_code ??
     update?.edited_message?.from?.language_code ??
     update?.channel_post?.from?.language_code ??
     update?.callback_query?.from?.language_code ??
     undefined;
-
   return { chatId, text, fromLangCode };
 }
-
 function extractAskBlocks(source: string): string[] {
   const t = (source || "").trim();
   const re = /\/ask(?:@\w+)?\s*/gi;
   const idxs: number[] = [];
   let m: RegExpExecArray | null;
-
   while ((m = re.exec(t))) idxs.push(m.index);
   if (idxs.length === 0) return [];
-
   const blocks: string[] = [];
   for (let i = 0; i < idxs.length; i++) {
     const start = idxs[i] + (t.slice(idxs[i]).match(/^\/ask(?:@\w+)?\s*/i)?.[0].length || 0);
@@ -75,7 +67,6 @@ function extractAskBlocks(source: string): string[] {
   }
   return blocks;
 }
-
 async function seenUpdateRecently(env: Env, updateId: number | string, ttlSec = 300): Promise<boolean> {
   if (!env.DEDUP_KV) return false;
   const key = `upd:${updateId}`;
@@ -84,7 +75,6 @@ async function seenUpdateRecently(env: Env, updateId: number | string, ttlSec = 
   await env.DEDUP_KV.put(key, "1", { expirationTtl: ttlSec });
   return false;
 }
-
 async function readJsonSafe(req: Request, maxBytes = 1024 * 1024) {
   const ct = req.headers.get("content-type") || "";
   if (!/application\/json/i.test(ct)) throw new Error("bad content-type");
@@ -94,7 +84,7 @@ async function readJsonSafe(req: Request, maxBytes = 1024 * 1024) {
   return JSON.parse(text);
 }
 
-/* --------------- worker --------------- */
+/* ------------ worker ------------ */
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -104,51 +94,57 @@ export default {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // ⚠️ Діагностика ТІЛЬКИ для не-/webhook маршрутів,
-    // щоб не чіпати body Telegram-запитів.
+    // Діагностика лише для не-/webhook, щоб не зачіпати body
     if (url.pathname !== "/webhook") {
       const diag = await handleDiagnostics(request, env as any, url);
       if (diag) return diag;
     }
 
-    // ---- Командні сервіси (з телефону) ----
-    if (request.method === "GET" && url.pathname === "/reset-commands") {
+    // ---- Командні сервіси ----
+    const guard = () => {
       const secret = url.searchParams.get("secret") || "";
-      if ((env.WEBHOOK_SECRET || "") && secret !== env.WEBHOOK_SECRET) return json({ ok: false, error: "forbidden" }, 403);
+      return (env.WEBHOOK_SECRET || "") && secret === env.WEBHOOK_SECRET;
+    };
+
+    if (request.method === "GET" && url.pathname === "/reset-commands") {
+      if (!guard()) return json({ ok: false, error: "forbidden" }, 403);
       const res = await resetAllCommands(env as any);
       return json({ ok: true, ...res });
     }
 
     if (request.method === "GET" && url.pathname === "/sync-commands") {
-      const secret = url.searchParams.get("secret") || "";
-      if ((env.WEBHOOK_SECRET || "") && secret !== env.WEBHOOK_SECRET) return json({ ok: false, error: "forbidden" }, 403);
+      if (!guard()) return json({ ok: false, error: "forbidden" }, 403);
       const res = await syncCommands(env as any);
       return json({ ok: true, ...res, commands: commandsList() });
     }
 
     if (request.method === "GET" && url.pathname === "/debug-commands") {
-      const secret = url.searchParams.get("secret") || "";
-      if ((env.WEBHOOK_SECRET || "") && secret !== env.WEBHOOK_SECRET) return json({ ok: false, error: "forbidden" }, 403);
+      if (!guard()) return json({ ok: false, error: "forbidden" }, 403);
       const all = await snapshotCommands(env as any);
       return json({ ok: true, snapshot: all });
     }
 
-    if (request.method === "GET" && url.pathname === "/sync-commands-chat") {
-      const secret = url.searchParams.get("secret") || "";
-      if ((env.WEBHOOK_SECRET || "") && secret !== env.WEBHOOK_SECRET) return json({ ok: false, error: "forbidden" }, 403);
-      const chatId = url.searchParams.get("chat_id");
-      if (!chatId) return json({ ok: false, error: "chat_id required" }, 400);
-      const res = await syncChatCommands(env as any, chatId);
-      return json({ ok: true, ...res, chatId });
-    }
-
     if (request.method === "GET" && url.pathname === "/reset-commands-chat") {
-      const secret = url.searchParams.get("secret") || "";
-      if ((env.WEBHOOK_SECRET || "") && secret !== env.WEBHOOK_SECRET) return json({ ok: false, error: "forbidden" }, 403);
+      if (!guard()) return json({ ok: false, error: "forbidden" }, 403);
       const chatId = url.searchParams.get("chat_id");
       if (!chatId) return json({ ok: false, error: "chat_id required" }, 400);
       const res = await resetChatCommands(env as any, chatId);
       return json({ ok: true, ...res, chatId });
+    }
+
+    if (request.method === "GET" && url.pathname === "/sync-commands-chat") {
+      if (!guard()) return json({ ok: false, error: "forbidden" }, 403);
+      const chatId = url.searchParams.get("chat_id");
+      if (!chatId) return json({ ok: false, error: "chat_id required" }, 400);
+      const res = await syncChatCommands(env as any, chatId);
+      return json({ ok: true, ...res, chatId, commands: commandsList() });
+    }
+
+    /** 🔥 Нове: форс-порожні команди для всіх scope/lang */
+    if (request.method === "GET" && url.pathname === "/force-empty-commands") {
+      if (!guard()) return json({ ok: false, error: "forbidden" }, 403);
+      const res = await forceEmptyAllCommands(env as any);
+      return json({ ok: true, ...res, emptied: true });
     }
 
     // ---- Webhook ----
@@ -176,25 +172,22 @@ export default {
       const { chatId, text, fromLangCode } = getMessageInfo(update);
 
       try {
-        // ==== Callback ====
+        // Callback
         if (update?.callback_query?.id && chatId) {
           const data: string | undefined = update?.callback_query?.data ?? undefined;
-
           if (likesCanHandleCallback(data)) {
             await likesOnCallback(env as any, update as any);
             return json({ ok: true, handled: "likes:callback" });
           }
-
           if (data?.startsWith("menu:") || data?.startsWith("settings:")) {
             await menuOnCallback(env as any, update as any);
             return json({ ok: true, handled: "menu:callback" });
           }
-
           await tgSendMessage(env as any, chatId, `tap: ${data ?? ""}`);
           return json({ ok: true, handled: "callback:echo" });
         }
 
-        // ==== Text / Commands ====
+        // Text / Commands
         if (typeof text === "string" && chatId) {
           const trimmed = text.trim();
 
@@ -203,22 +196,18 @@ export default {
             await sendHelp(env as any, chatId, langForHelp);
             return json({ ok: true, handled: "help" });
           }
-
           if (/^\/ping(?:@\w+)?$/i.test(trimmed)) {
             await pingCommand(env as any, chatId);
             return json({ ok: true, handled: "ping" });
           }
-
           if (/^\/likes(?:@\w+)?$/i.test(trimmed)) {
             await likesCommand(env as any, { message: { chat: { id: chatId } } });
             return json({ ok: true, handled: "likes" });
           }
-
           if (/^\/stats(?:@\w+)?$/i.test(trimmed)) {
             await statsCommand(env as any, { message: { chat: { id: chatId } } });
             return json({ ok: true, handled: "stats" });
           }
-
           if (/^\/menu(?:@\w+)?$/i.test(trimmed)) {
             await menuCommand(env as any, chatId);
             return json({ ok: true, handled: "menu" });
@@ -230,7 +219,6 @@ export default {
               await tgSendMessage(env as any, chatId, "Будь ласка, додай питання після команди.");
               return json({ ok: true, handled: "ask:empty" });
             }
-
             const answers: string[] = [];
             for (const q of blocks) {
               const qLang: Lang = normalizeLang(q, fromLangCode);
@@ -241,7 +229,6 @@ export default {
                 answers.push(answer);
               }
             }
-
             await tgSendMessage(env as any, chatId, answers.join("\n— — —\n"));
             return json({ ok: true, handled: `ask:${blocks.length}` });
           }
