@@ -1,21 +1,57 @@
-- name: Reset ALL bot commands (scopes + languages)
+name: Deploy to Cloudflare Workers
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Wrangler
+        run: npm install -g wrangler@4
+
+      - name: Cloudflare whoami (optional)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: wrangler whoami || true
+
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          wrangler deploy --config wrangler.toml --keep-vars true
+          echo "Deploy finished at $(date -u)"
+
+      # ---- опційно: повністю чистимо та задаємо мінімальні /commands у BotFather API ----
+      - name: Reset & set bot commands
+        if: ${{ secrets.BOT_TOKEN != '' }}
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
           API="https://api.telegram.org/bot${BOT_TOKEN}"
+
           # повне очищення у всіх основних scope
           curl -s -X POST "$API/setMyCommands" -d 'commands=[]' > /dev/null
-          curl -s -X POST "$API/setMyCommands" -d 'scope={"type":"all_private_chats"}&commands=[]' > /dev/null
-          curl -s -X POST "$API/setMyCommands" -d 'scope={"type":"all_group_chats"}&commands=[]' > /dev/null
-          curl -s -X POST "$API/setMyCommands" -d 'scope={"type":"all_chat_administrators"}&commands=[]' > /dev/null
-          # якщо колись задавали мовні списки — чистимо теж
-          curl -s -X POST "$API/setMyCommands" -d 'language_code=uk&commands=[]' > /dev/null
-          curl -s -X POST "$API/setMyCommands" -d 'language_code=en&commands=[]' > /dev/null
+          curl -s -X POST "$API/setMyCommands" -d 'scope={"type":"all_private_chats"}' -d 'commands=[]' > /dev/null
+          curl -s -X POST "$API/setMyCommands" -d 'scope={"type":"all_group_chats"}'   -d 'commands=[]' > /dev/null
+          curl -s -X POST "$API/setMyCommands" -d 'scope={"type":"all_chat_administrators"}' -d 'commands=[]' > /dev/null
 
-      - name: Set minimal command list (ask, ping, help)
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-        run: |
-          API="https://api.telegram.org/bot${BOT_TOKEN}"
-          CMDS='[{"command":"ask","description":"question to the model"},{"command":"ping","description":"connectivity check"},{"command":"help","description":"this list"}]'
-          curl -s -X POST "$API/setMyCommands" -d "commands=${CMDS}" > /dev/null
+          # (якщо треба локалізовані — додаси окремими викликами з language_code)
+          # curl -s -X POST "$API/setMyCommands" -d 'language_code=uk' -d 'commands=[]' > /dev/null
+          # curl -s -X POST "$API/setMyCommands" -d 'language_code=en' -d 'commands=[]' > /dev/null
+
+          # мінімальний набір
+          CMDS='[{"command":"ping","description":"connectivity check"},{"command":"ask","description":"question to the model"},{"command":"help","description":"this list"}]'
+          curl -s -X POST "$API/setMyCommands" -d "commands=$CMDS" > /dev/null
