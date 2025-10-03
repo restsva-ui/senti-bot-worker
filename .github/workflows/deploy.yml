@@ -2,13 +2,14 @@ name: Deploy to Cloudflare Workers
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main" ]   # якщо деплоїш з іншої гілки — зміни тут
   workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,27 +20,19 @@ jobs:
           node-version: '20'
 
       - name: Install Wrangler
-        run: npm install -g wrangler@4
+        run: npm i -g wrangler@4
 
-      - name: Cloudflare whoami (optional)
+      - name: Print Wrangler version
+        run: wrangler --version
+
+      - name: Cloudflare whoami (checks token & account)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: wrangler whoami || true
+        run: wrangler whoami --verbose
 
       - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          wrangler deploy --config wrangler.toml --keep-vars true
+          wrangler deploy --config wrangler.toml --keep-vars true --verbose
           echo "Deploy finished at $(date -u)"
-
-      - name: Set bot commands (ping, ask, help)
-        if: ${{ secrets.BOT_TOKEN != '' }}
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-        run: |
-          set -e
-          API="https://api.telegram.org/bot${BOT_TOKEN}"
-          curl -sS -X POST "$API/setMyCommands" -d 'commands=[]' > /dev/null
-          CMDS='[{"command":"ping","description":"connectivity check"},{"command":"ask","description":"question to the model"},{"command":"help","description":"this list"}]'
-          curl -sS -X POST "$API/setMyCommands" -d "commands=$CMDS" > /dev/null
