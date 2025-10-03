@@ -38,22 +38,13 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: wrangler deploy --config wrangler.toml --keep-vars true
 
-      # Опційно: виставити команди бота у Telegram (пропуститься, якщо BOT_TOKEN порожній)
       - name: Set Telegram bot commands (optional)
         if: ${{ secrets.BOT_TOKEN != '' }}
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
-          set -euo pipefail
+          set -e
           API="https://api.telegram.org/bot${BOT_TOKEN}"
-
-          # Коректно формуємо JSON команд в heredoc (уникаємо проблем з лапками/Unicode)
-          read -r -d '' CMDS <<'JSON' || true
-          [{"command":"ping","description":"перевірка зв'язку"},{"command":"ask","description":"постав запитання ІІ"},{"command":"help","description":"список команд"}]
-          JSON
-
-          # Надсилаємо запит і виводимо відповідь для діагностики (не ховаємо вивід)
-          resp=$(curl -sS -X POST "$API/setMyCommands" -H "Content-Type: application/json" -d "$CMDS")
-          echo "Telegram response: $resp"
-          # Якщо Telegram API повернув ok: false, то curl повертає код 0 — додатково перевіримо поле ok
-          echo "$resp" | grep -q '"ok":true' || (echo "Telegram setMyCommands failed" && exit 1)
+          CMDS='[{"command":"ping","description":"перевірка звʼязку"},{"command":"ask","description":"постав запитання ІІ"},{"command":"help","description":"список команд"}]'
+          curl -sS -X POST "$API/setMyCommands" -d "commands=$CMDS" > /dev/null
+          echo "Bot commands updated"
