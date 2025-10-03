@@ -28,3 +28,9 @@ jobs:
           echo "✅ Deploy finished successfully at $(date -u)"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Notify in Telegram
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage" \
+            -d chat_id=${{ secrets.OWNER_ID }} \
+            -d text="🚀 Senti деплой завершено успішно ✅"
