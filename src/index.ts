@@ -9,53 +9,40 @@ import { likesCommand, likesCanHandleCallback, likesOnCallback } from "./command
 import { statsCommand } from "./commands/stats";
 import { menuCommand, menuOnCallback } from "./commands/menu";
 import {
-  syncCommands,
-  commandsList,
-  resetAllCommands,
-  snapshotCommands,
-  resetChatCommands,
-  syncChatCommands,
-  forceEmptyAllCommands,
+  syncCommands, commandsList, resetAllCommands, snapshotCommands,
+  resetChatCommands, syncChatCommands, forceEmptyAllCommands, snapshotChatCommands
 } from "./commands/sync";
+import { idCommand } from "./commands/id";
 
 export interface Env extends ReplierEnv {
   BOT_TOKEN: string;
   WEBHOOK_SECRET?: string;
-
   CF_VISION?: string;
   CLOUDFLARE_API_TOKEN?: string;
-
   LIKES_KV?: KVNamespace;
   DEDUP_KV?: KVNamespace;
   SENTI_CACHE?: KVNamespace;
 }
 
-/* ------------ helpers ------------ */
 function json(res: unknown, status = 200) {
-  return new Response(JSON.stringify(res), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8" },
-  });
+  return new Response(JSON.stringify(res), { status, headers: { "content-type": "application/json; charset=utf-8" } });
 }
-function getMessageInfo(update: any): { chatId?: number; text?: string; fromLangCode?: string } {
-  const msg =
-    update?.message || update?.edited_message || update?.channel_post || update?.callback_query?.message || null;
+function getMessageInfo(update: any): { chatId?: number; text?: string; fromLangCode?: string; fromId?: number } {
+  const msg = update?.message || update?.edited_message || update?.channel_post || update?.callback_query?.message || null;
   const chatId: number | undefined = msg?.chat?.id;
-  const text: string | undefined =
-    update?.message?.text ?? update?.edited_message?.text ?? update?.channel_post?.text ?? update?.callback_query?.message?.text ?? undefined;
+  const text: string | undefined = update?.message?.text ?? update?.edited_message?.text ?? update?.channel_post?.text ?? update?.callback_query?.message?.text ?? undefined;
   const fromLangCode: string | undefined =
-    update?.message?.from?.language_code ??
-    update?.edited_message?.from?.language_code ??
-    update?.channel_post?.from?.language_code ??
-    update?.callback_query?.from?.language_code ??
-    undefined;
-  return { chatId, text, fromLangCode };
+    update?.message?.from?.language_code ?? update?.edited_message?.from?.language_code ??
+    update?.channel_post?.from?.language_code ?? update?.callback_query?.from?.language_code ?? undefined;
+  const fromId: number | undefined =
+    update?.message?.from?.id ?? update?.edited_message?.from?.id ??
+    update?.channel_post?.from?.id ?? update?.callback_query?.from?.id ?? undefined;
+  return { chatId, text, fromLangCode, fromId };
 }
 function extractAskBlocks(source: string): string[] {
   const t = (source || "").trim();
   const re = /\/ask(?:@\w+)?\s*/gi;
-  const idxs: number[] = [];
-  let m: RegExpExecArray | null;
+  const idxs: number[] = []; let m: RegExpExecArray | null;
   while ((m = re.exec(t))) idxs.push(m.index);
   if (idxs.length === 0) return [];
   const blocks: string[] = [];
@@ -84,7 +71,6 @@ async function readJsonSafe(req: Request, maxBytes = 1024 * 1024) {
   return JSON.parse(text);
 }
 
-/* ------------ worker ------------ */
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -94,60 +80,52 @@ export default {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // Діагностика лише для не-/webhook, щоб не зачіпати body
+    // Діагностика — не чіпаємо /webhook, щоб не зʼїсти body
     if (url.pathname !== "/webhook") {
       const diag = await handleDiagnostics(request, env as any, url);
       if (diag) return diag;
     }
 
-    // ---- Командні сервіси ----
-    const guard = () => {
-      const secret = url.searchParams.get("secret") || "";
-      return (env.WEBHOOK_SECRET || "") && secret === env.WEBHOOK_SECRET;
-    };
+    // Guard для службових роутів
+    const guard = () => (env.WEBHOOK_SECRET || "") === (url.searchParams.get("secret") || "");
 
+    // Командні сервіси
     if (request.method === "GET" && url.pathname === "/reset-commands") {
       if (!guard()) return json({ ok: false, error: "forbidden" }, 403);
-      const res = await resetAllCommands(env as any);
-      return json({ ok: true, ...res });
+      return json({ ok: true, ...(await resetAllCommands(env as any)) });
     }
-
     if (request.method === "GET" && url.pathname === "/sync-commands") {
       if (!guard()) return json({ ok: false, error: "forbidden" }, 403);
-      const res = await syncCommands(env as any);
-      return json({ ok: true, ...res, commands: commandsList() });
+      return json({ ok: true, ...(await syncCommands(env as any)), commands: commandsList() });
     }
-
+    if (request.method === "GET" && url.pathname === "/force-empty-commands") {
+      if (!guard()) return json({ ok: false, error: "forbidden" }, 403);
+      return json({ ok: true, ...(await forceEmptyAllCommands(env as any)), emptied: true });
+    }
     if (request.method === "GET" && url.pathname === "/debug-commands") {
       if (!guard()) return json({ ok: false, error: "forbidden" }, 403);
-      const all = await snapshotCommands(env as any);
-      return json({ ok: true, snapshot: all });
+      return json({ ok: true, snapshot: await snapshotCommands(env as any) });
     }
-
+    if (request.method === "GET" && url.pathname === "/debug-commands-chat") {
+      if (!guard()) return json({ ok: false, error: "forbidden" }, 403);
+      const chatId = url.searchParams.get("chat_id");
+      if (!chatId) return json({ ok: false, error: "chat_id required" }, 400);
+      return json({ ok: true, snapshot: await snapshotChatCommands(env as any, chatId) });
+    }
     if (request.method === "GET" && url.pathname === "/reset-commands-chat") {
       if (!guard()) return json({ ok: false, error: "forbidden" }, 403);
       const chatId = url.searchParams.get("chat_id");
       if (!chatId) return json({ ok: false, error: "chat_id required" }, 400);
-      const res = await resetChatCommands(env as any, chatId);
-      return json({ ok: true, ...res, chatId });
+      return json({ ok: true, ...(await resetChatCommands(env as any, chatId)), chatId });
     }
-
     if (request.method === "GET" && url.pathname === "/sync-commands-chat") {
       if (!guard()) return json({ ok: false, error: "forbidden" }, 403);
       const chatId = url.searchParams.get("chat_id");
       if (!chatId) return json({ ok: false, error: "chat_id required" }, 400);
-      const res = await syncChatCommands(env as any, chatId);
-      return json({ ok: true, ...res, chatId, commands: commandsList() });
+      return json({ ok: true, ...(await syncChatCommands(env as any, chatId)), chatId, commands: commandsList() });
     }
 
-    /** 🔥 Нове: форс-порожні команди для всіх scope/lang */
-    if (request.method === "GET" && url.pathname === "/force-empty-commands") {
-      if (!guard()) return json({ ok: false, error: "forbidden" }, 403);
-      const res = await forceEmptyAllCommands(env as any);
-      return json({ ok: true, ...res, emptied: true });
-    }
-
-    // ---- Webhook ----
+    // Webhook
     if (url.pathname === "/webhook") {
       if (request.method !== "POST") return json({ ok: false, error: "method not allowed" }, 405);
 
@@ -158,31 +136,26 @@ export default {
       }
 
       let update: any;
-      try {
-        update = await readJsonSafe(request);
-      } catch (e: any) {
-        return json({ ok: false, error: e?.message || "bad json" }, 400);
-      }
+      try { update = await readJsonSafe(request); }
+      catch (e: any) { return json({ ok: false, error: e?.message || "bad json" }, 400); }
 
-      const uid: number | string | undefined = update?.update_id;
-      if (uid !== undefined && (await seenUpdateRecently(env, uid, 300))) {
-        return json({ ok: true, dedup: true });
-      }
+      const uid = update?.update_id;
+      if (uid !== undefined && (await seenUpdateRecently(env, uid, 300))) return json({ ok: true, dedup: true });
 
-      const { chatId, text, fromLangCode } = getMessageInfo(update);
+      const { chatId, text, fromLangCode, fromId } = getMessageInfo(update);
 
       try {
+        // /id
+        if (typeof text === "string" && chatId && /^\/id(?:@\w+)?$/i.test(text.trim())) {
+          await idCommand(env as any, chatId, fromId);
+          return json({ ok: true, handled: "id" });
+        }
+
         // Callback
         if (update?.callback_query?.id && chatId) {
           const data: string | undefined = update?.callback_query?.data ?? undefined;
-          if (likesCanHandleCallback(data)) {
-            await likesOnCallback(env as any, update as any);
-            return json({ ok: true, handled: "likes:callback" });
-          }
-          if (data?.startsWith("menu:") || data?.startsWith("settings:")) {
-            await menuOnCallback(env as any, update as any);
-            return json({ ok: true, handled: "menu:callback" });
-          }
+          if (likesCanHandleCallback(data)) { await likesOnCallback(env as any, update as any); return json({ ok: true, handled: "likes:callback" }); }
+          if (data?.startsWith("menu:") || data?.startsWith("settings:")) { await menuOnCallback(env as any, update as any); return json({ ok: true, handled: "menu:callback" }); }
           await tgSendMessage(env as any, chatId, `tap: ${data ?? ""}`);
           return json({ ok: true, handled: "callback:echo" });
         }
@@ -196,38 +169,19 @@ export default {
             await sendHelp(env as any, chatId, langForHelp);
             return json({ ok: true, handled: "help" });
           }
-          if (/^\/ping(?:@\w+)?$/i.test(trimmed)) {
-            await pingCommand(env as any, chatId);
-            return json({ ok: true, handled: "ping" });
-          }
-          if (/^\/likes(?:@\w+)?$/i.test(trimmed)) {
-            await likesCommand(env as any, { message: { chat: { id: chatId } } });
-            return json({ ok: true, handled: "likes" });
-          }
-          if (/^\/stats(?:@\w+)?$/i.test(trimmed)) {
-            await statsCommand(env as any, { message: { chat: { id: chatId } } });
-            return json({ ok: true, handled: "stats" });
-          }
-          if (/^\/menu(?:@\w+)?$/i.test(trimmed)) {
-            await menuCommand(env as any, chatId);
-            return json({ ok: true, handled: "menu" });
-          }
+          if (/^\/ping(?:@\w+)?$/i.test(trimmed)) { await pingCommand(env as any, chatId); return json({ ok: true, handled: "ping" }); }
+          if (/^\/likes(?:@\w+)?$/i.test(trimmed)) { await likesCommand(env as any, { message: { chat: { id: chatId } } }); return json({ ok: true, handled: "likes" }); }
+          if (/^\/stats(?:@\w+)?$/i.test(trimmed)) { await statsCommand(env as any, { message: { chat: { id: chatId } } }); return json({ ok: true, handled: "stats" }); }
+          if (/^\/menu(?:@\w+)?$/i.test(trimmed))  { await menuCommand(env as any, chatId); return json({ ok: true, handled: "menu" }); }
 
           if (/\/ask(?:@\w+)?\b/i.test(trimmed)) {
             const blocks = extractAskBlocks(trimmed);
-            if (blocks.length === 0) {
-              await tgSendMessage(env as any, chatId, "Будь ласка, додай питання після команди.");
-              return json({ ok: true, handled: "ask:empty" });
-            }
+            if (blocks.length === 0) { await tgSendMessage(env as any, chatId, "Будь ласка, додай питання після команди."); return json({ ok: true, handled: "ask:empty" }); }
             const answers: string[] = [];
             for (const q of blocks) {
               const qLang: Lang = normalizeLang(q, fromLangCode);
               const quick = quickTemplateReply(qLang, q);
-              if (quick) answers.push(quick);
-              else {
-                const { text: answer } = await askSmart(env, q, qLang);
-                answers.push(answer);
-              }
+              if (quick) answers.push(quick); else { const { text: answer } = await askSmart(env, q, qLang); answers.push(answer); }
             }
             await tgSendMessage(env as any, chatId, answers.join("\n— — —\n"));
             return json({ ok: true, handled: `ask:${blocks.length}` });
@@ -236,10 +190,7 @@ export default {
           if (trimmed.length > 0) {
             const msgLang: Lang = normalizeLang(trimmed, fromLangCode);
             const quick = quickTemplateReply(msgLang, trimmed);
-            if (quick) {
-              await tgSendMessage(env as any, chatId, quick);
-              return json({ ok: true, handled: "template:plain" });
-            }
+            if (quick) { await tgSendMessage(env as any, chatId, quick); return json({ ok: true, handled: "template:plain" }); }
             const { text: answer } = await askSmart(env, trimmed, msgLang);
             await tgSendMessage(env as any, chatId, answer);
             return json({ ok: true, handled: "ask:fallback" });
@@ -248,12 +199,7 @@ export default {
 
         return json({ ok: true, noop: true });
       } catch (e: any) {
-        try {
-          const { chatId: safeChat } = getMessageInfo(update);
-          if (safeChat) {
-            await tgSendMessage(env as any, safeChat, `Вибач, сталася внутрішня помилка: ${e?.message || String(e)}`);
-          }
-        } catch {}
+        try { const { chatId: safeChat } = getMessageInfo(update); if (safeChat) await tgSendMessage(env as any, safeChat, `Вибач, сталася внутрішня помилка: ${e?.message || String(e)}`); } catch {}
         return json({ ok: false, error: "internal" }, 500);
       }
     }
