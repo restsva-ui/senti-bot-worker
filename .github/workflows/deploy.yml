@@ -9,7 +9,6 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,7 +33,6 @@ jobs:
           wrangler deploy --config wrangler.toml --keep-vars true
           echo "Deploy finished at $(date -u)"
 
-      # --- Після деплою: скинемо і поставимо мінімальний набір команд бота ---
       - name: Set bot commands (ping, ask, help)
         if: ${{ secrets.BOT_TOKEN != '' }}
         env:
@@ -42,8 +40,6 @@ jobs:
         run: |
           set -e
           API="https://api.telegram.org/bot${BOT_TOKEN}"
-          # повне очищення глобальних команд
           curl -sS -X POST "$API/setMyCommands" -d 'commands=[]' > /dev/null
-          # мінімальний список
           CMDS='[{"command":"ping","description":"connectivity check"},{"command":"ask","description":"question to the model"},{"command":"help","description":"this list"}]'
           curl -sS -X POST "$API/setMyCommands" -d "commands=$CMDS" > /dev/null
