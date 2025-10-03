@@ -1,0 +1,35 @@
+# Пропонований GitHub Actions workflow для запуску scripts/lang-autotest.ts
+on:
+  push:
+    branches:
+      - main
+      - master
+      - 'ci/*'
+  pull_request:
+    branches:
+      - main
+      - master
+
+jobs:
+  lang-autotest:
+    name: Run lang-autotest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies (if package.json present)
+        run: |
+          if [ -f package.json ]; then
+            npm ci
+          fi
+
+      - name: Run lang-autotest via npx ts-node
+        # Використовує npx для запуска ts-файлу без додаткової config
+        run: |
+          npx --yes ts-node --skip-project scripts/lang-autotest.ts
