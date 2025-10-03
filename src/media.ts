@@ -1,10 +1,12 @@
-import { analyzeImage } from "./ai/providers.js";
-import { tgGetFileUrl } from "./adapters/telegram.js";
+// src/media.ts
+import { analyzeImage } from "./ai/providers";
+import { tgGetFileUrl } from "./utils/telegram";
 
-export async function handlePhotoMessage(update, env) {
+export async function handlePhotoMessage(update: any, env: any) {
   const msg = update.message;
   const photos = msg.photo || [];
   if (!photos.length) return "Фото не знайдено.";
+
   // Найбільший розмір — останній елемент
   const fileId = photos[photos.length - 1].file_id;
   const url = await tgGetFileUrl(fileId, env);
