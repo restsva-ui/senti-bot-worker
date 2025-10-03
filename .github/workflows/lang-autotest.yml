@@ -1,35 +1,47 @@
-# Пропонований GitHub Actions workflow для запуску scripts/lang-autotest.ts
+name: Lang Autotest
+
 on:
+  workflow_dispatch: {}
   push:
-    branches:
-      - main
-      - master
-      - 'ci/*'
+    paths:
+      - 'src/utils/i18n.ts'
+      - 'scripts/lang-autotest.ts'
+      - '.github/workflows/lang-autotest.yml'
   pull_request:
-    branches:
-      - main
-      - master
+    paths:
+      - 'src/utils/i18n.ts'
+      - 'scripts/lang-autotest.ts'
+
+concurrency:
+  group: langtest-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  TZ: Europe/Kyiv
 
 jobs:
   lang-autotest:
     name: Run lang-autotest
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
+          cache: npm
 
-      - name: Install dependencies (if package.json present)
-        run: |
-          if [ -f package.json ]; then
-            npm ci
-          fi
+      - name: Install deps
+        run: npm install
 
-      - name: Run lang-autotest via npx ts-node
-        # Використовує npx для запуска ts-файлу без додаткової config
+      - name: Run lang-autotest via tsx
+        run: npx --yes tsx scripts/lang-autotest.ts
+
+      - name: Show time (debug)
         run: |
-          npx --yes ts-node --skip-project scripts/lang-autotest.ts
+          date
+          node -e "console.log(new Date().toString())"
