@@ -21,6 +21,7 @@ export interface Env extends ReplierEnv {
 
   // KV
   LIKES_KV?: KVNamespace;
+  DEDUP_KV?: KVNamespace; // нова KV для антидублю
 }
 
 function json(res: unknown, status = 200) {
@@ -30,6 +31,7 @@ function json(res: unknown, status = 200) {
   });
 }
 
+/** Утиліта: дістаємо chatId / text / lang з різних типів апдейтів */
 function getMessageInfo(update: any): { chatId?: number; text?: string; fromLangCode?: string } {
   const msg =
     update?.message ||
@@ -56,6 +58,7 @@ function getMessageInfo(update: any): { chatId?: number; text?: string; fromLang
   return { chatId, text, fromLangCode };
 }
 
+/** Парсимо мульти-/ask з одного повідомлення */
 function extractAskBlocks(source: string): string[] {
   const t = (source || "").trim();
   const re = /\/ask(?:@\w+)?\s*/gi;
@@ -75,6 +78,17 @@ function extractAskBlocks(source: string): string[] {
   return blocks;
 }
 
+/** Антидубль: запам'ятати update_id на TTL і не обробляти повторно */
+async function seenUpdateRecently(env: Env, updateId: number | string, ttlSec = 300): Promise<boolean> {
+  if (!env.DEDUP_KV) return false; // якщо не прив'язано KV — пропускаємо
+  const key = `upd:${updateId}`;
+  const existed = await env.DEDUP_KV.get(key);
+  if (existed) return true;
+  // ставимо короткий TTL (5 хв за замовч.), щоб не накопичувати сміття
+  await env.DEDUP_KV.put(key, "1", { expirationTtl: ttlSec });
+  return false;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -90,17 +104,25 @@ export default {
 
     // Telegram webhook
     if (request.method === "POST" && url.pathname === "/webhook") {
+      // 1) Перевірка секрету
       const expected = (env.TELEGRAM_SECRET_TOKEN || env.WEBHOOK_SECRET || "").trim();
       if (expected) {
         const got = (request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "").trim();
         if (got !== expected) return json({ ok: false, error: "invalid secret" }, 403);
       }
 
+      // 2) Читаємо апдейт
       let update: any = null;
       try {
         update = await request.json();
       } catch {
         return json({ ok: false, error: "bad json" }, 400);
+      }
+
+      // 3) АНТИДУБЛЬ: якщо такий update_id вже бачили — нічого не робимо
+      const uid: number | string | undefined = update?.update_id;
+      if (uid !== undefined && (await seenUpdateRecently(env, uid, 300))) {
+        return json({ ok: true, dedup: true });
       }
 
       const { chatId, text, fromLangCode } = getMessageInfo(update);
