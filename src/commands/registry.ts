@@ -1,39 +1,24 @@
 // src/commands/registry.ts
-// Єдиний реєстр команд. Даємо ключі і з префіксом "/", і без — щоб router завжди попав.
+// Єдиний реєстр команд. Даємо ключі і з префіксом "/", і без.
 
 type Handler = (ctx: any, args?: any) => Promise<any> | any;
 
-// ---- Безпечні імпорти (працює і з default, і з named) ----
-import startNamed, { start as startExport } from "./start";
-const start: Handler = (startExport as any) ?? (startNamed as any);
+// ---- Імпорти команд ----
+import { ping } from "./ping";
 
-import helpNamed, { help as helpExport } from "./help";
-const help: Handler = (helpExport as any) ?? (helpNamed as any);
-
-import pingNamed, { ping as pingExport } from "./ping";
-const ping: Handler = (pingExport as any) ?? (pingNamed as any);
-
-import healthNamed, { health as healthExport } from "./health";
-const health: Handler = (healthExport as any) ?? (healthNamed as any);
-
-import wikiDefault, {
+import {
   wiki as wikiExport,
   wikiSetAwait,
   wikiMaybeHandleFreeText,
 } from "./wiki";
-const wiki: Handler = (wikiExport as any) ?? (wikiDefault as any);
 
-// AI (може бути відключений змінною середовища)
-import aiNamed, { ai as aiExport } from "./ai";
-const ai: Handler | undefined = (aiExport as any) ?? (aiNamed as any);
+// AI (опціонально)
+import { ai as aiExport } from "./ai";
 
 // ---- Базовий набір без слеша ----
 const base: Record<string, Handler> = {
-  start,
-  help,
   ping,
-  health,
-  wiki,
+  wiki: wikiExport as Handler,
 };
 
 // Додаємо версії з префіксом "/"
@@ -42,9 +27,9 @@ const withSlash = Object.fromEntries(
 );
 
 // Якщо AI є — додаємо обидві форми
-if (ai) {
-  (base as any).ai = ai;
-  (withSlash as any)["/ai"] = ai;
+if (aiExport) {
+  (base as any).ai = aiExport;
+  (withSlash as any)["/ai"] = aiExport;
 }
 
 // Експортуємо єдину мапу, що містить ключі і з "/", і без
@@ -53,10 +38,10 @@ export const COMMANDS: Record<string, Handler> = {
   ...withSlash,
 };
 
-// Виносимо wiki-хелпери
+// Експортуємо wiki-хелпери
 export { wikiSetAwait, wikiMaybeHandleFreeText };
 
-// Утиліти (на випадок якщо десь юзаються)
+// Утиліти
 export function pickHandler(name: string): Handler | undefined {
   return (COMMANDS as any)[name];
 }
