@@ -1,7 +1,6 @@
 // src/commands/menu.ts
 import { tgSendMessage } from "../utils/telegram";
 import type { Env } from "../index";
-import { wikiSetAwait } from "./registry";
 import { likesCommand } from "./likes";
 import { sendHelp } from "./help";
 
@@ -42,14 +41,11 @@ async function writeSettings(env: Env, userId: number, patch: Partial<UserSettin
   await kv.put(skey(userId), JSON.stringify(next));
 }
 
-// ===== Розмітка клавіатур =====
+// ===== Розмітка клавіатур (без "Вікі") =====
 function mainKeyboard() {
   return {
     inline_keyboard: [
-      [
-        { text: "🧠 Задати питання", callback_data: "menu:ask" },
-        { text: "📖 Вікі", callback_data: "menu:wiki" },
-      ],
+      [{ text: "🧠 Задати питання", callback_data: "menu:ask" }],
       [
         { text: "👍 Лайки", callback_data: "menu:likes" },
         { text: "⚙️ Налаштування", callback_data: "menu:settings" },
@@ -123,13 +119,6 @@ export async function menuOnCallback(env: Env, update: any) {
 
   if (data === "menu:ask") {
     await tgSendMessage(env as any, chatId, "Введи своє питання з /ask ...");
-    return;
-  }
-  if (data === "menu:wiki") {
-    try {
-      await wikiSetAwait({ env }, update as any);
-    } catch {}
-    await tgSendMessage(env as any, chatId, "Увімкнено вікі-режим. Напиши термін 👇");
     return;
   }
   if (data === "menu:likes") {
