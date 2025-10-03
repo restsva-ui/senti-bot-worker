@@ -1,3 +1,4 @@
+# .github/workflows/deploy.yml
 name: Deploy to Cloudflare Workers
 
 on:
@@ -9,7 +10,6 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,60 +23,28 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
       - name: Deploy
+        run: |
+          wrangler deploy --config wrangler.toml --keep-vars true
+          echo "Deploy finished at $(date -u)"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          HEALTH_URL: https://senti-bot-worker.restsva.workers.dev/health
-        run: |
-          START_TS=$(date +%s)
 
-          wrangler deploy --config wrangler.toml --keep-vars true
-
-          echo "Deploy finished at $(date -u)"
-
-          # ---- Healthcheck (м'який) ----
-          echo "Healthcheck: $HEALTH_URL"
-          HC_RESP=$(curl -sS -m 15 "$HEALTH_URL" || true)
-          echo "Health response: $HC_RESP"
-          if echo "$HC_RESP" | grep -q '"ok":true'; then
-            HC_STATUS="OK"
-          else
-            HC_STATUS="FAIL"
-          fi
-
-          END_TS=$(date +%s)
-          DURATION=$((END_TS - START_TS))
-
-          # Збережемо в GITHUB_ENV, щоб використати у нотифікації
-          {
-            echo "HC_STATUS=$HC_STATUS"
-            echo "DURATION=$DURATION"
-          } >> "$GITHUB_ENV"
-
-      - name: Telegram getMe (soft)
-        if: ${{ secrets.BOT_TOKEN != '' }}
+      - name: Telegram getMe
+        if: env.BOT_TOKEN != ''
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
           echo "Calling getMe..."
           curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getMe" || true
 
-      - name: Notify Telegram (soft)
-        if: ${{ secrets.BOT_TOKEN != '' && secrets.OWNER_ID != '' }}
+      - name: Notify Telegram
+        if: env.BOT_TOKEN != '' && env.OWNER_ID != ''
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           OWNER_ID: ${{ secrets.OWNER_ID }}
         run: |
-          SHORT_SHA="${GITHUB_SHA::7}"
-          BRANCH="${GITHUB_REF_NAME}"
-          ACTOR="${GITHUB_ACTOR}"
-          MSG="Senti deploy finished
-Branch: ${BRANCH}
-Commit: ${SHORT_SHA} by ${ACTOR}
-Healthcheck: ${HC_STATUS}
-Duration: ${DURATION}s"
-
           echo "Sending Telegram notify to ${OWNER_ID}"
           RESP=$(curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
             -d chat_id="${OWNER_ID}" \
-            --data-urlencode text="$MSG")
+            --data-urlencode text="Senti deploy finished")
           echo "Telegram API response: $RESP"
