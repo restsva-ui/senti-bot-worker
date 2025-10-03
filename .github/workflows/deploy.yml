@@ -4,8 +4,8 @@ name: Deploy to Cloudflare Workers
 on:
   push:
     branches:
-      - main   # ⚠️ якщо у тебе активна гілка master — заміни тут на master
-  workflow_dispatch:  # дозволяє запускати вручну з вкладки Actions
+      - main
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -13,11 +13,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
 
       - name: Install Wrangler
         run: npm install -g wrangler
