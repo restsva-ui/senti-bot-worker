@@ -1,37 +1,24 @@
+# wrangler.toml — стабільний шаблон
 name = "senti-bot-worker"
-account_id = "2cf6e316af8623546c95c0354bc3aa00"
-workers_dev = true
 main = "src/index.ts"
+workers_dev = true
 
-# стабільна дата
+# 🔒 Обовʼязково змініть на свій
+account_id = "<YOUR_CLOUDFLARE_ACCOUNT_ID>"
+
+# Стабільна дата сумісності
 compatibility_date = "2024-09-01"
 
-# зручно дебажити
 minify = false
 
 # ===== KV namespaces =====
+# Створіть свою namespace у Cloudflare → KV, вставте ID нижче
 [[kv_namespaces]]
-binding = "LIKES_KV"                           # для збереження лайків/стану
-id = "7b32e2d1f60846ddb1c653eb52180bf7"        # senti-state
+binding = "LIKES_KV"
+id = "<YOUR_PROD_KV_ID>"
+preview_id = "<YOUR_PREVIEW_KV_ID>"
 
-[[kv_namespaces]]
-binding = "SENTI_CACHE"                        # кеш швидких відповідей
-id = "497eac980691495ea2a0bc8611892d65"        # senti-cache
-
-[[kv_namespaces]]
-binding = "DEDUP_KV"                           # антидубль update_id
-id = "20d81d7b68fa4ac6b9913e2fbd3465d5"        # senti-dedup
-
-# ===== Vars (змінні оточення) =====
-[vars]
-API_BASE_URL = "https://api.telegram.org"
-OWNER_ID = "784869835"                          # твій чат/юзер id
-
-# ===== Секрети =====
-# Додаються окремо: wrangler secret put BOT_TOKEN
-# значення з чек-листа: 8405753130:AAGrDrmi-cXMU6A_H_Y0-a9p-gDowMYu2xw
-
-# ===== Observability (щоб не ловити 10023 на free плані) =====
+# ===== Observability (free план: вимкнено) =====
 [observability]
 enabled = false
 
@@ -42,5 +29,5 @@ local_protocol = "https"
 
 # ===== (опційно) маршрути під свою зону =====
 # [routes]
-# pattern = "bot.your-domain.com/webhook/*"
-# zone_id = "<your-zone-id>"
+# pattern = "bot.example.com/webhook*"
+# zone_id = "<YOUR_ZONE_ID>"
