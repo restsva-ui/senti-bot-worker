@@ -1,9 +1,9 @@
 // src/utils/telegram.ts
-// Уніфіковані та стабільні хелпери Telegram API для Cloudflare Workers (ESM)
+// Хелпери Telegram API для Cloudflare Workers (ESM)
 
 export type Env = {
   BOT_TOKEN: string;
-  API_BASE_URL?: string; // опційно: кастомний endpoint
+  API_BASE_URL?: string; // опційно: свій endpoint
 };
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
@@ -71,7 +71,7 @@ export async function tgGetFileUrl(file_id: string, env: Env): Promise<string> {
   return `${base}/file/bot${env.BOT_TOKEN}/${file_path}`;
 }
 
-/** Виставити команди. scope / language_code — опціональні. */
+/** --- Команди бота --- */
 export async function setMyCommands(
   env: Env,
   commands: Array<{ command: string; description: string }>,
@@ -84,7 +84,6 @@ export async function setMyCommands(
   return tgFetch(env, "setMyCommands", body);
 }
 
-/** Видалити команди. scope / language_code — опціональні. */
 export async function deleteMyCommands(
   env: Env,
   scope?: Record<string, any>,
@@ -94,4 +93,15 @@ export async function deleteMyCommands(
   if (scope) body.scope = scope;
   if (language_code) body.language_code = language_code;
   return tgFetch(env, "deleteMyCommands", body);
+}
+
+export async function getMyCommands(
+  env: Env,
+  scope?: Record<string, any>,
+  language_code?: string
+) {
+  const body: any = {};
+  if (scope) body.scope = scope;
+  if (language_code) body.language_code = language_code;
+  return tgFetch<{ ok: boolean; result: Array<{ command: string; description: string }> }>(env, "getMyCommands", body);
 }
