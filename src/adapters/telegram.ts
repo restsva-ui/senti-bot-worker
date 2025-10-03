@@ -1,67 +1,31 @@
-// src/adapters/telegram.js
+// src/adapters/telegram.ts
+// Backward-compatible адаптер. Делегує виклики у utils/telegram і використовує правильний BOT_TOKEN.
 
-// Базова функція для виклику Telegram API
-export async function tg(env, method, body) {
-  const url = `https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/${method}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json;charset=UTF-8" },
-    body: JSON.stringify(body),
-  });
+import {
+  tgSendMessage,
+  answerCallbackQuery,
+  editMessageText,
+  getFile,
+  tgGetFileUrl,
+  setMyCommands,
+  type Env as TGEnv,
+} from "../utils/telegram";
+
+export type Env = TGEnv;
+
+// Залишаємо експорти з такими ж іменами, якщо старий код їх імпортував.
+export { tgSendMessage, answerCallbackQuery, editMessageText, getFile, tgGetFileUrl, setMyCommands };
+
+// Мінімальна сумісність із старою функцією tg(env, method, body)
+export async function tg(env: Env, method: string, body: Record<string, any>) {
+  // перенаправляємо у fetch через generic endpoint
+  const base = (env.API_BASE_URL || "https://api.telegram.org").replace(/\/+$/, "");
+  const url = `${base}/bot${env.BOT_TOKEN}/${method}`;
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json; charset=utf-8" }, body: JSON.stringify(body) });
   if (!res.ok) {
-    console.error(`Telegram API error [${method}]:`, await res.text());
+    let text = "";
+    try { text = await res.text(); } catch {}
+    console.error("TG API error:", { method, status: res.status, text });
   }
   return res.json();
-}
-
-// Відправка текстового повідомлення
-export async function sendMessage(env, chat_id, text, extra = {}) {
-  return tg(env, "sendMessage", {
-    chat_id,
-    text,
-    parse_mode: "HTML", // можна писати <b>жирний</b>, <i>курсив</i>
-    ...extra,
-  });
-}
-
-// Відправка фото
-export async function sendPhoto(env, chat_id, photo, caption = "", extra = {}) {
-  return tg(env, "sendPhoto", {
-    chat_id,
-    photo,
-    caption,
-    parse_mode: "HTML",
-    ...extra,
-  });
-}
-
-// Відправка документа
-export async function sendDocument(env, chat_id, file_id, caption = "", extra = {}) {
-  return tg(env, "sendDocument", {
-    chat_id,
-    document: file_id,
-    caption,
-    parse_mode: "HTML",
-    ...extra,
-  });
-}
-
-// Редагування тексту повідомлення
-export async function editMessageText(env, chat_id, message_id, text, extra = {}) {
-  return tg(env, "editMessageText", {
-    chat_id,
-    message_id,
-    text,
-    parse_mode: "HTML",
-    ...extra,
-  });
-}
-
-// Відповідь на callback (кнопки)
-export async function answerCallbackQuery(env, callback_query_id, text = "", show_alert = false) {
-  return tg(env, "answerCallbackQuery", {
-    callback_query_id,
-    text,
-    show_alert,
-  });
 }
