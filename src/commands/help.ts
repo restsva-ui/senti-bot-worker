@@ -13,8 +13,9 @@ const HELP_TEXTS: Record<Lang, string> = {
     "Доступні команди:",
     "• /ping — перевірка звʼязку",
     "• /ask <текст> — питання до моделі",
+    "• /likes — лайки чату",
     "• /stats — статистика (демо)",
-    "• /menu — головне меню",
+    "• /menu — мінімальне меню",
     "• /help — цей список",
     "",
     "Діагностика (GET у браузері):",
@@ -24,16 +25,18 @@ const HELP_TEXTS: Record<Lang, string> = {
     "• /diagnostics/ai/openrouter/models",
     "• /diagnostics/ai/cf-vision",
     "",
-    "Порада: якщо відповідь не прийшла — перевір змінні середовища (API-ключі) у воркері.",
+    "Порада: якщо відповідь не прийшла — перевір змінні середовища (API-ключі) у Worker.",
   ].join("\n"),
+
   ru: [
     "Senti — справка",
     "",
     "Доступные команды:",
     "• /ping — проверка связи",
     "• /ask <текст> — вопрос к модели",
+    "• /likes — лайки чата",
     "• /stats — статистика (демо)",
-    "• /menu — главное меню",
+    "• /menu — минимальное меню",
     "• /help — этот список",
     "",
     "Диагностика (GET в браузере):",
@@ -43,19 +46,21 @@ const HELP_TEXTS: Record<Lang, string> = {
     "• /diagnostics/ai/openrouter/models",
     "• /diagnostics/ai/cf-vision",
     "",
-    "Подсказка: если ответа нет — проверь переменные окружения (API-ключи) в воркере.",
+    "Подсказка: если ответа нет — проверь переменные окружения (API-ключи) в Worker.",
   ].join("\n"),
+
   de: [
     "Senti — Hilfe",
     "",
     "Verfügbare Befehle:",
     "• /ping — Verbindungstest",
     "• /ask <Text> — Frage an das Modell",
+    "• /likes — Chat-Likes",
     "• /stats — Statistik (Demo)",
-    "• /menu — Hauptmenü",
+    "• /menu — minimalistisches Menü",
     "• /help — diese Liste",
     "",
-    "Diagnose (GET im Browser):",
+    "Diagnose (im Browser via GET):",
     "• /diagnostics/ai/provider",
     "• /diagnostics/ai/gemini/models",
     "• /diagnostics/ai/gemini/ping",
@@ -64,14 +69,16 @@ const HELP_TEXTS: Record<Lang, string> = {
     "",
     "Tipp: Wenn keine Antwort kommt – Umgebungsvariablen (API-Keys) im Worker prüfen.",
   ].join("\n"),
+
   en: [
     "Senti — Help",
     "",
     "Available commands:",
     "• /ping — connectivity check",
     "• /ask <text> — question to the model",
+    "• /likes — chat likes",
     "• /stats — statistics (demo)",
-    "• /menu — main menu",
+    "• /menu — minimalist menu",
     "• /help — this list",
     "",
     "Diagnostics (GET in browser):",
@@ -85,8 +92,10 @@ const HELP_TEXTS: Record<Lang, string> = {
   ].join("\n"),
 };
 
+/** Надсилає довідку з урахуванням мови користувача */
 export async function sendHelp(env: Env, chatId: number, langCode?: string) {
   const lang = normalizeLang(langCode);
   const text = HELP_TEXTS[lang] ?? HELP_TEXTS.en;
+  // жодних кнопок/меню — тільки текст
   await tgSendMessage(env as any, chatId, text);
 }
