@@ -26,7 +26,6 @@ const HELP_TEXTS: Record<Lang, string> = {
     "",
     "Порада: якщо відповідь не прийшла — перевір змінні середовища (API-ключі) у воркері.",
   ].join("\n"),
-
   ru: [
     "Senti — справка",
     "",
@@ -46,7 +45,6 @@ const HELP_TEXTS: Record<Lang, string> = {
     "",
     "Подсказка: если ответа нет — проверь переменные окружения (API-ключи) в воркере.",
   ].join("\n"),
-
   de: [
     "Senti — Hilfe",
     "",
@@ -66,7 +64,6 @@ const HELP_TEXTS: Record<Lang, string> = {
     "",
     "Tipp: Wenn keine Antwort kommt – Umgebungsvariablen (API-Keys) im Worker prüfen.",
   ].join("\n"),
-
   en: [
     "Senti — Help",
     "",
@@ -88,13 +85,8 @@ const HELP_TEXTS: Record<Lang, string> = {
   ].join("\n"),
 };
 
-/** Надсилає довідку + кнопку відкриття меню */
 export async function sendHelp(env: Env, chatId: number, langCode?: string) {
   const lang = normalizeLang(langCode);
   const text = HELP_TEXTS[lang] ?? HELP_TEXTS.en;
-  await tgSendMessage(env as any, chatId, text, {
-    reply_markup: {
-      inline_keyboard: [[{ text: "🔘 Відкрити меню", callback_data: "menu:open" }]],
-    },
-  });
+  await tgSendMessage(env as any, chatId, text);
 }
