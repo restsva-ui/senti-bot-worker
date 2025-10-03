@@ -1,4 +1,4 @@
-name: Cloudflare Workers / deploy
+name: Deploy to Cloudflare Workers
 
 on:
   push:
@@ -8,43 +8,27 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    concurrency:
-      group: cf-deploy-${{ github.ref }}
-      cancel-in-progress: true
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
+      - name: Install deps
+        run: npm ci || npm i
+
       - name: Install Wrangler
-        run: npm i -g wrangler@4.40.1
+        run: npm install -g wrangler@4
 
-      - name: Show Wrangler version
-        run: wrangler --version
-
-      - name: Cloudflare whoami (checks token & account)
+      - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: wrangler whoami
-
-      - name: Deploy (uses wrangler.toml from repo root)
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: wrangler deploy --config wrangler.toml --keep-vars true
-
-      - name: Set Telegram bot commands (optional)
-        if: ${{ secrets.BOT_TOKEN != '' }}
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-        run: |
-          set -e
-          API="https://api.telegram.org/bot${BOT_TOKEN}"
-          CMDS='[{"command":"ping","description":"перевірка звʼязку"},{"command":"ask","description":"постав запитання ІІ"},{"command":"help","description":"список команд"}]'
-          curl -sS -X POST "$API/setMyCommands" -d "commands=$CMDS" > /dev/null
-          echo "Bot commands updated"
+        run: wrangler deploy --env production
