@@ -1,57 +1,28 @@
+# .github/workflows/deploy.yml
 name: Deploy to Cloudflare Workers
 
 on:
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Target environment'
-        required: false
-        default: 'production'
   push:
-    tags:
-      - 'v*.*.*'     # деплоїмо лише коли пушать реліз-теги
     branches:
-      - 'release/**' # або релізні гілки (опційно)
-      - main         # опційно, якщо так задумано
-      - master       # опційно, якщо так задумано
-
-concurrency:
-  group: deploy-${{ github.ref }}
-  cancel-in-progress: false
-
-permissions:
-  contents: read
-
-env:
-  TZ: Europe/Kyiv
+      - main   # ⚠️ якщо у тебе активна гілка master — заміни тут на master
+  workflow_dispatch:  # дозволяє запускати вручну з вкладки Actions
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
-
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
-      - name: Install deps
-        run: npm install
+      - name: Install Wrangler
+        run: npm install -g wrangler
 
-      - name: Build (optional)
-        run: npm run build --if-present
-
-      - name: Deploy with Wrangler v4
+      - name: Deploy to Cloudflare Workers
+        run: wrangler deploy --config wrangler.toml --keep-vars true
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: npx -y wrangler@4 deploy --config wrangler.toml --keep-vars true
-
-      - name: Show time (debug)
-        run: |
-          date
-          node -e "console.log(new Date().toString())"
