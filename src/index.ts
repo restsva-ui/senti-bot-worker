@@ -8,6 +8,7 @@ import { askSmart, quickTemplateReply, type ReplierEnv } from "./services/replie
 import { wikiSetAwait, wikiMaybeHandleFreeText } from "./commands/registry";
 import { likesCommand, likesCanHandleCallback, likesOnCallback } from "./commands/likes";
 import { statsCommand } from "./commands/stats";
+import { menuCommand, menuOnCallback } from "./commands/menu";   // 🆕 меню
 
 export interface Env extends ReplierEnv {
   // Telegram
@@ -21,7 +22,7 @@ export interface Env extends ReplierEnv {
 
   // KV
   LIKES_KV?: KVNamespace;
-  DEDUP_KV?: KVNamespace; // нова KV для антидублю
+  DEDUP_KV?: KVNamespace; // антидубль
 }
 
 function json(res: unknown, status = 200) {
@@ -31,7 +32,6 @@ function json(res: unknown, status = 200) {
   });
 }
 
-/** Утиліта: дістаємо chatId / text / lang з різних типів апдейтів */
 function getMessageInfo(update: any): { chatId?: number; text?: string; fromLangCode?: string } {
   const msg =
     update?.message ||
@@ -58,7 +58,6 @@ function getMessageInfo(update: any): { chatId?: number; text?: string; fromLang
   return { chatId, text, fromLangCode };
 }
 
-/** Парсимо мульти-/ask з одного повідомлення */
 function extractAskBlocks(source: string): string[] {
   const t = (source || "").trim();
   const re = /\/ask(?:@\w+)?\s*/gi;
@@ -78,13 +77,11 @@ function extractAskBlocks(source: string): string[] {
   return blocks;
 }
 
-/** Антидубль: запам'ятати update_id на TTL і не обробляти повторно */
 async function seenUpdateRecently(env: Env, updateId: number | string, ttlSec = 300): Promise<boolean> {
-  if (!env.DEDUP_KV) return false; // якщо не прив'язано KV — пропускаємо
+  if (!env.DEDUP_KV) return false;
   const key = `upd:${updateId}`;
   const existed = await env.DEDUP_KV.get(key);
   if (existed) return true;
-  // ставимо короткий TTL (5 хв за замовч.), щоб не накопичувати сміття
   await env.DEDUP_KV.put(key, "1", { expirationTtl: ttlSec });
   return false;
 }
@@ -93,25 +90,20 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // Healthcheck
     if (request.method === "GET" && url.pathname === "/health") {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // Diagnostics passthrough
     const diag = await handleDiagnostics(request, env as any, url);
     if (diag) return diag;
 
-    // Telegram webhook
     if (request.method === "POST" && url.pathname === "/webhook") {
-      // 1) Перевірка секрету
       const expected = (env.TELEGRAM_SECRET_TOKEN || env.WEBHOOK_SECRET || "").trim();
       if (expected) {
         const got = (request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "").trim();
         if (got !== expected) return json({ ok: false, error: "invalid secret" }, 403);
       }
 
-      // 2) Читаємо апдейт
       let update: any = null;
       try {
         update = await request.json();
@@ -119,7 +111,6 @@ export default {
         return json({ ok: false, error: "bad json" }, 400);
       }
 
-      // 3) АНТИДУБЛЬ: якщо такий update_id вже бачили — нічого не робимо
       const uid: number | string | undefined = update?.update_id;
       if (uid !== undefined && (await seenUpdateRecently(env, uid, 300))) {
         return json({ ok: true, dedup: true });
@@ -128,17 +119,20 @@ export default {
       const { chatId, text, fromLangCode } = getMessageInfo(update);
 
       try {
-        // ===== Callback кнопки =====
+        // ==== Callback ====
         if (update?.callback_query?.id && chatId) {
           const data = update?.callback_query?.data as string | undefined;
 
-          // 1) Лайки
           if (likesCanHandleCallback(data)) {
             await likesOnCallback(env as any, update as any);
             return json({ ok: true, handled: "likes:callback" });
           }
 
-          // 2) За замовчуванням — echo
+          if (data?.startsWith("menu:") || data?.startsWith("settings:")) {
+            await menuOnCallback(env as any, update as any);
+            return json({ ok: true, handled: "menu:callback" });
+          }
+
           await tgSendMessage(env as any, chatId, `tap: ${data ?? ""}`);
           return json({ ok: true, handled: "callback:echo" });
         }
@@ -146,38 +140,37 @@ export default {
         if (typeof text === "string" && chatId) {
           const trimmed = text.trim();
 
-          // /start | /help
           if (/^\/start(?:@\w+)?$/i.test(trimmed) || /^\/help(?:@\w+)?$/i.test(trimmed)) {
             const langForHelp: Lang = normalizeLang(trimmed, fromLangCode);
             await sendHelp(env as any, chatId, langForHelp);
             return json({ ok: true, handled: "help" });
           }
 
-          // /ping
           if (/^\/ping(?:@\w+)?$/i.test(trimmed)) {
             await pingCommand(env as any, chatId);
             return json({ ok: true, handled: "ping" });
           }
 
-          // /likes
           if (/^\/likes(?:@\w+)?$/i.test(trimmed)) {
             await likesCommand(env as any, { message: { chat: { id: chatId } } });
             return json({ ok: true, handled: "likes" });
           }
 
-          // /stats
           if (/^\/stats(?:@\w+)?$/i.test(trimmed)) {
             await statsCommand(env as any, { message: { chat: { id: chatId } } });
             return json({ ok: true, handled: "stats" });
           }
 
-          // /wiki
+          if (/^\/menu(?:@\w+)?$/i.test(trimmed)) {
+            await menuCommand(env as any, chatId);
+            return json({ ok: true, handled: "menu" });
+          }
+
           if (trimmed === "/wiki" || trimmed.startsWith("/wiki ")) {
             await wikiSetAwait({ env }, update as any);
             return json({ ok: true, handled: "wiki" });
           }
 
-          // /ask ...
           if (/\/ask(?:@\w+)?\b/i.test(trimmed)) {
             const blocks = extractAskBlocks(trimmed);
             if (blocks.length === 0) {
@@ -204,13 +197,11 @@ export default {
             return json({ ok: true, handled: `ask:${blocks.length}` });
           }
 
-          // wiki: вільний текст
           if (!trimmed.startsWith("/")) {
             const handled = await wikiMaybeHandleFreeText({ env }, update as any);
             if (handled) return json({ ok: true, handled: "wiki:free" });
           }
 
-          // fallback → один /ask
           if (trimmed.length > 0) {
             const msgLang: Lang = normalizeLang(trimmed, fromLangCode);
 
