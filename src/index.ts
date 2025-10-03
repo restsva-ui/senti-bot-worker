@@ -122,29 +122,52 @@ export default {
     // Guard для службових роутів
     const guardOK = () => (env.WEBHOOK_SECRET || "") === (url.searchParams.get("secret") || "");
 
+    // --- Службовий echo для діагностики параметрів ---
+    if (request.method === "GET" && url.pathname === "/echo") {
+      if (!guardOK()) return json({ ok: false, error: "forbidden" }, 403);
+      const chatIdStr = url.searchParams.get("chat_id");
+      return json({ ok: true, chatIdStr, asNumber: chatIdStr ? Number(chatIdStr) : null });
+    }
+
     // ---- Командні сервіси (глобальні) ----
     if (request.method === "GET" && url.pathname === "/reset-commands") {
       if (!guardOK()) return json({ ok: false, error: "forbidden" }, 403);
-      const res = await resetAllCommands(env as any);
-      return json({ ok: true, ...res });
+      try {
+        const res = await resetAllCommands(env as any);
+        return json({ ok: true, ...res });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
     }
 
     if (request.method === "GET" && url.pathname === "/sync-commands") {
       if (!guardOK()) return json({ ok: false, error: "forbidden" }, 403);
-      const res = await syncCommands(env as any);
-      return json({ ok: true, ...res, commands: commandsList() });
+      try {
+        const res = await syncCommands(env as any);
+        return json({ ok: true, ...res, commands: commandsList() });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
     }
 
     if (request.method === "GET" && url.pathname === "/force-empty-commands") {
       if (!guardOK()) return json({ ok: false, error: "forbidden" }, 403);
-      const res = await forceEmptyAllCommands(env as any);
-      return json({ ok: true, ...res, emptied: true });
+      try {
+        const res = await forceEmptyAllCommands(env as any);
+        return json({ ok: true, ...res, emptied: true });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
     }
 
     if (request.method === "GET" && url.pathname === "/debug-commands") {
       if (!guardOK()) return json({ ok: false, error: "forbidden" }, 403);
-      const all = await snapshotCommands(env as any);
-      return json({ ok: true, snapshot: all });
+      try {
+        const all = await snapshotCommands(env as any);
+        return json({ ok: true, snapshot: all });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
     }
 
     // ---- Командні сервіси (конкретний чат) ----
@@ -154,8 +177,12 @@ export default {
       if (!chatIdStr) return json({ ok: false, error: "chat_id required" }, 400);
       const chatId = Number(chatIdStr);
       if (Number.isNaN(chatId)) return json({ ok: false, error: "chat_id must be number" }, 400);
-      const snap = await snapshotChatCommands(env as any, chatId);
-      return json({ ok: true, snapshot: snap });
+      try {
+        const snap = await snapshotChatCommands(env as any, chatId);
+        return json({ ok: true, snapshot: snap });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
     }
 
     if (request.method === "GET" && url.pathname === "/reset-commands-chat") {
@@ -164,8 +191,12 @@ export default {
       if (!chatIdStr) return json({ ok: false, error: "chat_id required" }, 400);
       const chatId = Number(chatIdStr);
       if (Number.isNaN(chatId)) return json({ ok: false, error: "chat_id must be number" }, 400);
-      const res = await resetChatCommands(env as any, chatId);
-      return json({ ok: true, ...res, chatId });
+      try {
+        const res = await resetChatCommands(env as any, chatId);
+        return json({ ok: true, ...res, chatId });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
     }
 
     if (request.method === "GET" && url.pathname === "/sync-commands-chat") {
@@ -174,8 +205,12 @@ export default {
       if (!chatIdStr) return json({ ok: false, error: "chat_id required" }, 400);
       const chatId = Number(chatIdStr);
       if (Number.isNaN(chatId)) return json({ ok: false, error: "chat_id must be number" }, 400);
-      const res = await syncChatCommands(env as any, chatId);
-      return json({ ok: true, ...res, chatId, commands: commandsList() });
+      try {
+        const res = await syncChatCommands(env as any, chatId);
+        return json({ ok: true, ...res, chatId, commands: commandsList() });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message || String(e) }, 500);
+      }
     }
 
     // ---- Webhook ----
