@@ -1,4 +1,4 @@
-name: Deploy to Cloudflare Workers
+name: Smoke
 
 on:
   push:
@@ -7,39 +7,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy:
+  say:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Wrangler
-        run: npm install -g wrangler
-
-      - name: Show Cloudflare account
-        run: wrangler whoami
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-
-      - name: Deploy to Cloudflare Workers
-        run: |
-          wrangler deploy --config wrangler.toml --keep-vars true
-          echo "✅ Deploy finished successfully at $(date -u)"
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-
-      - name: Notify in Telegram (soft)
-        if: always()
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          OWNER_ID: ${{ secrets.OWNER_ID }}
-        run: |
-          echo "Sending Telegram notification..."
-          RESP=$(curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-            -d chat_id="${OWNER_ID}" \
-            --data-urlencode text="🚀 Senti деплой завершено ✅
-Repo: ${GITHUB_REPOSITORY}
-Commit: ${GITHUB_SHA::7}
-Time (UTC): $(date -u +'%Y-%m-%d %H:%M:%S')" || true)
-          echo "Telegram API response: $RESP"
+      - name: Echo
+        run: echo "smoke OK"
