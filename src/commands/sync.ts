@@ -1,5 +1,5 @@
 // src/commands/sync.ts
-import { setMyCommands, deleteMyCommands } from "../utils/telegram";
+import { setMyCommands, deleteMyCommands, getMyCommands } from "../utils/telegram";
 import type { Env } from "../index";
 
 /** Єдиний канонічний список команд бота (без wiki). */
@@ -15,20 +15,20 @@ export function commandsList() {
   ];
 }
 
+const SCOPES = [
+  { type: "default" },
+  { type: "all_private_chats" },
+  { type: "all_group_chats" },
+  { type: "all_chat_administrators" },
+] as const;
+
+const LANGS = [undefined, "uk", "en", "ru"] as const;
+
 /** Скинути команди в усіх основних scope і мовах. */
 export async function resetAllCommands(env: Env) {
-  const scopes = [
-    { type: "default" },
-    { type: "all_private_chats" },
-    { type: "all_group_chats" },
-    { type: "all_chat_administrators" },
-  ] as const;
-
-  const langs = [undefined, "uk", "en"] as const;
-
-  for (const s of scopes) {
+  for (const s of SCOPES) {
     await deleteMyCommands(env as any, s as any, undefined);
-    for (const lng of langs) {
+    for (const lng of LANGS) {
       await deleteMyCommands(env as any, s as any, lng as any);
     }
   }
@@ -39,19 +39,53 @@ export async function resetAllCommands(env: Env) {
 export async function syncCommands(env: Env) {
   const commands = commandsList();
 
-  const scopes = [
-    { type: "default" },
-    { type: "all_private_chats" },
-    { type: "all_group_chats" },
-    { type: "all_chat_administrators" },
-  ] as const;
-
-  const langs = [undefined, "uk", "en"] as const;
-
-  for (const s of scopes) {
-    // Спочатку видалимо, щоб прибрати залишки старих команд
+  for (const s of SCOPES) {
     await deleteMyCommands(env as any, s as any, undefined);
-    for (const lng of langs) {
+    for (const lng of LANGS) {
+      await setMyCommands(env as any, commands, s as any, lng as any);
+    }
+  }
+  return { ok: true };
+}
+
+/** Для діагностики: показати команди по всіх scope/lang. */
+export async function snapshotCommands(env: Env) {
+  const out: Record<string, any> = {};
+  for (const s of SCOPES) {
+    const sKey = s.type;
+    out[sKey] = {};
+    for (const lng of LANGS) {
+      const r = await getMyCommands(env as any, s as any, lng as any);
+      out[sKey][lng || "defaultLang"] = r?.result || [];
+    }
+  }
+  return out;
+}
+
+/** Опційно: скинути/виставити для конкретного чату. */
+export async function resetChatCommands(env: Env, chatId: number | string) {
+  const scopes = [
+    { type: "chat", chat_id: chatId },
+    { type: "chat_administrators", chat_id: chatId },
+  ];
+  for (const s of scopes) {
+    await deleteMyCommands(env as any, s as any, undefined);
+    for (const lng of LANGS) {
+      await deleteMyCommands(env as any, s as any, lng as any);
+    }
+  }
+  return { ok: true };
+}
+
+export async function syncChatCommands(env: Env, chatId: number | string) {
+  const scopes = [
+    { type: "chat", chat_id: chatId },
+    { type: "chat_administrators", chat_id: chatId },
+  ];
+  const commands = commandsList();
+  for (const s of scopes) {
+    await deleteMyCommands(env as any, s as any, undefined);
+    for (const lng of LANGS) {
       await setMyCommands(env as any, commands, s as any, lng as any);
     }
   }
