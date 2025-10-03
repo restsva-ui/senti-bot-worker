@@ -17,6 +17,11 @@ jobs:
       - name: Install Wrangler
         run: npm install -g wrangler
 
+      - name: Show Cloudflare account
+        run: wrangler whoami
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
       - name: Deploy to Cloudflare Workers
         run: wrangler deploy --config wrangler.toml --keep-vars true
         env:
