@@ -1,37 +1,29 @@
 // src/commands/registry.ts
-// Єдиний реєстр команд. Даємо ключі і з префіксом "/", і без.
-
 type Handler = (ctx: any, args?: any) => Promise<any> | any;
 
-// ---- Імпорти команд ----
 import { ping } from "./ping";
 
-// AI (опціонально)
-import { ai as aiExport } from "./ai";
-
-// ---- Базовий набір без слеша ----
-const base: Record<string, Handler> = {
-  ping,
-};
-
-// Додаємо версії з префіксом "/"
-const withSlash = Object.fromEntries(
-  Object.entries(base).map(([k, v]) => ["/" + k, v])
-);
-
-// Якщо AI є — додаємо обидві форми
-if (aiExport) {
-  (base as any).ai = aiExport;
-  (withSlash as any)["/ai"] = aiExport;
+// AI — опційно, якщо існує файл ./ai
+let ai: Handler | undefined;
+try {
+  // @ts-ignore
+  const { ai: aiExport } = await import("./ai");
+  ai = aiExport as Handler | undefined;
+} catch {
+  ai = undefined;
 }
 
-// Експортуємо єдину мапу, що містить ключі і з "/", і без
-export const COMMANDS: Record<string, Handler> = {
-  ...base,
-  ...withSlash,
-};
+const base: Record<string, Handler> = { ping };
+const withSlash = Object.fromEntries(Object.entries(base).map(([k, v]) => ["/" + k, v]));
+if (ai) {
+  (base as any).ai = ai;
+  (withSlash as any)["/ai"] = ai;
+}
 
-// Утиліти
+export const COMMANDS: Record<string, Handler> = { ...base, ...withSlash };
+export const wikiSetAwait = undefined as unknown as never;          // більше не експортуємо
+export const wikiMaybeHandleFreeText = undefined as unknown as never; // більше не експортуємо
+
 export function pickHandler(name: string): Handler | undefined {
   return (COMMANDS as any)[name];
 }
