@@ -71,8 +71,27 @@ export async function tgGetFileUrl(file_id: string, env: Env): Promise<string> {
   return `${base}/file/bot${env.BOT_TOKEN}/${file_path}`;
 }
 
-export async function setMyCommands(env: Env, commands: Array<{ command: string; description: string }>, scope?: any) {
+/** Виставити команди. scope / language_code — опціональні. */
+export async function setMyCommands(
+  env: Env,
+  commands: Array<{ command: string; description: string }>,
+  scope?: Record<string, any>,
+  language_code?: string
+) {
   const body: any = { commands };
   if (scope) body.scope = scope;
+  if (language_code) body.language_code = language_code;
   return tgFetch(env, "setMyCommands", body);
+}
+
+/** Видалити команди. scope / language_code — опціональні. */
+export async function deleteMyCommands(
+  env: Env,
+  scope?: Record<string, any>,
+  language_code?: string
+) {
+  const body: any = {};
+  if (scope) body.scope = scope;
+  if (language_code) body.language_code = language_code;
+  return tgFetch(env, "deleteMyCommands", body);
 }
