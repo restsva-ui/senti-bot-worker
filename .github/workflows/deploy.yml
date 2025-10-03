@@ -1,4 +1,5 @@
-name: Smoke
+# .github/workflows/deploy.yml
+name: Deploy to Cloudflare Workers
 
 on:
   push:
@@ -7,8 +8,45 @@ on:
   workflow_dispatch:
 
 jobs:
-  say:
+  deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Echo
-        run: echo "smoke OK"
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Wrangler
+        run: npm install -g wrangler
+
+      - name: Cloudflare whoami
+        run: wrangler whoami
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Deploy
+        run: |
+          wrangler deploy --config wrangler.toml --keep-vars true
+          echo "Deploy finished at $(date -u)"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      # --- DEBUG Telegram: показати хто цей бот (перевірка токена)
+      - name: Telegram getMe (soft)
+        if: ${{ secrets.BOT_TOKEN != '' }}
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          echo "Calling getMe..."
+          curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getMe" || true
+
+      # --- Надіслати повідомлення і завжди показати відповідь API у логах
+      - name: Notify Telegram (soft)
+        if: ${{ secrets.BOT_TOKEN != '' && secrets.OWNER_ID != '' }}
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
+        run: |
+          echo "Sending Telegram notify to ${OWNER_ID}"
+          RESP=$(curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -d chat_id="${OWNER_ID}" \
+            --data-urlencode text="Senti deploy finished")
+          echo "Telegram API response: $RESP"
