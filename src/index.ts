@@ -8,7 +8,7 @@ import { askSmart, quickTemplateReply, type ReplierEnv } from "./services/replie
 import { likesCommand, likesCanHandleCallback, likesOnCallback } from "./commands/likes";
 import { statsCommand } from "./commands/stats";
 import { menuCommand, menuOnCallback } from "./commands/menu";
-import { syncCommands, commandsList, resetAllCommands } from "./commands/sync";
+import { syncCommands, commandsList, resetAllCommands, snapshotCommands, resetChatCommands, syncChatCommands } from "./commands/sync";
 
 export interface Env extends ReplierEnv {
   BOT_TOKEN: string;
@@ -22,6 +22,7 @@ export interface Env extends ReplierEnv {
   SENTI_CACHE?: KVNamespace;
 }
 
+/* --------------- helpers --------------- */
 function json(res: unknown, status = 200) {
   return new Response(JSON.stringify(res), {
     status,
@@ -93,6 +94,7 @@ async function readJsonSafe(req: Request, maxBytes = 1024 * 1024) {
   return JSON.parse(text);
 }
 
+/* --------------- worker --------------- */
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -102,35 +104,56 @@ export default {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // Діагностика (важливо: clone(), щоб не витратити body)
-    const diag = await handleDiagnostics(request.clone(), env as any, url);
-    if (diag) return diag;
+    // ⚠️ Діагностика ТІЛЬКИ для не-/webhook маршрутів,
+    // щоб не чіпати body Telegram-запитів.
+    if (url.pathname !== "/webhook") {
+      const diag = await handleDiagnostics(request, env as any, url);
+      if (diag) return diag;
+    }
 
-    // ---- Reset commands (DELETE all scopes/langs) ----
+    // ---- Командні сервіси (з телефону) ----
     if (request.method === "GET" && url.pathname === "/reset-commands") {
       const secret = url.searchParams.get("secret") || "";
-      if ((env.WEBHOOK_SECRET || "") && secret !== env.WEBHOOK_SECRET) {
-        return json({ ok: false, error: "forbidden" }, 403);
-      }
+      if ((env.WEBHOOK_SECRET || "") && secret !== env.WEBHOOK_SECRET) return json({ ok: false, error: "forbidden" }, 403);
       const res = await resetAllCommands(env as any);
       return json({ ok: true, ...res });
     }
 
-    // ---- Sync commands (delete + set across scopes/langs) ----
     if (request.method === "GET" && url.pathname === "/sync-commands") {
       const secret = url.searchParams.get("secret") || "";
-      if ((env.WEBHOOK_SECRET || "") && secret !== env.WEBHOOK_SECRET) {
-        return json({ ok: false, error: "forbidden" }, 403);
-      }
+      if ((env.WEBHOOK_SECRET || "") && secret !== env.WEBHOOK_SECRET) return json({ ok: false, error: "forbidden" }, 403);
       const res = await syncCommands(env as any);
       return json({ ok: true, ...res, commands: commandsList() });
     }
 
-    // Webhook
+    if (request.method === "GET" && url.pathname === "/debug-commands") {
+      const secret = url.searchParams.get("secret") || "";
+      if ((env.WEBHOOK_SECRET || "") && secret !== env.WEBHOOK_SECRET) return json({ ok: false, error: "forbidden" }, 403);
+      const all = await snapshotCommands(env as any);
+      return json({ ok: true, snapshot: all });
+    }
+
+    if (request.method === "GET" && url.pathname === "/sync-commands-chat") {
+      const secret = url.searchParams.get("secret") || "";
+      if ((env.WEBHOOK_SECRET || "") && secret !== env.WEBHOOK_SECRET) return json({ ok: false, error: "forbidden" }, 403);
+      const chatId = url.searchParams.get("chat_id");
+      if (!chatId) return json({ ok: false, error: "chat_id required" }, 400);
+      const res = await syncChatCommands(env as any, chatId);
+      return json({ ok: true, ...res, chatId });
+    }
+
+    if (request.method === "GET" && url.pathname === "/reset-commands-chat") {
+      const secret = url.searchParams.get("secret") || "";
+      if ((env.WEBHOOK_SECRET || "") && secret !== env.WEBHOOK_SECRET) return json({ ok: false, error: "forbidden" }, 403);
+      const chatId = url.searchParams.get("chat_id");
+      if (!chatId) return json({ ok: false, error: "chat_id required" }, 400);
+      const res = await resetChatCommands(env as any, chatId);
+      return json({ ok: true, ...res, chatId });
+    }
+
+    // ---- Webhook ----
     if (url.pathname === "/webhook") {
-      if (request.method !== "POST") {
-        return json({ ok: false, error: "method not allowed" }, 405);
-      }
+      if (request.method !== "POST") return json({ ok: false, error: "method not allowed" }, 405);
 
       const expected = (env.WEBHOOK_SECRET || "").trim();
       if (expected) {
@@ -201,7 +224,6 @@ export default {
             return json({ ok: true, handled: "menu" });
           }
 
-          // ===== /ask (може бути кілька разів у одному повідомленні) =====
           if (/\/ask(?:@\w+)?\b/i.test(trimmed)) {
             const blocks = extractAskBlocks(trimmed);
             if (blocks.length === 0) {
@@ -212,11 +234,9 @@ export default {
             const answers: string[] = [];
             for (const q of blocks) {
               const qLang: Lang = normalizeLang(q, fromLangCode);
-
               const quick = quickTemplateReply(qLang, q);
-              if (quick) {
-                answers.push(quick);
-              } else {
+              if (quick) answers.push(quick);
+              else {
                 const { text: answer } = await askSmart(env, q, qLang);
                 answers.push(answer);
               }
@@ -226,16 +246,13 @@ export default {
             return json({ ok: true, handled: `ask:${blocks.length}` });
           }
 
-          // fallback → один /ask
           if (trimmed.length > 0) {
             const msgLang: Lang = normalizeLang(trimmed, fromLangCode);
-
             const quick = quickTemplateReply(msgLang, trimmed);
             if (quick) {
               await tgSendMessage(env as any, chatId, quick);
               return json({ ok: true, handled: "template:plain" });
             }
-
             const { text: answer } = await askSmart(env, trimmed, msgLang);
             await tgSendMessage(env as any, chatId, answer);
             return json({ ok: true, handled: "ask:fallback" });
