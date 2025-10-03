@@ -5,10 +5,9 @@ import { sendHelp } from "./commands/help";
 import { handleDiagnostics } from "./diagnostics-ai";
 import { normalizeLang, type Lang } from "./utils/i18n";
 import { askSmart, quickTemplateReply, type ReplierEnv } from "./services/replier";
-import { wikiSetAwait, wikiMaybeHandleFreeText } from "./commands/registry";
 import { likesCommand, likesCanHandleCallback, likesOnCallback } from "./commands/likes";
 import { statsCommand } from "./commands/stats";
-import { menuCommand, menuOnCallback } from "./commands/menu"; // меню
+import { menuCommand, menuOnCallback } from "./commands/menu"; // мінімалістичне меню
 
 export interface Env extends ReplierEnv {
   // Telegram
@@ -23,7 +22,7 @@ export interface Env extends ReplierEnv {
   // KV
   LIKES_KV?: KVNamespace;
   DEDUP_KV?: KVNamespace;   // антидубль
-  SENTI_CACHE?: KVNamespace; // ⚠️ додано: KV для налаштувань/кешу меню
+  SENTI_CACHE?: KVNamespace; // prefs/кеш
 }
 
 function json(res: unknown, status = 200) {
@@ -167,11 +166,7 @@ export default {
             return json({ ok: true, handled: "menu" });
           }
 
-          if (trimmed === "/wiki" || trimmed.startsWith("/wiki ")) {
-            await wikiSetAwait({ env }, update as any);
-            return json({ ok: true, handled: "wiki" });
-          }
-
+          // ===== /ask (може бути кілька разів у одному повідомленні) =====
           if (/\/ask(?:@\w+)?\b/i.test(trimmed)) {
             const blocks = extractAskBlocks(trimmed);
             if (blocks.length === 0) {
@@ -198,11 +193,7 @@ export default {
             return json({ ok: true, handled: `ask:${blocks.length}` });
           }
 
-          if (!trimmed.startsWith("/")) {
-            const handled = await wikiMaybeHandleFreeText({ env }, update as any);
-            if (handled) return json({ ok: true, handled: "wiki:free" });
-          }
-
+          // fallback → один /ask
           if (trimmed.length > 0) {
             const msgLang: Lang = normalizeLang(trimmed, fromLangCode);
 
