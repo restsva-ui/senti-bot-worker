@@ -8,6 +8,9 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      # зробимо доступним account_id для всіх кроків (є і в wrangler.toml, але хай буде)
+      CF_ACCOUNT_ID: 2cf6e316af8623546c95c0354bc3aa00
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,24 +26,24 @@ jobs:
       - name: Print wrangler version
         run: wrangler --version
 
-      # ✅ Перевіряємо мінімально потрібні secrets у GitHub
+      # Мінімальна перевірка наявності секретів у GitHub
       - name: Validate required secrets
         run: |
           test -n "${{ secrets.CLOUDFLARE_API_TOKEN }}" || (echo "Missing CLOUDFLARE_API_TOKEN" && exit 1)
           test -n "${{ secrets.BOT_TOKEN }}" || (echo "Missing BOT_TOKEN" && exit 1)
 
-      # 🔐 Заливаємо secrets у Worker (оновлюються кожен деплой)
+      # 🔐 Пишемо секрети у Worker (БЕЗ --yes/--quiet; значення подаємо через stdin)
       - name: Put BOT_TOKEN
-        run: echo "${{ secrets.BOT_TOKEN }}" | wrangler secret put BOT_TOKEN --yes --quiet
+        run: echo "${{ secrets.BOT_TOKEN }}" | wrangler secret put BOT_TOKEN
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
       - name: Put WEBHOOK secret (or TELEGRAM_SECRET_TOKEN)
         run: |
           if [ -n "${{ secrets.WEBHOOK_SECRET }}" ]; then
-            echo "${{ secrets.WEBHOOK_SECRET }}" | wrangler secret put WEBHOOK_SECRET --yes --quiet
+            echo "${{ secrets.WEBHOOK_SECRET }}" | wrangler secret put WEBHOOK_SECRET
           elif [ -n "${{ secrets.TELEGRAM_SECRET_TOKEN }}" ]; then
-            echo "${{ secrets.TELEGRAM_SECRET_TOKEN }}" | wrangler secret put TELEGRAM_SECRET_TOKEN --yes --quiet
+            echo "${{ secrets.TELEGRAM_SECRET_TOKEN }}" | wrangler secret put TELEGRAM_SECRET_TOKEN
           else
             echo "No WEBHOOK_SECRET or TELEGRAM_SECRET_TOKEN provided" && exit 1
           fi
@@ -49,14 +52,14 @@ jobs:
 
       - name: Put CF AI creds
         run: |
-          echo "2cf6e316af8623546c95c0354bc3aa00" | wrangler secret put CLOUDFLARE_ACCOUNT_ID --yes --quiet
+          echo "2cf6e316af8623546c95c0354bc3aa00" | wrangler secret put CLOUDFLARE_ACCOUNT_ID
           TOKEN="${{ secrets.CLOUDFLARE_API_TOKEN }}"
           if [ -z "$TOKEN" ]; then TOKEN="${{ secrets.CF_VISION }}"; fi
-          echo "$TOKEN" | wrangler secret put CLOUDFLARE_API_TOKEN --yes --quiet
+          echo "$TOKEN" | wrangler secret put CLOUDFLARE_API_TOKEN
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
-      # 🚀 Деплой
+      # 🚀 Деплой (account_id вже в wrangler.toml, але можна явно)
       - name: Deploy
         run: wrangler deploy --account-id 2cf6e316af8623546c95c0354bc3aa00
         env:
