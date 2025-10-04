@@ -2,19 +2,22 @@ export function health() {
   return json({ ok: true, time: new Date().toISOString() });
 }
 
-export function envInfo(env: Record<string, unknown>) {
-  return json({
-    ok: true,
-    has: {
-      BOT_TOKEN: !!env.BOT_TOKEN,
-      WEBHOOK_SECRET: !!(env as any).WEBHOOK_SECRET || !!(env as any).TELEGRAM_SECRET_TOKEN,
-      SENTI_CACHE: !!(env as any).SENTI_CACHE,
-      CF_API_TOKEN: !!(env as any).CLOUDFLARE_API_TOKEN || !!(env as any).CF_VISION,
-      CF_ACCOUNT_ID: !!(env as any).CLOUDFLARE_ACCOUNT_ID || !!(env as any).CF_ACCOUNT_ID,
-      LIKES_KV: !!(env as any).LIKES_KV,
-      DEDUP_KV: !!(env as any).DEDUP_KV,
-    },
-  });
+export async function handleDiagnostics(req: Request, env: any, url: URL) {
+  if (url.pathname === "/env") {
+    return json({
+      ok: true,
+      has: {
+        BOT_TOKEN: !!env.BOT_TOKEN,
+        WEBHOOK_SECRET: !!env.WEBHOOK_SECRET || !!env.TELEGRAM_SECRET_TOKEN,
+        SENTI_CACHE: !!env.SENTI_CACHE,
+        CF_API_TOKEN: !!env.CLOUDFLARE_API_TOKEN || !!env.CF_VISION,
+        CF_ACCOUNT_ID: !!env.CLOUDFLARE_ACCOUNT_ID || !!env.CF_ACCOUNT_ID,
+        LIKES_KV: !!env.LIKES_KV,
+        DEDUP_KV: !!env.DEDUP_KV,
+      },
+    });
+  }
+  return null;
 }
 
 function json(obj: unknown, status = 200) {
