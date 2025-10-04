@@ -26,6 +26,9 @@ import { Ai } from "@cloudflare/ai";
 import { smartAsk } from "./services/ask";
 import { loadHistory, saveTurn } from "./services/history";
 
+// 🔧 Debug: прямий виклик OpenRouter (для dry-run перевірок)
+import { openrouterAskText } from "./ai/openrouter";
+
 /* ======================== Env ======================== */
 export interface Env extends ReplierEnv {
   BOT_TOKEN: string;
@@ -169,6 +172,32 @@ export default {
           500
         );
       }
+    }
+
+    // 🔧 DEBUG: прямий тест OpenRouter без Telegram
+    if (url.pathname === "/ask") {
+      if (request.method === "GET") {
+        const prompt = url.searchParams.get("prompt") ?? "";
+        const lang = (url.searchParams.get("lang") ?? "uk") as Lang;
+        if (!prompt) return json({ ok: false, error: "prompt required" }, 400);
+        try {
+          const text = await openrouterAskText(env as any, prompt, lang);
+          return json({ ok: true, provider: "openrouter", text });
+        } catch (e: any) {
+          return json({ ok: false, error: e?.message || String(e) }, 500);
+        }
+      }
+      if (request.method === "POST") {
+        try {
+          const { prompt, lang = "uk" } = await readJsonSafe(request);
+          if (!prompt) return json({ ok: false, error: "prompt required" }, 400);
+          const text = await openrouterAskText(env as any, String(prompt), lang as Lang);
+          return json({ ok: true, provider: "openrouter", text });
+        } catch (e: any) {
+          return json({ ok: false, error: e?.message || String(e) }, 500);
+        }
+      }
+      return json({ ok: false, error: "method not allowed" }, 405);
     }
 
     // Diagnostics (тільки GET і не /webhook)
