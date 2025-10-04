@@ -1,88 +1,97 @@
 // src/router/commandRouter.ts
 import type { TgUpdate } from "../types";
-import { findCommandByName } from "../commands/registry";
+import { tgSendMessage } from "../utils/telegram";
 import { menuCanHandleCallback, menuOnCallback } from "../commands/menu";
 import { likesCanHandleCallback, likesOnCallback } from "../commands/likes";
-import { aiMaybeHandleFreeText } from "../commands/ai";
-import { wikiMaybeHandleFreeText } from "../commands/wiki";
+import { wikiSummary } from "../wiki";
 
 type Env = { BOT_TOKEN: string; API_BASE_URL?: string; LIKES_KV?: any };
 
-/** Дістаємо текст із message/edited_message */
 function getMessageText(update: TgUpdate): string | undefined {
   const msg = update.message ?? update.edited_message;
   return (msg?.text ?? msg?.caption ?? undefined)?.trim();
 }
 
-/** Нормалізуємо токен команди: "/cmd@BotName" -> "cmd" */
-function normalizeCmdToken(raw: string): string {
-  return raw.replace(/^\/+/, "").split("@", 1)[0].toLowerCase();
+function normalizeCmdToken(raw: string) {
+  return raw.replace(/^\/([a-zA-Z0-9_]+)(?:@\w+)?$/, "$1").toLowerCase();
 }
 
-export async function commandRouter(env: Env, update: TgUpdate) {
-  // 0) Діагностика
-  try {
-    console.log("update:", JSON.stringify(update));
-  } catch {}
+export async function commandRouter(request: Request, env: Env): Promise<Response> {
+  const update: TgUpdate = await request.json();
 
-  // 1) Callback-и: спочатку лайки, потім меню
-  const cb = update.callback_query;
-  if (cb?.data) {
-    const data = cb.data;
+  // 1) callback_query (кнопки)
+  const cb = (update as any)?.callback_query;
+  if (cb?.id) {
+    const data: string | undefined = cb?.data ?? undefined;
+
     if (likesCanHandleCallback(data)) {
-      await likesOnCallback(env as any, update);
+      await likesOnCallback(env as any, update as any);
       return new Response("OK");
     }
-    if (menuCanHandleCallback(data)) {
-      await menuOnCallback(env as any, update);
+    if (data?.startsWith("menu:") || data?.startsWith("settings:")) {
+      await menuOnCallback(env as any, update as any);
       return new Response("OK");
     }
-    // інші callback-и ігноруємо
-    return new Response("IGNORED_CB");
+    const chatId = cb?.message?.chat?.id;
+    if (chatId) await tgSendMessage(env as any, chatId, `tap: ${data ?? ""}`);
+    return new Response("OK");
   }
 
-  // 2) Текст/команди
-  const text = getMessageText(update);
-  if (!text) return new Response("NO_CONTENT");
+  // 2) звичайне повідомлення/команда
+  const text = getMessageText(update) || "";
+  const chatId = (update.message ?? update.edited_message)?.chat?.id;
 
-  if (text.startsWith("/")) {
-    // /cmd або /cmd@BotName [+ аргументи]
-    const firstToken = text.split(/\s+/, 1)[0]!;
-    const cmdName = normalizeCmdToken(firstToken);
+  if (!chatId || !text) return new Response("IGNORED");
 
-    const cmd = findCommandByName(cmdName);
-    if (cmd) {
+  // команди
+  if (/^\/\w+/.test(text)) {
+    const token = normalizeCmdToken(text.split(/\s+/)[0]);
+
+    if (token === "ping") {
+      await tgSendMessage(env as any, chatId, "pong");
+      return new Response("OK");
+    }
+    if (token === "menu") {
+      // простий пінг меню (деталізоване меню в основному воркері)
+      await tgSendMessage(env as any, chatId, "Меню відкрито (демо роутер)");
+      return new Response("OK");
+    }
+    if (token === "likes") {
+      // делегуємо в likes
+      await likesOnCallback(env as any, update as any);
+      return new Response("OK");
+    }
+    if (token === "wiki") {
+      const q = text.replace(/^\/wiki(?:@\w+)?\s*/i, "").trim() || "Україна";
       try {
-        await cmd(update as any, env as any);
-      } catch (e) {
-        console.error(`Command '${cmdName}' failed:`, e);
+        const s = await wikiSummary(q, "uk");
+        await tgSendMessage(env as any, chatId, s);
+      } catch (e: any) {
+        await tgSendMessage(env as any, chatId, `wiki: ${e?.message || "помилка"}`);
       }
       return new Response("OK");
     }
 
-    console.warn("Unknown command:", cmdName);
-    return new Response("UNKNOWN_CMD");
+    // fallback для невідомих команд
+    await tgSendMessage(env as any, chatId, "Команда не підтримується цим роутером.");
+    return new Response("OK");
   }
 
-  // 3) Не команда — даємо шанс AI-потоку з’їсти “вільний текст” після /ai
-  try {
-    const handledAI = await aiMaybeHandleFreeText(update as any, env as any);
-    if (handledAI) return new Response("OK");
-  } catch (e) {
-    console.warn("ai free-text error:", e);
+  // 3) вільний текст → пробуємо wiki-хендлер після "/wiki ..."
+  if (/^wiki\s+/i.test(text)) {
+    const q = text.replace(/^wiki\s+/i, "").trim();
+    try {
+      const s = await wikiSummary(q, "uk");
+      await tgSendMessage(env as any, chatId, s);
+    } catch (e: any) {
+      await tgSendMessage(env as any, chatId, `wiki: ${e?.message || "помилка"}`);
+    }
+    return new Response("OK");
   }
 
-  // 4) Якщо не AI — даємо шанс Wiki-потоку на “вільний текст” після /wiki
-  try {
-    const handledWiki = await wikiMaybeHandleFreeText(update as any, env as any);
-    if (handledWiki) return new Response("OK");
-  } catch (e) {
-    console.warn("wiki free-text error:", e);
-  }
-
-  // 5) Інакше — ігноруємо
+  // 4) інакше — ігнор
   return new Response("IGNORED");
 }
 
-// Зворотна сумісність із старими імпортами
+// зворотна сумісність
 export const routeUpdate = commandRouter;
