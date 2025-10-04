@@ -1,4 +1,3 @@
-// src/index.ts
 import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { sendHelp } from "./commands/help";
@@ -22,8 +21,11 @@ import { processPhotoWithGemini } from "./features/vision.ts";
 // Workers AI binding (Cloudflare)
 import { Ai } from "@cloudflare/ai";
 
-// 🧠 Smart /ask (окремий модуль)
-import { smartAsk, type ChatTurn } from "./services/ask";
+// 🧠 Smart /ask
+import { smartAsk } from "./services/ask";
+// 🧠 Контекст
+import { loadHistory, pushAssistant, pushUser } from "./services/context";
+import type { ChatMsg } from "./services/context";
 
 /* ======================== Env ======================== */
 export interface Env extends ReplierEnv {
@@ -35,7 +37,6 @@ export interface Env extends ReplierEnv {
   CLOUDFLARE_ACCOUNT_ID?: string;
   CF_ACCOUNT_ID?: string;
 
-  // ключі для роутера /ask
   OPENROUTER_API_KEY?: string;
   OR_API_KEY?: string;
   GEMINI_API_KEY?: string;
@@ -111,37 +112,6 @@ function readExpectedSecret(env: Env): string | null {
   return b || null;
 }
 
-/* ========= lightweight пам'ять у KV для /ask ========= */
-const HISTORY_TURNS = 6; // скільки пар user/assistant тримати
-
-function histKey(chatId: number | string) {
-  return `hist:${chatId}`;
-}
-
-async function loadHistory(env: Env, chatId: number | string): Promise<ChatTurn[]> {
-  if (!env.SENTI_CACHE) return [];
-  try {
-    const raw = await env.SENTI_CACHE.get(histKey(chatId));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      // санітуємо
-      return parsed
-        .filter((t) => t && (t.role === "user" || t.role === "assistant") && typeof t.content === "string")
-        .slice(-(HISTORY_TURNS * 2));
-    }
-  } catch {}
-  return [];
-}
-
-async function saveHistory(env: Env, chatId: number | string, history: ChatTurn[]) {
-  if (!env.SENTI_CACHE) return;
-  const clean = history
-    .filter((t) => t && (t.role === "user" || t.role === "assistant") && typeof t.content === "string")
-    .slice(-(HISTORY_TURNS * 2));
-  await env.SENTI_CACHE.put(histKey(chatId), JSON.stringify(clean), { expirationTtl: 60 * 60 * 24 }); // 24h TTL
-}
-
 /* ======================== worker ======================== */
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -161,10 +131,7 @@ export default {
         });
         return json({ ok: true, provider: "cloudflare-ai", status: 200, result });
       } catch (e: any) {
-        return json(
-          { ok: false, provider: "cloudflare-ai", status: 500, error: e?.message || String(e) },
-          500
-        );
+        return json({ ok: false, provider: "cloudflare-ai", status: 500, error: e?.message || String(e) }, 500);
       }
     }
 
@@ -182,8 +149,7 @@ export default {
       if (expected) {
         const got =
           (request.headers.get("x-telegram-bot-api-secret-token") ||
-            request.headers.get("X-Telegram-Bot-Api-Secret-Token") ||
-            "")!.trim();
+            request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "")!.trim();
         if (got !== expected) return json({ ok: false, error: "invalid secret" }, 403);
       }
 
@@ -267,7 +233,7 @@ export default {
             return json({ ok: true, handled: "menu" });
           }
 
-          // /ask <prompt> — з KV-пам'яттю та smartAsk
+          // /ask <prompt>
           const askMatch = trimmed.match(/^\/ask(?:@\w+)?\s*(.*)$/is);
           if (askMatch) {
             const prompt = askMatch[1]?.trim();
@@ -275,37 +241,34 @@ export default {
               await tgSendMessage(env as any, chatId, "💡 Напиши так: `/ask <твоє питання>`", { parse_mode: "Markdown" });
               return json({ ok: true, handled: "ask:usage" });
             }
-
-            // завантажуємо історію
-            const history = await loadHistory(env, chatId);
-
-            // системна інструкція коротка і універсальна
-            const systemPrompt =
-              "You are Senti, a concise and helpful assistant. Answer clearly, avoid markdown tables unless asked. If the user’s query is ambiguous—ask briefly to clarify.";
+            // 1) зберегти і навантажити історію
+            await pushUser(env as any, chatId, prompt);
+            const hist: ChatMsg[] = await loadHistory(env as any, chatId);
 
             try {
-              const { text: answer, provider, model } = await smartAsk(env, prompt, {
-                history,
-                systemPrompt,
-                maxTokens: 512,
-                temperature: 0.6,
-                historyTurns: HISTORY_TURNS,
-              });
-
-              // зберігаємо нову пару в історію
-              const nextHistory: ChatTurn[] = [
-                ...history,
-                { role: "user", content: prompt, ts: Date.now() },
-                { role: "assistant", content: answer, ts: Date.now() },
-              ];
-              await saveHistory(env, chatId, nextHistory);
-
+              const { text: answer, provider, model } = await smartAsk(env as any, prompt, hist);
+              await pushAssistant(env as any, chatId, answer);
               const header = `🤖 *Answer* (_${provider} · ${model}_)`;
               await tgSendMessage(env as any, chatId, `${header}\n\n${answer}`, { parse_mode: "Markdown" });
               return json({ ok: true, handled: `ask:${provider}` });
             } catch (e: any) {
               await tgSendMessage(env as any, chatId, `⚠️ Помилка відповіді: ${e?.message || String(e)}`);
               return json({ ok: false, error: "ask-failed" }, 500);
+            }
+          }
+
+          // ⚡ Звичайний текст — контекстна відповідь без /ask
+          // (ігноруємо якщо це суто службові/порожні рядки)
+          if (trimmed) {
+            await pushUser(env as any, chatId, trimmed);
+            const hist: ChatMsg[] = await loadHistory(env as any, chatId);
+            try {
+              const { text: answer } = await smartAsk(env as any, trimmed, hist);
+              await pushAssistant(env as any, chatId, answer);
+              await tgSendMessage(env as any, chatId, answer);
+              return json({ ok: true, handled: "ask:auto" });
+            } catch {
+              // якщо впало — спробуємо шаблони/підказку
             }
           }
 
