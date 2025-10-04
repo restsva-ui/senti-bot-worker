@@ -1,4 +1,4 @@
-name: Deploy to Cloudflare Workers
+name: Deploy Worker
 
 on:
   push:
@@ -8,23 +8,35 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions: { contents: read }
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: 20
+      - run: npm i -g wrangler
 
-      - name: Install deps
-        run: npm ci || npm i
+      # Прокидуємо потрібні секрети у Worker
+      - name: Put BOT_TOKEN
+        run: echo "${{ secrets.BOT_TOKEN }}" | wrangler secret put BOT_TOKEN --yes --quiet
+        env: { CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }} }
 
-      - name: Install Wrangler
-        run: npm i -g wrangler@4
+      - name: Put WEBHOOK secret (або TELEGRAM_SECRET_TOKEN)
+        run: |
+          if [ -n "${{ secrets.WEBHOOK_SECRET }}" ]; then
+            echo "${{ secrets.WEBHOOK_SECRET }}" | wrangler secret put WEBHOOK_SECRET --yes --quiet
+          elif [ -n "${{ secrets.TELEGRAM_SECRET_TOKEN }}" ]; then
+            echo "${{ secrets.TELEGRAM_SECRET_TOKEN }}" | wrangler secret put TELEGRAM_SECRET_TOKEN --yes --quiet
+          fi
+        env: { CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }} }
+
+      - name: Put CF AI creds
+        run: |
+          echo "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" | wrangler secret put CLOUDFLARE_ACCOUNT_ID --yes --quiet
+          TOKEN="${{ secrets.CLOUDFLARE_API_TOKEN }}"
+          if [ -z "$TOKEN" ]; then TOKEN="${{ secrets.CF_VISION }}"; fi
+          echo "$TOKEN" | wrangler secret put CLOUDFLARE_API_TOKEN --yes --quiet
+        env: { CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }} }
 
       - name: Deploy
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: wrangler deploy
+        run: wrangler deploy --account-id ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        env: { CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }} }
