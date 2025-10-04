@@ -24,6 +24,9 @@ import { Ai } from "@cloudflare/ai";
 // 🧠 Smart /ask (перенесено в окремий модуль)
 import { smartAsk } from "./services/ask";
 
+// 🔹 НОВЕ: контекст/історія діалогу в KV
+import { loadHistory, appendHistory, type ChatTurn } from "./services/history";
+
 /* ======================== Env ======================== */
 export interface Env extends ReplierEnv {
   BOT_TOKEN: string;
@@ -235,7 +238,7 @@ export default {
             return json({ ok: true, handled: "menu" });
           }
 
-          // /ask <prompt> — використовує smartAsk
+          // /ask <prompt> — використовує smartAsk + контекст з KV
           const askMatch = trimmed.match(/^\/ask(?:@\w+)?\s*(.*)$/is);
           if (askMatch) {
             const prompt = askMatch[1]?.trim();
@@ -244,9 +247,32 @@ export default {
               return json({ ok: true, handled: "ask:usage" });
             }
             try {
-              const { text: answer, provider, model } = await smartAsk(env, prompt);
+              // 1) підтягнути історію (якщо є SENTI_CACHE)
+              const history = await loadHistory(env as any, chatId);
+
+              // 2) виклик моделі з історією (через any — не ламаємо ваш поточний typings)
+              const ans: any = await (smartAsk as any)(env, prompt, {
+                chatId,
+                history,
+                systemPrompt: "Be concise, helpful and accurate. Use the user's language.",
+                maxTokens: 512,
+                temperature: 0.6,
+              });
+
+              const answer: string = ans?.text || ans?.answer || "⚠️ Немає відповіді.";
+              const provider = ans?.provider || "ai";
+              const model = ans?.model || "default";
+
               const header = `🤖 *Answer* (_${provider} · ${model}_)`;
               await tgSendMessage(env as any, chatId, `${header}\n\n${answer}`, { parse_mode: "Markdown" });
+
+              // 3) додати у KV нові turns (user -> assistant)
+              const now = Date.now();
+              const u: ChatTurn = { role: "user", content: prompt, ts: now };
+              const a: ChatTurn = { role: "assistant", content: answer, ts: now + 1 };
+              await appendHistory(env as any, chatId, u);
+              await appendHistory(env as any, chatId, a);
+
               return json({ ok: true, handled: `ask:${provider}` });
             } catch (e: any) {
               await tgSendMessage(env as any, chatId, `⚠️ Помилка відповіді: ${e?.message || String(e)}`);
