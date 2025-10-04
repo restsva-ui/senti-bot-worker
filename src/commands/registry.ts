@@ -1,40 +1,21 @@
-// src/commands/registry.ts
-// Єдиний реєстр команд (для сумісності)
+export type CommandHandler = (ctx: { env: any; chatId: number; text: string }) => Promise<void>;
 
-type Handler = (ctx: any, args?: any) => Promise<any> | any;
+const map = new Map<string, CommandHandler>();
 
-// ---- Імпорти команд ----
-import { ping } from "./ping";
-
-// AI — опційно, якщо існує файл ./ai
-let ai: Handler | undefined;
-try {
-  // @ts-ignore — динамічний імпорт, якщо файла нема — зловимо в catch
-  const { ai: aiExport } = await import("./ai");
-  ai = aiExport as Handler | undefined;
-} catch {
-  ai = undefined;
+export function register(name: string, fn: CommandHandler) {
+  map.set(name, fn);
 }
 
-// ---- Базовий набір без слеша ----
-const base: Record<string, Handler> = { ping };
-
-// Додаємо версії з префіксом "/"
-const withSlash = Object.fromEntries(Object.entries(base).map(([k, v]) => ["/" + k, v]));
-
-// Якщо AI є — додаємо обидві форми
-if (ai) {
-  (base as any).ai = ai;
-  (withSlash as any)["/ai"] = ai;
+export function get(name: string): CommandHandler | undefined {
+  return map.get(name);
 }
 
-// Експортуємо єдину мапу
-export const COMMANDS: Record<string, Handler> = { ...base, ...withSlash };
-
-// Утиліти (залишаємо, якщо десь використовується)
-export function pickHandler(name: string): Handler | undefined {
-  return (COMMANDS as any)[name];
-}
-export function hasCommand(name: string): boolean {
-  return typeof (COMMANDS as any)[name] === "function";
-}
+// Приклад echo на всяк випадок
+register("echo", async ({ env, chatId, text }) => {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
+  await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text })
+  });
+});
