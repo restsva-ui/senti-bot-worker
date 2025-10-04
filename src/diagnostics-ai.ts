@@ -30,28 +30,25 @@ async function fetchJson(url: string, opts: any = {}) {
   return { ok: r.ok, status: r.status, body };
 }
 
-/* ---------- Cloudflare Workers AI (тест інференсу) ---------- */
-async function cfRunTestModel(env: Record<string, any>) {
+/* ---------- Cloudflare Workers AI (core + endpoint) ---------- */
+async function cfRunTestModelCore(env: Record<string, any>) {
   const accountId =
     pickEnv(env, "CLOUDFLARE_ACCOUNT_ID", "CF_ACCOUNT_ID", "ACCOUNT_ID") || "";
   const apiToken =
     pickEnv(env, "CLOUDFLARE_API_TOKEN", "CF_API_TOKEN", "API_TOKEN") || "";
 
   if (!accountId || !apiToken) {
-    return json(
-      {
-        ok: false,
-        provider: "cloudflare-ai",
-        configured: false,
-        missing: {
-          accountId: !accountId,
-          apiToken: !apiToken,
-        },
-        hint:
-          "Заповни CLOUDFLARE_ACCOUNT_ID (або CF_ACCOUNT_ID) та CLOUDFLARE_API_TOKEN у Variables/Secrets.",
+    return {
+      ok: false,
+      provider: "cloudflare-ai",
+      configured: false,
+      missing: {
+        accountId: !accountId,
+        apiToken: !apiToken,
       },
-      200
-    );
+      hint:
+        "Заповни CLOUDFLARE_ACCOUNT_ID (або CF_ACCOUNT_ID) та CLOUDFLARE_API_TOKEN у Variables/Secrets.",
+    };
   }
 
   const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/meta/llama-3.1-8b-instruct`;
@@ -64,103 +61,109 @@ async function cfRunTestModel(env: Record<string, any>) {
     body: JSON.stringify({ prompt: "ping" }),
   });
 
-  return json(
-    {
-      ok,
-      provider: "cloudflare-ai",
-      status,
-      result: body?.result ?? body,
-    },
-    ok ? 200 : 502
-  );
+  const result = body?.result ?? body;
+  const responseText =
+    (typeof result?.response === "string" && result.response) ||
+    (typeof result?.output_text === "string" && result.output_text) ||
+    "";
+
+  return {
+    ok,
+    provider: "cloudflare-ai",
+    status,
+    result,
+    response: responseText,
+  };
 }
 
-/* ---------- Gemini ---------- */
-async function geminiModels(env: Record<string, any>) {
+async function cfRunTestModel(env: Record<string, any>) {
+  const r = await cfRunTestModelCore(env);
+  return json(r, r.ok ? 200 : 502);
+}
+
+/* ---------- Gemini (core + endpoints) ---------- */
+async function geminiModelsCore(env: Record<string, any>) {
   const apiKey = pickEnv(env, "GEMINI_API_KEY", "GOOGLE_API_KEY");
   if (!apiKey) {
-    return json(
-      {
-        ok: false,
-        provider: "gemini",
-        configured: false,
-        missing: { GEMINI_API_KEY: true },
-        hint: "Додай GEMINI_API_KEY до Secrets у воркері.",
-      },
-      200
-    );
+    return {
+      ok: false,
+      provider: "gemini",
+      configured: false,
+      missing: { GEMINI_API_KEY: true },
+      hint: "Додай GEMINI_API_KEY до Secrets у воркері.",
+    };
   }
   const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(
     apiKey
   )}`;
   const { ok, status, body } = await fetchJson(url);
-  return json(
-    {
-      ok,
-      provider: "gemini",
-      status,
-      models: body?.models ?? body,
-    },
-    ok ? 200 : 502
-  );
+  return {
+    ok,
+    provider: "gemini",
+    status,
+    models: body?.models ?? body,
+  };
 }
 
-async function geminiPing(env: Record<string, any>) {
+async function geminiPingCore(env: Record<string, any>) {
   const apiKey = pickEnv(env, "GEMINI_API_KEY", "GOOGLE_API_KEY");
   if (!apiKey) {
-    return json(
-      {
-        ok: false,
-        provider: "gemini",
-        configured: false,
-        missing: { GEMINI_API_KEY: true },
-      },
-      200
-    );
+    return {
+      ok: false,
+      provider: "gemini",
+      configured: false,
+      missing: { GEMINI_API_KEY: true },
+    };
   }
   const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(
     apiKey
   )}`;
   const { ok, status } = await fetchJson(url);
-  return json(
-    {
-      ok,
-      provider: "gemini",
-      status,
-      message: ok ? "Gemini reachable ✅" : "Gemini unreachable ❌",
-    },
-    ok ? 200 : 502
-  );
+  return {
+    ok,
+    provider: "gemini",
+    status,
+    message: ok ? "Gemini reachable ✅" : "Gemini unreachable ❌",
+  };
 }
 
-/* ---------- OpenRouter ---------- */
-async function openrouterModels(env: Record<string, any>) {
+async function geminiModels(env: Record<string, any>) {
+  const r = await geminiModelsCore(env);
+  return json(r, r.ok ? 200 : 502);
+}
+
+async function geminiPing(env: Record<string, any>) {
+  const r = await geminiPingCore(env);
+  return json(r, r.ok ? 200 : 502);
+}
+
+/* ---------- OpenRouter (core + endpoint) ---------- */
+async function openrouterModelsCore(env: Record<string, any>) {
   const key = pickEnv(env, "OPENROUTER_API_KEY", "OR_API_KEY");
   if (!key) {
-    return json(
-      {
-        ok: false,
-        provider: "openrouter",
-        configured: false,
-        missing: { OPENROUTER_API_KEY: true },
-        hint: "Додай OPENROUTER_API_KEY до Secrets у воркері.",
-      },
-      200
-    );
+    return {
+      ok: false,
+      provider: "openrouter",
+      configured: false,
+      missing: { OPENROUTER_API_KEY: true },
+      hint: "Додай OPENROUTER_API_KEY до Secrets у воркері.",
+    };
   }
   const url = "https://openrouter.ai/api/v1/models";
   const { ok, status, body } = await fetchJson(url, {
     headers: { Authorization: `Bearer ${key}` },
   });
-  return json(
-    {
-      ok,
-      provider: "openrouter",
-      status,
-      models: body?.data ?? body,
-    },
-    ok ? 200 : 502
-  );
+  return {
+    ok,
+    provider: "openrouter",
+    status,
+    models: body?.data ?? body,
+  };
+}
+
+async function openrouterModels(env: Record<string, any>) {
+  const r = await openrouterModelsCore(env);
+  return json(r, r.ok ? 200 : 502);
 }
 
 /* ---------- Info для фотопотоку ---------- */
@@ -200,13 +203,47 @@ function htmlDiagnosticsPage(origin: string) {
 </head>
 <body>
   <h1>🧪 Senti — Diagnostics</h1>
-  <p class="muted">Натискай кнопки — відповідь з'явиться нижче.</p>
+  <p class="muted">Натискай кнопки — відповідь з'явиться нижче у <code>&lt;pre&gt;</code>.</p>
 
   <div class="grid">
     <div class="card">
-      <h3>Cloudflare Workers AI — тестовий inference</h3>
+      <h3>Зведена перевірка</h3>
+      <button data-endpoint="/diagnostics/ai/provider">/diagnostics/ai/provider</button>
+    </div>
+
+    <div class="card">
+      <h3>Cloudflare Workers AI</h3>
       <button data-endpoint="/diagnostics/ai/cf-vision">/diagnostics/ai/cf-vision</button>
       <p class="muted">Викликає @cf/meta/llama-3.1-8b-instruct з prompt "ping".</p>
+    </div>
+
+    <div class="card">
+      <h3>Gemini</h3>
+      <button data-endpoint="/diagnostics/ai/gemini/models">/diagnostics/ai/gemini/models</button>
+      <button data-endpoint="/diagnostics/ai/gemini/ping">/diagnostics/ai/gemini/ping</button>
+    </div>
+
+    <div class="card">
+      <h3>OpenRouter</h3>
+      <button data-endpoint="/diagnostics/ai/openrouter/models">/diagnostics/ai/openrouter/models</button>
+    </div>
+
+    <div class="card">
+      <h3>Фото-флоу</h3>
+      <button data-endpoint="/diagnostics/photos">/diagnostics/photos</button>
+    </div>
+
+    <div class="card">
+      <h3>Прямі посилання</h3>
+      <ul>
+        <li><a href="${origin}/health" target="_blank">${origin}/health</a></li>
+        <li><a href="${origin}/diagnostics/ai/provider" target="_blank">${origin}/diagnostics/ai/provider</a></li>
+        <li><a href="${origin}/diagnostics/ai/cf-vision" target="_blank">${origin}/diagnostics/ai/cf-vision</a></li>
+        <li><a href="${origin}/diagnostics/ai/gemini/models" target="_blank">${origin}/diagnostics/ai/gemini/models</a></li>
+        <li><a href="${origin}/diagnostics/ai/gemini/ping" target="_blank">${origin}/diagnostics/ai/gemini/ping</a></li>
+        <li><a href="${origin}/diagnostics/ai/openrouter/models" target="_blank">${origin}/diagnostics/ai/openrouter/models</a></li>
+        <li><a href="${origin}/diagnostics/photos" target="_blank">${origin}/diagnostics/photos</a></li>
+      </ul>
     </div>
   </div>
 
@@ -214,17 +251,20 @@ function htmlDiagnosticsPage(origin: string) {
   <pre id="out">—</pre>
 
 <script>
-const out=document.getElementById('out');
-async function call(ep){
-  out.textContent='Loading '+ep+' ...';
-  try{
-    const r=await fetch(ep,{headers:{'accept':'application/json'}});
-    const t=await r.text();
-    try{out.textContent=JSON.stringify(JSON.parse(t),null,2);}catch{out.textContent=t;}
-  }catch(e){out.textContent='Error: '+(e&&e.message||e);}
-}
-document.querySelectorAll('button[data-endpoint]')
-  .forEach(b=>b.addEventListener('click',()=>call(b.dataset.endpoint)));
+  const out = document.getElementById('out');
+  async function call(ep){
+    out.textContent = 'Loading ' + ep + ' ...';
+    try{
+      const r = await fetch(ep, { headers: { 'accept':'application/json' }});
+      const t = await r.text();
+      try { out.textContent = JSON.stringify(JSON.parse(t), null, 2); }
+      catch { out.textContent = t; }
+    }catch(e){
+      out.textContent = 'Error: ' + (e && e.message || e);
+    }
+  }
+  document.querySelectorAll('button[data-endpoint]')
+    .forEach(b => b.addEventListener('click', () => call(b.dataset.endpoint)));
 </script>
 </body>
 </html>`;
@@ -244,6 +284,41 @@ export async function handleDiagnostics(
   }
   if (!url.pathname.startsWith("/diagnostics")) return null;
 
+  // Зведена перевірка всіх провайдерів
+  if (url.pathname === "/diagnostics/ai/provider") {
+    const [cf, gmPing, orList] = await Promise.allSettled([
+      cfRunTestModelCore(env),
+      geminiPingCore(env),
+      openrouterModelsCore(env),
+    ]);
+
+    // акуратно збираємо, навіть якщо щось впаде
+    const toVal = (p: PromiseSettledResult<any>) =>
+      p.status === "fulfilled" ? p.value : { ok: false, error: String(p.reason ?? "failed") };
+
+    const body = {
+      ok: true,
+      provider: "summary",
+      cloudflare: toVal(cf),
+      gemini: toVal(gmPing),
+      openrouter: toVal(orList),
+      tips: [
+        "Для Cloudflare потрібні CLOUDFLARE_ACCOUNT_ID і CLOUDFLARE_API_TOKEN.",
+        "Для Gemini — GEMINI_API_KEY.",
+        "Для OpenRouter — OPENROUTER_API_KEY.",
+      ],
+      endpoints: [
+        "/diagnostics/ai/cf-vision",
+        "/diagnostics/ai/gemini/models",
+        "/diagnostics/ai/gemini/ping",
+        "/diagnostics/ai/openrouter/models",
+        "/diagnostics/photos",
+      ],
+    };
+    return json(body, 200);
+  }
+
+  // Окремі ендпоїнти
   if (url.pathname === "/diagnostics/ai/cf-vision") {
     return await cfRunTestModel(env);
   }
