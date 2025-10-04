@@ -1,12 +1,23 @@
+# =========================
+# Senti Bot — Wrangler TOML
+# =========================
+
 name = "senti-bot-worker"
 main = "src/index.ts"
 workers_dev = true
 
+# Твій акаунт
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
+
+# Сумісність рантайму
 compatibility_date = "2024-09-01"
+# Якщо десь юзаєш Node API (Buffer тощо) — розкоментуй наступний рядок:
+# compatibility_flags = ["nodejs_compat"]
+
+# Мінімізувати чи ні (залишив як у тебе)
 minify = false
 
-# ===== KV namespaces (з твоїх скрінів) =====
+# ---------- KV namespaces (з твоїх скрінів) ----------
 [[kv_namespaces]]
 binding = "LIKES_KV"
 id = "7b32e2d1f60846ddb1c653eb52180bf7"   # senti-state
@@ -17,11 +28,38 @@ id = "20d81d7b68fa4ac6b9913e2fbd3465d5"   # senti-dedup
 
 [[kv_namespaces]]
 binding = "SENTI_CACHE"
-id = "497eac980691495ea2a0bc8611892d65"   # senti-cache
+id = "497eac980691495ea2a0bc8611892d65"   # senti-cache (тут зберігаємо lastPhoto тощо)
 
+# ---------- Публічні змінні (НЕ секрети) ----------
+[vars]
+# Базовий API телеграма (не секрет)
+API_BASE_URL = "https://api.telegram.org"
+
+# Вмикач логіки AI у коді (зручно мати прапорець)
+AI_ENABLED = "true"
+
+# Твій телеграм ID (використовуємо в /id/адмін-логіці за потреби)
+OWNER_ID = "784869835"
+
+# Дублюємо account_id як змінну для REST-звернень до Workers AI (не секрет)
+CF_ACCOUNT_ID = "2cf6e316af8623546c95c0354bc3aa00"
+
+# Якщо захочеш перейти на вбудоване Workers AI (env.AI.run),
+# розкоментуй секцію нижче та використовуй binding "AI" у коді.
+# [ai]
+# binding = "AI"
+
+# ---------- Observability ----------
 [observability]
-enabled = false
+enabled = false   # Логи вмикаються у Dashboard → Worker → Settings → Workers Logs
 
+# ---------- Dev server (локально, якщо коли-небудь знадобиться) ----------
 [dev]
 port = 8787
 local_protocol = "https"
+
+# ---------- Build ----------
+[build]
+# Якщо у тебе є скрипт збірки — залиш "npm run build".
+# Якщо збірки нема і деплоїш TS напряму — можна закоментувати.
+command = "npm run build"
