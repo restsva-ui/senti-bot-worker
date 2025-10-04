@@ -14,15 +14,15 @@ import {
 } from "./commands/sync";
 import { handleDiagnostics } from "./diagnostics-ai";
 
-// 🔁 ЯВНІ розширення .ts — щоб резолвер не вередував
+// фото-модулі
 import { handlePhoto } from "./features/photos/handler.ts";
-import { processPhotoWithGemini } from "./features/photos/vision.ts";
+import { processPhotoWithGemini } from "./features/vision.ts";
 
 /* ======================== Env ======================== */
 export interface Env extends ReplierEnv {
   BOT_TOKEN: string;
   WEBHOOK_SECRET?: string;
-  TELEGRAM_SECRET_TOKEN?: string;
+  TELEGRAM_SECRET_TOKEN?: string;   // сумісність
   CF_VISION?: string;
   CLOUDFLARE_API_TOKEN?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
@@ -106,7 +106,7 @@ export default {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // 🛡️ Diagnostics
+    // 🛡️ Diagnostics (тільки GET і не /webhook)
     if (request.method === "GET" && url.pathname !== "/webhook") {
       const diag = await handleDiagnostics(request, env as any, url);
       if (diag) return diag;
@@ -168,38 +168,44 @@ export default {
         if (typeof text === "string") {
           const trimmed = text.trim();
 
+          // /id
           if (/^\/id(?:@\w+)?$/i.test(trimmed)) {
             await idCommand(env as any, chatId, fromId);
             return json({ ok: true, handled: "id" });
           }
 
+          // /start | /help
           if (/^\/start(?:@\w+)?$/i.test(trimmed) || /^\/help(?:@\w+)?$/i.test(trimmed)) {
             const langForHelp: Lang = normalizeLang(trimmed, fromLangCode);
             await sendHelp(env as any, chatId, langForHelp);
             return json({ ok: true, handled: "help" });
           }
 
+          // /ping
           if (/^\/ping(?:@\w+)?$/i.test(trimmed)) {
             await pingCommand(env as any, chatId);
             return json({ ok: true, handled: "ping" });
           }
 
+          // /likes
           if (/^\/likes(?:@\w+)?$/i.test(trimmed)) {
             await likesCommand(env as any, { message: { chat: { id: chatId } } });
             return json({ ok: true, handled: "likes" });
           }
 
+          // /stats
           if (/^\/stats(?:@\w+)?$/i.test(trimmed)) {
             await statsCommand(env as any, { message: { chat: { id: chatId } } });
             return json({ ok: true, handled: "stats" });
           }
 
+          // /menu
           if (/^\/menu(?:@\w+)?$/i.test(trimmed)) {
             await menuCommand(env as any, chatId);
             return json({ ok: true, handled: "menu" });
           }
 
-          // 🖼️ якщо було фото — vision сам дістане його з KV
+          // 🖼️ Якщо було фото — vision сам дістане його з KV
           if (env.SENTI_CACHE) {
             const result = await processPhotoWithGemini(env as any, chatId, trimmed);
             const out = typeof result === "string" ? result : (result?.text ?? "");
@@ -209,6 +215,7 @@ export default {
             }
           }
 
+          // Швидкі шаблони
           const msgLang: Lang = normalizeLang(trimmed, fromLangCode);
           const quick = quickTemplateReply(msgLang, trimmed);
           if (quick) {
@@ -216,6 +223,7 @@ export default {
             return json({ ok: true, handled: "template:plain" });
           }
 
+          // Фолбек — повідомлення
           await tgSendMessage(env as any, chatId, "💡 Текстовий AI ще не підключений у цьому місці.");
           return json({ ok: true, handled: "ask:fallback" });
         }
