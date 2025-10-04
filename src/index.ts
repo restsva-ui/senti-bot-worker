@@ -21,10 +21,12 @@ import { processPhotoWithGemini } from "./features/photos/vision";
 /* ======================== Env ======================== */
 export interface Env extends ReplierEnv {
   BOT_TOKEN: string;
-  WEBHOOK_SECRET?: string;                 // основна назва
-  TELEGRAM_SECRET_TOKEN?: string;          // сумісність із твоїми секретами
-  CF_VISION?: string;                      // альтернативна назва для токена CF AI
+  WEBHOOK_SECRET?: string;
+  TELEGRAM_SECRET_TOKEN?: string;   // сумісність
+  CF_VISION?: string;
   CLOUDFLARE_API_TOKEN?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  CF_ACCOUNT_ID?: string;
 
   LIKES_KV?: KVNamespace;
   DEDUP_KV?: KVNamespace;
@@ -114,15 +116,12 @@ export default {
     if (url.pathname === "/webhook") {
       if (request.method !== "POST") return json({ ok: false, error: "method not allowed" }, 405);
 
-      // секрет приймаємо з двома назвами змінних (загальна/сумісність)
       const expected = readExpectedSecret(env);
       if (expected) {
-        // заголовки у Fetch API case-insensitive, але підстрахуємося
         const got =
           (request.headers.get("x-telegram-bot-api-secret-token") ||
             request.headers.get("X-Telegram-Bot-Api-Secret-Token") ||
             "")!.trim();
-
         if (got !== expected) return json({ ok: false, error: "invalid secret" }, 403);
       }
 
@@ -206,10 +205,9 @@ export default {
             return json({ ok: true, handled: "menu" });
           }
 
-          // 🖼️ Якщо перед цим було фото, vision-модуль сам дістане його з KV
+          // 🖼️ Якщо перед цим було фото — vision сам дістане його з KV
           if (env.SENTI_CACHE) {
             const result = await processPhotoWithGemini(env as any, chatId, trimmed);
-            // processPhotoWithGemini може повернути рядок або { text }
             const out = typeof result === "string" ? result : (result?.text ?? "");
             if (out) {
               await tgSendMessage(env as any, chatId, out);
@@ -217,7 +215,7 @@ export default {
             }
           }
 
-          // ⚙️ Швидкі шаблони
+          // Швидкі шаблони
           const msgLang: Lang = normalizeLang(trimmed, fromLangCode);
           const quick = quickTemplateReply(msgLang, trimmed);
           if (quick) {
@@ -225,17 +223,14 @@ export default {
             return json({ ok: true, handled: "template:plain" });
           }
 
-          // Фолбек — місце для текстового AI (поки повідомлення)
+          // Фолбек — повідомлення
           await tgSendMessage(env as any, chatId, "💡 Текстовий AI ще не підключений у цьому місці.");
           return json({ ok: true, handled: "ask:fallback" });
         }
 
         return json({ ok: true, noop: true });
       } catch (e: any) {
-        // Захищене повідомлення про помилку користувачу
-        try {
-          await tgSendMessage(env as any, chatId!, `⚠️ Помилка: ${e?.message || String(e)}`);
-        } catch {}
+        try { await tgSendMessage(env as any, chatId!, `⚠️ Помилка: ${e?.message || String(e)}`); } catch {}
         return json({ ok: false, error: "internal" }, 500);
       }
     }
