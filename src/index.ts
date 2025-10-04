@@ -111,7 +111,7 @@ function readExpectedSecret(env: Env): string | null {
   return b || null;
 }
 
-/** 🔎 Перевірка: чи є “останнє фото” для цього чату у KV (кілька можливих ключів) */
+/** 🔎 Чи є “останнє фото” для цього чату у KV (підтримуємо кілька ключів) */
 async function hasRecentPhoto(env: Env, chatId: number): Promise<boolean> {
   if (!env.SENTI_CACHE) return false;
   const candidates = [
@@ -119,6 +119,7 @@ async function hasRecentPhoto(env: Env, chatId: number): Promise<boolean> {
     `photos:last:${chatId}`,
     `tg:lastPhoto:${chatId}`,
     `lastPhoto:${chatId}`,
+    `last_photo:${chatId}`, // ⬅️ додано
   ];
   for (const k of candidates) {
     const val = await env.SENTI_CACHE.get(k);
@@ -273,20 +274,7 @@ export default {
             }
           }
 
-          // 🧠 ЗВИЧАЙНИЙ ТЕКСТ → smartAsk з історією (контекстні відповіді без команди)
-          // !!! Перенесено ПЕРЕД фото-флоу з підказками, щоби не спрацьовував "надішли фото"
-          try {
-            const history = await loadHistory(env as any, chatId);
-            const { text: answer, provider, model } = await smartAsk(env as any, trimmed, history);
-            const header = `🤖 *Answer* (_${provider} · ${model}_)`;
-            await tgSendMessage(env as any, chatId, `${header}\n\n${answer}`, { parse_mode: "Markdown" });
-            await saveTurn(env as any, chatId, trimmed, answer);
-            return json({ ok: true, handled: `ask:auto:${provider}` });
-          } catch {
-            // Якщо не вдалось — падати не будемо, підемо далі у фото-флоу/швидкі шаблони
-          }
-
-          // 🖼️ Фото-флоу: запускати ТІЛЬКИ якщо в KV є "останнє фото" цього чату
+          // 🖼️ Якщо є свіже фото для чату — СПОЧАТКУ пробуємо Vision
           if (env.SENTI_CACHE && await hasRecentPhoto(env, chatId)) {
             try {
               const result = await processPhotoWithGemini(env as any, chatId, trimmed);
@@ -296,9 +284,20 @@ export default {
                 return json({ ok: true, handled: "photo:ask" });
               }
             } catch (e: any) {
-              await tgSendMessage(env as any, chatId, `AI помилка: ${e?.message || String(e)}`);
-              return json({ ok: true, handled: "photo:error" });
+              // якщо CF AI недоступний/нема роута — просто впадемо у smartAsk нижче
             }
+          }
+
+          // 🧠 ЗВИЧАЙНИЙ ТЕКСТ → smartAsk з історією (контекстні відповіді без команди)
+          try {
+            const history = await loadHistory(env as any, chatId);
+            const { text: answer, provider, model } = await smartAsk(env as any, trimmed, history);
+            const header = `🤖 *Answer* (_${provider} · ${model}_)`;
+            await tgSendMessage(env as any, chatId, `${header}\n\n${answer}`, { parse_mode: "Markdown" });
+            await saveTurn(env as any, chatId, trimmed, answer);
+            return json({ ok: true, handled: `ask:auto:${provider}` });
+          } catch {
+            // Якщо не вдалось — підемо в шаблони/фолбек
           }
 
           // Швидкі шаблони
