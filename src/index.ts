@@ -23,9 +23,7 @@ import { Ai } from "@cloudflare/ai";
 
 // 🧠 Smart /ask
 import { smartAsk } from "./services/ask";
-// 🧠 Контекст
-import { loadHistory, pushAssistant, pushUser } from "./services/context";
-import type { ChatMsg } from "./services/context";
+import { loadHistory, saveTurn } from "./services/history";
 
 /* ======================== Env ======================== */
 export interface Env extends ReplierEnv {
@@ -37,6 +35,7 @@ export interface Env extends ReplierEnv {
   CLOUDFLARE_ACCOUNT_ID?: string;
   CF_ACCOUNT_ID?: string;
 
+  // ключі для роутера /ask
   OPENROUTER_API_KEY?: string;
   OR_API_KEY?: string;
   GEMINI_API_KEY?: string;
@@ -131,7 +130,10 @@ export default {
         });
         return json({ ok: true, provider: "cloudflare-ai", status: 200, result });
       } catch (e: any) {
-        return json({ ok: false, provider: "cloudflare-ai", status: 500, error: e?.message || String(e) }, 500);
+        return json(
+          { ok: false, provider: "cloudflare-ai", status: 500, error: e?.message || String(e) },
+          500
+        );
       }
     }
 
@@ -149,7 +151,8 @@ export default {
       if (expected) {
         const got =
           (request.headers.get("x-telegram-bot-api-secret-token") ||
-            request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "")!.trim();
+            request.headers.get("X-Telegram-Bot-Api-Secret-Token") ||
+            "")!.trim();
         if (got !== expected) return json({ ok: false, error: "invalid secret" }, 403);
       }
 
@@ -233,7 +236,7 @@ export default {
             return json({ ok: true, handled: "menu" });
           }
 
-          // /ask <prompt>
+          // /ask <prompt> — smartAsk + пам'ять
           const askMatch = trimmed.match(/^\/ask(?:@\w+)?\s*(.*)$/is);
           if (askMatch) {
             const prompt = askMatch[1]?.trim();
@@ -241,15 +244,12 @@ export default {
               await tgSendMessage(env as any, chatId, "💡 Напиши так: `/ask <твоє питання>`", { parse_mode: "Markdown" });
               return json({ ok: true, handled: "ask:usage" });
             }
-            // 1) зберегти і навантажити історію
-            await pushUser(env as any, chatId, prompt);
-            const hist: ChatMsg[] = await loadHistory(env as any, chatId);
-
             try {
-              const { text: answer, provider, model } = await smartAsk(env as any, prompt, hist);
-              await pushAssistant(env as any, chatId, answer);
+              const history = await loadHistory(env as any, chatId);
+              const { text: answer, provider, model } = await smartAsk(env as any, prompt, history);
               const header = `🤖 *Answer* (_${provider} · ${model}_)`;
               await tgSendMessage(env as any, chatId, `${header}\n\n${answer}`, { parse_mode: "Markdown" });
+              await saveTurn(env as any, chatId, prompt, answer);
               return json({ ok: true, handled: `ask:${provider}` });
             } catch (e: any) {
               await tgSendMessage(env as any, chatId, `⚠️ Помилка відповіді: ${e?.message || String(e)}`);
@@ -257,32 +257,18 @@ export default {
             }
           }
 
-          // ⚡ Звичайний текст — контекстна відповідь без /ask
-          // (ігноруємо якщо це суто службові/порожні рядки)
-          if (trimmed) {
-            await pushUser(env as any, chatId, trimmed);
-            const hist: ChatMsg[] = await loadHistory(env as any, chatId);
-            try {
-              const { text: answer } = await smartAsk(env as any, trimmed, hist);
-              await pushAssistant(env as any, chatId, answer);
-              await tgSendMessage(env as any, chatId, answer);
-              return json({ ok: true, handled: "ask:auto" });
-            } catch {
-              // якщо впало — спробуємо шаблони/підказку
-            }
-          }
-
-          // Фото-флоу: якщо було фото — vision дістане його з KV
+          // 🖼️ Якщо було фото — vision сам дістане його з KV (після будь-якого тексту)
           if (env.SENTI_CACHE) {
             const result = await processPhotoWithGemini(env as any, chatId, trimmed);
             const out = typeof result === "string" ? result : (result?.text ?? "");
             if (out) {
               await tgSendMessage(env as any, chatId, out);
+              // НЕ зберігаємо в діалогову пам’ять фото-відповідь
               return json({ ok: true, handled: "photo:ask" });
             }
           }
 
-          // Швидкі шаблони
+          // Швидкі шаблони (короткі автівки)
           const msgLang: Lang = normalizeLang(trimmed, fromLangCode);
           const quick = quickTemplateReply(msgLang, trimmed);
           if (quick) {
@@ -290,9 +276,18 @@ export default {
             return json({ ok: true, handled: "template:plain" });
           }
 
-          // Фолбек
-          await tgSendMessage(env as any, chatId, "💡 Спробуй /ask питання — відповім через AI.");
-          return json({ ok: true, handled: "ask:fallback" });
+          // 🧠 ЗВИЧАЙНИЙ ТЕКСТ → smartAsk з історією (контекстні відповіді без команди)
+          try {
+            const history = await loadHistory(env as any, chatId);
+            const { text: answer, provider, model } = await smartAsk(env as any, trimmed, history);
+            const header = `🤖 *Answer* (_${provider} · ${model}_)`;
+            await tgSendMessage(env as any, chatId, `${header}\n\n${answer}`, { parse_mode: "Markdown" });
+            await saveTurn(env as any, chatId, trimmed, answer);
+            return json({ ok: true, handled: `ask:auto:${provider}` });
+          } catch (e: any) {
+            await tgSendMessage(env as any, chatId, "💡 Спробуй /ask <текст> для запиту до ШІ.");
+            return json({ ok: true, handled: "ask:auto-fallback" });
+          }
         }
 
         return json({ ok: true, noop: true });
