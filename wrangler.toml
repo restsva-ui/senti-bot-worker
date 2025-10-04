@@ -3,18 +3,18 @@ main = "src/index.ts"
 compatibility_date = "2024-10-01"
 workers_dev = true
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
-# Якщо колись зʼявиться потреба у Node API, додай:
+# Якщо колись попросить Node API: 
 # compatibility_flags = ["nodejs_compat"]
 
-# ── KV namespaces (ВСТАВ СВОЇ Namespace ID, не імена)
+# ── KV namespaces (IDs взяті з твоїх скрінів)
 [[kv_namespaces]]
 binding = "SENTI_CACHE"
-id = "PASTE_SENTI_CACHE_ID"   # ID для senti-cache
+id = "497eac980691495ea2a0bc8611892d65"   # senti-cache
 
 [[kv_namespaces]]
 binding = "LIKES_KV"
-id = "PASTE_LIKES_KV_ID"      # ID для senti-state
+id = "7b32e2d1f60846ddb1c653eb52180bf7"   # senti-state
 
 [[kv_namespaces]]
 binding = "DEDUP_KV"
-id = "PASTE_DEDUP_KV_ID"      # ID для senti-dedup
+id = "20d81d7b68fa4ac6b9913e2fbd3465d5"   # senti-dedup
