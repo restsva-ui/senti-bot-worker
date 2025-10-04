@@ -5,12 +5,19 @@ type EnvAll = {
   BOT_TOKEN: string;
   SENTI_CACHE?: KVNamespace;
 
+  // Cloudflare AI
   CLOUDFLARE_API_TOKEN?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
 
   // альтернативні назви (для сумісності зі скрінами)
   CF_ACCOUNT_ID?: string;
   CF_VISION?: string;
+
+  // OpenRouter Vision (fallback)
+  OPENROUTER_API_KEY?: string;
+  OPENROUTER_MODEL_VISION?: string;
+  OPENROUTER_MODEL?: string;
+  OR_MODEL?: string;
 };
 
 // головне вікно "свіжості" фото для підпису (збільшено до 5 хв)
@@ -92,6 +99,70 @@ async function pickGeminiEndpoint(
   return null;
 }
 
+/** -------- OpenRouter Vision Fallback -------- */
+const OR_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
+
+function pickORVisModel(env: EnvAll): string {
+  return (
+    env.OPENROUTER_MODEL_VISION ||
+    env.OPENROUTER_MODEL ||
+    env.OR_MODEL ||
+    "openrouter/auto"
+  );
+}
+
+async function askOpenRouterVision(
+  env: EnvAll,
+  tgFileUrl: string,
+  prompt: string
+): Promise<string | null> {
+  const key = env.OPENROUTER_API_KEY;
+  if (!key) return null;
+
+  const body = {
+    model: pickORVisModel(env),
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          // Більшість OR-моделей приймають 'input_image'. Деякі — 'image_url'.
+          { type: "input_image", image_url: tgFileUrl },
+        ],
+      },
+    ],
+    temperature: 0.2,
+  };
+
+  const res = await fetch(OR_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      Authorization: `Bearer ${key}`,
+      "HTTP-Referer": "https://t.me/SentiBot",
+      "X-Title": "Senti Vision",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const raw = await res.text().catch(() => "");
+  let data: any = {};
+  try { data = raw ? JSON.parse(raw) : {}; } catch { /* ignore */ }
+
+  if (!res.ok) {
+    // Якщо OR недоступний або 4xx/5xx — повернемо null, нехай це трактують вище як фейл
+    return null;
+  }
+
+  const text =
+    data?.choices?.[0]?.message?.content ??
+    (Array.isArray(data?.choices) ? data.choices.map((c: any) => c?.message?.content || "").join("\n") : "");
+
+  const out = String(text || "").trim();
+  return out || null;
+}
+
+/** -------- Основна функція Vision -------- */
 export async function processPhotoWithGemini(
   env: EnvAll,
   chatId: number,
@@ -119,72 +190,81 @@ export async function processPhotoWithGemini(
   // 2) креденшали CF AI
   const accountId = env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID;
   const apiToken = env.CLOUDFLARE_API_TOKEN || env.CF_VISION;
-  if (!accountId || !apiToken) {
-    return { text: "AI ще не налаштований: додай CLOUDFLARE_ACCOUNT_ID та CLOUDFLARE_API_TOKEN (або CF_ACCOUNT_ID/CF_VISION)." };
-  }
-  const headers = { Authorization: `Bearer ${apiToken}`, "content-type": "application/json" };
 
-  // 3) робочий endpoint (уникаємо 'No route for that URI')
-  const endpoint = await pickGeminiEndpoint(accountId, headers);
-  if (!endpoint) {
-    return { text: "AI помилка: модель Gemini недоступна у твоєму акаунті Cloudflare (No route for that URI)." };
-  }
+  // 3) Спроба через Cloudflare AI (як основний шлях)
+  if (accountId && apiToken) {
+    const headers = { Authorization: `Bearer ${apiToken}`, "content-type": "application/json" };
+    const endpoint = await pickGeminiEndpoint(accountId, headers);
 
-  // 4) кілька форматів тіла запиту (для різних ревізій CF AI)
-  const bodies: any[] = [
-    {
-      messages: [{ role: "user", content: [
-        { type: "input_text", text: prompt },
-        { type: "input_image", image_url: tgFileUrl },
-      ]}],
-    },
-    {
-      messages: [{ role: "user", content: [
-        { type: "text", text: prompt },
-        { type: "image_url", image_url: tgFileUrl },
-      ]}],
-    },
-    { input_text: prompt, image: tgFileUrl },
-  ];
+    if (endpoint) {
+      const bodies: any[] = [
+        {
+          messages: [{ role: "user", content: [
+            { type: "input_text", text: prompt },
+            { type: "input_image", image_url: tgFileUrl },
+          ]}],
+        },
+        {
+          messages: [{ role: "user", content: [
+            { type: "text", text: prompt },
+            { type: "image_url", image_url: tgFileUrl },
+          ]}],
+        },
+        { input_text: prompt, image: tgFileUrl },
+      ];
 
-  let lastError: string | null = null;
+      let lastError: string | null = null;
 
-  for (const body of bodies) {
-    try {
-      const res = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify(body) });
+      for (const body of bodies) {
+        try {
+          const res = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify(body) });
 
-      if (res.status === 401 || res.status === 403) {
-        return { text: "AI помилка: немає доступу до Cloudflare AI (перевір CLOUDFLARE_API_TOKEN)." };
+          if (res.status === 401 || res.status === 403) {
+            // токен є, але немає прав — не пробуємо інші тіла, одразу впадемо у OR fallback
+            lastError = "немає доступу до Cloudflare AI";
+            break;
+          }
+
+          const data = await res.json<any>().catch(() => ({}));
+          if (data?.success === false) {
+            lastError = data?.errors?.[0]?.message || `CF AI status ${res.status}`;
+            continue;
+          }
+
+          const result = data?.result ?? data;
+          const text =
+            result?.output_text ||
+            result?.response ||
+            result?.text ||
+            (Array.isArray(result?.messages) &&
+              result.messages.map((m: any) => m?.content?.text).filter(Boolean).join("\n")) ||
+            (Array.isArray(result) && result[0]?.response) ||
+            (typeof result === "string" ? result : null) ||
+            JSON.stringify(result ?? data);
+
+          if (text && String(text).trim()) {
+            await cleanupPhoto(env, chatId);
+            return { text: String(text).trim() };
+          }
+
+          lastError = `Порожня відповідь моделі (status ${res.status})`;
+        } catch (e: any) {
+          lastError = e?.message || String(e);
+        }
       }
 
-      const data = await res.json<any>().catch(() => ({}));
-      if (data?.success === false) {
-        lastError = data?.errors?.[0]?.message || `CF AI status ${res.status}`;
-        continue;
-      }
-
-      const result = data?.result ?? data;
-      const text =
-        result?.output_text ||
-        result?.response ||
-        result?.text ||
-        (Array.isArray(result?.messages) &&
-          result.messages.map((m: any) => m?.content?.text).filter(Boolean).join("\n")) ||
-        (Array.isArray(result) && result[0]?.response) ||
-        (typeof result === "string" ? result : null) ||
-        JSON.stringify(result ?? data);
-
-      if (text && String(text).trim()) {
-        // успішно — очищаємо запис, щоб не тримати зайве
-        await cleanupPhoto(env, chatId);
-        return { text: String(text).trim() };
-      }
-
-      lastError = `Порожня відповідь моделі (status ${res.status})`;
-    } catch (e: any) {
-      lastError = e?.message || String(e);
+      // якщо CF не дав валідної відповіді — спробуємо OR нижче
     }
+    // якщо endpoint не знайдено — спробуємо OR нижче
   }
 
-  return { text: `AI помилка: ${lastError || "невідомо"}` };
+  // 4) Fallback: OpenRouter Vision (якщо є ключ)
+  const orText = await askOpenRouterVision(env, tgFileUrl, prompt);
+  if (orText && orText.trim()) {
+    await cleanupPhoto(env, chatId);
+    return { text: orText.trim() };
+  }
+
+  // 5) повний фейл
+  return { text: "AI помилка: жодна з моделей Vision не відповіла. Перевір ключі CF/OpenRouter та спробуй ще раз." };
 }
