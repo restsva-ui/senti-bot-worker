@@ -2,27 +2,35 @@ import { tgSendMessage } from "../../utils/telegram";
 
 type EnvAll = { SENTI_CACHE?: KVNamespace };
 
+// новий уніфікований ключ
+const KEY_NEW = (chatId: number) => `lastPhoto2:${chatId}`;
+
+// для сумісності зі старими назвами
+const LEGACY_KEYS = (chatId: number) => [
+  `lastPhoto:${chatId}`,
+  `last_photo:${chatId}`,
+  `photo:last:${chatId}`,
+  `photos:last:${chatId}`,
+  `tg:lastPhoto:${chatId}`,
+];
+
 export async function handlePhoto(update: any, env: EnvAll, chatId: number) {
   const photos = update?.message?.photo as { file_id: string }[] | undefined;
   const best = photos?.[photos.length - 1];
   if (!best?.file_id) return;
 
-  const ts = Date.now();
-  const ttl = 600; // 10 хвилин з запасом
+  // 1) пишемо новим форматом (JSON з timestamp)
+  const payload = JSON.stringify({ file_id: best.file_id, ts: Date.now() });
 
-  // ✅ Уніфікований ключ + metadata.ts
-  await env.SENTI_CACHE?.put(
-    `photo:last:${chatId}`,
-    best.file_id,
-    { expirationTtl: ttl, metadata: { ts } } as any
-  );
+  // TTL з запасом (10 хв), а вікно "свіжості" контролюємо у vision.ts
+  await env.SENTI_CACHE?.put(KEY_NEW(chatId), payload, { expirationTtl: 600 });
 
-  // 🔁 Сумісність зі старими ключами (без metadata — не критично)
-  await env.SENTI_CACHE?.put(`lastPhoto:${chatId}`, best.file_id, { expirationTtl: ttl });
-  await env.SENTI_CACHE?.put(`last_photo:${chatId}`, best.file_id, { expirationTtl: ttl });
-  await env.SENTI_CACHE?.put(`photos:last:${chatId}`, best.file_id, { expirationTtl: ttl });
-  await env.SENTI_CACHE?.put(`tg:lastPhoto:${chatId}`, best.file_id, { expirationTtl: ttl });
+  // 2) почистимо legacy-ключі, щоб не плутатися далі
+  for (const k of LEGACY_KEYS(chatId)) {
+    try { await env.SENTI_CACHE?.delete(k); } catch {}
+  }
 
+  // 3) підказка
   await tgSendMessage(
     env as any,
     chatId,
