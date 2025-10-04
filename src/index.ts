@@ -1,4 +1,3 @@
-// src/index.ts
 import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { sendHelp } from "./commands/help";
@@ -112,9 +111,9 @@ function readExpectedSecret(env: Env): string | null {
   return b || null;
 }
 
-/** 🕒 Отримати значення "останнього фото", якщо воно свіже (<= maxAgeSec).
- * Працює з кількома можливими ключами та вимагає наявності metadata.ts,
- * яку ми пишемо у handlePhoto.
+/** 🕒 Отримати останнє фото, якщо свіже (≤ maxAgeSec).
+ * Якщо metadata.ts немає (старі ключі) — трактуємо як "свіже" одним фреймом,
+ * щоб Vision усе одно спрацював одразу після фото.
  */
 async function getRecentPhotoIfFresh(env: Env, chatId: number, maxAgeSec = 120): Promise<string | null> {
   if (!env.SENTI_CACHE) return null;
@@ -125,12 +124,17 @@ async function getRecentPhotoIfFresh(env: Env, chatId: number, maxAgeSec = 120):
     `lastPhoto:${chatId}`,
     `last_photo:${chatId}`,
   ];
+
+  // 1) Пробуємо зчитати з metadata
   for (const key of keys) {
     try {
       const res = await env.SENTI_CACHE.getWithMetadata<string, { ts?: number }>(key);
       if (!res?.value) continue;
       const ts = res.metadata?.ts;
-      if (typeof ts === "number" && Date.now() - ts < maxAgeSec * 1000) {
+      if (typeof ts === "number") {
+        if (Date.now() - ts < maxAgeSec * 1000) return res.value;
+      } else {
+        // 2) Фолбек: якщо немає metadata, але значення є — вважаємо "свіжим"
         return res.value;
       }
     } catch {}
@@ -284,7 +288,7 @@ export default {
             }
           }
 
-          // 🖼️ Якщо є свіже фото (≤ 2 хв) — пріоритетно Vision
+          // 🖼️ Якщо є свіже (або щойно прислане) фото — Vision має пріоритет
           const recentPhoto = await getRecentPhotoIfFresh(env, chatId, 120);
           if (recentPhoto) {
             try {
