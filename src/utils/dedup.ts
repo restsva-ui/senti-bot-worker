@@ -1,6 +1,6 @@
 // src/utils/dedup.ts
 export interface DedupEnv {
-  LIKES_KV: KVNamespace;
+  DEDUP_KV: KVNamespace;
 }
 
 /**
@@ -17,10 +17,10 @@ export async function seenUpdateRecently(
   const ttlUsed = Math.max(60, Math.min(7 * 24 * 3600, Math.floor(ttlSec)));
 
   const key = `dedup:update:${updateId}`;
-  const existed = await env.LIKES_KV.get(key);
+  const existed = await env.DEDUP_KV.get(key);
   if (existed) return true;
 
   // Ставитимемо маркер з TTL (клемплений)
-  await env.LIKES_KV.put(key, "1", { expirationTtl: ttlUsed });
+  await env.DEDUP_KV.put(key, "1", { expirationTtl: ttlUsed });
   return false;
 }
