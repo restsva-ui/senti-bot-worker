@@ -1,18 +1,20 @@
 name = "senti-bot-worker"
 main = "src/index.ts"
-compatibility_date = "2024-09-10"
+compatibility_date = "2024-10-01"
 workers_dev = true
-node_compat = false
+account_id = "2cf6e316af8623546c95c0354bc3aa00"
+# Якщо колись зʼявиться потреба у Node API, додай:
+# compatibility_flags = ["nodejs_compat"]
 
-# ПРИВ'ЯЗКИ KV — встав СВОЇ ID з дашборду Cloudflare
+# ── KV namespaces (ВСТАВ СВОЇ Namespace ID, не імена)
 [[kv_namespaces]]
 binding = "SENTI_CACHE"
-id = "PASTE_SENTI_CACHE_ID"
+id = "PASTE_SENTI_CACHE_ID"   # ID для senti-cache
 
 [[kv_namespaces]]
 binding = "LIKES_KV"
-id = "PASTE_LIKES_KV_ID"
+id = "PASTE_LIKES_KV_ID"      # ID для senti-state
 
 [[kv_namespaces]]
 binding = "DEDUP_KV"
-id = "PASTE_DEDUP_KV_ID"
+id = "PASTE_DEDUP_KV_ID"      # ID для senti-dedup
