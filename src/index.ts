@@ -21,7 +21,7 @@ import { processPhotoWithGemini } from "./features/vision.ts";
 // Workers AI binding (Cloudflare)
 import { Ai } from "@cloudflare/ai";
 
-// 🧠 Smart /ask
+// 🧠 Smart /ask + пам’ять
 import { smartAsk } from "./services/ask";
 import { loadHistory, saveTurn } from "./services/history";
 
@@ -109,6 +109,22 @@ function readExpectedSecret(env: Env): string | null {
   if (a) return a;
   const b = (env.TELEGRAM_SECRET_TOKEN || "").trim();
   return b || null;
+}
+
+/** 🔎 Перевірка: чи є “останнє фото” для цього чату у KV (кілька можливих ключів) */
+async function hasRecentPhoto(env: Env, chatId: number): Promise<boolean> {
+  if (!env.SENTI_CACHE) return false;
+  const candidates = [
+    `photo:last:${chatId}`,
+    `photos:last:${chatId}`,
+    `tg:lastPhoto:${chatId}`,
+    `lastPhoto:${chatId}`,
+  ];
+  for (const k of candidates) {
+    const val = await env.SENTI_CACHE.get(k);
+    if (val) return true;
+  }
+  return false;
 }
 
 /* ======================== worker ======================== */
@@ -257,26 +273,8 @@ export default {
             }
           }
 
-          // 🖼️ Якщо було фото — vision сам дістане його з KV (після будь-якого тексту)
-          if (env.SENTI_CACHE) {
-            const result = await processPhotoWithGemini(env as any, chatId, trimmed);
-            const out = typeof result === "string" ? result : (result?.text ?? "");
-            if (out) {
-              await tgSendMessage(env as any, chatId, out);
-              // НЕ зберігаємо в діалогову пам’ять фото-відповідь
-              return json({ ok: true, handled: "photo:ask" });
-            }
-          }
-
-          // Швидкі шаблони (короткі автівки)
-          const msgLang: Lang = normalizeLang(trimmed, fromLangCode);
-          const quick = quickTemplateReply(msgLang, trimmed);
-          if (quick) {
-            await tgSendMessage(env as any, chatId, quick);
-            return json({ ok: true, handled: "template:plain" });
-          }
-
           // 🧠 ЗВИЧАЙНИЙ ТЕКСТ → smartAsk з історією (контекстні відповіді без команди)
+          // !!! Перенесено ПЕРЕД фото-флоу з підказками, щоби не спрацьовував "надішли фото"
           try {
             const history = await loadHistory(env as any, chatId);
             const { text: answer, provider, model } = await smartAsk(env as any, trimmed, history);
@@ -284,10 +282,36 @@ export default {
             await tgSendMessage(env as any, chatId, `${header}\n\n${answer}`, { parse_mode: "Markdown" });
             await saveTurn(env as any, chatId, trimmed, answer);
             return json({ ok: true, handled: `ask:auto:${provider}` });
-          } catch (e: any) {
-            await tgSendMessage(env as any, chatId, "💡 Спробуй /ask <текст> для запиту до ШІ.");
-            return json({ ok: true, handled: "ask:auto-fallback" });
+          } catch {
+            // Якщо не вдалось — падати не будемо, підемо далі у фото-флоу/швидкі шаблони
           }
+
+          // 🖼️ Фото-флоу: запускати ТІЛЬКИ якщо в KV є "останнє фото" цього чату
+          if (env.SENTI_CACHE && await hasRecentPhoto(env, chatId)) {
+            try {
+              const result = await processPhotoWithGemini(env as any, chatId, trimmed);
+              const out = typeof result === "string" ? result : (result?.text ?? "");
+              if (out) {
+                await tgSendMessage(env as any, chatId, out);
+                return json({ ok: true, handled: "photo:ask" });
+              }
+            } catch (e: any) {
+              await tgSendMessage(env as any, chatId, `AI помилка: ${e?.message || String(e)}`);
+              return json({ ok: true, handled: "photo:error" });
+            }
+          }
+
+          // Швидкі шаблони
+          const msgLang: Lang = normalizeLang(trimmed, fromLangCode);
+          const quick = quickTemplateReply(msgLang, trimmed);
+          if (quick) {
+            await tgSendMessage(env as any, chatId, quick);
+            return json({ ok: true, handled: "template:plain" });
+          }
+
+          // Фолбек
+          await tgSendMessage(env as any, chatId, "💡 Спробуй /ask питання — або просто напиши повідомлення, я відповім контекстно.");
+          return json({ ok: true, handled: "ask:fallback" });
         }
 
         return json({ ok: true, noop: true });
