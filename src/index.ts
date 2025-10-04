@@ -18,24 +18,32 @@ import { handleDiagnostics } from "./diagnostics-ai";
 import { handlePhoto } from "./features/photos/handler.ts";
 import { processPhotoWithGemini } from "./features/vision.ts";
 
-// ⬇️ Workers AI binding (Cloudflare)
+// Workers AI binding (Cloudflare)
 import { Ai } from "@cloudflare/ai";
+
+// 🧠 Smart /ask (перенесено в окремий модуль)
+import { smartAsk } from "./services/ask";
 
 /* ======================== Env ======================== */
 export interface Env extends ReplierEnv {
   BOT_TOKEN: string;
   WEBHOOK_SECRET?: string;
-  TELEGRAM_SECRET_TOKEN?: string;   // сумісність
+  TELEGRAM_SECRET_TOKEN?: string;
   CF_VISION?: string;
   CLOUDFLARE_API_TOKEN?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
   CF_ACCOUNT_ID?: string;
 
+  // ключі для роутера /ask
+  OPENROUTER_API_KEY?: string;
+  OR_API_KEY?: string;
+  GEMINI_API_KEY?: string;
+  GOOGLE_API_KEY?: string;
+
   LIKES_KV?: KVNamespace;
   DEDUP_KV?: KVNamespace;
   SENTI_CACHE?: KVNamespace;
 
-  // ⬇️ новий binding для Workers AI
   AI: Ai;
 }
 
@@ -112,7 +120,7 @@ export default {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // 🔬 Cloudflare Workers AI — простий ping через binding
+    // CF AI ping
     if (request.method === "GET" && url.pathname === "/diagnostics/ai/cf-ping") {
       try {
         const result = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
@@ -128,7 +136,7 @@ export default {
       }
     }
 
-    // 🛡️ Diagnostics (тільки GET і не /webhook)
+    // Diagnostics (тільки GET і не /webhook)
     if (request.method === "GET" && url.pathname !== "/webhook") {
       const diag = await handleDiagnostics(request, env as any, url);
       if (diag) return diag;
@@ -227,35 +235,26 @@ export default {
             return json({ ok: true, handled: "menu" });
           }
 
-          // 🔹 НОВЕ: /ask <запит> — відповідь через Cloudflare Workers AI
-          const askMatch = trimmed.match(/^\/ask(?:@\w+)?\s+([\s\S]+)$/i);
+          // /ask <prompt> — використовує smartAsk
+          const askMatch = trimmed.match(/^\/ask(?:@\w+)?\s*(.*)$/is);
           if (askMatch) {
-            const prompt = askMatch[1].trim();
+            const prompt = askMatch[1]?.trim();
             if (!prompt) {
-              await tgSendMessage(env as any, chatId, "Синтаксис: /ask твій_запит");
+              await tgSendMessage(env as any, chatId, "💡 Напиши так: `/ask <твоє питання>`", { parse_mode: "Markdown" });
               return json({ ok: true, handled: "ask:usage" });
             }
             try {
-              const result: any = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
-                messages: [
-                  { role: "system", content: "Be concise and helpful." },
-                  { role: "user", content: prompt },
-                ],
-                max_tokens: 512,
-              });
-              const out =
-                (typeof result?.response === "string" && result.response) ||
-                (typeof result?.output_text === "string" && result.output_text) ||
-                JSON.stringify(result);
-              await tgSendMessage(env as any, chatId, out);
-              return json({ ok: true, handled: "ask:cf", usage: result?.usage });
-            } catch (err: any) {
-              await tgSendMessage(env as any, chatId, `CF-AI помилка: ${err?.message || String(err)}`);
-              return json({ ok: false, handled: "ask:error" });
+              const { text: answer, provider, model } = await smartAsk(env, prompt);
+              const header = `🤖 *Answer* (_${provider} · ${model}_)`;
+              await tgSendMessage(env as any, chatId, `${header}\n\n${answer}`, { parse_mode: "Markdown" });
+              return json({ ok: true, handled: `ask:${provider}` });
+            } catch (e: any) {
+              await tgSendMessage(env as any, chatId, `⚠️ Помилка відповіді: ${e?.message || String(e)}`);
+              return json({ ok: false, error: "ask-failed" }, 500);
             }
           }
 
-          // 🖼️ Якщо було фото — vision сам дістане його з KV
+          // Фото-флоу: якщо було фото — vision дістане його з KV
           if (env.SENTI_CACHE) {
             const result = await processPhotoWithGemini(env as any, chatId, trimmed);
             const out = typeof result === "string" ? result : (result?.text ?? "");
@@ -273,8 +272,8 @@ export default {
             return json({ ok: true, handled: "template:plain" });
           }
 
-          // Фолбек — підказка про /ask
-          await tgSendMessage(env as any, chatId, "💡 Спробуй /ask питання — відповім через Cloudflare AI.");
+          // Фолбек
+          await tgSendMessage(env as any, chatId, "💡 Спробуй /ask питання — відповім через AI.");
           return json({ ok: true, handled: "ask:fallback" });
         }
 
