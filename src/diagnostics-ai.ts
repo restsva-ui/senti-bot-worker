@@ -18,8 +18,8 @@ function pickEnv(env: Record<string, any>, ...keys: string[]): string | undefine
   return undefined;
 }
 
-async function fetchJson(url: string, headers?: MaybeHeaders, init?: RequestInit) {
-  const r = await fetch(url, { headers, ...(init || {}) });
+async function fetchJson(url: string, opts: any = {}) {
+  const r = await fetch(url, opts);
   const text = await r.text();
   let body: any;
   try {
@@ -30,8 +30,8 @@ async function fetchJson(url: string, headers?: MaybeHeaders, init?: RequestInit
   return { ok: r.ok, status: r.status, body };
 }
 
-/* ---------- Cloudflare Workers AI (models list) ---------- */
-async function cfListModels(env: Record<string, any>) {
+/* ---------- Cloudflare Workers AI (тест інференсу) ---------- */
+async function cfRunTestModel(env: Record<string, any>) {
   const accountId =
     pickEnv(env, "CLOUDFLARE_ACCOUNT_ID", "CF_ACCOUNT_ID", "ACCOUNT_ID") || "";
   const apiToken =
@@ -54,9 +54,14 @@ async function cfListModels(env: Record<string, any>) {
     );
   }
 
-  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/models`;
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/meta/llama-3.1-8b-instruct`;
   const { ok, status, body } = await fetchJson(url, {
-    Authorization: `Bearer ${apiToken}`,
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ prompt: "ping" }),
   });
 
   return json(
@@ -64,75 +69,7 @@ async function cfListModels(env: Record<string, any>) {
       ok,
       provider: "cloudflare-ai",
       status,
-      endpoint: "/diagnostics/ai/cf-vision",
-      models: body?.result ?? body,
-    },
-    ok ? 200 : 502
-  );
-}
-
-/* ---------- Cloudflare Workers AI (ping via inference) ---------- */
-async function cfPing(env: Record<string, any>, url: URL) {
-  const accountId =
-    pickEnv(env, "CLOUDFLARE_ACCOUNT_ID", "CF_ACCOUNT_ID", "ACCOUNT_ID") || "";
-  const apiToken =
-    pickEnv(env, "CLOUDFLARE_API_TOKEN", "CF_API_TOKEN", "API_TOKEN") || "";
-
-  if (!accountId || !apiToken) {
-    return json(
-      {
-        ok: false,
-        provider: "cloudflare-ai",
-        configured: false,
-        missing: {
-          accountId: !accountId,
-          apiToken: !apiToken,
-        },
-        hint:
-          "Для пінгу потрібні CLOUDFLARE_ACCOUNT_ID та CLOUDFLARE_API_TOKEN.",
-      },
-      200
-    );
-  }
-
-  // Модель можна перевизначити через ?model=
-  const model =
-    url.searchParams.get("model") ||
-    "@cf/meta/llama-3.1-8b-instruct";
-
-  const endpoint = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${encodeURIComponent(
-    model
-  )}`;
-
-  // Уніфікований формат Workers AI (chat-like)
-  const body = {
-    messages: [
-      { role: "system", content: "You are a minimal healthcheck. Reply with one word only." },
-      { role: "user", content: "pong" },
-    ],
-    stream: false,
-  };
-
-  const { ok, status, body: resp } = await fetchJson(
-    endpoint,
-    {
-      Authorization: `Bearer ${apiToken}`,
-      "content-type": "application/json",
-    },
-    {
-      method: "POST",
-      body: JSON.stringify(body),
-    }
-  );
-
-  // Стандартна відповідь Workers AI: { result: { response: string, ... }, usage: {...} }
-  return json(
-    {
-      ok,
-      provider: "cloudflare-ai",
-      status,
-      result: resp?.result ?? resp,
-      usage: resp?.usage,
+      result: body?.result ?? body,
     },
     ok ? 200 : 502
   );
@@ -213,7 +150,7 @@ async function openrouterModels(env: Record<string, any>) {
   }
   const url = "https://openrouter.ai/api/v1/models";
   const { ok, status, body } = await fetchJson(url, {
-    Authorization: `Bearer ${key}`,
+    headers: { Authorization: `Bearer ${key}` },
   });
   return json(
     {
@@ -263,53 +200,13 @@ function htmlDiagnosticsPage(origin: string) {
 </head>
 <body>
   <h1>🧪 Senti — Diagnostics</h1>
-  <p class="muted">Натискай кнопки — відповідь з'явиться нижче у <code>&lt;пре&gt;</code>.</p>
+  <p class="muted">Натискай кнопки — відповідь з'явиться нижче.</p>
 
   <div class="grid">
     <div class="card">
-      <h3>Загальна перевірка</h3>
-      <button data-endpoint="/health">/health</button>
-      <button data-endpoint="/diagnostics/ai/provider">/diagnostics/ai/provider</button>
-    </div>
-
-    <div class="card">
-      <h3>Cloudflare Workers AI</h3>
+      <h3>Cloudflare Workers AI — тестовий inference</h3>
       <button data-endpoint="/diagnostics/ai/cf-vision">/diagnostics/ai/cf-vision</button>
-      <button data-endpoint="/diagnostics/ai/cf/ping">/diagnostics/ai/cf/ping</button>
-      <p class="muted">Потребує <code>CLOUDFLARE_ACCOUNT_ID</code> і <code>CLOUDFLARE_API_TOKEN</code>.</p>
-    </div>
-
-    <div class="card">
-      <h3>Gemini</h3>
-      <button data-endpoint="/diagnostics/ai/gemini/models">/diagnostics/ai/gemini/models</button>
-      <button data-endpoint="/diagnostics/ai/gemini/ping">/diagnostics/ai/gemini/ping</button>
-      <p class="muted">Потребує <code>GEMINI_API_KEY</code>.</p>
-    </div>
-
-    <div class="card">
-      <h3>OpenRouter</h3>
-      <button data-endpoint="/diagnostics/ai/openrouter/models">/diagnostics/ai/openrouter/models</button>
-      <p class="muted">Потребує <code>OPENROUTER_API_KEY</code>.</p>
-    </div>
-
-    <div class="card">
-      <h3>Фото-флоу</h3>
-      <button data-endpoint="/diagnostics/photos">/diagnostics/photos</button>
-      <p class="muted">У Телеграмі: спочатку фото → потім коротка текстова підказка.</p>
-    </div>
-
-    <div class="card">
-      <h3>Прямі посилання</h3>
-      <ul>
-        <li><a href="${origin}/health" target="_blank">${origin}/health</a></li>
-        <li><a href="${origin}/diagnostics/ai/provider" target="_blank">${origin}/diagnostics/ai/provider</a></li>
-        <li><a href="${origin}/diagnostics/ai/cf-vision" target="_blank">${origin}/diagnostics/ai/cf-vision</a></li>
-        <li><a href="${origin}/diagnostics/ai/cf/ping" target="_blank">${origin}/diagnostics/ai/cf/ping</a></li>
-        <li><a href="${origin}/diagnostics/ai/gemini/models" target="_blank">${origin}/diagnostics/ai/gemini/models</a></li>
-        <li><a href="${origin}/diagnostics/ai/gemini/ping" target="_blank">${origin}/diagnostics/ai/gemini/ping</a></li>
-        <li><a href="${origin}/diagnostics/ai/openrouter/models" target="_blank">${origin}/diagnostics/ai/openrouter/models</a></li>
-        <li><a href="${origin}/diagnostics/photos" target="_blank">${origin}/diagnostics/photos</a></li>
-      </ul>
+      <p class="muted">Викликає @cf/meta/llama-3.1-8b-instruct з prompt "ping".</p>
     </div>
   </div>
 
@@ -317,20 +214,17 @@ function htmlDiagnosticsPage(origin: string) {
   <pre id="out">—</pre>
 
 <script>
-  const out = document.getElementById('out');
-  async function call(ep){
-    out.textContent = 'Loading ' + ep + ' ...';
-    try{
-      const r = await fetch(ep, { headers: { 'accept':'application/json' }});
-      const t = await r.text();
-      try { out.textContent = JSON.stringify(JSON.parse(t), null, 2); }
-      catch { out.textContent = t; }
-    }catch(e){
-      out.textContent = 'Error: ' + (e && e.message || e);
-    }
-  }
-  document.querySelectorAll('button[data-endpoint]')
-    .forEach(b => b.addEventListener('click', () => call(b.dataset.endpoint)));
+const out=document.getElementById('out');
+async function call(ep){
+  out.textContent='Loading '+ep+' ...';
+  try{
+    const r=await fetch(ep,{headers:{'accept':'application/json'}});
+    const t=await r.text();
+    try{out.textContent=JSON.stringify(JSON.parse(t),null,2);}catch{out.textContent=t;}
+  }catch(e){out.textContent='Error: '+(e&&e.message||e);}
+}
+document.querySelectorAll('button[data-endpoint]')
+  .forEach(b=>b.addEventListener('click',()=>call(b.dataset.endpoint)));
 </script>
 </body>
 </html>`;
@@ -350,54 +244,18 @@ export async function handleDiagnostics(
   }
   if (!url.pathname.startsWith("/diagnostics")) return null;
 
-  // /diagnostics/ai/provider
-  if (url.pathname === "/diagnostics/ai/provider") {
-    const accountId =
-      pickEnv(env, "CLOUDFLARE_ACCOUNT_ID", "CF_ACCOUNT_ID", "ACCOUNT_ID") || null;
-    const cfToken =
-      pickEnv(env, "CLOUDFLARE_API_TOKEN", "CF_API_TOKEN", "API_TOKEN") || null;
-    const hasGemini = !!pickEnv(env, "GEMINI_API_KEY", "GOOGLE_API_KEY");
-    const hasOpenRouter = !!pickEnv(env, "OPENROUTER_API_KEY", "OR_API_KEY");
-
-    return json({
-      ok: true,
-      provider: "summary",
-      cloudflare: {
-        accountId,
-        hasApiToken: !!cfToken,
-      },
-      gemini: { configured: hasGemini },
-      openrouter: { configured: hasOpenRouter },
-      endpoints: [
-        "/diagnostics/ai/cf-vision",
-        "/diagnostics/ai/cf/ping",
-        "/diagnostics/ai/gemini/models",
-        "/diagnostics/ai/gemini/ping",
-        "/diagnostics/ai/openrouter/models",
-      ],
-    });
-  }
-
   if (url.pathname === "/diagnostics/ai/cf-vision") {
-    return await cfListModels(env);
+    return await cfRunTestModel(env);
   }
-
-  if (url.pathname === "/diagnostics/ai/cf/ping") {
-    return await cfPing(env, url);
-  }
-
   if (url.pathname === "/diagnostics/ai/gemini/models") {
     return await geminiModels(env);
   }
-
   if (url.pathname === "/diagnostics/ai/gemini/ping") {
     return await geminiPing(env);
   }
-
   if (url.pathname === "/diagnostics/ai/openrouter/models") {
     return await openrouterModels(env);
   }
-
   if (url.pathname === "/diagnostics/photos") {
     return photosInfo();
   }
