@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "build": "tsc",                      
     "types": "tsc --noEmit",
     "test:lang": "tsx scripts/lang-autotest.ts"
   },
