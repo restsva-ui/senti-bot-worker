@@ -1,3 +1,4 @@
+// src/index.ts
 import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { sendHelp } from "./commands/help";
@@ -21,11 +22,8 @@ import { processPhotoWithGemini } from "./features/vision.ts";
 // Workers AI binding (Cloudflare)
 import { Ai } from "@cloudflare/ai";
 
-// 🧠 Smart /ask (перенесено в окремий модуль)
-import { smartAsk } from "./services/ask";
-
-// 🔹 НОВЕ: контекст/історія діалогу в KV
-import { loadHistory, appendHistory, type ChatTurn } from "./services/history";
+// 🧠 Smart /ask (окремий модуль)
+import { smartAsk, type ChatTurn } from "./services/ask";
 
 /* ======================== Env ======================== */
 export interface Env extends ReplierEnv {
@@ -111,6 +109,37 @@ function readExpectedSecret(env: Env): string | null {
   if (a) return a;
   const b = (env.TELEGRAM_SECRET_TOKEN || "").trim();
   return b || null;
+}
+
+/* ========= lightweight пам'ять у KV для /ask ========= */
+const HISTORY_TURNS = 6; // скільки пар user/assistant тримати
+
+function histKey(chatId: number | string) {
+  return `hist:${chatId}`;
+}
+
+async function loadHistory(env: Env, chatId: number | string): Promise<ChatTurn[]> {
+  if (!env.SENTI_CACHE) return [];
+  try {
+    const raw = await env.SENTI_CACHE.get(histKey(chatId));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      // санітуємо
+      return parsed
+        .filter((t) => t && (t.role === "user" || t.role === "assistant") && typeof t.content === "string")
+        .slice(-(HISTORY_TURNS * 2));
+    }
+  } catch {}
+  return [];
+}
+
+async function saveHistory(env: Env, chatId: number | string, history: ChatTurn[]) {
+  if (!env.SENTI_CACHE) return;
+  const clean = history
+    .filter((t) => t && (t.role === "user" || t.role === "assistant") && typeof t.content === "string")
+    .slice(-(HISTORY_TURNS * 2));
+  await env.SENTI_CACHE.put(histKey(chatId), JSON.stringify(clean), { expirationTtl: 60 * 60 * 24 }); // 24h TTL
 }
 
 /* ======================== worker ======================== */
@@ -238,7 +267,7 @@ export default {
             return json({ ok: true, handled: "menu" });
           }
 
-          // /ask <prompt> — використовує smartAsk + контекст з KV
+          // /ask <prompt> — з KV-пам'яттю та smartAsk
           const askMatch = trimmed.match(/^\/ask(?:@\w+)?\s*(.*)$/is);
           if (askMatch) {
             const prompt = askMatch[1]?.trim();
@@ -246,33 +275,33 @@ export default {
               await tgSendMessage(env as any, chatId, "💡 Напиши так: `/ask <твоє питання>`", { parse_mode: "Markdown" });
               return json({ ok: true, handled: "ask:usage" });
             }
-            try {
-              // 1) підтягнути історію (якщо є SENTI_CACHE)
-              const history = await loadHistory(env as any, chatId);
 
-              // 2) виклик моделі з історією (через any — не ламаємо ваш поточний typings)
-              const ans: any = await (smartAsk as any)(env, prompt, {
-                chatId,
+            // завантажуємо історію
+            const history = await loadHistory(env, chatId);
+
+            // системна інструкція коротка і універсальна
+            const systemPrompt =
+              "You are Senti, a concise and helpful assistant. Answer clearly, avoid markdown tables unless asked. If the user’s query is ambiguous—ask briefly to clarify.";
+
+            try {
+              const { text: answer, provider, model } = await smartAsk(env, prompt, {
                 history,
-                systemPrompt: "Be concise, helpful and accurate. Use the user's language.",
+                systemPrompt,
                 maxTokens: 512,
                 temperature: 0.6,
+                historyTurns: HISTORY_TURNS,
               });
 
-              const answer: string = ans?.text || ans?.answer || "⚠️ Немає відповіді.";
-              const provider = ans?.provider || "ai";
-              const model = ans?.model || "default";
+              // зберігаємо нову пару в історію
+              const nextHistory: ChatTurn[] = [
+                ...history,
+                { role: "user", content: prompt, ts: Date.now() },
+                { role: "assistant", content: answer, ts: Date.now() },
+              ];
+              await saveHistory(env, chatId, nextHistory);
 
               const header = `🤖 *Answer* (_${provider} · ${model}_)`;
               await tgSendMessage(env as any, chatId, `${header}\n\n${answer}`, { parse_mode: "Markdown" });
-
-              // 3) додати у KV нові turns (user -> assistant)
-              const now = Date.now();
-              const u: ChatTurn = { role: "user", content: prompt, ts: now };
-              const a: ChatTurn = { role: "assistant", content: answer, ts: now + 1 };
-              await appendHistory(env as any, chatId, u);
-              await appendHistory(env as any, chatId, a);
-
               return json({ ok: true, handled: `ask:${provider}` });
             } catch (e: any) {
               await tgSendMessage(env as any, chatId, `⚠️ Помилка відповіді: ${e?.message || String(e)}`);
