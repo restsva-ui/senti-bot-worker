@@ -18,8 +18,8 @@ function pickEnv(env: Record<string, any>, ...keys: string[]): string | undefine
   return undefined;
 }
 
-async function fetchJson(url: string, headers?: MaybeHeaders) {
-  const r = await fetch(url, { headers });
+async function fetchJson(url: string, headers?: MaybeHeaders, init?: RequestInit) {
+  const r = await fetch(url, { headers, ...(init || {}) });
   const text = await r.text();
   let body: any;
   try {
@@ -66,6 +66,73 @@ async function cfListModels(env: Record<string, any>) {
       status,
       endpoint: "/diagnostics/ai/cf-vision",
       models: body?.result ?? body,
+    },
+    ok ? 200 : 502
+  );
+}
+
+/* ---------- Cloudflare Workers AI (ping via inference) ---------- */
+async function cfPing(env: Record<string, any>, url: URL) {
+  const accountId =
+    pickEnv(env, "CLOUDFLARE_ACCOUNT_ID", "CF_ACCOUNT_ID", "ACCOUNT_ID") || "";
+  const apiToken =
+    pickEnv(env, "CLOUDFLARE_API_TOKEN", "CF_API_TOKEN", "API_TOKEN") || "";
+
+  if (!accountId || !apiToken) {
+    return json(
+      {
+        ok: false,
+        provider: "cloudflare-ai",
+        configured: false,
+        missing: {
+          accountId: !accountId,
+          apiToken: !apiToken,
+        },
+        hint:
+          "Для пінгу потрібні CLOUDFLARE_ACCOUNT_ID та CLOUDFLARE_API_TOKEN.",
+      },
+      200
+    );
+  }
+
+  // Модель можна перевизначити через ?model=
+  const model =
+    url.searchParams.get("model") ||
+    "@cf/meta/llama-3.1-8b-instruct";
+
+  const endpoint = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${encodeURIComponent(
+    model
+  )}`;
+
+  // Уніфікований формат Workers AI (chat-like)
+  const body = {
+    messages: [
+      { role: "system", content: "You are a minimal healthcheck. Reply with one word only." },
+      { role: "user", content: "pong" },
+    ],
+    stream: false,
+  };
+
+  const { ok, status, body: resp } = await fetchJson(
+    endpoint,
+    {
+      Authorization: `Bearer ${apiToken}`,
+      "content-type": "application/json",
+    },
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    }
+  );
+
+  // Стандартна відповідь Workers AI: { result: { response: string, ... }, usage: {...} }
+  return json(
+    {
+      ok,
+      provider: "cloudflare-ai",
+      status,
+      result: resp?.result ?? resp,
+      usage: resp?.usage,
     },
     ok ? 200 : 502
   );
@@ -208,6 +275,7 @@ function htmlDiagnosticsPage(origin: string) {
     <div class="card">
       <h3>Cloudflare Workers AI</h3>
       <button data-endpoint="/diagnostics/ai/cf-vision">/diagnostics/ai/cf-vision</button>
+      <button data-endpoint="/diagnostics/ai/cf/ping">/diagnostics/ai/cf/ping</button>
       <p class="muted">Потребує <code>CLOUDFLARE_ACCOUNT_ID</code> і <code>CLOUDFLARE_API_TOKEN</code>.</p>
     </div>
 
@@ -236,6 +304,7 @@ function htmlDiagnosticsPage(origin: string) {
         <li><a href="${origin}/health" target="_blank">${origin}/health</a></li>
         <li><a href="${origin}/diagnostics/ai/provider" target="_blank">${origin}/diagnostics/ai/provider</a></li>
         <li><a href="${origin}/diagnostics/ai/cf-vision" target="_blank">${origin}/diagnostics/ai/cf-vision</a></li>
+        <li><a href="${origin}/diagnostics/ai/cf/ping" target="_blank">${origin}/diagnostics/ai/cf/ping</a></li>
         <li><a href="${origin}/diagnostics/ai/gemini/models" target="_blank">${origin}/diagnostics/ai/gemini/models</a></li>
         <li><a href="${origin}/diagnostics/ai/gemini/ping" target="_blank">${origin}/diagnostics/ai/gemini/ping</a></li>
         <li><a href="${origin}/diagnostics/ai/openrouter/models" target="_blank">${origin}/diagnostics/ai/openrouter/models</a></li>
@@ -301,6 +370,7 @@ export async function handleDiagnostics(
       openrouter: { configured: hasOpenRouter },
       endpoints: [
         "/diagnostics/ai/cf-vision",
+        "/diagnostics/ai/cf/ping",
         "/diagnostics/ai/gemini/models",
         "/diagnostics/ai/gemini/ping",
         "/diagnostics/ai/openrouter/models",
@@ -310,6 +380,10 @@ export async function handleDiagnostics(
 
   if (url.pathname === "/diagnostics/ai/cf-vision") {
     return await cfListModels(env);
+  }
+
+  if (url.pathname === "/diagnostics/ai/cf/ping") {
+    return await cfPing(env, url);
   }
 
   if (url.pathname === "/diagnostics/ai/gemini/models") {
