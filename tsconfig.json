@@ -1,16 +1,17 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022", "WebWorker"],
-    "module": "ESNext",
+    "module": "ES2022",
     "moduleResolution": "Bundler",
+    "lib": ["ES2022", "WebWorker", "DOM"],
     "strict": true,
-    "noEmit": true,
     "isolatedModules": true,
-    "verbatimModuleSyntax": true,
     "skipLibCheck": true,
-    "types": ["@cloudflare/workers-types"]
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": ".",
+    "resolveJsonModule": true
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist", "build"]
+  "include": ["src", "scripts"],
+  "exclude": ["node_modules", "dist"]
 }
