@@ -1,2 +1,2 @@
-// proxy re-export so builds don't fail even if this file can't be removed on mobile
-export { processPhotoWithGemini } from "../vision.ts";
+// proxy re-export to keep backward compatibility with older imports
+export { processPhotoWithGemini } from "../vision";
