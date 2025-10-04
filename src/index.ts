@@ -18,6 +18,9 @@ import { handleDiagnostics } from "./diagnostics-ai";
 import { handlePhoto } from "./features/photos/handler.ts";
 import { processPhotoWithGemini } from "./features/vision.ts";
 
+// ⬇️ Workers AI binding (Cloudflare)
+import { Ai } from "@cloudflare/ai";
+
 /* ======================== Env ======================== */
 export interface Env extends ReplierEnv {
   BOT_TOKEN: string;
@@ -31,6 +34,9 @@ export interface Env extends ReplierEnv {
   LIKES_KV?: KVNamespace;
   DEDUP_KV?: KVNamespace;
   SENTI_CACHE?: KVNamespace;
+
+  // ⬇️ новий binding для Workers AI
+  AI: Ai;
 }
 
 /* ======================== helpers ======================== */
@@ -104,6 +110,22 @@ export default {
     // Health
     if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/")) {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
+    }
+
+    // 🔬 Cloudflare Workers AI — простий ping через binding
+    if (request.method === "GET" && url.pathname === "/diagnostics/ai/cf-ping") {
+      try {
+        const result = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
+          messages: [{ role: "user", content: "Say 'pong' and nothing else." }],
+          max_tokens: 16,
+        });
+        return json({ ok: true, provider: "cloudflare-ai", status: 200, result });
+      } catch (e: any) {
+        return json(
+          { ok: false, provider: "cloudflare-ai", status: 500, error: e?.message || String(e) },
+          500
+        );
+      }
     }
 
     // 🛡️ Diagnostics (тільки GET і не /webhook)
