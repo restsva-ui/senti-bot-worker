@@ -1,0 +1,68 @@
+import { tgGetFilePath } from "../utils/telegram";
+
+type EnvAll = {
+  BOT_TOKEN: string;
+  SENTI_CACHE?: KVNamespace;
+
+  CLOUDFLARE_API_TOKEN?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+
+  // альтернативні назви (для сумісності зі скрінів)
+  CF_ACCOUNT_ID?: string;
+  CF_VISION?: string;
+};
+
+async function getLastPhotoFileId(env: EnvAll, chatId: number) {
+  if (!env.SENTI_CACHE) return null;
+  const v1 = await env.SENTI_CACHE.get(`lastPhoto:${chatId}`);
+  if (v1) return v1;
+  const v2 = await env.SENTI_CACHE.get(`last_photo:${chatId}`);
+  return v2;
+}
+
+export async function processPhotoWithGemini(
+  env: EnvAll,
+  chatId: number,
+  prompt: string
+): Promise<{ text: string }> {
+  const fileId = await getLastPhotoFileId(env, chatId);
+  if (!fileId) return { text: "Спочатку надішли фото, потім — текст-підказку. 😉" };
+
+  const filePath = await tgGetFilePath(env as any, fileId);
+  if (!filePath) {
+    return { text: "Не вдалось отримати шлях до фото з Telegram. Спробуй надіслати зображення ще раз." };
+  }
+
+  const tgFileUrl = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${filePath}`;
+
+  const accountId = env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID;
+  const apiToken  = env.CLOUDFLARE_API_TOKEN || env.CF_VISION;
+  if (!accountId || !apiToken) {
+    return { text: "AI ще не налаштований: додай CLOUDFLARE_ACCOUNT_ID та CLOUDFLARE_API_TOKEN (або CF_ACCOUNT_ID/CF_VISION)." };
+  }
+
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/google/gemini-1.5-flash-001`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ input_text: prompt, image: tgFileUrl }),
+  });
+
+  const data = await res.json<any>().catch(() => ({}));
+  if (data?.success === false) {
+    return { text: `AI помилка: ${data?.errors?.[0]?.message || "невідомо"}` };
+  }
+
+  const result = data?.result ?? data;
+  const text =
+    result?.response ||
+    result?.text ||
+    result?.output_text ||
+    (Array.isArray(result) && result[0]?.response) ||
+    JSON.stringify(result ?? data);
+
+  return { text: String(text) };
+}
