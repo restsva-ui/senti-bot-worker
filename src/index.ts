@@ -1,3 +1,4 @@
+// src/index.ts
 import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { sendHelp } from "./commands/help";
@@ -111,35 +112,37 @@ function readExpectedSecret(env: Env): string | null {
   return b || null;
 }
 
-/** 🕒 Отримати останнє фото, якщо свіже (≤ maxAgeSec).
- * Якщо metadata.ts немає (старі ключі) — трактуємо як "свіже" одним фреймом,
- * щоб Vision усе одно спрацював одразу після фото.
- */
-async function getRecentPhotoIfFresh(env: Env, chatId: number, maxAgeSec = 120): Promise<string | null> {
-  if (!env.SENTI_CACHE) return null;
-  const keys = [
+/** 🔎 Перевірка: чи є “останнє фото” для цього чату у KV (кілька можливих ключів) */
+async function hasRecentPhoto(env: Env, chatId: number): Promise<boolean> {
+  if (!env.SENTI_CACHE) return false;
+  const candidates = [
+    `lastPhoto:${chatId}`,
+    `last_photo:${chatId}`,
     `photo:last:${chatId}`,
     `photos:last:${chatId}`,
     `tg:lastPhoto:${chatId}`,
-    `lastPhoto:${chatId}`,
-    `last_photo:${chatId}`,
   ];
-
-  // 1) Пробуємо зчитати з metadata
-  for (const key of keys) {
-    try {
-      const res = await env.SENTI_CACHE.getWithMetadata<string, { ts?: number }>(key);
-      if (!res?.value) continue;
-      const ts = res.metadata?.ts;
-      if (typeof ts === "number") {
-        if (Date.now() - ts < maxAgeSec * 1000) return res.value;
-      } else {
-        // 2) Фолбек: якщо немає metadata, але значення є — вважаємо "свіжим"
-        return res.value;
-      }
-    } catch {}
+  for (const k of candidates) {
+    const val = await env.SENTI_CACHE.get(k);
+    if (val) return true;
   }
-  return null;
+  return false;
+}
+
+/** 🧠 Чи виглядає повідомлення як запит до фото */
+function looksLikePhotoQuestion(text: string): boolean {
+  const t = text.toLowerCase().trim();
+  const patterns = [
+    /що\s+на\s+фото/,
+    /що\s+на\s+зображ/i,
+    /опиши\s+(це|це\s+фото|фото|зображення)/,
+    /розпізнай|розпиши|проаналізуй\s+(фото|зображ)/,
+    /what'?s\s+in\s+(the\s+)?(photo|image)/,
+    /describe\s+(this|the)\s+(photo|image)/,
+  ];
+  if (patterns.some((re) => re.test(t))) return true;
+  if (t.length <= 160 && (t.endsWith("?") || /опиши|зображ|фото/i.test(t))) return true;
+  return false;
 }
 
 /* ======================== worker ======================== */
@@ -288,9 +291,9 @@ export default {
             }
           }
 
-          // 🖼️ Якщо є свіже (або щойно прислане) фото — Vision має пріоритет
-          const recentPhoto = await getRecentPhotoIfFresh(env, chatId, 120);
-          if (recentPhoto) {
+          // 🖼️ Якщо є свіже фото і запит схожий на "про фото" — запускаємо vision ПЕРЕД smartAsk
+          const photoThere = await hasRecentPhoto(env, chatId);
+          if (photoThere && looksLikePhotoQuestion(trimmed)) {
             try {
               const result = await processPhotoWithGemini(env as any, chatId, trimmed);
               const out = typeof result === "string" ? result : (result?.text ?? "");
@@ -299,7 +302,8 @@ export default {
                 return json({ ok: true, handled: "photo:ask" });
               }
             } catch (e: any) {
-              // якщо CF AI недоступний — йдемо далі до smartAsk
+              await tgSendMessage(env as any, chatId, `AI помилка: ${e?.message || String(e)}`);
+              // не блокуємо — нижче ще буде smartAsk
             }
           }
 
@@ -312,7 +316,7 @@ export default {
             await saveTurn(env as any, chatId, trimmed, answer);
             return json({ ok: true, handled: `ask:auto:${provider}` });
           } catch {
-            // даємо шанс швидким шаблонам і фолбеку нижче
+            // якщо не вдалось — підемо далі до швидких шаблонів/фолбеку
           }
 
           // Швидкі шаблони
@@ -324,11 +328,7 @@ export default {
           }
 
           // Фолбек
-          await tgSendMessage(
-            env as any,
-            chatId,
-            "💡 Спробуй /ask питання — або просто напиши повідомлення, я відповім контекстно."
-          );
+          await tgSendMessage(env as any, chatId, "💡 Спробуй /ask питання — або просто напиши повідомлення, я відповім контекстно.");
           return json({ ok: true, handled: "ask:fallback" });
         }
 
