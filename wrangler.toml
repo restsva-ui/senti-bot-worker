@@ -11,6 +11,10 @@ compatibility_flags = ["nodejs_compat"]
 # Уникаємо перезапису змінних/секретів з Dashboard
 keep_vars = true
 
+# 🔗 Увімкнути Workers AI в цьому воркері
+[ai]
+binding = "AI"
+
 # Якщо KV уже прив'язані через Dashboard — цей блок можна НЕ додавати.
 # Якщо хочеш явно прописати — вкажи свої реальні IDs (із UI):
 # [[kv_namespaces]]
