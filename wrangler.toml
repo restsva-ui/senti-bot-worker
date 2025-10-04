@@ -1,51 +1,18 @@
-# =========================
-# Senti Bot — Wrangler TOML
-# =========================
-
 name = "senti-bot-worker"
 main = "src/index.ts"
+compatibility_date = "2024-09-10"
 workers_dev = true
+node_compat = false
 
-account_id = "2cf6e316af8623546c95c0354bc3aa00"
-compatibility_date = "2024-09-01"
-# Якщо десь потрібні Node-APIs (Buffer тощо), розкоментуй:
-# compatibility_flags = ["nodejs_compat"]
-minify = false
+# ПРИВ'ЯЗКИ KV — встав СВОЇ ID з дашборду Cloudflare
+[[kv_namespaces]]
+binding = "SENTI_CACHE"
+id = "PASTE_SENTI_CACHE_ID"
 
-# ---------- KV namespaces ----------
 [[kv_namespaces]]
 binding = "LIKES_KV"
-id = "7b32e2d1f60846ddb1c653eb52180bf7"   # senti-state
+id = "PASTE_LIKES_KV_ID"
 
 [[kv_namespaces]]
 binding = "DEDUP_KV"
-id = "20d81d7b68fa4ac6b9913e2fbd3465d5"   # senti-dedup
-
-[[kv_namespaces]]
-binding = "SENTI_CACHE"
-id = "497eac980691495ea2a0bc8611892d65"   # senti-cache
-
-# ---------- Публічні змінні (НЕ секрети) ----------
-[vars]
-API_BASE_URL = "https://api.telegram.org"
-AI_ENABLED   = "true"
-OWNER_ID     = "784869835"
-CF_ACCOUNT_ID = "2cf6e316af8623546c95c0354bc3aa00"
-
-# Якщо захочеш юзати env.AI.run(...)
-# [ai]
-# binding = "AI"
-
-# ---------- Observability ----------
-[observability]
-enabled = false
-
-# ---------- Dev ----------
-[dev]
-port = 8787
-local_protocol = "https"
-
-# ---------- Build ----------
-# Wrangler перед деплоєм викличе `npm run build`
-[build]
-command = "npm run build"
+id = "PASTE_DEDUP_KV_ID"
