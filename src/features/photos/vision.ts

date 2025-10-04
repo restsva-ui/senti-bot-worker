@@ -1,41 +1,75 @@
-import { Env } from "../../index";
-import { tgSendMessage } from "../../utils/telegram";
+// Обробка фото + Vision через Cloudflare AI (Gemini 1.5 Flash) — REST API
+import { tgGetFilePath, tgSendMessage } from "../../utils/telegram";
 
-export async function processPhotoWithGemini(env: Env, chatId: number, prompt: string): Promise<{ text: string }> {
-  if (!env.SENTI_CACHE) return { text: "⚠️ Немає кешу для фото." };
+type EnvAll = {
+  BOT_TOKEN: string;
 
-  const fileId = await env.SENTI_CACHE.get(`lastPhoto:${chatId}`);
-  if (!fileId) return { text: "⚠️ Фото не знайдено. Спочатку надішли фото." };
+  // KV
+  SENTI_CACHE: KVNamespace;
 
-  // ⚡️ Будуємо URL до фото
-  const url = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${fileId}`;
+  // Secrets для Workers AI через REST
+  CLOUDFLARE_API_TOKEN?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
 
-  // 🔑 Використовуємо Cloudflare AI (Gemini Vision)
-  const model = "@cf/google/gemini-1.5-flash-001";
-  const input = {
-    messages: [
-      { role: "system", content: "Ти — помічник, що аналізує фото і відповідає коротко." },
-      { role: "user", content: [
-        { type: "input_text", text: prompt },
-        { type: "input_image", image_url: url }
-      ]}
-    ]
-  };
+  // Альтернативні назви зі скрінів (сумісність)
+  CF_ACCOUNT_ID?: string;
+  CF_VISION?: string;
+};
 
-  const resp = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/ai/run/${model}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(input),
-  });
+export const cacheKey = (chatId: number) => `last_photo:${chatId}`;
 
-  if (!resp.ok) {
-    const errText = await resp.text();
-    return { text: `⚠️ AI error: ${errText}` };
+export async function handleIncomingPhoto(env: EnvAll, chatId: number, fileId: string) {
+  await env.SENTI_CACHE.put(cacheKey(chatId), fileId, { expirationTtl: 600 });
+  await tgSendMessage(env, chatId, "Фото отримав ✅ Тепер надішли коротку підказку текстом — що саме проаналізувати?");
+}
+
+export async function runVision(env: EnvAll, chatId: number, prompt: string) {
+  const fileId = await env.SENTI_CACHE.get(cacheKey(chatId));
+  if (!fileId) {
+    await tgSendMessage(env, chatId, "Спершу надішли фото, потім — текст-підказку. 😉");
+    return;
   }
 
-  const data = await resp.json();
-  return { text: data?.result?.response || "🤔 Не вдалося отримати відповідь." };
+  const filePath = await tgGetFilePath(env, fileId);
+  if (!filePath) {
+    await tgSendMessage(env, chatId, "Не вдалось отримати шлях до фото з Telegram. Спробуй надіслати картинку ще раз.");
+    return;
+  }
+  const fileUrl = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${filePath}`;
+
+  const text = await runWorkersAI(env, fileUrl, prompt);
+  if (!text) {
+    const hints: string[] = [];
+    if (!env.CLOUDFLARE_API_TOKEN && !env.CF_VISION) hints.push("додай CLOUDFLARE_API_TOKEN (або CF_VISION).");
+    if (!env.CLOUDFLARE_ACCOUNT_ID && !env.CF_ACCOUNT_ID) hints.push("додай CLOUDFLARE_ACCOUNT_ID (або CF_ACCOUNT_ID).");
+    await tgSendMessage(env, chatId, "Не вдалось отримати відповідь від AI. Перевір секрети Cloudflare." + (hints.length ? "\n- " + hints.join("\n- ") : ""));
+    return;
+  }
+
+  await tgSendMessage(env, chatId, text);
+}
+
+async function runWorkersAI(env: EnvAll, imageUrl: string, prompt: string): Promise<string | null> {
+  const accountId = env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID;
+  const apiToken  = env.CLOUDFLARE_API_TOKEN || env.CF_VISION;
+  if (!accountId || !apiToken) return null;
+
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/google/gemini-1.5-flash-001`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ input_text: prompt, image: imageUrl }),
+  });
+  const data = await res.json<any>().catch(() => ({}));
+  if (data?.success === false) return null;
+
+  const result = data?.result ?? data;
+  const text =
+    result?.response ||
+    result?.text ||
+    result?.output_text ||
+    (Array.isArray(result) && result[0]?.response) ||
+    null;
+
+  return text ? String(text) : JSON.stringify(result ?? data);
 }
