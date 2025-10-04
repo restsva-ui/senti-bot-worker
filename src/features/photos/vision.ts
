@@ -1,67 +1,61 @@
-// Обробка фото + Vision через Cloudflare AI (Gemini 1.5 Flash) — REST API
-import { tgGetFilePath, tgSendMessage } from "../../utils/telegram";
+import { tgGetFilePath } from "../../utils/telegram";
 
 type EnvAll = {
   BOT_TOKEN: string;
+  SENTI_CACHE?: KVNamespace;
 
-  // KV
-  SENTI_CACHE: KVNamespace;
-
-  // Secrets для Workers AI через REST
   CLOUDFLARE_API_TOKEN?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
 
-  // Альтернативні назви зі скрінів (сумісність)
+  // альтернативні назви зі скрінів (сумісність)
   CF_ACCOUNT_ID?: string;
   CF_VISION?: string;
 };
 
-export const cacheKey = (chatId: number) => `last_photo:${chatId}`;
-
-export async function handleIncomingPhoto(env: EnvAll, chatId: number, fileId: string) {
-  await env.SENTI_CACHE.put(cacheKey(chatId), fileId, { expirationTtl: 600 });
-  await tgSendMessage(env, chatId, "Фото отримав ✅ Тепер надішли коротку підказку текстом — що саме проаналізувати?");
+async function getLastPhotoFileId(env: EnvAll, chatId: number) {
+  if (!env.SENTI_CACHE) return null;
+  // підтримуємо обидва ключі
+  const v1 = await env.SENTI_CACHE.get(`lastPhoto:${chatId}`);
+  if (v1) return v1;
+  const v2 = await env.SENTI_CACHE.get(`last_photo:${chatId}`);
+  return v2;
 }
 
-export async function runVision(env: EnvAll, chatId: number, prompt: string) {
-  const fileId = await env.SENTI_CACHE.get(cacheKey(chatId));
+export async function processPhotoWithGemini(env: EnvAll, chatId: number, prompt: string): Promise<{ text: string }> {
+  const fileId = await getLastPhotoFileId(env, chatId);
   if (!fileId) {
-    await tgSendMessage(env, chatId, "Спершу надішли фото, потім — текст-підказку. 😉");
-    return;
+    return { text: "Спочатку надішли фото, потім — текст-підказку. 😉" };
   }
 
-  const filePath = await tgGetFilePath(env, fileId);
+  const filePath = await tgGetFilePath(env as any, fileId);
   if (!filePath) {
-    await tgSendMessage(env, chatId, "Не вдалось отримати шлях до фото з Telegram. Спробуй надіслати картинку ще раз.");
-    return;
+    return { text: "Не вдалось отримати шлях до фото з Telegram. Спробуй надіслати зображення ще раз." };
   }
   const fileUrl = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${filePath}`;
 
-  const text = await runWorkersAI(env, fileUrl, prompt);
-  if (!text) {
-    const hints: string[] = [];
-    if (!env.CLOUDFLARE_API_TOKEN && !env.CF_VISION) hints.push("додай CLOUDFLARE_API_TOKEN (або CF_VISION).");
-    if (!env.CLOUDFLARE_ACCOUNT_ID && !env.CF_ACCOUNT_ID) hints.push("додай CLOUDFLARE_ACCOUNT_ID (або CF_ACCOUNT_ID).");
-    await tgSendMessage(env, chatId, "Не вдалось отримати відповідь від AI. Перевір секрети Cloudflare." + (hints.length ? "\n- " + hints.join("\n- ") : ""));
-    return;
-  }
-
-  await tgSendMessage(env, chatId, text);
-}
-
-async function runWorkersAI(env: EnvAll, imageUrl: string, prompt: string): Promise<string | null> {
+  // пріоритетно беремо CLOUDFLARE_*; якщо їх нема — CF_* (сумісність)
   const accountId = env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID;
   const apiToken  = env.CLOUDFLARE_API_TOKEN || env.CF_VISION;
-  if (!accountId || !apiToken) return null;
+
+  if (!accountId || !apiToken) {
+    return { text: "AI ще не налаштований: додай CLOUDFLARE_ACCOUNT_ID та CLOUDFLARE_API_TOKEN (або CF_ACCOUNT_ID/CF_VISION)." };
+  }
 
   const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/google/gemini-1.5-flash-001`;
-  const res = await fetch(url, {
+
+  const resp = await fetch(url, {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiToken}`, "content-type": "application/json" },
-    body: JSON.stringify({ input_text: prompt, image: imageUrl }),
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ input_text: prompt, image: fileUrl }),
   });
-  const data = await res.json<any>().catch(() => ({}));
-  if (data?.success === false) return null;
+
+  const data = await resp.json<any>().catch(() => ({}));
+  if (data?.success === false) {
+    return { text: `AI помилка: ${data?.errors?.[0]?.message || "невідомо"}` };
+  }
 
   const result = data?.result ?? data;
   const text =
@@ -69,7 +63,7 @@ async function runWorkersAI(env: EnvAll, imageUrl: string, prompt: string): Prom
     result?.text ||
     result?.output_text ||
     (Array.isArray(result) && result[0]?.response) ||
-    null;
+    JSON.stringify(result ?? data);
 
-  return text ? String(text) : JSON.stringify(result ?? data);
+  return { text: String(text) };
 }
