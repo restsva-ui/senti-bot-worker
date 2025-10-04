@@ -40,6 +40,16 @@ function sanitizeAnswer(text: string): string {
 const OR_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_MODEL = "openrouter/auto";
 
+/** Вибір моделі з env або дефолт */
+function pickModel(env: Env): string {
+  // підтримуємо кілька назв змінних оточення
+  const fromEnv =
+    (env as any).OPENROUTER_MODEL ||
+    (env as any).OR_MODEL ||
+    "";
+  return String(fromEnv || DEFAULT_MODEL);
+}
+
 export async function openrouterAskText(
   env: Env,
   userPrompt: string,
@@ -54,7 +64,7 @@ export async function openrouterAskText(
   const reinforced = `${system}\n\nВідповідай згідно інструкції вище.\n\n${userPrompt}`;
 
   const body = {
-    model: DEFAULT_MODEL,
+    model: pickModel(env),
     messages: [
       { role: "system", content: system },
       { role: "user", content: reinforced },
