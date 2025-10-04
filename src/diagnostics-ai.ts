@@ -1,6 +1,5 @@
 // src/diagnostics-ai.ts
-// Діагностичні GET-ендпоїнти для перевірки інтеграцій AI/провайдерів.
-// Працює у Cloudflare Workers (без Node-специфіки).
+// Діагностичні GET-ендпоїнти + HTML-сторінка /diagnostics для ручних перевірок.
 
 type MaybeHeaders = HeadersInit | undefined;
 
@@ -11,7 +10,6 @@ function json(data: unknown, status = 200) {
   });
 }
 
-// Допоміжне: дістаємо значення змінних середовища з можливими синонімами
 function pickEnv(env: Record<string, any>, ...keys: string[]): string | undefined {
   for (const k of keys) {
     const v = (env as any)?.[k];
@@ -88,7 +86,6 @@ async function geminiModels(env: Record<string, any>) {
       200
     );
   }
-  // Публічний ендпоїнт переліку моделей Gemini
   const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(
     apiKey
   )}`;
@@ -117,7 +114,6 @@ async function geminiPing(env: Record<string, any>) {
       200
     );
   }
-  // Простий ping — запит списку моделей з мінімальною відповіддю
   const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(
     apiKey
   )}`;
@@ -163,7 +159,7 @@ async function openrouterModels(env: Record<string, any>) {
   );
 }
 
-/* ---------- Простий опис для фото ---------- */
+/* ---------- Info для фотопотоку ---------- */
 function photosInfo() {
   return json({
     ok: true,
@@ -173,10 +169,103 @@ function photosInfo() {
       "2) Потім — коротку текстову підказку (наприклад: 'Що на фото?').",
       "Бот збереже 'останні фото' у KV та проаналізує разом із підказкою.",
     ],
-    endpoints: {
-      tg_flow: "Telegram → photo → prompt",
-    },
+    endpoints: { tg_flow: "Telegram → photo → prompt" },
   });
+}
+
+/* ---------- HTML /diagnostics ---------- */
+function htmlDiagnosticsPage(origin: string) {
+  const html = `<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Senti — Diagnostics</title>
+<style>
+  :root{color-scheme:light dark}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;margin:0;padding:16px;line-height:1.45}
+  h1{margin:0 0 12px}
+  .grid{display:grid;gap:12px}
+  .card{border:1px solid rgba(0,0,0,.15);border-radius:10px;padding:14px}
+  button{cursor:pointer;border-radius:8px;border:1px solid rgba(0,0,0,.2);padding:10px 12px;background:transparent}
+  button:hover{background:rgba(0,0,0,.06)}
+  pre{white-space:pre-wrap;word-break:break-word;background:rgba(0,0,0,.06);padding:12px;border-radius:8px;max-height:50vh;overflow:auto}
+  a{color:inherit}
+  .muted{opacity:.8;font-size:.95em}
+</style>
+</head>
+<body>
+  <h1>🧪 Senti — Diagnostics</h1>
+  <p class="muted">Натискай кнопки — відповідь з'явиться нижче у <code>&lt;пре&gt;</code>.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Загальна перевірка</h3>
+      <button data-endpoint="/health">/health</button>
+      <button data-endpoint="/diagnostics/ai/provider">/diagnostics/ai/provider</button>
+    </div>
+
+    <div class="card">
+      <h3>Cloudflare Workers AI</h3>
+      <button data-endpoint="/diagnostics/ai/cf-vision">/diagnostics/ai/cf-vision</button>
+      <p class="muted">Потребує <code>CLOUDFLARE_ACCOUNT_ID</code> і <code>CLOUDFLARE_API_TOKEN</code>.</p>
+    </div>
+
+    <div class="card">
+      <h3>Gemini</h3>
+      <button data-endpoint="/diagnostics/ai/gemini/models">/diagnostics/ai/gemini/models</button>
+      <button data-endpoint="/diagnostics/ai/gemini/ping">/diagnostics/ai/gemini/ping</button>
+      <p class="muted">Потребує <code>GEMINI_API_KEY</code>.</p>
+    </div>
+
+    <div class="card">
+      <h3>OpenRouter</h3>
+      <button data-endpoint="/diagnostics/ai/openrouter/models">/diagnostics/ai/openrouter/models</button>
+      <p class="muted">Потребує <code>OPENROUTER_API_KEY</code>.</p>
+    </div>
+
+    <div class="card">
+      <h3>Фото-флоу</h3>
+      <button data-endpoint="/diagnostics/photos">/diagnostics/photos</button>
+      <p class="muted">У Телеграмі: спочатку фото → потім коротка текстова підказка.</p>
+    </div>
+
+    <div class="card">
+      <h3>Прямі посилання</h3>
+      <ul>
+        <li><a href="${origin}/health" target="_blank">${origin}/health</a></li>
+        <li><a href="${origin}/diagnostics/ai/provider" target="_blank">${origin}/diagnostics/ai/provider</a></li>
+        <li><a href="${origin}/diagnostics/ai/cf-vision" target="_blank">${origin}/diagnostics/ai/cf-vision</a></li>
+        <li><a href="${origin}/diagnostics/ai/gemini/models" target="_blank">${origin}/diagnostics/ai/gemini/models</a></li>
+        <li><a href="${origin}/diagnostics/ai/gemini/ping" target="_blank">${origin}/diagnostics/ai/gemini/ping</a></li>
+        <li><a href="${origin}/diagnostics/ai/openrouter/models" target="_blank">${origin}/diagnostics/ai/openrouter/models</a></li>
+        <li><a href="${origin}/diagnostics/photos" target="_blank">${origin}/diagnostics/photos</a></li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>Відповідь</h3>
+  <pre id="out">—</pre>
+
+<script>
+  const out = document.getElementById('out');
+  async function call(ep){
+    out.textContent = 'Loading ' + ep + ' ...';
+    try{
+      const r = await fetch(ep, { headers: { 'accept':'application/json' }});
+      const t = await r.text();
+      try { out.textContent = JSON.stringify(JSON.parse(t), null, 2); }
+      catch { out.textContent = t; }
+    }catch(e){
+      out.textContent = 'Error: ' + (e && e.message || e);
+    }
+  }
+  document.querySelectorAll('button[data-endpoint]')
+    .forEach(b => b.addEventListener('click', () => call(b.dataset.endpoint)));
+</script>
+</body>
+</html>`;
+  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
 /* ---------- Публічна оболонка ---------- */
@@ -186,8 +275,10 @@ export async function handleDiagnostics(
   url: URL
 ): Promise<Response | null> {
   if (request.method !== "GET") return null;
-
-  // тільки діагностичні GET-маршрути
+  if (url.pathname === "/diagnostics") {
+    const origin = `${url.protocol}//${url.host}`;
+    return htmlDiagnosticsPage(origin);
+  }
   if (!url.pathname.startsWith("/diagnostics")) return null;
 
   // /diagnostics/ai/provider
@@ -208,8 +299,6 @@ export async function handleDiagnostics(
       },
       gemini: { configured: hasGemini },
       openrouter: { configured: hasOpenRouter },
-      note:
-        "Це лише перевірка наявності ключів. Для реальної перевірки запустіть інші ендпоїнти нижче.",
       endpoints: [
         "/diagnostics/ai/cf-vision",
         "/diagnostics/ai/gemini/models",
@@ -219,31 +308,25 @@ export async function handleDiagnostics(
     });
   }
 
-  // /diagnostics/ai/cf-vision
   if (url.pathname === "/diagnostics/ai/cf-vision") {
     return await cfListModels(env);
   }
 
-  // /diagnostics/ai/gemini/models
   if (url.pathname === "/diagnostics/ai/gemini/models") {
     return await geminiModels(env);
   }
 
-  // /diagnostics/ai/gemini/ping
   if (url.pathname === "/diagnostics/ai/gemini/ping") {
     return await geminiPing(env);
   }
 
-  // /diagnostics/ai/openrouter/models
   if (url.pathname === "/diagnostics/ai/openrouter/models") {
     return await openrouterModels(env);
   }
 
-  // /diagnostics/photos
   if (url.pathname === "/diagnostics/photos") {
     return photosInfo();
   }
 
-  // Невідомий діагностичний шлях
   return json({ ok: false, error: "diagnostics: not found" }, 404);
 }
