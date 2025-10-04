@@ -2,16 +2,49 @@
 import { setMyCommands, deleteMyCommands, getMyCommands } from "../utils/telegram";
 import type { Env } from "../index";
 
-export function commandsList() {
+/** Опис команд трьома мовами */
+const CMD_TEXT = {
+  uk: {
+    start: "Запустити бота",
+    help:  "Довідка",
+    ping:  "Перевірка зв'язку",
+    likes: "Керувати вподобайками",
+    stats: "Статистика",
+    menu:  "Меню",
+    ask:   "Запит до ШІ",
+  },
+  en: {
+    start: "Start the bot",
+    help:  "Help",
+    ping:  "Connectivity check",
+    likes: "Chat likes",
+    stats: "Statistics (demo)",
+    menu:  "Menu",
+    ask:   "Ask the AI",
+  },
+  ru: {
+    start: "Запустить бота",
+    help:  "Справка",
+    ping:  "Проверка связи",
+    likes: "Управлять лайками",
+    stats: "Статистика",
+    menu:  "Меню",
+    ask:   "Вопрос к ИИ",
+  },
+};
+
+/** Повертає список команд для конкретної мови */
+export function commandsList(lang: "uk" | "en" | "ru" | undefined = "uk") {
+  const t = CMD_TEXT[lang || "uk"];
   return [
-    { command: "start", description: "Запустити бота" },
-    { command: "help",  description: "Довідка" },
-    { command: "ping",  description: "Перевірка зв'язку" },
-    { command: "likes", description: "Керувати вподобайками" },
-    { command: "stats", description: "Статистика" },
-    { command: "menu",  description: "Меню" },
-    { command: "ask",   description: "Запит до ШІ" },
-    // /id НЕ додаю в офіційний список, щоб не світити в меню
+    { command: "start", description: t.start },
+    { command: "help",  description: t.help  },
+    { command: "ping",  description: t.ping  },
+    { command: "likes", description: t.likes },
+    { command: "stats", description: t.stats },
+    { command: "menu",  description: t.menu  },
+    { command: "ask",   description: t.ask   },
+    // /id не світимо у меню навмисно
   ];
 }
 
@@ -27,16 +60,21 @@ const LANGS = [undefined, "uk", "en", "ru"] as const;
 export async function resetAllCommands(env: Env) {
   for (const s of SCOPES) {
     await deleteMyCommands(env as any, s as any, undefined);
-    for (const lng of LANGS) await deleteMyCommands(env as any, s as any, lng as any);
+    for (const lng of LANGS) {
+      await deleteMyCommands(env as any, s as any, lng as any);
+    }
   }
   return { ok: true };
 }
 
 export async function syncCommands(env: Env) {
-  const commands = commandsList();
   for (const s of SCOPES) {
+    // спочатку чистимо, щоб уникнути «хвостів»
     await deleteMyCommands(env as any, s as any, undefined);
-    for (const lng of LANGS) await setMyCommands(env as any, commands, s as any, lng as any);
+    for (const lng of LANGS) {
+      const list = commandsList(lng as any);
+      await setMyCommands(env as any, list, s as any, lng as any);
+    }
   }
   return { ok: true };
 }
@@ -61,7 +99,9 @@ export async function resetChatCommands(env: Env, chatId: number | string) {
   ];
   for (const s of scopes) {
     await deleteMyCommands(env as any, s as any, undefined);
-    for (const lng of LANGS) await deleteMyCommands(env as any, s as any, lng as any);
+    for (const lng of LANGS) {
+      await deleteMyCommands(env as any, s as any, lng as any);
+    }
   }
   return { ok: true };
 }
@@ -71,10 +111,12 @@ export async function syncChatCommands(env: Env, chatId: number | string) {
     { type: "chat", chat_id: chatId },
     { type: "chat_administrators", chat_id: chatId },
   ];
-  const commands = commandsList();
   for (const s of scopes) {
     await deleteMyCommands(env as any, s as any, undefined);
-    for (const lng of LANGS) await setMyCommands(env as any, commands, s as any, lng as any);
+    for (const lng of LANGS) {
+      const list = commandsList(lng as any);
+      await setMyCommands(env as any, list, s as any, lng as any);
+    }
   }
   return { ok: true };
 }
@@ -83,7 +125,9 @@ export async function syncChatCommands(env: Env, chatId: number | string) {
 export async function forceEmptyAllCommands(env: Env) {
   for (const s of SCOPES) {
     await setMyCommands(env as any, [], s as any, undefined);
-    for (const lng of LANGS) await setMyCommands(env as any, [], s as any, lng as any);
+    for (const lng of LANGS) {
+      await setMyCommands(env as any, [], s as any, lng as any);
+    }
   }
   return { ok: true };
 }
