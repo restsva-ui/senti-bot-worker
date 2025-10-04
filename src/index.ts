@@ -14,21 +14,24 @@ import {
 } from "./commands/sync";
 import { handleDiagnostics } from "./diagnostics-ai";
 
-// нові модулі для фото
+// фото-модулі
 import { handlePhoto } from "./features/photos/handler";
 import { processPhotoWithGemini } from "./features/photos/vision";
 
+/* ======================== Env ======================== */
 export interface Env extends ReplierEnv {
   BOT_TOKEN: string;
-  WEBHOOK_SECRET?: string;
-  CF_VISION?: string;
+  WEBHOOK_SECRET?: string;                 // основна назва
+  TELEGRAM_SECRET_TOKEN?: string;          // сумісність із твоїми секретами
+  CF_VISION?: string;                      // альтернативна назва для токена CF AI
   CLOUDFLARE_API_TOKEN?: string;
+
   LIKES_KV?: KVNamespace;
   DEDUP_KV?: KVNamespace;
   SENTI_CACHE?: KVNamespace;
 }
 
-/* ------------ helpers ------------ */
+/* ======================== helpers ======================== */
 function json(res: unknown, status = 200) {
   return new Response(JSON.stringify(res), {
     status,
@@ -48,18 +51,27 @@ async function readJsonSafe(req: Request, maxBytes = 1024 * 1024) {
 function getMessageInfo(update: any): {
   chatId?: number; text?: string; fromLangCode?: string; fromId?: number;
 } {
-  const msg = update?.message || update?.edited_message || update?.channel_post || update?.callback_query?.message || null;
+  const msg =
+    update?.message ||
+    update?.edited_message ||
+    update?.channel_post ||
+    update?.callback_query?.message ||
+    null;
+
   return {
     chatId: msg?.chat?.id,
-    text: update?.message?.text ??
+    text:
+      update?.message?.text ??
       update?.edited_message?.text ??
       update?.channel_post?.text ??
       update?.callback_query?.message?.text,
-    fromLangCode: update?.message?.from?.language_code ??
+    fromLangCode:
+      update?.message?.from?.language_code ??
       update?.edited_message?.from?.language_code ??
       update?.channel_post?.from?.language_code ??
       update?.callback_query?.from?.language_code,
-    fromId: update?.message?.from?.id ??
+    fromId:
+      update?.message?.from?.id ??
       update?.edited_message?.from?.id ??
       update?.channel_post?.from?.id ??
       update?.callback_query?.from?.id,
@@ -75,7 +87,14 @@ async function seenUpdateRecently(env: Env, updateId: number | string, ttlSec = 
   return false;
 }
 
-/* ------------ worker ------------ */
+function readExpectedSecret(env: Env): string | null {
+  const a = (env.WEBHOOK_SECRET || "").trim();
+  if (a) return a;
+  const b = (env.TELEGRAM_SECRET_TOKEN || "").trim();
+  return b || null;
+}
+
+/* ======================== worker ======================== */
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -85,7 +104,7 @@ export default {
       return json({ ok: true, service: "senti-bot-worker", ts: Date.now() });
     }
 
-    // 🛡️ Diagnostics only GET
+    // 🛡️ Diagnostics (тільки GET і не /webhook)
     if (request.method === "GET" && url.pathname !== "/webhook") {
       const diag = await handleDiagnostics(request, env as any, url);
       if (diag) return diag;
@@ -95,9 +114,15 @@ export default {
     if (url.pathname === "/webhook") {
       if (request.method !== "POST") return json({ ok: false, error: "method not allowed" }, 405);
 
-      const expected = (env.WEBHOOK_SECRET || "").trim();
+      // секрет приймаємо з двома назвами змінних (загальна/сумісність)
+      const expected = readExpectedSecret(env);
       if (expected) {
-        const got = (request.headers.get("x-telegram-bot-api-secret-token") || "").trim();
+        // заголовки у Fetch API case-insensitive, але підстрахуємося
+        const got =
+          (request.headers.get("x-telegram-bot-api-secret-token") ||
+            request.headers.get("X-Telegram-Bot-Api-Secret-Token") ||
+            "")!.trim();
+
         if (got !== expected) return json({ ok: false, error: "invalid secret" }, 403);
       }
 
@@ -117,13 +142,13 @@ export default {
       if (!chatId) return json({ ok: true, noop: true });
 
       try {
-        // ---- якщо прилетіло фото ----
-        if (update?.message?.photo) {
+        /* ---------- 1) Фото ---------- */
+        if (update?.message?.photo?.length) {
           await handlePhoto(update, env, chatId);
           return json({ ok: true, handled: "photo" });
         }
 
-        // ---- callback buttons ----
+        /* ---------- 2) Callback-кнопки ---------- */
         if (update?.callback_query?.id) {
           const data: string | undefined = update?.callback_query?.data ?? undefined;
 
@@ -135,11 +160,12 @@ export default {
             await menuOnCallback(env as any, update as any);
             return json({ ok: true, handled: "menu:callback" });
           }
+
           await tgSendMessage(env as any, chatId, `tap: ${data ?? ""}`);
           return json({ ok: true, handled: "callback:echo" });
         }
 
-        // ---- text / commands ----
+        /* ---------- 3) Текст / Команди ---------- */
         if (typeof text === "string") {
           const trimmed = text.trim();
 
@@ -149,43 +175,49 @@ export default {
             return json({ ok: true, handled: "id" });
           }
 
+          // /start | /help
           if (/^\/start(?:@\w+)?$/i.test(trimmed) || /^\/help(?:@\w+)?$/i.test(trimmed)) {
             const langForHelp: Lang = normalizeLang(trimmed, fromLangCode);
             await sendHelp(env as any, chatId, langForHelp);
             return json({ ok: true, handled: "help" });
           }
 
+          // /ping
           if (/^\/ping(?:@\w+)?$/i.test(trimmed)) {
             await pingCommand(env as any, chatId);
             return json({ ok: true, handled: "ping" });
           }
 
+          // /likes
           if (/^\/likes(?:@\w+)?$/i.test(trimmed)) {
             await likesCommand(env as any, { message: { chat: { id: chatId } } });
             return json({ ok: true, handled: "likes" });
           }
 
+          // /stats
           if (/^\/stats(?:@\w+)?$/i.test(trimmed)) {
             await statsCommand(env as any, { message: { chat: { id: chatId } } });
             return json({ ok: true, handled: "stats" });
           }
 
+          // /menu
           if (/^\/menu(?:@\w+)?$/i.test(trimmed)) {
             await menuCommand(env as any, chatId);
             return json({ ok: true, handled: "menu" });
           }
 
-          // якщо є фото у кеші → обробляємо разом із текстом
+          // 🖼️ Якщо перед цим було фото, vision-модуль сам дістане його з KV
           if (env.SENTI_CACHE) {
-            const lastPhoto = await env.SENTI_CACHE.get(`lastPhoto:${chatId}`);
-            if (lastPhoto) {
-              const result = await processPhotoWithGemini(env, chatId, trimmed);
-              await tgSendMessage(env, chatId, result.text);
+            const result = await processPhotoWithGemini(env as any, chatId, trimmed);
+            // processPhotoWithGemini може повернути рядок або { text }
+            const out = typeof result === "string" ? result : (result?.text ?? "");
+            if (out) {
+              await tgSendMessage(env as any, chatId, out);
               return json({ ok: true, handled: "photo:ask" });
             }
           }
 
-          // fallback — текстовий AI (як було)
+          // ⚙️ Швидкі шаблони
           const msgLang: Lang = normalizeLang(trimmed, fromLangCode);
           const quick = quickTemplateReply(msgLang, trimmed);
           if (quick) {
@@ -193,15 +225,16 @@ export default {
             return json({ ok: true, handled: "template:plain" });
           }
 
-          // якщо нічого швидкого → тут можна підключати текстовий AI (Cloudflare/Gemini)
+          // Фолбек — місце для текстового AI (поки повідомлення)
           await tgSendMessage(env as any, chatId, "💡 Текстовий AI ще не підключений у цьому місці.");
           return json({ ok: true, handled: "ask:fallback" });
         }
 
         return json({ ok: true, noop: true });
       } catch (e: any) {
+        // Захищене повідомлення про помилку користувачу
         try {
-          await tgSendMessage(env as any, chatId, `⚠️ Помилка: ${e?.message || String(e)}`);
+          await tgSendMessage(env as any, chatId!, `⚠️ Помилка: ${e?.message || String(e)}`);
         } catch {}
         return json({ ok: false, error: "internal" }, 500);
       }
