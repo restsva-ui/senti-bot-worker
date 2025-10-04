@@ -1,3 +1,4 @@
+// src/index.ts
 import { tgSendMessage } from "./utils/telegram";
 import { ping as pingCommand } from "./commands/ping";
 import { sendHelp } from "./commands/help";
@@ -111,21 +112,30 @@ function readExpectedSecret(env: Env): string | null {
   return b || null;
 }
 
-/** 🔎 Чи є “останнє фото” для цього чату у KV (підтримуємо кілька ключів) */
-async function hasRecentPhoto(env: Env, chatId: number): Promise<boolean> {
-  if (!env.SENTI_CACHE) return false;
-  const candidates = [
+/** 🕒 Отримати значення "останнього фото", якщо воно свіже (<= maxAgeSec).
+ * Працює з кількома можливими ключами та вимагає наявності metadata.ts,
+ * яку ми пишемо у handlePhoto.
+ */
+async function getRecentPhotoIfFresh(env: Env, chatId: number, maxAgeSec = 120): Promise<string | null> {
+  if (!env.SENTI_CACHE) return null;
+  const keys = [
     `photo:last:${chatId}`,
     `photos:last:${chatId}`,
     `tg:lastPhoto:${chatId}`,
     `lastPhoto:${chatId}`,
-    `last_photo:${chatId}`, // ⬅️ додано
+    `last_photo:${chatId}`,
   ];
-  for (const k of candidates) {
-    const val = await env.SENTI_CACHE.get(k);
-    if (val) return true;
+  for (const key of keys) {
+    try {
+      const res = await env.SENTI_CACHE.getWithMetadata<string, { ts?: number }>(key);
+      if (!res?.value) continue;
+      const ts = res.metadata?.ts;
+      if (typeof ts === "number" && Date.now() - ts < maxAgeSec * 1000) {
+        return res.value;
+      }
+    } catch {}
   }
-  return false;
+  return null;
 }
 
 /* ======================== worker ======================== */
@@ -274,8 +284,9 @@ export default {
             }
           }
 
-          // 🖼️ Якщо є свіже фото для чату — СПОЧАТКУ пробуємо Vision
-          if (env.SENTI_CACHE && await hasRecentPhoto(env, chatId)) {
+          // 🖼️ Якщо є свіже фото (≤ 2 хв) — пріоритетно Vision
+          const recentPhoto = await getRecentPhotoIfFresh(env, chatId, 120);
+          if (recentPhoto) {
             try {
               const result = await processPhotoWithGemini(env as any, chatId, trimmed);
               const out = typeof result === "string" ? result : (result?.text ?? "");
@@ -284,11 +295,11 @@ export default {
                 return json({ ok: true, handled: "photo:ask" });
               }
             } catch (e: any) {
-              // якщо CF AI недоступний/нема роута — просто впадемо у smartAsk нижче
+              // якщо CF AI недоступний — йдемо далі до smartAsk
             }
           }
 
-          // 🧠 ЗВИЧАЙНИЙ ТЕКСТ → smartAsk з історією (контекстні відповіді без команди)
+          // 🧠 Звичайний текст → smartAsk з історією
           try {
             const history = await loadHistory(env as any, chatId);
             const { text: answer, provider, model } = await smartAsk(env as any, trimmed, history);
@@ -297,7 +308,7 @@ export default {
             await saveTurn(env as any, chatId, trimmed, answer);
             return json({ ok: true, handled: `ask:auto:${provider}` });
           } catch {
-            // Якщо не вдалось — підемо в шаблони/фолбек
+            // даємо шанс швидким шаблонам і фолбеку нижче
           }
 
           // Швидкі шаблони
@@ -309,7 +320,11 @@ export default {
           }
 
           // Фолбек
-          await tgSendMessage(env as any, chatId, "💡 Спробуй /ask питання — або просто напиши повідомлення, я відповім контекстно.");
+          await tgSendMessage(
+            env as any,
+            chatId,
+            "💡 Спробуй /ask питання — або просто напиши повідомлення, я відповім контекстно."
+          );
           return json({ ok: true, handled: "ask:fallback" });
         }
 
