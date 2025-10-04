@@ -1,22 +1,15 @@
-import { Env } from "../../index";
 import { tgSendMessage } from "../../utils/telegram";
 
-export async function handlePhoto(update: any, env: Env, chatId: number) {
-  try {
-    const photos = update?.message?.photo;
-    if (!photos || photos.length === 0) return;
+type EnvAll = {
+  SENTI_CACHE?: KVNamespace;
+};
 
-    // найбільше фото (краща якість)
-    const largest = photos[photos.length - 1];
-    const fileId = largest.file_id;
-
-    // збережемо fileId у KV
-    if (env.SENTI_CACHE) {
-      await env.SENTI_CACHE.put(`lastPhoto:${chatId}`, fileId, { expirationTtl: 600 });
-    }
-
-    await tgSendMessage(env, chatId, "📸 Фото отримано! Тепер напиши, що з ним зробити.");
-  } catch (err: any) {
-    await tgSendMessage(env, chatId, `⚠️ Помилка обробки фото: ${err.message || String(err)}`);
-  }
+export async function handlePhoto(update: any, env: EnvAll, chatId: number) {
+  const photos = update?.message?.photo as { file_id: string }[] | undefined;
+  const best = photos?.[photos.length - 1];
+  if (!best?.file_id) return;
+  // зберігаємо під двома ключами для сумісності зі старими/новими модулями
+  await env.SENTI_CACHE?.put(`lastPhoto:${chatId}`, best.file_id, { expirationTtl: 600 });
+  await env.SENTI_CACHE?.put(`last_photo:${chatId}`, best.file_id, { expirationTtl: 600 });
+  await tgSendMessage(env as any, chatId, "Фото отримав ✅ Тепер надішли коротку підказку текстом — що саме проаналізувати?");
 }
