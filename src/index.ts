@@ -227,6 +227,34 @@ export default {
             return json({ ok: true, handled: "menu" });
           }
 
+          // 🔹 НОВЕ: /ask <запит> — відповідь через Cloudflare Workers AI
+          const askMatch = trimmed.match(/^\/ask(?:@\w+)?\s+([\s\S]+)$/i);
+          if (askMatch) {
+            const prompt = askMatch[1].trim();
+            if (!prompt) {
+              await tgSendMessage(env as any, chatId, "Синтаксис: /ask твій_запит");
+              return json({ ok: true, handled: "ask:usage" });
+            }
+            try {
+              const result: any = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
+                messages: [
+                  { role: "system", content: "Be concise and helpful." },
+                  { role: "user", content: prompt },
+                ],
+                max_tokens: 512,
+              });
+              const out =
+                (typeof result?.response === "string" && result.response) ||
+                (typeof result?.output_text === "string" && result.output_text) ||
+                JSON.stringify(result);
+              await tgSendMessage(env as any, chatId, out);
+              return json({ ok: true, handled: "ask:cf", usage: result?.usage });
+            } catch (err: any) {
+              await tgSendMessage(env as any, chatId, `CF-AI помилка: ${err?.message || String(err)}`);
+              return json({ ok: false, handled: "ask:error" });
+            }
+          }
+
           // 🖼️ Якщо було фото — vision сам дістане його з KV
           if (env.SENTI_CACHE) {
             const result = await processPhotoWithGemini(env as any, chatId, trimmed);
@@ -245,8 +273,8 @@ export default {
             return json({ ok: true, handled: "template:plain" });
           }
 
-          // Фолбек — повідомлення
-          await tgSendMessage(env as any, chatId, "💡 Текстовий AI ще не підключений у цьому місці.");
+          // Фолбек — підказка про /ask
+          await tgSendMessage(env as any, chatId, "💡 Спробуй /ask питання — відповім через Cloudflare AI.");
           return json({ ok: true, handled: "ask:fallback" });
         }
 
