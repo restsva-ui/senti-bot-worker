@@ -1,2 +1,2 @@
-// proxy re-export to keep backward compatibility with older imports
+// src/features/photos/vision.ts
 export { processPhotoWithGemini } from "../vision";
