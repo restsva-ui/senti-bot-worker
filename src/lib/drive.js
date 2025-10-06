@@ -1,37 +1,35 @@
 // src/lib/drive.js
-// Google Drive клієнт для Cloudflare Workers.
-// Підтримує 2 режими:
-//   1) Service Account (JWT)            -> GOOGLE_IS_SERVICE=true
-//   2) Особистий доступ (OAuth token)   -> GOOGLE_IS_SERVICE=false + GOOGLE_ACCESS_TOKEN
+// Google Drive клієнт для Cloudflare Workers з підтримкою:
+// 1) Service Account (JWT) -> GOOGLE_IS_SERVICE=true
+// 2) Особистий OAuth з автооновленням через refresh_token -> GOOGLE_IS_SERVICE=false
 
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const DRIVE_UPLOAD_MULTIPART =
   "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
 const DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files";
 
-/* ========================== Допоміжні ========================== */
+/* ========================== Utils / Config ========================== */
 
-// Читаємо DRIVE_FOLDER_ID
 function ensureFolder(env) {
   const id = env.DRIVE_FOLDER_ID;
   if (!id) throw new Error("Missing DRIVE_FOLDER_ID (Cloudflare Variable)");
   return id;
 }
 
-// Чи увімкнено Service Account?
 function isService(env) {
   const v = String(env.GOOGLE_IS_SERVICE ?? "true").toLowerCase().trim();
   return v === "true" || v === "1" || v === "yes";
 }
 
-// Розбір секрету GOOGLE_DRIVE_CREDENTIALS (повний JSON)
+/* ========================== Service Account ========================== */
+
 function getCreds(env) {
   if (!env.GOOGLE_DRIVE_CREDENTIALS)
     throw new Error("Missing secret GOOGLE_DRIVE_CREDENTIALS");
   let creds;
   try {
     creds = JSON.parse(env.GOOGLE_DRIVE_CREDENTIALS);
-  } catch (e) {
+  } catch {
     throw new Error("GOOGLE_DRIVE_CREDENTIALS is not valid JSON");
   }
   if (!creds.client_email || !creds.private_key) {
@@ -61,7 +59,6 @@ function encJSONUrlSafe(obj) {
   return b64url(b);
 }
 
-// Генеруємо access_token для Service Account
 async function getServiceAccessToken(env) {
   const creds = getCreds(env);
   const now = Math.floor(Date.now() / 1000);
@@ -69,7 +66,7 @@ async function getServiceAccessToken(env) {
   const header = { alg: "RS256", typ: "JWT" };
   const claim = {
     iss: creds.client_email,
-    sub: creds.client_email, // як сервісний акаунт
+    sub: creds.client_email,
     scope: "https://www.googleapis.com/auth/drive.file",
     aud: OAUTH_TOKEN_URL,
     iat: now,
@@ -105,25 +102,56 @@ async function getServiceAccessToken(env) {
   return data.access_token;
 }
 
-// Повертає access_token відповідно до режиму
-async function getAccessToken(env) {
-  if (isService(env)) {
-    return await getServiceAccessToken(env);
+/* ========================== OAuth user-flow (auto refresh) ========================== */
+
+// У пам'яті воркера кешуємо access_token, щоб не звертатися щозапиту
+let userTokenCache = { token: null, exp: 0 }; // exp = epoch seconds
+
+async function getUserAccessToken(env) {
+  const now = Math.floor(Date.now() / 1000);
+  if (userTokenCache.token && now < userTokenCache.exp) {
+    return userTokenCache.token;
   }
-  // Особистий токен (виданий OAuth Playground)
-  const tok = env.GOOGLE_ACCESS_TOKEN;
-  if (!tok) {
+
+  const clientId = env.GOOGLE_CLIENT_ID;
+  const clientSecret = env.GOOGLE_CLIENT_SECRET;
+  const refreshToken = env.GOOGLE_REFRESH_TOKEN;
+  if (!clientId || !clientSecret || !refreshToken) {
     throw new Error(
-      "Missing GOOGLE_ACCESS_TOKEN (set GOOGLE_IS_SERVICE=false to use it)"
+      "Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REFRESH_TOKEN"
     );
   }
-  return tok;
+
+  const res = await fetch(OAUTH_TOKEN_URL, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error("refresh_token_error: " + JSON.stringify(data));
+
+  const ttl = Math.max(60, (data.expires_in || 3600) - 60); // буфер 60с
+  userTokenCache.token = data.access_token;
+  userTokenCache.exp = now + ttl;
+  return userTokenCache.token;
 }
 
-// Витягаємо ім’я файлу з Content-Disposition (якщо є)
+/* ========================== Спільний доступ до токена ========================== */
+
+async function getAccessToken(env) {
+  if (isService(env)) return getServiceAccessToken(env);
+  return getUserAccessToken(env);
+}
+
+/* ========================== Допоміжні для файлів ========================== */
+
 function nameFromContentDisposition(dispo) {
   if (!dispo) return null;
-  // приклади: attachment; filename="my.pdf"  |  attachment; filename*=UTF-8''my.pdf
   const m1 = dispo.match(/filename\*?=(?:UTF-8''|")?([^";]+)/i);
   if (m1 && m1[1]) {
     try {
@@ -135,7 +163,6 @@ function nameFromContentDisposition(dispo) {
   return null;
 }
 
-// Резервне ім’я з URL
 function guessNameFromUrl(u) {
   try {
     const url = new URL(u);
@@ -168,12 +195,11 @@ export async function driveSaveFromUrl(env, fileUrl, nameOptional) {
   const token = await getAccessToken(env);
   const folderId = ensureFolder(env);
 
-  // 1) завантажуємо файл у воркер
+  // Скачуємо файл у воркер
   const src = await fetch(fileUrl);
   if (!src.ok) throw new Error(`Fetch failed: ${src.status}`);
   const buf = new Uint8Array(await src.arrayBuffer());
 
-  // Визначаємо ім’я та тип
   const cd = src.headers.get("content-disposition") || "";
   const hintedName = nameFromContentDisposition(cd);
   const filename =
@@ -184,12 +210,9 @@ export async function driveSaveFromUrl(env, fileUrl, nameOptional) {
   const contentType =
     src.headers.get("content-type") || "application/octet-stream";
 
-  // 2) multipart/related тіло
+  // multipart/related
   const boundary = "----senti-drive-" + Math.random().toString(16).slice(2);
-  const metadata = {
-    name: filename,
-    parents: [folderId],
-  };
+  const metadata = { name: filename, parents: [folderId] };
 
   const enc = new TextEncoder();
   const metaPart =
@@ -197,15 +220,12 @@ export async function driveSaveFromUrl(env, fileUrl, nameOptional) {
     `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
     JSON.stringify(metadata) +
     `\r\n`;
-
   const filePartHeader =
     `--${boundary}\r\n` + `Content-Type: ${contentType}\r\n\r\n`;
-
   const footer = `\r\n--${boundary}--\r\n`;
 
   const body = new Blob([enc.encode(metaPart), enc.encode(filePartHeader), buf, enc.encode(footer)]);
 
-  // 3) завантажуємо у Drive
   const uploadUrl = `${DRIVE_UPLOAD_MULTIPART}&supportsAllDrives=true`;
   const upload = await fetch(uploadUrl, {
     method: "POST",
