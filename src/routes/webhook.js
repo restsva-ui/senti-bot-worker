@@ -1,5 +1,6 @@
 import { json, sendMessage, logReply, isOwner, getAutolog, setAutolog } from "../lib/utils.js";
 import { loadTodos, saveTodos, addTodo, removeTodoByIndex, formatTodos } from "../lib/todo.js";
+import { syncOnce } from "../lib/checklist-manager.js";
 
 export default async function webhook(request, env, ctx) {
   let update;
@@ -24,6 +25,25 @@ export default async function webhook(request, env, ctx) {
   // /id
   if (text === "/id") {
     await sendMessage(env, chatId, `👤 Твій Telegram ID: \`${fromId}\``);
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+
+  // /sync — ручний запуск нормалізації (owner)
+  if (text === "/sync") {
+    if (!(await isOwner(env, fromId))) {
+      await sendMessage(env, chatId, "🔒 Лише власник.");
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+    const { changed, addedRules, count } = await syncOnce(env, chatId);
+    const parts = [
+      "🔁 Sync виконано.",
+      `• елементів: ${count}`,
+      `• зміни: ${changed ? "так" : "ні"}`
+    ];
+    if (addedRules.length) parts.push("• додано правила:\n" + addedRules.map((r) => `  - ${r}`).join("\n"));
+    await sendMessage(env, chatId, parts.join("\n"));
     await logReply(env, chatId);
     return json({ ok: true });
   }
@@ -73,6 +93,8 @@ export default async function webhook(request, env, ctx) {
     await saveTodos(env, chatId, []);
     await sendMessage(env, chatId, "🧹 Список очищено.");
     await logReply(env, chatId);
+    // подієвий sync у фоні
+    ctx.waitUntil(syncOnce(env, chatId));
     return json({ ok: true });
   }
 
@@ -81,6 +103,8 @@ export default async function webhook(request, env, ctx) {
     const { ok, removed, list } = await removeTodoByIndex(env, chatId, n);
     await sendMessage(env, chatId, ok ? `✅ Готово: ${removed.text}\n\n${formatTodos(list)}` : "❌ Не той номер.");
     await logReply(env, chatId);
+    // подієвий sync у фоні
+    ctx.waitUntil(syncOnce(env, chatId));
     return json({ ok: true });
   }
 
@@ -99,6 +123,8 @@ export default async function webhook(request, env, ctx) {
             : `ℹ️ Вже є в списку: ${itemText}\n\n${formatTodos(list)}`
         );
         await logReply(env, chatId);
+        // подієвий sync у фоні
+        ctx.waitUntil(syncOnce(env, chatId));
         return json({ ok: true });
       }
     }
@@ -117,7 +143,7 @@ export default async function webhook(request, env, ctx) {
       chatId,
       [
         "*Команди:*",
-        "/ping, /id",
+        "/ping, /id, /sync",
         "/log status | /log on | /log off",
         "/todo — показати список",
         "/done N — завершити пункт №N",
