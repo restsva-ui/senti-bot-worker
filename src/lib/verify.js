@@ -1,15 +1,9 @@
-/**
- * Перевірка секрету вебхука.
- * Підтримує офіційний хедер Telegram:
- *   X-Telegram-Bot-Api-Secret-Token
- * і наш резервний:
- *   X-Webhook-Secret
- */
+// Приймаємо і офіційний хедер, і query-параметр (?secret=...)
 export function verifyWebhookSecret(request, env) {
-  const tgHeader = request.headers.get("x-telegram-bot-api-secret-token");
+  const header = request.headers.get("x-telegram-bot-api-secret-token");
   const altHeader = request.headers.get("x-webhook-secret");
+  const urlSecret = new URL(request.url).searchParams.get("secret");
   const expected = env.WEBHOOK_SECRET;
-
   if (!expected) return false;
-  return tgHeader === expected || altHeader === expected;
+  return header === expected || altHeader === expected || urlSecret === expected;
 }
