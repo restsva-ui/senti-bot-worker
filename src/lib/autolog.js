@@ -1,36 +1,23 @@
-import { addItem } from "./checklist.js";
+// Уніфіковане зберігання прапорця автологування
 
-/** Ключ прапорця автологування в KV */
-const AUTOLOG_KEY = "autolog:enabled";
-const TTL = 60 * 60 * 24 * 90; // 90 днів
+const KEY = "autolog:enabled";
 
-export async function setAutolog(env, enabled) {
-  if (!env.SENTI_CACHE) return false;
-  await env.SENTI_CACHE.put(AUTOLOG_KEY, enabled ? "1" : "0", { expirationTtl: TTL });
-  return enabled;
+// Вибираємо правильний KV з кількох можливих назв биндингів.
+// За скрінами у тебе: LIKES_KV → senti-state, SENTI_CACHE → senti-cache.
+function pickKV(env) {
+  return env.SENTI_STATE || env.LIKES_KV || env.SENTI_CACHE || null;
 }
 
 export async function getAutolog(env) {
-  if (!env.SENTI_CACHE) return false;
-  const v = await env.SENTI_CACHE.get(AUTOLOG_KEY);
-  return v === "1";
+  const kv = pickKV(env);
+  if (!kv) return false;
+  const v = await kv.get(KEY);
+  return v === "1" || v === "true";
 }
 
-/**
- * Якщо автологування увімкнено і повідомлення починається з '+',
- * записуємо текст (без '+') в чек-лист. Повертаємо true, якщо записали.
- */
-export async function autologMaybe(env, fromId, text) {
-  const enabled = await getAutolog(env);
-  if (!enabled) return false;
-  if (!text || typeof text !== "string") return false;
-
-  const trimmed = text.trim();
-  if (!trimmed.startsWith("+")) return false;
-
-  const task = trimmed.replace(/^\+\s*/, "");
-  if (!task) return false;
-
-  await addItem(env, task, fromId);
+export async function setAutolog(env, enabled) {
+  const kv = pickKV(env);
+  if (!kv) return false;
+  await kv.put(KEY, enabled ? "1" : "0");
   return true;
 }
