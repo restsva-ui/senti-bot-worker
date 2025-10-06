@@ -2,13 +2,17 @@ import { loadTodos, saveTodos } from "./todo.js";
 
 const LAST_SYNC_KEY = (chatId) => `checklist:last_sync:${chatId}`;
 
-// Обов'язкові правила для моєї самодисципліни
+// Обов'язкові правила для самодисципліни і стабільності дев-процесу.
+// Вони автоматично додаються (без дублів) при кожному sync.
 const REQUIRED_RULES = [
   "RULE: Завжди надавати повний файл після змін.",
   "RULE: Перед змінами перевіряти зв’язки між файлами та конфігами.",
   "RULE: Вести лог змін у STATE_KV (file:<name>, hash, ts).",
   "RULE: Перевіряти доступність KV та біндінги перед деплоєм.",
   "RULE: Пам’ятати, що Шеф працює з телефону — мінімізувати кроки.",
+  // ✅ Додані за твоїм запитом:
+  "RULE: Діємо мікрокроками, щоб не допускати помилок.",
+  "RULE: Нові функції/можливості оформлювати окремими модулями, щоб не перевантажувати основні файли."
 ];
 
 function normalizeList(rawList) {
@@ -29,7 +33,9 @@ function normalizeList(rawList) {
 
   // 3) додати відсутні RULES зверху
   const have = new Set(list.map((x) => x.text.toLowerCase()));
-  const rulesToAdd = REQUIRED_RULES.filter(r => !have.has(r.toLowerCase())).map(r => ({ text: r, ts: Date.now() }));
+  const rulesToAdd = REQUIRED_RULES
+    .filter(r => !have.has(r.toLowerCase()))
+    .map(r => ({ text: r, ts: Date.now() }));
   if (rulesToAdd.length) list = [...rulesToAdd, ...list];
 
   return { list, addedRules: rulesToAdd.map(r => r.text) };
