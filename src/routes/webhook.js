@@ -1,25 +1,149 @@
-import { json, sendMessage, logReply, isOwner, getAutolog, setAutolog } from "../lib/utils.js";
-import { loadTodos, saveTodos, addTodo, removeTodoByIndex, formatTodos } from "../lib/todo.js";
-import { getBaseSnapshot, setBaseSnapshot } from "../lib/snapshot-manager.js";
+// src/routes/webhook.js
 
+import { drivePing, driveSaveFromUrl } from "../lib/drive.js";
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function json(data, init = {}) {
+  return new Response(JSON.stringify(data), {
+    headers: { "content-type": "application/json; charset=utf-8" },
+    ...init,
+  });
+}
+
+async function sendMessage(env, chatId, text, extra = {}) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
+  const body = {
+    chat_id: chatId,
+    text,
+    parse_mode: "Markdown",
+    disable_web_page_preview: true,
+    ...extra,
+  };
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (_) {}
+}
+
+async function logReply(env, chatId) {
+  try {
+    await env.STATE_KV.put(`last-reply:${chatId}`, new Date().toISOString(), {
+      expirationTtl: 60 * 60 * 24,
+    });
+  } catch (_) {}
+}
+
+async function isOwner(env, fromId) {
+  try {
+    const raw = String(env.OWNER_ID ?? "").trim();
+    if (!raw) return false;
+    const list = raw.split(",").map((s) => s.trim()).filter(Boolean);
+    return list.includes(String(fromId).trim());
+  } catch {
+    return false;
+  }
+}
+
+// ── Автологування у STATE_KV ─────────────────────────────────────────────────
+const AUTOLOG_KEY = "autolog:enabled";
+
+async function getAutolog(env) {
+  try {
+    const v = await env.STATE_KV.get(AUTOLOG_KEY);
+    return v === "1";
+  } catch {
+    return false;
+  }
+}
+
+async function setAutolog(env, on) {
+  try {
+    await env.STATE_KV.put(AUTOLOG_KEY, on ? "1" : "0", {
+      expirationTtl: 60 * 60 * 24 * 365,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ── TODO у TODO_KV ───────────────────────────────────────────────────────────
+const todoKey = (chatId) => `todo:${chatId}`;
+
+async function loadTodos(env, chatId) {
+  try {
+    const raw = await env.TODO_KV.get(todoKey(chatId));
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveTodos(env, chatId, list) {
+  try {
+    await env.TODO_KV.put(todoKey(chatId), JSON.stringify(list));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function addTodo(env, chatId, text) {
+  const list = await loadTodos(env, chatId);
+  const exists = list.some((x) => x.text.toLowerCase() === text.toLowerCase());
+  if (exists) return { added: false, list };
+  const item = { text, ts: Date.now() };
+  list.push(item);
+  await saveTodos(env, chatId, list);
+  return { added: true, list };
+}
+
+async function removeTodoByIndex(env, chatId, idx1) {
+  const list = await loadTodos(env, chatId);
+  const i = idx1 - 1;
+  if (i < 0 || i >= list.length) return { ok: false, list };
+  const [removed] = list.splice(i, 1);
+  await saveTodos(env, chatId, list);
+  return { ok: true, removed, list };
+}
+
+function formatTodos(list) {
+  if (!list.length) return "✅ Чек-лист порожній.";
+  return "📝 Чек-лист:\n" + list.map((x, i) => `${i + 1}. ${x.text}`).join("\n");
+}
+
+// ── Основний обробник ────────────────────────────────────────────────────────
 export default async function webhook(request, env, ctx) {
   let update;
-  try { update = await request.json(); }
-  catch { return json({ ok: false, error: "bad json" }, { status: 400 }); }
+  try {
+    update = await request.json();
+  } catch {
+    return json({ ok: false, error: "bad json" }, { status: 400 });
+  }
 
-  const msg = update.message || update.edited_message || update.callback_query?.message || null;
+  const msg =
+    update.message ||
+    update.edited_message ||
+    update.callback_query?.message ||
+    null;
+
   const chatId = msg?.chat?.id;
   const fromId =
     update.message?.from?.id ??
     update.edited_message?.from?.id ??
-    update.callback_query?.from?.id ?? null;
+    update.callback_query?.from?.id ??
+    null;
 
   const textRaw =
     update.message?.text ??
     update.edited_message?.text ??
-    update.callback_query?.data ?? "";
-  const text = (textRaw || "").trim();
+    update.callback_query?.data ??
+    "";
 
+  const text = (textRaw || "").trim();
   if (!chatId) return json({ ok: true });
 
   // /id
@@ -29,84 +153,17 @@ export default async function webhook(request, env, ctx) {
     return json({ ok: true });
   }
 
-  // ---- /snapshot команди (лише власник) ----
-  // /snapshot           → показати базовий снепшот
-  // /snapshot setdrive  → встановити Drive-архів як базу (очікує URL у відповіді-reply або наступним меседжем)
-  // /snapshot setsha <owner/repo> <sha> → зафіксувати git-архів як базу
-  if (text.startsWith("/snapshot")) {
-    if (!(await isOwner(env, fromId))) {
-      await sendMessage(env, chatId, "🔒 Лише власник.");
-      await logReply(env, chatId);
-      return json({ ok: true });
-    }
-
-    const parts = text.split(/\s+/);
-    const sub = (parts[1] || "").toLowerCase();
-
-    if (!sub) {
-      const base = await getBaseSnapshot(env);
-      if (!base) {
-        await sendMessage(env, chatId, "ℹ️ Базовий снепшот ще не встановлено.");
-      } else {
-        const when = new Date(base.createdTs).toLocaleString("uk-UA", { timeZone: env.TZ ?? "Europe/Kyiv" });
-        await sendMessage(env, chatId,
-          `📦 Базовий снепшот:\n• sha: ${base.sha || "—"}\n• url: ${base.url}\n• note: ${base.note || "—"}\n• when: ${when}`
-        );
-      }
-      await logReply(env, chatId);
-      return json({ ok: true });
-    }
-
-    if (sub === "setdrive") {
-      // Очікуємо, що ти відправиш у чат наступним повідомленням ПУБЛІЧНИЙ URL Google Drive архіву
-      const hint = "Надішли публічний *URL Google Drive* архіву (повідомленням), і я встановлю його як базовий снепшот.\nПриклад: https://drive.google.com/file/d/..../view?usp=sharing";
-      await sendMessage(env, chatId, hint);
-      // простий режим: запам'ятати у STATE_KV маркер і далі перехопити наступне повідомлення (не реалізовуємо FSM, тримаємо просто)
-      await env.STATE_KV.put(`snapshot:await_url:${chatId}`, "1", { expirationTtl: 300 });
-      await logReply(env, chatId);
-      return json({ ok: true });
-    }
-
-    if (sub === "setsha") {
-      const repo = parts[2] || "";
-      const sha = parts[3] || "";
-      if (!repo || !sha) {
-        await sendMessage(env, chatId, "Формат: `/snapshot setsha owner/repo <sha>`");
-        await logReply(env, chatId);
-        return json({ ok: true });
-      }
-      const urlZip = `https://github.com/${repo}/archive/${sha}.zip`;
-      const snap = await setBaseSnapshot(env, { sha, url: urlZip, note: "manual setsha" });
-      await sendMessage(env, chatId, `✅ Встановив базовий снепшот:\n• sha: ${snap.sha}\n• url: ${snap.url}`);
-      await logReply(env, chatId);
-      return json({ ok: true });
-    }
-  }
-
-  // Якщо раніше ввімкнули режим очікування Drive-URL — перехоплюємо перше ж довільне повідомлення як URL
-  const awaiting = await env.STATE_KV.get(`snapshot:await_url:${chatId}`);
-  if (awaiting) {
-    await env.STATE_KV.delete(`snapshot:await_url:${chatId}`);
-    const maybeUrl = text;
-    // Мінімальна валідація: має містити "drive.google.com"
-    if (!/drive\.google\.com/i.test(maybeUrl)) {
-      await sendMessage(env, chatId, "❌ Це не схоже на публічний лінк Google Drive. Спробуй ще раз `/snapshot setdrive`.");
-      await logReply(env, chatId);
-      return json({ ok: true });
-    }
-    const snap = await setBaseSnapshot(env, { sha: "", url: maybeUrl, note: "google drive base" });
-    await sendMessage(env, chatId, `✅ Встановив базовий снепшот із Drive:\n• url: ${snap.url}`);
-    await logReply(env, chatId);
-    return json({ ok: true });
-  }
-
-  // ---- /log on|off|status ----
+  // /log on|off|status
   if (text.startsWith("/log")) {
     const sub = (text.split(" ")[1] || "status").toLowerCase();
     const owner = await isOwner(env, fromId);
 
     if (!owner && sub !== "status") {
-      await sendMessage(env, chatId, "🔒 Керувати автологуванням може лише власник. Використай `/log status` або `/id`.");
+      await sendMessage(
+        env,
+        chatId,
+        "🔒 Керувати автологуванням може лише власник. Використай `/log status` або `/id`."
+      );
       await logReply(env, chatId);
       return json({ ok: true });
     }
@@ -114,7 +171,13 @@ export default async function webhook(request, env, ctx) {
     if (sub === "on") {
       const ok = await setAutolog(env, true);
       const now = await getAutolog(env);
-      await sendMessage(env, chatId, ok && now ? "🟢 Автологування УВІМКНЕНО. Пиши завдання з префіксом `+`." : "⚠️ Не вдалося увімкнути автологування (KV недоступне?).");
+      await sendMessage(
+        env,
+        chatId,
+        ok && now
+          ? "🟢 Автологування УВІМКНЕНО. Пиши завдання з префіксом `+`."
+          : "⚠️ Не вдалося увімкнути автологування (KV недоступне?)."
+      );
       await logReply(env, chatId);
       return json({ ok: true });
     }
@@ -122,18 +185,28 @@ export default async function webhook(request, env, ctx) {
     if (sub === "off") {
       const ok = await setAutolog(env, false);
       const now = await getAutolog(env);
-      await sendMessage(env, chatId, ok && !now ? "⚪️ Автологування вимкнено." : "⚠️ Не вдалося вимкнути автологування (KV недоступне?).");
+      await sendMessage(
+        env,
+        chatId,
+        ok && !now
+          ? "⚪️ Автологування вимкнено."
+          : "⚠️ Не вдалося вимкнути автологування (KV недоступне?)."
+      );
       await logReply(env, chatId);
       return json({ ok: true });
     }
 
     const enabled = await getAutolog(env);
-    await sendMessage(env, chatId, `ℹ️ Автологування: ${enabled ? "УВІМКНЕНО" : "вимкнено"}.`);
+    await sendMessage(
+      env,
+      chatId,
+      `ℹ️ Автологування: ${enabled ? "УВІМКНЕНО" : "вимкнено"}.`
+    );
     await logReply(env, chatId);
     return json({ ok: true });
   }
 
-  // ---- /todo, /todo clear, /done N ----
+  // /todo, /todo clear, /done N
   if (text === "/todo") {
     const list = await loadTodos(env, chatId);
     await sendMessage(env, chatId, formatTodos(list));
@@ -151,12 +224,16 @@ export default async function webhook(request, env, ctx) {
   if (/^\/done\s+\d+$/i.test(text)) {
     const n = parseInt(text.split(/\s+/)[1], 10);
     const { ok, removed, list } = await removeTodoByIndex(env, chatId, n);
-    await sendMessage(env, chatId, ok ? `✅ Готово: ${removed.text}\n\n${formatTodos(list)}` : "❌ Не той номер.");
+    await sendMessage(
+      env,
+      chatId,
+      ok ? `✅ Готово: ${removed.text}\n\n${formatTodos(list)}` : "❌ Не той номер."
+    );
     await logReply(env, chatId);
     return json({ ok: true });
   }
 
-  // ---- автологування: + задача ----
+  // Автологування: + пункт у чек-лист
   if (await getAutolog(env)) {
     const m = text.match(/^\s*\+\s*(.+)$/s);
     if (m) {
@@ -176,7 +253,38 @@ export default async function webhook(request, env, ctx) {
     }
   }
 
-  // /ping /help
+  // === Google Drive команди ===
+  if (text === "/gdrive ping") {
+    try {
+      await drivePing(env);
+      await sendMessage(env, chatId, "🟢 Drive доступний, можемо заливати файли.");
+    } catch (e) {
+      await sendMessage(env, chatId, "❌ Drive недоступний: " + String(e.message || e));
+    }
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+
+  if (/^\/gdrive\s+save\s+/i.test(text)) {
+    const [, , , ...rest] = text.split(/\s+/);
+    if (!rest.length) {
+      await sendMessage(env, chatId, "ℹ️ Використання: `/gdrive save <url> [назва.zip]`");
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+    const url = rest[0];
+    const name = rest.slice(1).join(" ");
+    try {
+      const { name: saved, link } = await driveSaveFromUrl(env, url, name);
+      await sendMessage(env, chatId, `📤 Залив у Drive: *${saved}*\n🔗 ${link}`);
+    } catch (e) {
+      await sendMessage(env, chatId, "❌ Не вдалося залити: " + String(e.message || e));
+    }
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+
+  // /ping і /help
   if (text === "/ping") {
     await sendMessage(env, chatId, "🏓 Pong!");
     await logReply(env, chatId);
@@ -191,10 +299,15 @@ export default async function webhook(request, env, ctx) {
         "*Команди:*",
         "/ping, /id",
         "/log status | /log on | /log off",
-        "/todo — показати список | /done N | /todo clear",
-        "/snapshot — показати базовий снепшот",
-        "/snapshot setdrive — встановити Drive-архів як базу",
-        "/snapshot setsha owner/repo <sha> — встановити git-архів як базу",
+        "/todo — показати список",
+        "/done N — завершити пункт №N",
+        "/todo clear — очистити список",
+        "",
+        "*Drive:*",
+        "/gdrive ping — перевірка доступу",
+        "/gdrive save <url> [назва] — зберегти файл із URL у Google Drive",
+        "",
+        "Коли увімкнено автологування — пиши `+ завдання`, і я додам у чек-лист.",
       ].join("\n")
     );
     await logReply(env, chatId);
