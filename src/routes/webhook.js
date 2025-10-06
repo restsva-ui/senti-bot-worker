@@ -3,34 +3,28 @@ import { verifyWebhookSecret } from "../lib/verify.js";
 import { sendMessage } from "../lib/telegram.js";
 
 export async function handleWebhook(request, env) {
-  // Безпека: перевіряємо секрет
   if (!verifyWebhookSecret(request, env)) {
-    return forbidden("Invalid webhook secret");
+    // ВАЖЛИВО: повертай 200, щоб Telegram не ретраїв безкінечно
+    return json({ ok: true, ignored: true, reason: "bad secret" });
   }
 
   let update;
   try {
     update = await request.json();
   } catch {
-    return badRequest("Invalid JSON");
+    return badRequest("invalid json");
   }
 
-  // Підтримуємо message та edited_message
-  const msg = update.message || update.edited_message;
+  const msg = update.message || update.edited_message || update.channel_post;
   const chatId = msg?.chat?.id;
-  const text = msg?.text ?? "";
+  const text = msg?.text || msg?.caption || "";
 
-  // Мінімальна логіка: echo, щоб перевірити зв’язок
   if (chatId) {
     const reply = text
-      ? `👋 Привіт! Ти написав: ${text}`
-      : "👋 Привіт! Надішли мені текстове повідомлення.";
-    try {
-      await sendMessage(env, chatId, reply);
-    } catch (e) {
-      // Не падаємо 500, просто звітуємо у відповіді вебхуку
-      return json({ ok: true, delivered: false, error: String(e?.message || e) });
-    }
+      ? `✅ Сенті онлайн.\nТи написав: "${text}"`
+      : "✅ Сенті онлайн. Надішли текстове повідомлення.";
+    // не ламаємо відповідь вебхуку, навіть якщо Telegram відмовив
+    try { await sendMessage(env, chatId, reply); } catch (e) { /* ignore */ }
   }
 
   return json({ ok: true });
