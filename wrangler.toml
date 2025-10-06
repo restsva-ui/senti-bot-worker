@@ -2,3 +2,18 @@ name = "senti-bot-worker"
 main = "src/index.js"
 compatibility_date = "2025-01-10"
 workers_dev = true
+
+[vars]
+TZ = "Europe/Kyiv"
+
+[[kv_namespaces]]
+binding = "STATE_KV"
+id = "7b32e2d1f60846ddb1c653eb52180bf7"   # senti-state
+
+[[kv_namespaces]]
+binding = "DEDUP_KV"
+id = "20d81d7b68fa4ac6b9913e2fbd3465d5"   # senti-dedup
+
+[[kv_namespaces]]
+binding = "TODO_KV"
+id = "497eac980691495ea2a0bc8611892d65"   # senti-cache
