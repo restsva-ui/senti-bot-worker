@@ -6,17 +6,17 @@ workers_dev = true
 [vars]
 TZ = "Europe/Kyiv"
 
-# === Google Drive (Service Account) ===
-# EMAIL сервіс-акаунта (з JSON: client_email)
-GDRIVE_SA_EMAIL = "senti-drive-agent@<твій-проект>.iam.gserviceaccount.com"
-# ID папки на Google Drive, куди складати бекапи (створи папку, візьми її ID з URL)
-GDRIVE_FOLDER_ID = "<YOUR_DRIVE_FOLDER_ID>"
-# Бажана за замовчуванням MIME-тип назви файлів, якщо не вдасться визначити (не чіпай)
-GDRIVE_DEFAULT_MIME = "application/octet-stream"
+# 🔗 Google Drive (вкажи це як Variable у Cloudflare → Settings → Variables)
+# ID папки в Google Drive, куди складати бекапи (з URL папки після /folders/)
+DRIVE_FOLDER_ID = "1lMcN4cRlYNzOU1D1y5eirq5y1W7by9T-"
 
-# ВАЖЛИВО: приватний ключ додаємо як СЕКРЕТ (не в plaintext)
-#   назва секрета: GDRIVE_PRIVATE_KEY
-#   значення: поле "private_key" з JSON (з новими рядками \n як є)
+# 🛡️ WEBHOOK_SECRET вже використовується у проекті (для HTTP-ручок)
+# Переконайся, що значення збігається з тим, що ти використовуєш у ТГ тестах
+# WEBHOOK_SECRET = "senti1984"   # (задай у Cloudflare як Variable, якщо ще не задано)
+
+# 🔑 Секрет із JSON сервісного акаунта (додай у Cloudflare → Settings → Secrets):
+# Name: GOOGLE_DRIVE_CREDENTIALS
+# Value: ВЕСЬ JSON, який ти завантажив із Google Cloud (цілком, з { ... })
 
 [[kv_namespaces]]
 binding = "STATE_KV"
