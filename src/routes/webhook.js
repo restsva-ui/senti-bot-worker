@@ -2,8 +2,10 @@
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function json(data, init = {}) {
-  const headers = { "content-type": "application/json; charset=utf-8" };
-  return new Response(JSON.stringify(data), { headers, ...init });
+  return new Response(JSON.stringify(data), {
+    headers: { "content-type": "application/json; charset=utf-8" },
+    ...init,
+  });
 }
 
 async function sendMessage(env, chatId, text, extra = {}) {
@@ -22,37 +24,37 @@ async function sendMessage(env, chatId, text, extra = {}) {
       body: JSON.stringify(body),
     });
   } catch (_) {
-    // ігноруємо помилки відправки, щоб не ламати відповідь вебхука
+    // не валимо вебхук, якщо Telegram тимчасово недоступний
   }
 }
 
 async function logReply(env, chatId) {
-  // легкий "пінг" у логах + можливе майбутнє розширення
-  // (зараз no-op, але залишаємо точку розширення)
+  // зберігаємо timestamp останньої відповіді — в STATE_KV
   try {
-    await env.SENTI_CACHE.put(
-      `last-reply:${chatId}`,
-      new Date().toISOString(),
-      { expirationTtl: 60 * 60 * 24 } // 1 доба
-    );
+    await env.STATE_KV.put(`last-reply:${chatId}`, new Date().toISOString(), {
+      expirationTtl: 60 * 60 * 24, // 1 доба
+    });
   } catch (_) {}
 }
 
 async function isOwner(env, fromId) {
+  // підтримуємо один ID або список через кому
   try {
-    const ownerStr = env.OWNER_ID ?? "";
-    return ownerStr && ownerStr.trim() === String(fromId).trim();
+    const raw = String(env.OWNER_ID ?? "").trim();
+    if (!raw) return false;
+    const list = raw.split(",").map((s) => s.trim()).filter(Boolean);
+    return list.includes(String(fromId).trim());
   } catch {
     return false;
   }
 }
 
-// Зберігаємо прапор автологування в KV (namespace: SENTI_CACHE)
+// ── Автологування: прапор у STATE_KV ─────────────────────────────────────────
 const AUTOLOG_KEY = "autolog:enabled";
 
 async function getAutolog(env) {
   try {
-    const val = await env.SENTI_CACHE.get(AUTOLOG_KEY);
+    const val = await env.STATE_KV.get(AUTOLOG_KEY);
     return val === "1";
   } catch {
     return false;
@@ -61,11 +63,9 @@ async function getAutolog(env) {
 
 async function setAutolog(env, on) {
   try {
-    if (on) {
-      await env.SENTI_CACHE.put(AUTOLOG_KEY, "1");
-    } else {
-      await env.SENTI_CACHE.put(AUTOLOG_KEY, "0");
-    }
+    await env.STATE_KV.put(AUTOLOG_KEY, on ? "1" : "0", {
+      expirationTtl: 60 * 60 * 24 * 365, // 1 рік
+    });
     return true;
   } catch {
     return false;
@@ -82,13 +82,19 @@ export default async function webhook(request, env, ctx) {
     return json({ ok: false, error: "bad json" }, { status: 400 });
   }
 
-  // 2) витягаємо базову інформацію
-  const msg = update.message || update.edited_message || update.callback_query?.message || null;
+  // 2) базова інформація
+  const msg =
+    update.message ||
+    update.edited_message ||
+    update.callback_query?.message ||
+    null;
+
   const chatId = msg?.chat?.id;
-  const fromId = (update.message?.from?.id)
-    ?? (update.edited_message?.from?.id)
-    ?? (update.callback_query?.from?.id)
-    ?? null;
+  const fromId =
+    update.message?.from?.id ??
+    update.edited_message?.from?.id ??
+    update.callback_query?.from?.id ??
+    null;
 
   const textRaw =
     update.message?.text ??
@@ -97,13 +103,55 @@ export default async function webhook(request, env, ctx) {
     "";
 
   const text = (textRaw || "").trim();
-
-  // Якщо не вистачає обов'язкових полів — просто відповідаємо OK
   if (!chatId) return json({ ok: true });
 
-  // ── Команда /id для зручності перевірки власника ───────────────────────────
+  // ── /id ────────────────────────────────────────────────────────────────────
   if (text === "/id") {
     await sendMessage(env, chatId, `👤 Твій Telegram ID: \`${fromId}\``);
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+
+  // ── /kvtest — перевірка STATE_KV (лише власник) ───────────────────────────
+  if (text === "/kvtest") {
+    if (!(await isOwner(env, fromId))) {
+      await sendMessage(env, chatId, "🔒 Лише власник.");
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+    const key = `kvtest:${chatId}`;
+    const val = `ts=${Date.now()}`;
+    let putOk = true,
+      getOk = true,
+      getVal = null,
+      errPut = "",
+      errGet = "";
+
+    try {
+      await env.STATE_KV.put(key, val, { expirationTtl: 3600 });
+    } catch (e) {
+      putOk = false;
+      errPut = String(e);
+    }
+    try {
+      getVal = await env.STATE_KV.get(key);
+      getOk = !!getVal;
+    } catch (e) {
+      getOk = false;
+      errGet = String(e);
+    }
+
+    await sendMessage(
+      env,
+      chatId,
+      [
+        "🧪 KV test (STATE_KV):",
+        `• put: ${putOk ? "OK" : "FAIL"}${putOk ? "" : ` — ${errPut}`}`,
+        `• get: ${getOk ? "OK" : "FAIL"}${
+          getOk ? ` — ${getVal}` : ` — ${errGet}`
+        }`,
+      ].join("\n")
+    );
     await logReply(env, chatId);
     return json({ ok: true });
   }
@@ -114,9 +162,11 @@ export default async function webhook(request, env, ctx) {
     const owner = await isOwner(env, fromId);
 
     if (!owner && sub !== "status") {
-      const reply =
-        "🔒 Керувати автологуванням може лише власник. Використай `/log status` або `/id`.";
-      await sendMessage(env, chatId, reply).catch(() => {});
+      await sendMessage(
+        env,
+        chatId,
+        "🔒 Керувати автологуванням може лише власник. Використай `/log status` або `/id`."
+      );
       await logReply(env, chatId);
       return json({ ok: true });
     }
@@ -124,11 +174,13 @@ export default async function webhook(request, env, ctx) {
     if (sub === "on") {
       const ok = await setAutolog(env, true);
       const now = await getAutolog(env);
-      const reply =
+      await sendMessage(
+        env,
+        chatId,
         ok && now
           ? "🟢 Автологування УВІМКНЕНО. Пиши завдання з префіксом `+`."
-          : "⚠️ Не вдалося увімкнути автологування (KV недоступне?).";
-      await sendMessage(env, chatId, reply).catch(() => {});
+          : "⚠️ Не вдалося увімкнути автологування (KV недоступне?)."
+      );
       await logReply(env, chatId);
       return json({ ok: true });
     }
@@ -136,11 +188,13 @@ export default async function webhook(request, env, ctx) {
     if (sub === "off") {
       const ok = await setAutolog(env, false);
       const now = await getAutolog(env);
-      const reply =
+      await sendMessage(
+        env,
+        chatId,
         ok && !now
           ? "⚪️ Автологування вимкнено."
-          : "⚠️ Не вдалося вимкнути автологування (KV недоступне?).";
-      await sendMessage(env, chatId, reply).catch(() => {});
+          : "⚠️ Не вдалося вимкнути автологування (KV недоступне?)."
+      );
       await logReply(env, chatId);
       return json({ ok: true });
     }
@@ -151,12 +205,12 @@ export default async function webhook(request, env, ctx) {
       env,
       chatId,
       `ℹ️ Автологування: ${enabled ? "УВІМКНЕНО" : "вимкнено"}.`
-    ).catch(() => {});
+    );
     await logReply(env, chatId);
     return json({ ok: true });
   }
 
-  // ── Додаткові прості відповіді (не обов'язково) ────────────────────────────
+  // ── інші дрібні команди ────────────────────────────────────────────────────
   if (text === "/ping") {
     await sendMessage(env, chatId, "🏓 Pong!");
     await logReply(env, chatId);
@@ -167,12 +221,12 @@ export default async function webhook(request, env, ctx) {
     await sendMessage(
       env,
       chatId,
-      "/help → /ping /mem /reset /status /todo /log"
+      "/help → /ping /id /kvtest /log status|on|off"
     );
     await logReply(env, chatId);
     return json({ ok: true });
   }
 
-  // За замовчуванням просто OK (нічого не робимо)
+  // дефолт
   return json({ ok: true });
 }
