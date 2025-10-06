@@ -6,11 +6,10 @@ workers_dev = true
 [vars]
 TZ = "Europe/Kyiv"
 
-# ⏰ щоденний дайджест о 09:00 (за TZ)
+# ⏰ синхронізація кожні 15 хв
 [triggers]
-crons = ["0 9 * * *"]
+crons = ["*/15 * * * *"]
 
-# KV bindings (твій прод)
 [[kv_namespaces]]
 binding = "STATE_KV"
 id = "7b32e2d1f60846ddb1c653eb52180bf7"   # senti-state
