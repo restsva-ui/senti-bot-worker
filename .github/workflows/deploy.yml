@@ -1,4 +1,4 @@
-name: Deploy Worker
+name: 🚀 Deploy Worker
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
       - name: 🛠️ Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🧰 Setup Node
+      - name: 🧰 Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -26,3 +26,9 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: 🔖 Record snapshot after successful deploy
+        if: success()
+        run: |
+          echo "📦 Sending snapshot info..."
+          curl -sS "https://${{ secrets.WORKER_HOST }}/postdeploy?key=${{ secrets.WEBHOOK_SECRET }}&repo=restsva-ui/senti-bot-worker&sha=${GITHUB_SHA}"
