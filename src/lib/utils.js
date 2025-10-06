@@ -7,27 +7,15 @@ export function json(data, init = {}) {
 
 export async function sendMessage(env, chatId, text, extra = {}) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
-  const body = {
-    chat_id: chatId,
-    text,
-    parse_mode: "Markdown",
-    disable_web_page_preview: true,
-    ...extra,
-  };
+  const body = { chat_id: chatId, text, parse_mode: "Markdown", disable_web_page_preview: true, ...extra };
   try {
-    await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   } catch (_) {}
 }
 
 export async function logReply(env, chatId) {
   try {
-    await env.STATE_KV.put(`last-reply:${chatId}`, new Date().toISOString(), {
-      expirationTtl: 60 * 60 * 24,
-    });
+    await env.STATE_KV.put(`last-reply:${chatId}`, new Date().toISOString(), { expirationTtl: 60 * 60 * 24 });
   } catch (_) {}
 }
 
@@ -56,9 +44,7 @@ export async function getAutolog(env) {
 
 export async function setAutolog(env, on) {
   try {
-    await env.STATE_KV.put(AUTOLOG_KEY, on ? "1" : "0", {
-      expirationTtl: 60 * 60 * 24 * 365,
-    });
+    await env.STATE_KV.put(AUTOLOG_KEY, on ? "1" : "0", { expirationTtl: 60 * 60 * 24 * 365 });
     return true;
   } catch {
     return false;
