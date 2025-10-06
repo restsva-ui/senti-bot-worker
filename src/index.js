@@ -1,25 +1,27 @@
-import { notFound, text } from "./lib/resp.js";
-import { handleHealth } from "./routes/health.js";
-import { handleWebhook } from "./routes/webhook.js";
-import { getChecklist, toMarkdown } from "./lib/checklist.js";
+import webhook from "./routes/webhook.js";
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    const path = url.pathname;
 
-    if (request.method === "GET" && url.pathname === "/health") {
-      return handleHealth(env);
+    // === WEBHOOK ===
+    if (path === "/webhook" && request.method === "POST") {
+      return await webhook(request, env, ctx);
     }
 
-    if (request.method === "GET" && url.pathname === "/checklist") {
-      const list = await getChecklist(env);
-      return text(toMarkdown(list), { headers: { "content-type": "text/markdown; charset=utf-8" } });
+    // === HEALTH CHECK ===
+    if (path === "/ping") {
+      return new Response("pong 🟢", {
+        status: 200,
+        headers: { "content-type": "text/plain" },
+      });
     }
 
-    if (request.method === "POST" && url.pathname === "/webhook") {
-      return handleWebhook(request, env);
-    }
-
-    return notFound();
+    // === DEFAULT RESPONSE ===
+    return new Response("Senti Worker Active", {
+      status: 200,
+      headers: { "content-type": "text/plain" },
+    });
   },
 };
