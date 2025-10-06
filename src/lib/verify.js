@@ -1,4 +1,4 @@
-// Приймаємо і офіційний хедер, і query-параметр (?secret=...)
+// Приймаємо і офіційний хедер Telegram, і query (?secret=...)
 export function verifyWebhookSecret(request, env) {
   const header = request.headers.get("x-telegram-bot-api-secret-token");
   const altHeader = request.headers.get("x-webhook-secret");
