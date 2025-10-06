@@ -1,8 +1,7 @@
 import webhook from "./routes/webhook.js";
 import { loadTodos, formatTodos } from "./lib/todo.js";
-import { syncOnce } from "./lib/checklist-manager.js";
+import { getBaseSnapshot, setBaseSnapshot, getHistory } from "./lib/snapshot-manager.js";
 
-// простий текстовий респонс
 function textResponse(text, status = 200, type = "text/plain") {
   return new Response(text, { status, headers: { "content-type": type } });
 }
@@ -12,21 +11,57 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // Webhook
+    // Webhook від Telegram
     if (path === "/webhook" && request.method === "POST") {
       return await webhook(request, env, ctx);
     }
 
-    // Ручний sync через HTTP (для мене/скриптів)
-    // GET /sync?key=WEBHOOK_SECRET
-    if (path === "/sync" && request.method === "GET") {
+    // ---- Snapshot API (для мене/CI; захищено WEBHOOK_SECRET) ----
+
+    // 1) Отримати поточний базовий снепшот
+    // GET /snapshot.json?key=SECRET
+    if (path === "/snapshot.json" && request.method === "GET") {
       const key = url.searchParams.get("key");
       if (!key || key !== (env.WEBHOOK_SECRET ?? "")) return textResponse("forbidden", 403);
-      const { changed, addedRules, count } = await syncOnce(env, env.OWNER_ID);
-      return textResponse(JSON.stringify({ ok: true, changed, addedRules, count }), 200, "application/json; charset=utf-8");
+      const base = await getBaseSnapshot(env);
+      const history = await getHistory(env);
+      return textResponse(JSON.stringify({ base, history }), 200, "application/json; charset=utf-8");
     }
 
-    // Експорт todo
+    // 2) Встановити/оновити базовий снепшот (напр., твій Google Drive архів)
+    // POST /snapshot.set?key=SECRET  body: { sha?, url, note? }
+    if (path === "/snapshot.set" && request.method === "POST") {
+      const key = url.searchParams.get("key");
+      if (!key || key !== (env.WEBHOOK_SECRET ?? "")) return textResponse("forbidden", 403);
+      let payload = {};
+      try { payload = await request.json(); } catch {}
+      const sha = payload.sha ? String(payload.sha) : "";
+      const urlIn = String(payload.url || "");
+      const note = payload.note ? String(payload.note) : "manual set";
+      const snap = await setBaseSnapshot(env, { sha, url: urlIn, note });
+      return textResponse(JSON.stringify({ ok: true, snap }), 200, "application/json; charset=utf-8");
+    }
+
+    // 3) Гачок з GitHub Actions після успішного деплою
+    //    GET /postdeploy?key=SECRET&repo=owner/name&sha=...   (url авто зберемо)
+    if (path === "/postdeploy" && request.method === "GET") {
+      const key = url.searchParams.get("key");
+      if (!key || key !== (env.WEBHOOK_SECRET ?? "")) return textResponse("forbidden", 403);
+      const repo = url.searchParams.get("repo") || "";
+      const sha = url.searchParams.get("sha") || "";
+      if (!repo || !sha) return textResponse("missing repo or sha", 400);
+
+      // Стандартний архів GitHub для конкретного коміту:
+      // https://github.com/<owner>/<repo>/archive/<sha>.zip
+      const zipURL = `https://github.com/${repo}/archive/${sha}.zip`;
+      const note = "post-deploy snapshot";
+      const snap = await setBaseSnapshot(env, { sha, url: zipURL, note });
+      return textResponse(JSON.stringify({ ok: true, snap }), 200, "application/json; charset=utf-8");
+    }
+
+    // ---- Допоміжні ендпоїнти, як були ----
+
+    // Експорт todo (для інтеграцій)
     if (path === "/todo.json" && request.method === "GET") {
       const key = url.searchParams.get("key");
       if (!key || key !== (env.WEBHOOK_SECRET ?? "")) return textResponse("forbidden", 403);
@@ -49,25 +84,4 @@ export default {
     if (path === "/ping") return textResponse("pong 🟢");
     return textResponse("Senti Worker Active");
   },
-
-  // ⏰ Cron: кожні 15 хв — м'який фоновий sync
-  async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => {
-      try {
-        const { changed, addedRules } = await syncOnce(env, env.OWNER_ID);
-        // за бажанням — можна присилати короткий репорт у ТГ лише якщо були зміни
-        if (changed && env.BOT_TOKEN && env.OWNER_ID) {
-          const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
-          const parts = [];
-          if (addedRules?.length) parts.push("➕ Додав правила:\n" + addedRules.map((r) => `• ${r}`).join("\n"));
-          const text = parts.length ? parts.join("\n\n") : "🔁 Синхронізація без змін.";
-          await fetch(url, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ chat_id: env.OWNER_ID, text, disable_web_page_preview: true }),
-          });
-        }
-      } catch (_) {}
-    })());
-  }
 };
