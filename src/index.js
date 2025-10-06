@@ -1,6 +1,6 @@
 import webhook from "./routes/webhook.js";
 import { loadTodos, formatTodos } from "./lib/todo.js";
-import { getBaseSnapshot, setBaseSnapshot, getHistory } from "./lib/snapshot-manager.js";
+import { getBaseSnapshot, setBaseSnapshot, getHistory, upsertSnapshotTodo } from "./lib/snapshot-manager.js";
 
 function textResponse(text, status = 200, type = "text/plain") {
   return new Response(text, { status, headers: { "content-type": type } });
@@ -18,8 +18,7 @@ export default {
 
     // ---- Snapshot API (для мене/CI; захищено WEBHOOK_SECRET) ----
 
-    // 1) Отримати поточний базовий снепшот
-    // GET /snapshot.json?key=SECRET
+    // 1) Отримати поточний базовий снепшот + історію
     if (path === "/snapshot.json" && request.method === "GET") {
       const key = url.searchParams.get("key");
       if (!key || key !== (env.WEBHOOK_SECRET ?? "")) return textResponse("forbidden", 403);
@@ -28,8 +27,8 @@ export default {
       return textResponse(JSON.stringify({ base, history }), 200, "application/json; charset=utf-8");
     }
 
-    // 2) Встановити/оновити базовий снепшот (напр., твій Google Drive архів)
-    // POST /snapshot.set?key=SECRET  body: { sha?, url, note? }
+    // 2) Встановити/оновити базовий снепшот вручну (Drive або будь-який URL)
+    //    POST /snapshot.set?key=SECRET  body: { sha?, url, note? }
     if (path === "/snapshot.set" && request.method === "POST") {
       const key = url.searchParams.get("key");
       if (!key || key !== (env.WEBHOOK_SECRET ?? "")) return textResponse("forbidden", 403);
@@ -39,11 +38,15 @@ export default {
       const urlIn = String(payload.url || "");
       const note = payload.note ? String(payload.note) : "manual set";
       const snap = await setBaseSnapshot(env, { sha, url: urlIn, note });
+
+      // ⏫ оновити/додати пункт у чек-лісті
+      await upsertSnapshotTodo(env, env.OWNER_ID, snap);
+
       return textResponse(JSON.stringify({ ok: true, snap }), 200, "application/json; charset=utf-8");
     }
 
     // 3) Гачок з GitHub Actions після успішного деплою
-    //    GET /postdeploy?key=SECRET&repo=owner/name&sha=...   (url авто зберемо)
+    //    GET /postdeploy?key=SECRET&repo=owner/name&sha=...
     if (path === "/postdeploy" && request.method === "GET") {
       const key = url.searchParams.get("key");
       if (!key || key !== (env.WEBHOOK_SECRET ?? "")) return textResponse("forbidden", 403);
@@ -51,11 +54,12 @@ export default {
       const sha = url.searchParams.get("sha") || "";
       if (!repo || !sha) return textResponse("missing repo or sha", 400);
 
-      // Стандартний архів GitHub для конкретного коміту:
-      // https://github.com/<owner>/<repo>/archive/<sha>.zip
       const zipURL = `https://github.com/${repo}/archive/${sha}.zip`;
-      const note = "post-deploy snapshot";
-      const snap = await setBaseSnapshot(env, { sha, url: zipURL, note });
+      const snap = await setBaseSnapshot(env, { sha, url: zipURL, note: "post-deploy snapshot" });
+
+      // ⏫ оновити/додати пункт у чек-лісті
+      await upsertSnapshotTodo(env, env.OWNER_ID, snap);
+
       return textResponse(JSON.stringify({ ok: true, snap }), 200, "application/json; charset=utf-8");
     }
 
