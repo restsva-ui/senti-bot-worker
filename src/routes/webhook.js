@@ -1,6 +1,6 @@
 import { json, sendMessage, logReply, isOwner, getAutolog, setAutolog } from "../lib/utils.js";
 import { loadTodos, saveTodos, addTodo, removeTodoByIndex, formatTodos } from "../lib/todo.js";
-import { syncOnce } from "../lib/checklist-manager.js";
+import { getBaseSnapshot, setBaseSnapshot } from "../lib/snapshot-manager.js";
 
 export default async function webhook(request, env, ctx) {
   let update;
@@ -29,26 +29,78 @@ export default async function webhook(request, env, ctx) {
     return json({ ok: true });
   }
 
-  // /sync — ручний запуск нормалізації (owner)
-  if (text === "/sync") {
+  // ---- /snapshot команди (лише власник) ----
+  // /snapshot           → показати базовий снепшот
+  // /snapshot setdrive  → встановити Drive-архів як базу (очікує URL у відповіді-reply або наступним меседжем)
+  // /snapshot setsha <owner/repo> <sha> → зафіксувати git-архів як базу
+  if (text.startsWith("/snapshot")) {
     if (!(await isOwner(env, fromId))) {
       await sendMessage(env, chatId, "🔒 Лише власник.");
       await logReply(env, chatId);
       return json({ ok: true });
     }
-    const { changed, addedRules, count } = await syncOnce(env, chatId);
-    const parts = [
-      "🔁 Sync виконано.",
-      `• елементів: ${count}`,
-      `• зміни: ${changed ? "так" : "ні"}`
-    ];
-    if (addedRules.length) parts.push("• додано правила:\n" + addedRules.map((r) => `  - ${r}`).join("\n"));
-    await sendMessage(env, chatId, parts.join("\n"));
+
+    const parts = text.split(/\s+/);
+    const sub = (parts[1] || "").toLowerCase();
+
+    if (!sub) {
+      const base = await getBaseSnapshot(env);
+      if (!base) {
+        await sendMessage(env, chatId, "ℹ️ Базовий снепшот ще не встановлено.");
+      } else {
+        const when = new Date(base.createdTs).toLocaleString("uk-UA", { timeZone: env.TZ ?? "Europe/Kyiv" });
+        await sendMessage(env, chatId,
+          `📦 Базовий снепшот:\n• sha: ${base.sha || "—"}\n• url: ${base.url}\n• note: ${base.note || "—"}\n• when: ${when}`
+        );
+      }
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+
+    if (sub === "setdrive") {
+      // Очікуємо, що ти відправиш у чат наступним повідомленням ПУБЛІЧНИЙ URL Google Drive архіву
+      const hint = "Надішли публічний *URL Google Drive* архіву (повідомленням), і я встановлю його як базовий снепшот.\nПриклад: https://drive.google.com/file/d/..../view?usp=sharing";
+      await sendMessage(env, chatId, hint);
+      // простий режим: запам'ятати у STATE_KV маркер і далі перехопити наступне повідомлення (не реалізовуємо FSM, тримаємо просто)
+      await env.STATE_KV.put(`snapshot:await_url:${chatId}`, "1", { expirationTtl: 300 });
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+
+    if (sub === "setsha") {
+      const repo = parts[2] || "";
+      const sha = parts[3] || "";
+      if (!repo || !sha) {
+        await sendMessage(env, chatId, "Формат: `/snapshot setsha owner/repo <sha>`");
+        await logReply(env, chatId);
+        return json({ ok: true });
+      }
+      const urlZip = `https://github.com/${repo}/archive/${sha}.zip`;
+      const snap = await setBaseSnapshot(env, { sha, url: urlZip, note: "manual setsha" });
+      await sendMessage(env, chatId, `✅ Встановив базовий снепшот:\n• sha: ${snap.sha}\n• url: ${snap.url}`);
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+  }
+
+  // Якщо раніше ввімкнули режим очікування Drive-URL — перехоплюємо перше ж довільне повідомлення як URL
+  const awaiting = await env.STATE_KV.get(`snapshot:await_url:${chatId}`);
+  if (awaiting) {
+    await env.STATE_KV.delete(`snapshot:await_url:${chatId}`);
+    const maybeUrl = text;
+    // Мінімальна валідація: має містити "drive.google.com"
+    if (!/drive\.google\.com/i.test(maybeUrl)) {
+      await sendMessage(env, chatId, "❌ Це не схоже на публічний лінк Google Drive. Спробуй ще раз `/snapshot setdrive`.");
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+    const snap = await setBaseSnapshot(env, { sha: "", url: maybeUrl, note: "google drive base" });
+    await sendMessage(env, chatId, `✅ Встановив базовий снепшот із Drive:\n• url: ${snap.url}`);
     await logReply(env, chatId);
     return json({ ok: true });
   }
 
-  // /log on|off|status
+  // ---- /log on|off|status ----
   if (text.startsWith("/log")) {
     const sub = (text.split(" ")[1] || "status").toLowerCase();
     const owner = await isOwner(env, fromId);
@@ -81,7 +133,7 @@ export default async function webhook(request, env, ctx) {
     return json({ ok: true });
   }
 
-  // /todo, /todo clear, /done N
+  // ---- /todo, /todo clear, /done N ----
   if (text === "/todo") {
     const list = await loadTodos(env, chatId);
     await sendMessage(env, chatId, formatTodos(list));
@@ -93,8 +145,6 @@ export default async function webhook(request, env, ctx) {
     await saveTodos(env, chatId, []);
     await sendMessage(env, chatId, "🧹 Список очищено.");
     await logReply(env, chatId);
-    // подієвий sync у фоні
-    ctx.waitUntil(syncOnce(env, chatId));
     return json({ ok: true });
   }
 
@@ -103,12 +153,10 @@ export default async function webhook(request, env, ctx) {
     const { ok, removed, list } = await removeTodoByIndex(env, chatId, n);
     await sendMessage(env, chatId, ok ? `✅ Готово: ${removed.text}\n\n${formatTodos(list)}` : "❌ Не той номер.");
     await logReply(env, chatId);
-    // подієвий sync у фоні
-    ctx.waitUntil(syncOnce(env, chatId));
     return json({ ok: true });
   }
 
-  // автологування: + задача
+  // ---- автологування: + задача ----
   if (await getAutolog(env)) {
     const m = text.match(/^\s*\+\s*(.+)$/s);
     if (m) {
@@ -123,8 +171,6 @@ export default async function webhook(request, env, ctx) {
             : `ℹ️ Вже є в списку: ${itemText}\n\n${formatTodos(list)}`
         );
         await logReply(env, chatId);
-        // подієвий sync у фоні
-        ctx.waitUntil(syncOnce(env, chatId));
         return json({ ok: true });
       }
     }
@@ -143,13 +189,12 @@ export default async function webhook(request, env, ctx) {
       chatId,
       [
         "*Команди:*",
-        "/ping, /id, /sync",
+        "/ping, /id",
         "/log status | /log on | /log off",
-        "/todo — показати список",
-        "/done N — завершити пункт №N",
-        "/todo clear — очистити список",
-        "",
-        "Коли увімкнено автологування — пиши `+ завдання`, і я додам у чек-лист.",
+        "/todo — показати список | /done N | /todo clear",
+        "/snapshot — показати базовий снепшот",
+        "/snapshot setdrive — встановити Drive-архів як базу",
+        "/snapshot setsha owner/repo <sha> — встановити git-архів як базу",
       ].join("\n")
     );
     await logReply(env, chatId);
