@@ -6,9 +6,17 @@ workers_dev = true
 [vars]
 TZ = "Europe/Kyiv"
 
-# ⏰ синхронізація кожні 15 хв
-[triggers]
-crons = ["*/15 * * * *"]
+# === Google Drive (Service Account) ===
+# EMAIL сервіс-акаунта (з JSON: client_email)
+GDRIVE_SA_EMAIL = "senti-drive-agent@<твій-проект>.iam.gserviceaccount.com"
+# ID папки на Google Drive, куди складати бекапи (створи папку, візьми її ID з URL)
+GDRIVE_FOLDER_ID = "<YOUR_DRIVE_FOLDER_ID>"
+# Бажана за замовчуванням MIME-тип назви файлів, якщо не вдасться визначити (не чіпай)
+GDRIVE_DEFAULT_MIME = "application/octet-stream"
+
+# ВАЖЛИВО: приватний ключ додаємо як СЕКРЕТ (не в plaintext)
+#   назва секрета: GDRIVE_PRIVATE_KEY
+#   значення: поле "private_key" з JSON (з новими рядками \n як є)
 
 [[kv_namespaces]]
 binding = "STATE_KV"
