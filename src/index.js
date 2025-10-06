@@ -1,37 +1,18 @@
+import { notFound } from "./lib/resp.js";
+import { handleHealth } from "./routes/health.js";
+import { handleWebhook } from "./routes/webhook.js";
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Healthcheck
-    if (url.pathname === "/health") {
-      return new Response(JSON.stringify({ ok: true, name: "senti-bot-worker" }), {
-        headers: { "content-type": "application/json" },
-      });
+    if (request.method === "GET" && url.pathname === "/health") {
+      return handleHealth(env);
+    }
+    if (request.method === "POST" && url.pathname === "/webhook") {
+      return handleWebhook(request, env);
     }
 
-    // Telegram webhook
-    if (url.pathname === "/webhook" && request.method === "POST") {
-      const secret = url.searchParams.get("secret");
-      if (secret !== env.WEBHOOK_SECRET) {
-        return new Response("Unauthorized", { status: 403 });
-      }
-
-      const update = await request.json();
-      const chatId = update.message?.chat?.id;
-      const text = update.message?.text;
-
-      if (chatId && text) {
-        const reply = `✅ Сенті онлайн!\nТи написав: "${text}"`;
-        await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ chat_id: chatId, text: reply }),
-        });
-      }
-
-      return new Response("ok");
-    }
-
-    return new Response("Not found", { status: 404 });
+    return notFound();
   },
 };
