@@ -1,5 +1,4 @@
 // src/routes/webhook.js
-
 import { drivePing, driveSaveFromUrl } from "../lib/drive.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -253,32 +252,34 @@ export default async function webhook(request, env, ctx) {
     }
   }
 
-  // === Google Drive команди ===
+  // === Google Drive команди (зручно з телефона) ===
   if (text === "/gdrive ping") {
     try {
       await drivePing(env);
-      await sendMessage(env, chatId, "🟢 Drive доступний, можемо заливати файли.");
+      await sendMessage(env, chatId, "🟢 Drive доступний, папка знайдена.");
     } catch (e) {
-      await sendMessage(env, chatId, "❌ Drive недоступний: " + String(e.message || e));
+      await sendMessage(env, chatId, "❌ Drive недоступний: " + String(e?.message || e));
     }
     await logReply(env, chatId);
     return json({ ok: true });
   }
 
+  // /gdrive save <url> [name]
   if (/^\/gdrive\s+save\s+/i.test(text)) {
-    const [, , , ...rest] = text.split(/\s+/);
-    if (!rest.length) {
+    const parts = text.split(/\s+/);
+    // /gdrive save <url> [name...]
+    const url = parts[2];
+    const name = parts.length > 3 ? parts.slice(3).join(" ") : "";
+    if (!url) {
       await sendMessage(env, chatId, "ℹ️ Використання: `/gdrive save <url> [назва.zip]`");
       await logReply(env, chatId);
       return json({ ok: true });
     }
-    const url = rest[0];
-    const name = rest.slice(1).join(" ");
     try {
-      const { name: saved, link } = await driveSaveFromUrl(env, url, name);
-      await sendMessage(env, chatId, `📤 Залив у Drive: *${saved}*\n🔗 ${link}`);
+      const saved = await driveSaveFromUrl(env, url, name);
+      await sendMessage(env, chatId, `📤 Залив у Drive: *${saved.name}*\n🔗 ${saved.link}`);
     } catch (e) {
-      await sendMessage(env, chatId, "❌ Не вдалося залити: " + String(e.message || e));
+      await sendMessage(env, chatId, "❌ Не вдалося залити: " + String(e?.message || e));
     }
     await logReply(env, chatId);
     return json({ ok: true });
@@ -304,7 +305,7 @@ export default async function webhook(request, env, ctx) {
         "/todo clear — очистити список",
         "",
         "*Drive:*",
-        "/gdrive ping — перевірка доступу",
+        "/gdrive ping — перевірка доступу до папки",
         "/gdrive save <url> [назва] — зберегти файл із URL у Google Drive",
         "",
         "Коли увімкнено автологування — пиши `+ завдання`, і я додам у чек-лист.",
