@@ -1,13 +1,33 @@
 // src/lib/drive.js
-// Google Drive клієнт для Cloudflare Workers на базі Service Account (JWT).
+// Google Drive клієнт для Cloudflare Workers.
+// Підтримує 2 режими:
+//   1) Service Account (JWT)            -> GOOGLE_IS_SERVICE=true
+//   2) Особистий доступ (OAuth token)   -> GOOGLE_IS_SERVICE=false + GOOGLE_ACCESS_TOKEN
 
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const DRIVE_UPLOAD_MULTIPART = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
+const DRIVE_UPLOAD_MULTIPART =
+  "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
 const DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files";
+
+/* ========================== Допоміжні ========================== */
+
+// Читаємо DRIVE_FOLDER_ID
+function ensureFolder(env) {
+  const id = env.DRIVE_FOLDER_ID;
+  if (!id) throw new Error("Missing DRIVE_FOLDER_ID (Cloudflare Variable)");
+  return id;
+}
+
+// Чи увімкнено Service Account?
+function isService(env) {
+  const v = String(env.GOOGLE_IS_SERVICE ?? "true").toLowerCase().trim();
+  return v === "true" || v === "1" || v === "yes";
+}
 
 // Розбір секрету GOOGLE_DRIVE_CREDENTIALS (повний JSON)
 function getCreds(env) {
-  if (!env.GOOGLE_DRIVE_CREDENTIALS) throw new Error("Missing secret GOOGLE_DRIVE_CREDENTIALS");
+  if (!env.GOOGLE_DRIVE_CREDENTIALS)
+    throw new Error("Missing secret GOOGLE_DRIVE_CREDENTIALS");
   let creds;
   try {
     creds = JSON.parse(env.GOOGLE_DRIVE_CREDENTIALS);
@@ -15,7 +35,9 @@ function getCreds(env) {
     throw new Error("GOOGLE_DRIVE_CREDENTIALS is not valid JSON");
   }
   if (!creds.client_email || !creds.private_key) {
-    throw new Error("GOOGLE_DRIVE_CREDENTIALS must include client_email and private_key");
+    throw new Error(
+      "GOOGLE_DRIVE_CREDENTIALS must include client_email and private_key"
+    );
   }
   return creds;
 }
@@ -29,7 +51,6 @@ function pemToArrayBuffer(pem) {
 }
 
 function b64url(bytes) {
-  // bytes: Uint8Array
   const b64 = btoa(String.fromCharCode(...bytes));
   return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
@@ -40,7 +61,8 @@ function encJSONUrlSafe(obj) {
   return b64url(b);
 }
 
-async function getAccessToken(env) {
+// Генеруємо access_token для Service Account
+async function getServiceAccessToken(env) {
   const creds = getCreds(env);
   const now = Math.floor(Date.now() / 1000);
 
@@ -63,7 +85,11 @@ async function getAccessToken(env) {
     false,
     ["sign"]
   );
-  const sig = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(unsigned));
+  const sig = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    key,
+    new TextEncoder().encode(unsigned)
+  );
   const jwt = `${unsigned}.${b64url(new Uint8Array(sig))}`;
 
   const res = await fetch(OAUTH_TOKEN_URL, {
@@ -79,31 +105,63 @@ async function getAccessToken(env) {
   return data.access_token;
 }
 
-function ensureFolder(env) {
-  const id = env.DRIVE_FOLDER_ID;
-  if (!id) throw new Error("Missing DRIVE_FOLDER_ID (Cloudflare Variable)");
-  return id;
+// Повертає access_token відповідно до режиму
+async function getAccessToken(env) {
+  if (isService(env)) {
+    return await getServiceAccessToken(env);
+  }
+  // Особистий токен (виданий OAuth Playground)
+  const tok = env.GOOGLE_ACCESS_TOKEN;
+  if (!tok) {
+    throw new Error(
+      "Missing GOOGLE_ACCESS_TOKEN (set GOOGLE_IS_SERVICE=false to use it)"
+    );
+  }
+  return tok;
 }
+
+// Витягаємо ім’я файлу з Content-Disposition (якщо є)
+function nameFromContentDisposition(dispo) {
+  if (!dispo) return null;
+  // приклади: attachment; filename="my.pdf"  |  attachment; filename*=UTF-8''my.pdf
+  const m1 = dispo.match(/filename\*?=(?:UTF-8''|")?([^";]+)/i);
+  if (m1 && m1[1]) {
+    try {
+      return decodeURIComponent(m1[1]);
+    } catch {
+      return m1[1];
+    }
+  }
+  return null;
+}
+
+// Резервне ім’я з URL
+function guessNameFromUrl(u) {
+  try {
+    const url = new URL(u);
+    const last = url.pathname.split("/").pop() || "file";
+    return last.includes(".") ? last : last + ".bin";
+  } catch {
+    return "file.bin";
+  }
+}
+
+/* ========================== Публічні функції ========================== */
 
 export async function drivePing(env) {
   const token = await getAccessToken(env);
   const folderId = ensureFolder(env);
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-  const res = await fetch(`${DRIVE_FILES_URL}?q=${q}&pageSize=1&fields=files(id,name)`, {
+  const url =
+    `${DRIVE_FILES_URL}?q=${q}` +
+    `&pageSize=1&fields=files(id,name)` +
+    `&supportsAllDrives=true&includeItemsFromAllDrives=true`;
+
+  const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) throw new Error("Drive ping failed: " + (await res.text()));
   return true;
-}
-
-function guessNameFromUrl(u) {
-  try {
-    const url = new URL(u);
-    const last = url.pathname.split("/").pop() || "file";
-    return last.includes(".") ? last : (last + ".bin");
-  } catch {
-    return "file.bin";
-  }
 }
 
 export async function driveSaveFromUrl(env, fileUrl, nameOptional) {
@@ -115,9 +173,19 @@ export async function driveSaveFromUrl(env, fileUrl, nameOptional) {
   if (!src.ok) throw new Error(`Fetch failed: ${src.status}`);
   const buf = new Uint8Array(await src.arrayBuffer());
 
-  const filename = (nameOptional && nameOptional.trim()) || guessNameFromUrl(fileUrl);
-  const boundary = "----senti-drive-" + Math.random().toString(16).slice(2);
+  // Визначаємо ім’я та тип
+  const cd = src.headers.get("content-disposition") || "";
+  const hintedName = nameFromContentDisposition(cd);
+  const filename =
+    (nameOptional && nameOptional.trim()) ||
+    hintedName ||
+    guessNameFromUrl(fileUrl);
 
+  const contentType =
+    src.headers.get("content-type") || "application/octet-stream";
+
+  // 2) multipart/related тіло
+  const boundary = "----senti-drive-" + Math.random().toString(16).slice(2);
   const metadata = {
     name: filename,
     parents: [folderId],
@@ -127,22 +195,19 @@ export async function driveSaveFromUrl(env, fileUrl, nameOptional) {
   const metaPart =
     `--${boundary}\r\n` +
     `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
-    JSON.stringify(metadata) + `\r\n`;
+    JSON.stringify(metadata) +
+    `\r\n`;
 
   const filePartHeader =
-    `--${boundary}\r\n` +
-    `Content-Type: application/zip\r\n\r\n`;
+    `--${boundary}\r\n` + `Content-Type: ${contentType}\r\n\r\n`;
 
   const footer = `\r\n--${boundary}--\r\n`;
 
-  const body = new Blob([
-    enc.encode(metaPart),
-    enc.encode(filePartHeader),
-    buf,
-    enc.encode(footer),
-  ]);
+  const body = new Blob([enc.encode(metaPart), enc.encode(filePartHeader), buf, enc.encode(footer)]);
 
-  const upload = await fetch(DRIVE_UPLOAD_MULTIPART, {
+  // 3) завантажуємо у Drive
+  const uploadUrl = `${DRIVE_UPLOAD_MULTIPART}&supportsAllDrives=true`;
+  const upload = await fetch(uploadUrl, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
@@ -150,7 +215,8 @@ export async function driveSaveFromUrl(env, fileUrl, nameOptional) {
     },
     body,
   });
-  const info = await upload.json();
+
+  const info = await upload.json().catch(() => ({}));
   if (!upload.ok) throw new Error("upload_failed: " + JSON.stringify(info));
 
   return {
@@ -164,8 +230,16 @@ export async function driveList(env, limit = 10) {
   const token = await getAccessToken(env);
   const folderId = ensureFolder(env);
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-  const fields = encodeURIComponent("files(id,name,modifiedTime,size,webViewLink)");
-  const res = await fetch(`${DRIVE_FILES_URL}?q=${q}&orderBy=modifiedTime desc&pageSize=${limit}&fields=${fields}`, {
+  const fields = encodeURIComponent(
+    "files(id,name,modifiedTime,size,webViewLink)"
+  );
+
+  const url =
+    `${DRIVE_FILES_URL}?q=${q}` +
+    `&orderBy=modifiedTime desc&pageSize=${limit}&fields=${fields}` +
+    `&supportsAllDrives=true&includeItemsFromAllDrives=true`;
+
+  const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
   const data = await res.json();
