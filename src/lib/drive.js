@@ -1,41 +1,70 @@
-// Lightweight Google Drive client for Cloudflare Workers (Service Account, JWT)
+// src/lib/drive.js
+// Google Drive клієнт для Cloudflare Workers на базі Service Account (JWT).
 
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const DRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
-const DRIVE_FILES_URL  = "https://www.googleapis.com/drive/v3/files";
+const DRIVE_UPLOAD_MULTIPART = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
+const DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files";
+
+// Розбір секрету GOOGLE_DRIVE_CREDENTIALS (повний JSON)
+function getCreds(env) {
+  if (!env.GOOGLE_DRIVE_CREDENTIALS) throw new Error("Missing secret GOOGLE_DRIVE_CREDENTIALS");
+  let creds;
+  try {
+    creds = JSON.parse(env.GOOGLE_DRIVE_CREDENTIALS);
+  } catch (e) {
+    throw new Error("GOOGLE_DRIVE_CREDENTIALS is not valid JSON");
+  }
+  if (!creds.client_email || !creds.private_key) {
+    throw new Error("GOOGLE_DRIVE_CREDENTIALS must include client_email and private_key");
+  }
+  return creds;
+}
 
 function pemToArrayBuffer(pem) {
-  const b64 = pem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
-  const raw = atob(b64);
-  const buf = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+  const raw = pem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
+  const bin = atob(raw);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
   return buf.buffer;
 }
 
+function b64url(bytes) {
+  // bytes: Uint8Array
+  const b64 = btoa(String.fromCharCode(...bytes));
+  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function encJSONUrlSafe(obj) {
+  const txt = JSON.stringify(obj);
+  const b = new TextEncoder().encode(txt);
+  return b64url(b);
+}
+
 async function getAccessToken(env) {
+  const creds = getCreds(env);
   const now = Math.floor(Date.now() / 1000);
+
   const header = { alg: "RS256", typ: "JWT" };
   const claim = {
-    iss: env.GDRIVE_SA_EMAIL,
+    iss: creds.client_email,
+    sub: creds.client_email, // як сервісний акаунт
     scope: "https://www.googleapis.com/auth/drive.file",
     aud: OAUTH_TOKEN_URL,
-    exp: now + 60 * 60, // 1h
     iat: now,
+    exp: now + 3600,
   };
-  const enc = (obj) => btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(obj)))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
-  const unsigned = enc(header) + "." + enc(claim);
 
-  const keyData = pemToArrayBuffer(env.GDRIVE_PRIVATE_KEY);
+  const unsigned = `${encJSONUrlSafe(header)}.${encJSONUrlSafe(claim)}`;
+
   const key = await crypto.subtle.importKey(
     "pkcs8",
-    keyData,
+    pemToArrayBuffer(creds.private_key),
     { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
     false,
     ["sign"]
   );
-  const sigBuf = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(unsigned));
-  const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sigBuf))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
-  const jwt = `${unsigned}.${sigB64}`;
+  const sig = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(unsigned));
+  const jwt = `${unsigned}.${b64url(new Uint8Array(sig))}`;
 
   const res = await fetch(OAUTH_TOKEN_URL, {
     method: "POST",
@@ -45,54 +74,56 @@ async function getAccessToken(env) {
       assertion: jwt,
     }),
   });
-  if (!res.ok) {
-    const t = await res.text();
-    throw new Error("Token error: " + t);
-  }
-  const json = await res.json();
-  return json.access_token;
+  const data = await res.json();
+  if (!res.ok) throw new Error("token_error: " + JSON.stringify(data));
+  return data.access_token;
 }
 
-function guessNameFromUrl(url) {
+function ensureFolder(env) {
+  const id = env.DRIVE_FOLDER_ID;
+  if (!id) throw new Error("Missing DRIVE_FOLDER_ID (Cloudflare Variable)");
+  return id;
+}
+
+export async function drivePing(env) {
+  const token = await getAccessToken(env);
+  const folderId = ensureFolder(env);
+  const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
+  const res = await fetch(`${DRIVE_FILES_URL}?q=${q}&pageSize=1&fields=files(id,name)`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error("Drive ping failed: " + (await res.text()));
+  return true;
+}
+
+function guessNameFromUrl(u) {
   try {
-    const u = new URL(url);
-    const last = u.pathname.split("/").pop() || "file";
-    return last.includes(".") ? last : last + ".bin";
+    const url = new URL(u);
+    const last = url.pathname.split("/").pop() || "file";
+    return last.includes(".") ? last : (last + ".bin");
   } catch {
     return "file.bin";
   }
 }
 
-export async function drivePing(env) {
-  const token = await getAccessToken(env);
-  const q = new URLSearchParams({
-    q: `'${env.GDRIVE_FOLDER_ID}' in parents and trashed = false`,
-    pageSize: "1",
-    fields: "files(id,name)",
-  });
-  const res = await fetch(`${DRIVE_FILES_URL}?${q}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) throw new Error("Drive list failed: " + (await res.text()));
-  return true;
-}
-
 export async function driveSaveFromUrl(env, fileUrl, nameOptional) {
   const token = await getAccessToken(env);
+  const folderId = ensureFolder(env);
 
   // 1) завантажуємо файл у воркер
-  const fileRes = await fetch(fileUrl);
-  if (!fileRes.ok) throw new Error(`Fetch failed (${fileRes.status})`);
-  const buf = new Uint8Array(await fileRes.arrayBuffer());
+  const src = await fetch(fileUrl);
+  if (!src.ok) throw new Error(`Fetch failed: ${src.status}`);
+  const buf = new Uint8Array(await src.arrayBuffer());
 
   const filename = (nameOptional && nameOptional.trim()) || guessNameFromUrl(fileUrl);
   const boundary = "----senti-drive-" + Math.random().toString(16).slice(2);
 
   const metadata = {
     name: filename,
-    parents: [env.GDRIVE_FOLDER_ID],
+    parents: [folderId],
   };
 
+  const enc = new TextEncoder();
   const metaPart =
     `--${boundary}\r\n` +
     `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
@@ -100,20 +131,18 @@ export async function driveSaveFromUrl(env, fileUrl, nameOptional) {
 
   const filePartHeader =
     `--${boundary}\r\n` +
-    `Content-Type: ${env.GDRIVE_DEFAULT_MIME || "application/octet-stream"}\r\n\r\n`;
+    `Content-Type: application/zip\r\n\r\n`;
 
   const footer = `\r\n--${boundary}--\r\n`;
 
-  // Склеюємо multipart тіло
-  const encoder = new TextEncoder();
   const body = new Blob([
-    encoder.encode(metaPart),
-    encoder.encode(filePartHeader),
+    enc.encode(metaPart),
+    enc.encode(filePartHeader),
     buf,
-    encoder.encode(footer),
+    enc.encode(footer),
   ]);
 
-  const upload = await fetch(DRIVE_UPLOAD_URL, {
+  const upload = await fetch(DRIVE_UPLOAD_MULTIPART, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
@@ -121,14 +150,25 @@ export async function driveSaveFromUrl(env, fileUrl, nameOptional) {
     },
     body,
   });
+  const info = await upload.json();
+  if (!upload.ok) throw new Error("upload_failed: " + JSON.stringify(info));
 
-  if (!upload.ok) {
-    const t = await upload.text();
-    throw new Error("Upload failed: " + t);
-  }
+  return {
+    id: info.id,
+    name: info.name,
+    link: `https://drive.google.com/file/d/${info.id}/view`,
+  };
+}
 
-  const json = await upload.json(); // { id, name, ... }
-  // робимо shareable link (optional, лише якщо папка дозволяє)
-  const webView = `https://drive.google.com/file/d/${json.id}/view`;
-  return { id: json.id, name: json.name, link: webView };
+export async function driveList(env, limit = 10) {
+  const token = await getAccessToken(env);
+  const folderId = ensureFolder(env);
+  const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
+  const fields = encodeURIComponent("files(id,name,modifiedTime,size,webViewLink)");
+  const res = await fetch(`${DRIVE_FILES_URL}?q=${q}&orderBy=modifiedTime desc&pageSize=${limit}&fields=${fields}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error("list_failed: " + JSON.stringify(data));
+  return data.files || [];
 }
