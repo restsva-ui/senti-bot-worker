@@ -23,22 +23,18 @@ async function sendMessage(env, chatId, text, extra = {}) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-  } catch (_) {
-    // не валимо вебхук, якщо Telegram тимчасово недоступний
-  }
+  } catch (_) {}
 }
 
 async function logReply(env, chatId) {
-  // зберігаємо timestamp останньої відповіді — в STATE_KV
   try {
     await env.STATE_KV.put(`last-reply:${chatId}`, new Date().toISOString(), {
-      expirationTtl: 60 * 60 * 24, // 1 доба
+      expirationTtl: 60 * 60 * 24,
     });
   } catch (_) {}
 }
 
 async function isOwner(env, fromId) {
-  // підтримуємо один ID або список через кому
   try {
     const raw = String(env.OWNER_ID ?? "").trim();
     if (!raw) return false;
@@ -49,13 +45,13 @@ async function isOwner(env, fromId) {
   }
 }
 
-// ── Автологування: прапор у STATE_KV ─────────────────────────────────────────
+// ── Автологування у STATE_KV ─────────────────────────────────────────────────
 const AUTOLOG_KEY = "autolog:enabled";
 
 async function getAutolog(env) {
   try {
-    const val = await env.STATE_KV.get(AUTOLOG_KEY);
-    return val === "1";
+    const v = await env.STATE_KV.get(AUTOLOG_KEY);
+    return v === "1";
   } catch {
     return false;
   }
@@ -64,7 +60,7 @@ async function getAutolog(env) {
 async function setAutolog(env, on) {
   try {
     await env.STATE_KV.put(AUTOLOG_KEY, on ? "1" : "0", {
-      expirationTtl: 60 * 60 * 24 * 365, // 1 рік
+      expirationTtl: 60 * 60 * 24 * 365,
     });
     return true;
   } catch {
@@ -72,9 +68,59 @@ async function setAutolog(env, on) {
   }
 }
 
-// ── Основний обробник вебхука ────────────────────────────────────────────────
+// ── TODO у TODO_KV ───────────────────────────────────────────────────────────
+const todoKey = (chatId) => `todo:${chatId}`;
+
+async function loadTodos(env, chatId) {
+  try {
+    const raw = await env.TODO_KV.get(todoKey(chatId));
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveTodos(env, chatId, list) {
+  try {
+    await env.TODO_KV.put(todoKey(chatId), JSON.stringify(list));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function addTodo(env, chatId, text) {
+  const list = await loadTodos(env, chatId);
+  // просте дедуплікування по тексту (без регістру)
+  const exists = list.some((x) => x.text.toLowerCase() === text.toLowerCase());
+  if (exists) return { added: false, list };
+  const item = { text, ts: Date.now() };
+  list.push(item);
+  await saveTodos(env, chatId, list);
+  return { added: true, list };
+}
+
+async function removeTodoByIndex(env, chatId, idx1) {
+  const list = await loadTodos(env, chatId);
+  const i = idx1 - 1;
+  if (i < 0 || i >= list.length) return { ok: false, list };
+  const [removed] = list.splice(i, 1);
+  await saveTodos(env, chatId, list);
+  return { ok: true, removed, list };
+}
+
+function formatTodos(list) {
+  if (!list.length) return "✅ Чек-лист порожній.";
+  return (
+    "📝 Чек-лист:\n" +
+    list
+      .map((x, i) => `${i + 1}. ${x.text}`)
+      .join("\n")
+  );
+}
+
+// ── Основний обробник ────────────────────────────────────────────────────────
 export default async function webhook(request, env, ctx) {
-  // 1) зчитуємо апдейт Telegram
   let update;
   try {
     update = await request.json();
@@ -82,7 +128,6 @@ export default async function webhook(request, env, ctx) {
     return json({ ok: false, error: "bad json" }, { status: 400 });
   }
 
-  // 2) базова інформація
   const msg =
     update.message ||
     update.edited_message ||
@@ -105,58 +150,14 @@ export default async function webhook(request, env, ctx) {
   const text = (textRaw || "").trim();
   if (!chatId) return json({ ok: true });
 
-  // ── /id ────────────────────────────────────────────────────────────────────
+  // /id
   if (text === "/id") {
     await sendMessage(env, chatId, `👤 Твій Telegram ID: \`${fromId}\``);
     await logReply(env, chatId);
     return json({ ok: true });
   }
 
-  // ── /kvtest — перевірка STATE_KV (лише власник) ───────────────────────────
-  if (text === "/kvtest") {
-    if (!(await isOwner(env, fromId))) {
-      await sendMessage(env, chatId, "🔒 Лише власник.");
-      await logReply(env, chatId);
-      return json({ ok: true });
-    }
-    const key = `kvtest:${chatId}`;
-    const val = `ts=${Date.now()}`;
-    let putOk = true,
-      getOk = true,
-      getVal = null,
-      errPut = "",
-      errGet = "";
-
-    try {
-      await env.STATE_KV.put(key, val, { expirationTtl: 3600 });
-    } catch (e) {
-      putOk = false;
-      errPut = String(e);
-    }
-    try {
-      getVal = await env.STATE_KV.get(key);
-      getOk = !!getVal;
-    } catch (e) {
-      getOk = false;
-      errGet = String(e);
-    }
-
-    await sendMessage(
-      env,
-      chatId,
-      [
-        "🧪 KV test (STATE_KV):",
-        `• put: ${putOk ? "OK" : "FAIL"}${putOk ? "" : ` — ${errPut}`}`,
-        `• get: ${getOk ? "OK" : "FAIL"}${
-          getOk ? ` — ${getVal}` : ` — ${errGet}`
-        }`,
-      ].join("\n")
-    );
-    await logReply(env, chatId);
-    return json({ ok: true });
-  }
-
-  // ── /log (автологування) ───────────────────────────────────────────────────
+  // /log on|off|status
   if (text.startsWith("/log")) {
     const sub = (text.split(" ")[1] || "status").toLowerCase();
     const owner = await isOwner(env, fromId);
@@ -199,7 +200,6 @@ export default async function webhook(request, env, ctx) {
       return json({ ok: true });
     }
 
-    // status
     const enabled = await getAutolog(env);
     await sendMessage(
       env,
@@ -210,7 +210,54 @@ export default async function webhook(request, env, ctx) {
     return json({ ok: true });
   }
 
-  // ── інші дрібні команди ────────────────────────────────────────────────────
+  // /todo, /todo clear, /done N
+  if (text === "/todo") {
+    const list = await loadTodos(env, chatId);
+    await sendMessage(env, chatId, formatTodos(list));
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+
+  if (text === "/todo clear") {
+    await saveTodos(env, chatId, []);
+    await sendMessage(env, chatId, "🧹 Список очищено.");
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+
+  if (/^\/done\s+\d+$/i.test(text)) {
+    const n = parseInt(text.split(/\s+/)[1], 10);
+    const { ok, removed, list } = await removeTodoByIndex(env, chatId, n);
+    await sendMessage(
+      env,
+      chatId,
+      ok ? `✅ Готово: ${removed.text}\n\n${formatTodos(list)}` : "❌ Не той номер."
+    );
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+
+  // Автологування: + пункт у чек-лист
+  if (await getAutolog(env)) {
+    const m = text.match(/^\s*\+\s*(.+)$/s);
+    if (m) {
+      const itemText = m[1].trim();
+      if (itemText) {
+        const { added, list } = await addTodo(env, chatId, itemText);
+        await sendMessage(
+          env,
+          chatId,
+          added
+            ? `➕ Додав у чек-лист: ${itemText}\n\n${formatTodos(list)}`
+            : `ℹ️ Вже є в списку: ${itemText}\n\n${formatTodos(list)}`
+        );
+        await logReply(env, chatId);
+        return json({ ok: true });
+      }
+    }
+  }
+
+  // /ping і /help
   if (text === "/ping") {
     await sendMessage(env, chatId, "🏓 Pong!");
     await logReply(env, chatId);
@@ -221,12 +268,20 @@ export default async function webhook(request, env, ctx) {
     await sendMessage(
       env,
       chatId,
-      "/help → /ping /id /kvtest /log status|on|off"
+      [
+        "*Команди:*",
+        "/ping, /id",
+        "/log status | /log on | /log off",
+        "/todo — показати список",
+        "/done N — завершити пункт №N",
+        "/todo clear — очистити список",
+        "",
+        "Коли увімкнено автологування — пиши `+ завдання`, і я додам у чек-лист.",
+      ].join("\n")
     );
     await logReply(env, chatId);
     return json({ ok: true });
   }
 
-  // дефолт
   return json({ ok: true });
 }
