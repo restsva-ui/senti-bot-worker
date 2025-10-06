@@ -7,6 +7,7 @@ import { rateLimit, allowWarn } from "../lib/ratelimit.js";
 import { logReply, getStatus } from "../lib/journal.js";
 
 import { getChecklist, addItem, markDone, removeItem, clearChecklist, toMarkdown } from "../lib/checklist.js";
+import { getAutolog, setAutolog, autologMaybe } from "../lib/autolog.js";
 
 function isOwner(env, fromId) {
   const owner = env.OWNER_ID ? String(env.OWNER_ID) : "";
@@ -14,10 +15,12 @@ function isOwner(env, fromId) {
 }
 
 export async function handleWebhook(request, env) {
+  // 1) Секрет (header або ?secret)
   if (!verifyWebhookSecret(request, env)) {
     return json({ ok: true, ignored: true, reason: "bad secret" });
   }
 
+  // 2) Парсимо апдейт
   let update;
   try { update = await request.json(); } catch { return badRequest("invalid json"); }
 
@@ -27,10 +30,12 @@ export async function handleWebhook(request, env) {
   const text = (msg?.text || msg?.caption || "").trim();
   const updateId = update.update_id;
 
+  // 3) Дедуп
   if (await seenUpdate(env, chatId, updateId)) {
     return json({ ok: true, duplicate: true });
   }
 
+  // 4) Rate-limit
   if (chatId) {
     const rl = await rateLimit(env, chatId, { windowMs: 2000, burst: 3 });
     if (!rl.allowed) {
@@ -44,12 +49,41 @@ export async function handleWebhook(request, env) {
     }
   }
 
+  // ====== КЕРУВАННЯ АВТОЛОГУВАННЯМ ======
+  if (chatId && text.startsWith("/log")) {
+    const sub = (text.split(" ")[1] || "status").toLowerCase();
+    if (!isOwner(env, fromId) && sub !== "status") {
+      const reply = "🔒 Керувати автологуванням може лише власник. Використай `/log status`.";
+      await sendMessage(env, chatId, reply).catch(() => {});
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+    if (sub === "on") {
+      await setAutolog(env, true);
+      await sendMessage(env, chatId, "🟢 Автологування увімкнено. Пишіть завдання з префіксом `+` — я додам у чек-лист.").catch(() => {});
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+    if (sub === "off") {
+      await setAutolog(env, false);
+      await sendMessage(env, chatId, "⚪️ Автологування вимкнено.").catch(() => {});
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+    // status
+    const enabled = await getAutolog(env);
+    await sendMessage(env, chatId, `ℹ️ Автологування: ${enabled ? "УВІМКНЕНО" : "вимкнено"}.`).catch(() => {});
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+  // =======================================
+
   // ====== Команди CheckList (/todo ...) ======
   if (chatId && text.startsWith("/todo")) {
     const args = text.split(" ").slice(1);
     const sub = (args[0] || "list").toLowerCase();
 
-    // Лише власник (OWNER_ID) може змінювати; усі можуть читати.
+    // Лише власник може змінювати; усі можуть читати
     const canWrite = isOwner(env, fromId);
 
     if (sub === "list") {
@@ -60,7 +94,7 @@ export async function handleWebhook(request, env) {
     }
 
     if (!canWrite) {
-      const reply = "🔒 Зміни доступні лише власнику. Використай `/todo list` для перегляду.";
+      const reply = "🔒 Зміни доступні лише власнику. Доступно: `/todo list`.";
       await sendMessage(env, chatId, reply).catch(() => {});
       await logReply(env, chatId);
       return json({ ok: true });
@@ -109,14 +143,15 @@ export async function handleWebhook(request, env) {
       "/todo list\n" +
       "/todo add <текст>\n" +
       "/todo done <id> | /todo undo <id>\n" +
-      "/todo rm <id> | /todo clear"
+      "/todo rm <id> | /todo clear\n" +
+      "/log on | /log off | /log status"
     ).catch(() => {});
     await logReply(env, chatId);
     return json({ ok: true });
   }
   // ====== Кінець блоку чек-листа ======
 
-  // Інші команди
+  // 5) Інші команди
   if (chatId && text) {
     if (text === "/ping") {
       const reply = "🏓 pong";
@@ -155,13 +190,26 @@ export async function handleWebhook(request, env) {
     }
   }
 
+  // 6) Автологування: якщо увімкнено і фраза починається з '+'
+  if (chatId && text) {
+    const logged = await autologMaybe(env, fromId, text);
+    if (logged) {
+      const reply = "📝 Занотував у чек-лист.";
+      await sendMessage(env, chatId, reply).catch(() => {});
+      await rememberBotMessage(env, chatId, reply);
+      await logReply(env, chatId);
+      // Не повертаємось — також відповімо стандартним ехо нижче.
+    }
+  }
+
+  // 7) Стандартна відповідь + пам'ять
   if (chatId) {
     await rememberUserMessage(env, chatId, text);
     const ctx = await getShortContext(env, chatId, 4);
     const hint = ctx.slice(0, -1).length
       ? `\n🧠 У контексті збережено ${ctx.length} останніх реплік.`
       : "";
-    const reply = `👋 Привіт! Ти написав: ${text || "(порожньо)"}${hint}\n\n/help → /ping /mem /reset /status /todo`;
+    const reply = `👋 Привіт! Ти написав: ${text || "(порожньо)"}${hint}\n\n/help → /ping /mem /reset /status /todo /log`;
     await sendMessage(env, chatId, reply).catch(() => {});
     await rememberBotMessage(env, chatId, reply);
     await logReply(env, chatId);
