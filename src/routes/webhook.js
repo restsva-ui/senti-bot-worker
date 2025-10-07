@@ -51,15 +51,22 @@ async function isOwner(env, fromId) {
   }
 }
 
+// Normalize button texts (strip emojis/extra spaces, lowercased)
+function normalize(t) {
+  return (t || "")
+    .replace(/[\uFE0F]/g, "")
+    .replace(/[\p{Extended_Pictographic}]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 // ── Time / TZ ─────────────────────────────────────────────────────────────────
 function toLocalKyiv(ts, env) {
   const tz = (env.TZ || "Europe/Kyiv").trim() || "Europe/Kyiv";
   try {
     const d = new Date(ts);
-    return d.toLocaleString("uk-UA", {
-      timeZone: tz,
-      hour12: false,
-    });
+    return d.toLocaleString("uk-UA", { timeZone: tz, hour12: false });
   } catch {
     return ts;
   }
@@ -93,13 +100,34 @@ async function showAdmin(env, chatId) {
   );
 }
 
+// ── Bot commands (/menu під кнопкою у Telegram) ───────────────────────────────
+async function ensureBotCommands(env) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/setMyCommands`;
+  const commands = [
+    { command: "admin", description: "Адмін-панель" },
+    { command: "menu", description: "Показати меню" },
+    { command: "drive", description: "Drive пінг і список файлів" },
+    { command: "list10", description: "Останні 10 файлів у Drive" },
+    { command: "backup", description: "Зберегти файл за URL у Drive" },
+    { command: "checkadd", description: "Додати рядок у чеклист" },
+    { command: "help", description: "Довідка" },
+  ];
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commands }),
+    });
+  } catch (_) {}
+}
+
 // ── Персональні стейти (STATE_KV) ────────────────────────────────────────────
 const STATE_KEY = (chatId) => `state:${chatId}`;
 
 async function setState(env, chatId, stateObj) {
   try {
     await env.STATE_KV.put(STATE_KEY(chatId), JSON.stringify(stateObj), {
-      expirationTtl: 60 * 10, // 10 хвилин на дію
+      expirationTtl: 60 * 10, // 10 хвилин
     });
   } catch {}
 }
@@ -205,14 +233,12 @@ async function showDriveStatusAndList(env, chatId) {
     const files = await driveList(env, 10);
     const mapped = files.map((f, i) => {
       const when = f.modifiedTime ? toLocalKyiv(f.modifiedTime, env) : "";
-      return `${i + 1}. *${f.name}*\n   🕒 ${when}\n   🔗 ${f.webViewLink || `https://drive.google.com/file/d/${f.id}/view`}`;
+      const link = f.webViewLink || `https://drive.google.com/file/d/${f.id}/view?usp=drivesdk`;
+      return `${i + 1}. *${f.name}*\n🕒 ${when}\n🔗 ${link}`;
     });
-    await sendMessage(
-      env,
-      chatId,
-      ["*Останні 10 файлів:*", ...mapped].join("\n\n"),
-      { reply_markup: adminKeyboard() }
-    );
+    await sendMessage(env, chatId, ["*Останні 10 файлів:*", ...mapped].join("\n\n"), {
+      reply_markup: adminKeyboard(),
+    });
   } catch (e) {
     await sendMessage(env, chatId, "⚠️ Не вдалося отримати список файлів: " + String(e?.message || e));
   }
@@ -247,13 +273,13 @@ export default async function webhook(request, env, ctx) {
     "";
 
   const text = (textRaw || "").trim();
+  const ntext = normalize(text); // normalized
   if (!chatId) return json({ ok: true });
 
   // ── Спочатку перевіряємо, чи очікуємо відповідь від користувача ────────────
   const currentState = await getState(env, chatId);
 
   if (currentState?.type === "await_backup_url") {
-    // чекаємо повідомлення з URL (і, можливо, назвою після пробілу)
     const m = text.match(/^(https?:\/\/\S+)(?:\s+(.+))?$/i);
     if (!m) {
       await sendMessage(env, chatId, "❗️Це не схоже на URL. Спробуй ще раз: `https://... [назва]`");
@@ -268,12 +294,9 @@ export default async function webhook(request, env, ctx) {
       await sendMessage(env, chatId, `✅ Збережено: *${saved.name}*\n🔗 ${saved.link}`, {
         reply_markup: adminKeyboard(),
       });
-
-      // Опціонально фіксуємо у чеклисті
       try {
         await driveAppendLog(env, "senti_checklist.md", `Backup: ${saved.name} — ${saved.link}`);
       } catch (_) {}
-
     } catch (e) {
       await sendMessage(env, chatId, "❌ Не вдалося зберегти: " + String(e?.message || e));
     }
@@ -291,12 +314,9 @@ export default async function webhook(request, env, ctx) {
     }
     try {
       const r = await driveAppendLog(env, "senti_checklist.md", line);
-      await sendMessage(
-        env,
-        chatId,
-        `🟩 Додано у *senti_checklist.md*.\n🔗 ${r.webViewLink}`,
-        { reply_markup: adminKeyboard() }
-      );
+      await sendMessage(env, chatId, `🟩 Додано у *senti_checklist.md*.\n🔗 ${r.webViewLink}`, {
+        reply_markup: adminKeyboard(),
+      });
     } catch (e) {
       await sendMessage(env, chatId, "❌ Помилка при додаванні: " + String(e?.message || e));
     }
@@ -306,27 +326,70 @@ export default async function webhook(request, env, ctx) {
   }
 
   // ── Команди ────────────────────────────────────────────────────────────────
-
-  // /start та головне меню одразу з адмін-кнопками
-  if (text === "/start" || text === "/menu" || text === "Меню" || text === "/admin") {
+  if (text === "/start" || ntext === "меню" || text === "/menu" || text === "/admin") {
+    await ensureBotCommands(env);
     await showAdmin(env, chatId);
     await logReply(env, chatId);
     return json({ ok: true });
   }
 
-  // Кнопки адмін-меню (reply keyboard)
-  if (text === "Drive ✅") {
+  // Синоніми-слеш-команди для адмін-дій
+  if (text === "/drive") {
+    await showDriveStatusAndList(env, chatId);
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+  if (text === "/list10") {
+    try {
+      const files = await driveList(env, 10);
+      const mapped = files.map((f, i) => {
+        const when = f.modifiedTime ? toLocalKyiv(f.modifiedTime, env) : "";
+        const link = f.webViewLink || `https://drive.google.com/file/d/${f.id}/view?usp=drivesdk`;
+        return `${i + 1}. *${f.name}*\n🕒 ${when}\n🔗 ${link}`;
+      });
+      await sendMessage(env, chatId, ["*Останні 10 файлів:*", ...mapped].join("\n\n"), {
+        reply_markup: adminKeyboard(),
+      });
+    } catch (e) {
+      await sendMessage(env, chatId, "⚠️ Не вдалося отримати список файлів: " + String(e?.message || e));
+    }
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+  if (text === "/backup") {
+    await setState(env, chatId, { type: "await_backup_url" });
+    await sendMessage(
+      env,
+      chatId,
+      "Надішли *URL* для збереження у Drive. Можна додати назву після пробілу:\n`https://... файл.zip`",
+      { reply_markup: adminKeyboard() }
+    );
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+  if (text === "/checkadd") {
+    await setState(env, chatId, { type: "await_checklist_line" });
+    await sendMessage(env, chatId, "Надішли *один рядок*, який додати в *senti_checklist.md*.", {
+      reply_markup: adminKeyboard(),
+    });
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+
+  // Кнопки адмін-меню (з нормалізацією)
+  if (["drive ✅", "drive"].includes(ntext)) {
     await showDriveStatusAndList(env, chatId);
     await logReply(env, chatId);
     return json({ ok: true });
   }
 
-  if (text === "List 10 📄") {
+  if (["list 10 📄", "list 10", "list10"].includes(ntext)) {
     try {
       const files = await driveList(env, 10);
       const mapped = files.map((f, i) => {
         const when = f.modifiedTime ? toLocalKyiv(f.modifiedTime, env) : "";
-        return `${i + 1}. *${f.name}*\n   🕒 ${when}\n   🔗 ${f.webViewLink || `https://drive.google.com/file/d/${f.id}/view`}`;
+        const link = f.webViewLink || `https://drive.google.com/file/d/${f.id}/view?usp=drivesdk`;
+        return `${i + 1}. *${f.name}*\n🕒 ${when}\n🔗 ${link}`;
       });
       await sendMessage(env, chatId, ["*Останні 10 файлів:*", ...mapped].join("\n\n"), {
         reply_markup: adminKeyboard(),
@@ -338,7 +401,7 @@ export default async function webhook(request, env, ctx) {
     return json({ ok: true });
   }
 
-  if (text === "Backup URL ⬆️") {
+  if (["backup url ⬆️", "backup url"].includes(ntext)) {
     await setState(env, chatId, { type: "await_backup_url" });
     await sendMessage(
       env,
@@ -350,7 +413,7 @@ export default async function webhook(request, env, ctx) {
     return json({ ok: true });
   }
 
-  if (text === "Checklist ➕") {
+  if (["checklist ➕", "checklist +", "checklist"].includes(ntext)) {
     await setState(env, chatId, { type: "await_checklist_line" });
     await sendMessage(env, chatId, "Надішли *один рядок*, який додати в *senti_checklist.md*.", {
       reply_markup: adminKeyboard(),
@@ -466,7 +529,7 @@ export default async function webhook(request, env, ctx) {
     }
   }
 
-  // === Google Drive команди (зручно з телефона) ===
+  // === Google Drive команди ===
   if (text === "/gdrive ping") {
     try {
       await drivePing(env);
@@ -481,7 +544,6 @@ export default async function webhook(request, env, ctx) {
   // /gdrive save <url> [name]
   if (/^\/gdrive\s+save\s+/i.test(text)) {
     const parts = text.split(/\s+/);
-    // /gdrive save <url> [name...]
     const url = parts[2];
     const name = parts.length > 3 ? parts.slice(3).join(" ") : "";
     if (!url) {
@@ -513,18 +575,19 @@ export default async function webhook(request, env, ctx) {
       chatId,
       [
         "*Команди:*",
-        "/menu — головне меню (адмін-кнопки)",
+        "/admin — адмін-панель",
+        "/menu — показати меню",
+        "/drive — перевірка Drive і список",
+        "/list10 — останні 10 файлів",
+        "/backup — зберегти файл за URL",
+        "/checkadd — додати рядок у чеклист",
         "/ping, /id",
         "/log status | /log on | /log off",
-        "/todo — показати список",
-        "/done N — завершити пункт №N",
-        "/todo clear — очистити список",
+        "/todo, /done N, /todo clear",
         "",
-        "*Drive:*",
-        "/gdrive ping — перевірка доступу до папки",
-        "/gdrive save <url> [назва] — зберегти файл із URL у Google Drive",
-        "",
-        "Коли увімкнено автологування — пиши `+ завдання`, і я додам у чек-лист.",
+        "*Drive вручну:*",
+        "/gdrive ping",
+        "/gdrive save <url> [назва]",
       ].join("\n"),
       { reply_markup: adminKeyboard() }
     );
