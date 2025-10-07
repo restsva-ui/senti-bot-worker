@@ -6,6 +6,6 @@ export function adminKeyboard() {
       [{ text: "Меню" }],
     ],
     resize_keyboard: true,
-    one_time_keyboard: false,
+    is_persistent: true,
   };
 }
