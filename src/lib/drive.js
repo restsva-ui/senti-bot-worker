@@ -7,9 +7,7 @@ const API = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
 
 function authHeaders(env) {
-  return {
-    Authorization: `Bearer ${env.GDRIVE_TOKEN}`,
-  };
+  return { Authorization: `Bearer ${env.GDRIVE_TOKEN}` };
 }
 
 async function gjson(res) {
@@ -76,7 +74,6 @@ async function getFileContent(env, id) {
 }
 
 async function uploadMultipart(env, { id, name, mime = "application/octet-stream", content }) {
-  // multipart/related
   const boundary = "boundary" + Math.random().toString(16).slice(2);
   const meta = JSON.stringify({
     name,
@@ -96,7 +93,6 @@ async function uploadMultipart(env, { id, name, mime = "application/octet-stream
     ``,
   ];
 
-  // Перетворюємо у Blob, щоб зберегти binary частину
   const blobs = bodyParts.map((p) =>
     typeof p === "string" ? new Blob([p + "\r\n"]) : new Blob([p])
   );
@@ -115,7 +111,6 @@ async function uploadMultipart(env, { id, name, mime = "application/octet-stream
   });
   const data = await gjson(res);
 
-  // доберемо webViewLink
   const infoRes = await fetch(
     `${API}/files/${data.id}?fields=id,name,webViewLink,modifiedTime`,
     { headers: authHeaders(env) }
@@ -123,20 +118,17 @@ async function uploadMultipart(env, { id, name, mime = "application/octet-stream
   return await gjson(infoRes);
 }
 
-/**
- * Додати один рядок у markdown-файл (створить, якщо не існує)
- */
+/** Додати один рядок у markdown-файл (створить, якщо не існує) */
 export async function driveAppendLog(env, filename, line) {
   const safeLine = String(line || "").replace(/\r?\n/g, " ").trim();
   let file = await findByName(env, filename);
 
   const append = `\n${safeLine}`;
   if (!file) {
-    // створюємо новий
     file = await uploadMultipart(env, {
       name: filename,
       mime: "text/markdown; charset=UTF-8",
-      content: append.trimStart(), // без лідінгу, бо новий файл
+      content: append.trimStart(),
     });
     return file;
   }
@@ -153,15 +145,11 @@ export async function driveAppendLog(env, filename, line) {
   return updatedFile;
 }
 
-/**
- * Завантажити файл у Drive із зовнішнього URL.
- * name — опціональна назва (з .zip/.txt тощо). Якщо порожня — беремо з URL або Content-Disposition.
- */
+/** Завантажити файл у Drive із зовнішнього URL. */
 export async function driveSaveFromUrl(env, url, name = "") {
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`Завантаження URL: ${resp.status} ${resp.statusText}`);
 
-  // Визначимо ім'я
   let finalName = String(name || "").trim();
   if (!finalName) {
     const cd = resp.headers.get("content-disposition") || "";
@@ -171,9 +159,7 @@ export async function driveSaveFromUrl(env, url, name = "") {
   if (!finalName) {
     try {
       finalName = decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
   if (!finalName) finalName = "file.bin";
 
@@ -187,3 +173,6 @@ export async function driveSaveFromUrl(env, url, name = "") {
   });
   return { id: saved.id, name: saved.name, link: saved.webViewLink };
 }
+
+/* === АЛІАС, ЩОБ СТАРИЙ КОД НЕ ПАДАВ === */
+export const driveList = driveListLatest;
