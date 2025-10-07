@@ -1,119 +1,115 @@
-// src/routes/admin.js
-import { adminKeyboard } from "../lib/keyboard.js";
-import { drivePing, driveListLatest } from "../lib/drive.js";
+// Адмін-меню та обробники кнопок
+import { drivePing, driveList, driveSaveFromUrl, driveAppendLog } from "../lib/drive.js";
+import { getState, setState, clearState } from "../utils/state.js";
+import { sendMessage, escape } from "../utils/telegram.js";
 
-/** Команда, яка відкриває адмін-меню */
-export function wantAdmin(text = "") {
-  const t = String(text || "").trim().toLowerCase();
-  return t === "/admin" || t === "меню" || t === "/menu";
+export function adminKeyboard() {
+  // IMPORTANT: keyboard — це масив РЯДКІВ (масив масивів)
+  return {
+    keyboard: [
+      [{ text: "Drive ✅" }, { text: "List 10 🧾" }],
+      [{ text: "Backup URL ⬆️" }, { text: "Checklist +" }],
+      [{ text: "Меню" }],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
 }
 
-/** Нормалізація: нижній регістр, прибираємо емодзі/службові символи, стискаємо пробіли */
-function norm(s = "") {
-  const str = String(s || "")
-    // прибрати emoji та піктограми
-    .replace(/\p{Extended_Pictographic}/gu, " ")
-    // прибрати керівні/непомітні символи
-    .replace(/[\u2000-\u200F\u202A-\u202E\u2060-\u206F]/g, " ")
-    // замінити підряд пробілів одним
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-  return str;
+export async function showAdminMenu(env, chatId) {
+  // скидаємо будь-який “очікую URL”
+  await clearState(env, chatId, "awaiting_url");
+  return sendMessage(env, chatId,
+    "Senti Admin\n— мінімальне меню керування:\n• Drive пінг і список файлів\n• Швидкий бекап за URL\n• Додавання в чеклист",
+    { reply_markup: adminKeyboard() }
+  );
 }
 
-/** Зареєструвати команди бота в Telegram (щоб були в системному меню) */
-export async function ensureBotCommands(env) {
-  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/setMyCommands`;
-  const commands = [
-    { command: "start", description: "Запустити бота" },
-    { command: "admin", description: "Адмін-меню (керування)" },
-    { command: "menu", description: "Показати меню" },
-    { command: "ping", description: "Перевірка зв'язку" },
-    { command: "help", description: "Довідка" },
-  ];
-  try {
-    await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ commands }),
-    });
-  } catch (_) {}
-}
+export async function handleAdminButtons(env, chatId, text) {
+  const trimmed = (text || "").trim();
 
-/**
- * Обробка адмін-команд і кнопок.
- * Повертає:
- *  - { text, keyboard } — повідомлення + клавіатура
- *  - { text, expect: 'backup-url'|'append-checklist', keyboard? } — якщо чекаємо наступний крок
- */
-export async function handleAdminCommand(env, chatId, text) {
-  const tRaw = String(text || "").trim();
-  const t = norm(tRaw);
-
-  // 1) Просто показати меню
-  if (wantAdmin(tRaw) || t === "меню") {
-    return {
-      text:
-        "Senti Admin\n— мінімальне меню керування:\n" +
-        "• Drive пінг і список файлів\n" +
-        "• Швидкий бекап за URL\n" +
-        "• Додавання в чеклист",
-      keyboard: adminKeyboard(),
-    };
-  }
-
-  // 2) Кнопки з клавіатури: робимо нечутливими до емодзі/регістру/зайвих пробілів
-  // Drive ping
-  if (t.startsWith("drive") || t === "drive" || t.includes("gdrive ping") || t === "/gdrive_ping_btn") {
+  if (trimmed === "Drive ✅") {
+    // скинути очікування URL, якщо було
+    await clearState(env, chatId, "awaiting_url");
     try {
       await drivePing(env);
-      return { text: "🟢 Drive OK", keyboard: adminKeyboard() };
+      return sendMessage(env, chatId, "🟢 Drive доступний");
     } catch (e) {
-      return { text: "🔴 Drive помилка: " + String(e?.message || e), keyboard: adminKeyboard() };
+      return sendMessage(env, chatId, `🔴 Drive помилка: ${escape(e.message)}`);
     }
   }
 
-  // List 10
-  if (t.startsWith("list 10") || t === "list 10" || t === "/list10_btn") {
+  if (trimmed === "List 10 🧾") {
+    await clearState(env, chatId, "awaiting_url");
     try {
-      const list = await driveListLatest(env, 10); // [{name, webViewLink, modifiedTime}]
-      if (!list?.length) {
-        return { text: "Список порожній.", keyboard: adminKeyboard() };
-      }
-      const lines = list.map((f, i) => {
-        const dt = new Date(f.modifiedTime || Date.now());
-        const time = dt.toISOString().replace("T", " ").replace("Z", "");
-        return [
-          `${i + 1}. *${f.name}*`,
-          `🕓 ${time}`,
-          f.webViewLink ? `🔗 ${f.webViewLink}` : "",
-        ].filter(Boolean).join("\n");
-      });
-      return { text: "Останні 10 файлів:\n\n" + lines.join("\n\n"), keyboard: adminKeyboard() };
+      const files = await driveList(env, 10);
+      if (!files.length) return sendMessage(env, chatId, "Порожньо.");
+      const lines = files.map(
+        (f, i) => `${i + 1}. ${escape(f.name)} — ${escape(f.webViewLink || f.id)}`
+      );
+      return sendMessage(env, chatId, lines.join("\n"));
     } catch (e) {
-      return { text: "Не вдалося отримати список: " + String(e?.message || e), keyboard: adminKeyboard() };
+      return sendMessage(env, chatId, `Не вдалося отримати список: ${escape(e.message)}`);
     }
   }
 
-  // Backup URL
-  if (t.startsWith("backup url") || t === "backup url" || t === "/backup_btn") {
-    return {
-      text: "Надішли URL для збереження у Drive. Можна додати назву після пробілу:\n`https://... файл.zip`",
-      expect: "backup-url",
-      keyboard: adminKeyboard(),
-    };
+  if (trimmed === "Backup URL ⬆️") {
+    // ставимо стан очікування URL
+    await setState(env, chatId, "awaiting_url", true);
+    return sendMessage(env, chatId,
+      "Надішли URL для збереження у Drive.\nМожна додати назву після пробілу: `https://... файл.zip`",
+      { parse_mode: "Markdown" }
+    );
   }
 
-  // Checklist add
-  if (t.startsWith("checklist") || t === "checklist" || t.includes("checklist add") || t === "/checklist_add_btn") {
-    return {
-      text: "Надішли *один рядок*, який додати в `senti_checklist.md`.",
-      expect: "append-checklist",
-      keyboard: adminKeyboard(),
-    };
+  if (trimmed === "Checklist +") {
+    await setState(env, chatId, "awaiting_checklist_line", true);
+    return sendMessage(env, chatId, "Надішли рядок, який додати до `senti_checklist.md`", {
+      parse_mode: "Markdown",
+    });
   }
 
-  // Якщо не впізнали — повертаємо null, щоб webhook проігнорував
-  return null;
+  if (trimmed === "Меню") {
+    await clearState(env, chatId, "awaiting_url");
+    await clearState(env, chatId, "awaiting_checklist_line");
+    // покажемо підказки за замовчуванням (звичайне меню)
+    return sendMessage(env, chatId,
+      "Доступні команди:\n/start — запустити бота\n/menu — адмін-меню\n/ping — перевірка зв'язку"
+    );
+  }
+
+  // Якщо користувач у стані “очікую URL” — пробуємо зберегти
+  const isAwaitingUrl = await getState(env, chatId, "awaiting_url");
+  if (isAwaitingUrl) {
+    const parts = trimmed.split(/\s+(.+)?/); // URL [name?]
+    const url = parts[0];
+    const name = parts[1] || "";
+    if (!/^https?:\/\//i.test(url)) {
+      return sendMessage(env, chatId, "Надішли, будь ласка, валідний URL (http/https).");
+    }
+    try {
+      const saved = await driveSaveFromUrl(env, url, name);
+      await clearState(env, chatId, "awaiting_url");
+      return sendMessage(env, chatId, `✅ Збережено: ${escape(saved.name)}\n${escape(saved.link)}`);
+    } catch (e) {
+      return sendMessage(env, chatId, `Помилка збереження: ${escape(e.message)}`);
+    }
+  }
+
+  // Якщо користувач у стані “очікую рядок для чеклисту”
+  const isAwaitingLine = await getState(env, chatId, "awaiting_checklist_line");
+  if (isAwaitingLine) {
+    const line = trimmed;
+    if (!line) return sendMessage(env, chatId, "Надішли не порожній рядок.");
+    try {
+      await driveAppendLog(env, "senti_checklist.md", line);
+      await clearState(env, chatId, "awaiting_checklist_line");
+      return sendMessage(env, chatId, "✅ Додано до чеклисту.");
+    } catch (e) {
+      return sendMessage(env, chatId, `Помилка: ${escape(e.message)}`);
+    }
+  }
+
+  // Невідома кнопка — повернемось до меню
+  return showAdminMenu(env, chatId);
 }
