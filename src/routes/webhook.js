@@ -1,6 +1,7 @@
+// src/routes/webhook.js
 import { getState, setState, clearState } from "../lib/index.js";
 import { ensureBotCommands, handleAdminCommand, wantAdmin } from "./admin.js";
-import { drivePing, driveSaveFromUrl, driveAppendLog } from "../lib/drive.js";
+import { drivePing, driveSaveFromUrl, driveAppendLog, driveListLatest } from "../lib/drive.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function json(data, init = {}) {
@@ -54,9 +55,9 @@ export default async function webhook(request, env, ctx) {
 
   if (!chatId) return json({ ok: true });
 
-  // /start — показати адмін-меню та зареєструвати команди
+  // /start — реєструємо команди *для цього чату* і показуємо меню
   if (text === "/start") {
-    await ensureBotCommands(env);
+    await ensureBotCommands(env, chatId); // важливо: chat-scope + default
     const res = await handleAdminCommand(env, chatId, "/admin");
     if (res) {
       await sendMessage(
@@ -67,6 +68,31 @@ export default async function webhook(request, env, ctx) {
       );
       return json({ ok: true });
     }
+  }
+
+  // Базові команди, щоб бот «не мовчав»
+  if (text === "/ping") {
+    await sendMessage(env, chatId, "pong 🟢");
+    return json({ ok: true });
+  }
+  if (text === "/help") {
+    await sendMessage(
+      env,
+      chatId,
+      "Доступні команди:\n" +
+        "/start — запустити бота\n" +
+        "/menu — адмін-меню\n" +
+        "/ping — перевірка зв'язку"
+    );
+    return json({ ok: true });
+  }
+  if (text === "/menu" || text === "/admin") {
+    await ensureBotCommands(env, chatId);
+    const res = await handleAdminCommand(env, chatId, "/admin");
+    if (res) {
+      await sendMessage(env, chatId, res.text, res.keyboard ? { reply_markup: res.keyboard } : {});
+    }
+    return json({ ok: true });
   }
 
   // Адмін-панель (кнопка/команда)
@@ -121,7 +147,31 @@ export default async function webhook(request, env, ctx) {
     return json({ ok: true });
   }
 
-  // === Google Drive команди (залишив як зручно з телефона) ===
+  // Кнопки з меню (реальні дії)
+  if (text.toLowerCase() === "drive ✅" || text === "/gdrive_ping_btn") {
+    try { await drivePing(env); await sendMessage(env, chatId, "🟢 Drive доступний, папка знайдена."); }
+    catch (e) { await sendMessage(env, chatId, "❌ Drive недоступний: " + String(e?.message || e)); }
+    return json({ ok: true });
+  }
+
+  if (text.toLowerCase() === "list 10 🧾" || text === "list 10" || text === "/list10_btn") {
+    try {
+      const list = await driveListLatest(env, 10);
+      if (!list?.length) { await sendMessage(env, chatId, "Список порожній."); return json({ ok: true }); }
+      const lines = list.map((f, i) => {
+        const dt = new Date(f.modifiedTime || Date.now());
+        const time = dt.toISOString().replace("T", " ").replace("Z", "");
+        return [`${i + 1}. *${f.name}*`, `🕓 ${time}`, f.webViewLink ? `🔗 ${f.webViewLink}` : ""]
+          .filter(Boolean).join("\n");
+      });
+      await sendMessage(env, chatId, "Останні 10 файлів:\n\n" + lines.join("\n\n"));
+    } catch (e) {
+      await sendMessage(env, chatId, "Не вдалося отримати список: " + String(e?.message || e));
+    }
+    return json({ ok: true });
+  }
+
+  // === Google Drive команди для ручного вводу ===
   if (text === "/gdrive ping") {
     try { await drivePing(env); await sendMessage(env, chatId, "🟢 Drive доступний, папка знайдена."); }
     catch (e) { await sendMessage(env, chatId, "❌ Drive недоступний: " + String(e?.message || e)); }
