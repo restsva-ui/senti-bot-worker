@@ -3,6 +3,7 @@
 // 1) OAuth (user) токен із OAUTH_KV/google_oauth_token  ← пріоритет
 // 2) Фолбек: Service Account (JWT)
 // Завантаження йде у вихідному форматі (mime з джерела).
+// + Утиліти для читання/перезапису текстових файлів за назвою (для чекліста).
 
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const DRIVE_UPLOAD_MULTIPART = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
@@ -87,17 +88,16 @@ async function saveOAuth(env, obj) {
 }
 
 async function maybeRefreshOAuth(env, tok) {
-  // якщо є refresh_token і доступний client_id/secret — рефрешимо, коли треба
   try {
     const savedAt = tok.saved_at ?? 0;
     const expSec = tok.expires_in ?? 3600;
-    const stillValid = Date.now() < (savedAt + (expSec * 1000)) - 60_000; // за хвилину до
+    const stillValid = Date.now() < (savedAt + (expSec * 1000)) - 60_000;
     if (stillValid) return tok.access_token;
 
     const cid = env.GOOGLE_CLIENT_ID;
     const cs = env.GOOGLE_CLIENT_SECRET;
     const rt = tok.refresh_token;
-    if (!cid || !cs || !rt) return tok.access_token; // нема чим рефрешити
+    if (!cid || !cs || !rt) return tok.access_token;
 
     const resp = await fetch(OAUTH_TOKEN_URL, {
       method: "POST",
@@ -114,14 +114,13 @@ async function maybeRefreshOAuth(env, tok) {
 
     const merged = {
       ...tok,
-      ...data,                 // access_token, expires_in, scope, token_type, ...
+      ...data,
       saved_at: Date.now(),
-      refresh_token: tok.refresh_token || data.refresh_token, // інколи не приходить — зберігаємо старий
+      refresh_token: tok.refresh_token || data.refresh_token,
     };
     await saveOAuth(env, merged);
     return merged.access_token;
   } catch {
-    // якщо щось пішло не так — повертаємо старий
     return tok.access_token;
   }
 }
@@ -176,14 +175,12 @@ async function getSAToken(env) {
 
 // ---------- Unified access token ----------
 async function getAccessToken(env) {
-  // 1) OAuth через OAUTH_KV
   if (env.OAUTH_KV) {
     const tok = await readOAuth(env);
     if (tok && tok.access_token) {
       return await maybeRefreshOAuth(env, tok);
     }
   }
-  // 2) Фолбек: Service Account
   return await getSAToken(env);
 }
 
@@ -216,19 +213,16 @@ export async function driveSaveFromUrl(env, fileUrl, nameOptional) {
   const token = await getAccessToken(env);
   const folderId = ensureFolder(env);
 
-  // Завантажуємо джерело
   const src = await fetch(fileUrl);
   if (!src.ok) throw new Error(`Fetch failed: ${src.status}`);
   const buf = new Uint8Array(await src.arrayBuffer());
-  const mime = src.headers.get("content-type") || "application/octet-stream";
+  const mime = (src.headers.get("content-type") || "").split(";")[0].trim() || "application/octet-stream";
 
-  // Ім'я файлу
   const baseName = (nameOptional && nameOptional.trim()) || guessNameFromUrl(fileUrl);
   const filename = nameWithExt(baseName, mime);
 
-  // multipart upload у вихідному форматі
   const boundary = "----senti-drive-" + Math.random().toString(16).slice(2);
-  const metadata = { name: filename, parents: [folderId] };
+  const metadata = { name: filename, parents: [folderId], mimeType: mime };
 
   const enc = new TextEncoder();
   const body = new Blob([
@@ -251,7 +245,7 @@ export async function driveSaveFromUrl(env, fileUrl, nameOptional) {
   return { id: info.id, name: info.name, link: `https://drive.google.com/file/d/${info.id}/view` };
 }
 
-// --------- Лог-файл (text/plain) ----------
+// --------- ТЕКСТОВІ ОПЕРАЦІЇ (для чекліста) ----------
 async function findFileByName(env, name) {
   const token = await getAccessToken(env);
   const folderId = ensureFolder(env);
@@ -278,12 +272,12 @@ async function createTextFile(env, name, content) {
   const token = await getAccessToken(env);
   const folderId = ensureFolder(env);
   const boundary = "----senti-drive-" + Math.random().toString(16).slice(2);
-  const metadata = { name, parents: [folderId], mimeType: "text/plain" };
+  const metadata = { name, parents: [folderId], mimeType: "text/markdown" };
 
   const enc = new TextEncoder();
   const body = new Blob([
     enc.encode(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`),
-    enc.encode(`--${boundary}\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n${content}\r\n`),
+    enc.encode(`--${boundary}\r\nContent-Type: text/markdown; charset=UTF-8\r\n\r\n${content}\r\n`),
     enc.encode(`--${boundary}--\r\n`),
   ]);
 
@@ -300,12 +294,12 @@ async function createTextFile(env, name, content) {
 async function updateTextFile(env, fileId, content) {
   const token = await getAccessToken(env);
   const boundary = "----senti-drive-" + Math.random().toString(16).slice(2);
-  const metadata = { mimeType: "text/plain" };
+  const metadata = { mimeType: "text/markdown" };
 
   const enc = new TextEncoder();
   const body = new Blob([
     enc.encode(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`),
-    enc.encode(`--${boundary}\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n${content}\r\n`),
+    enc.encode(`--${boundary}\r\nContent-Type: text/markdown; charset=UTF-8\r\n\r\n${content}\r\n`),
     enc.encode(`--${boundary}--\r\n`),
   ]);
 
@@ -320,9 +314,9 @@ async function updateTextFile(env, fileId, content) {
 }
 
 export async function driveAppendLog(env, filename, line) {
-  const name = filename || "senti_logs.txt";
+  const name = filename || "senti_checklist.md";
   const ts = new Date().toISOString();
-  const entry = `[${ts}] ${line}\n`;
+  const entry = `- [${ts}] ${line}\n`;
 
   const existing = await findFileByName(env, name);
   if (!existing) {
@@ -334,4 +328,21 @@ export async function driveAppendLog(env, filename, line) {
   if (prev.length > 1024 * 1024) prev = prev.slice(-1024 * 1024);
   const updated = await updateTextFile(env, existing.id, prev + entry);
   return { action: "appended", id: updated.id, name, webViewLink: `https://drive.google.com/file/d/${updated.id}/view` };
+}
+
+// === Експорти для чекліста ===
+export async function driveReadTextByName(env, name) {
+  const existing = await findFileByName(env, name);
+  if (!existing) return "";
+  return await downloadText(env, existing.id);
+}
+
+export async function driveSetTextByName(env, name, content) {
+  const existing = await findFileByName(env, name);
+  if (!existing) {
+    const created = await createTextFile(env, name, content);
+    return { created: true, id: created.id };
+  }
+  const updated = await updateTextFile(env, existing.id, content);
+  return { created: false, id: updated.id };
 }
