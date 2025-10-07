@@ -1,21 +1,28 @@
-// Простий state-machine у KV
-const KEY = (chatId) => `state:${chatId}`;
+// Простий стан діалогу в KV: state:<chatId>
+// Використовується для "очікуємо URL" та "очікуємо рядок для чекліста" тощо.
+
+const key = (chatId) => `state:${chatId}`;
 
 export async function getState(env, chatId) {
   try {
-    const raw = await env.STATE_KV.get(KEY(chatId));
-    return raw ? JSON.parse(raw) : null;
+    const raw = await env.STATE_KV.get(key(chatId));
+    return raw ? JSON.parse(raw) : {};
   } catch {
-    return null;
+    return {};
   }
 }
 
-export async function setState(env, chatId, stateObj) {
+export async function setState(env, chatId, patch, ttlSec = 3600) {
+  const cur = await getState(env, chatId);
+  const next = { ...cur, ...patch, _ts: Date.now() };
   try {
-    await env.STATE_KV.put(KEY(chatId), JSON.stringify(stateObj), { expirationTtl: 60 * 10 });
-  } catch {}
+    await env.STATE_KV.put(key(chatId), JSON.stringify(next), { expirationTtl: ttlSec });
+  } catch (_) {}
+  return next;
 }
 
 export async function clearState(env, chatId) {
-  try { await env.STATE_KV.delete(KEY(chatId)); } catch {}
+  try {
+    await env.STATE_KV.delete(key(chatId));
+  } catch (_) {}
 }
