@@ -4,7 +4,7 @@ import { adminKeyboard } from "../lib/keyboard.js";
 import { wantAdmin, handleAdminCommand, ensureBotCommands } from "./admin.js";
 import { driveSaveFromUrl, driveAppendLog } from "../lib/drive.js";
 
-// === helpers ===
+// === Telegram helpers ===
 async function tgApi(env, method, body) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`;
   const res = await fetch(url, {
@@ -12,24 +12,37 @@ async function tgApi(env, method, body) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  // Жорсткий логінг усіх помилок Telegram
   if (!res.ok) {
     const t = await res.text().catch(() => "");
     console.error("Telegram API error", method, res.status, t || res.statusText);
-  } else {
-    // опціонально можна увімкнути:
-    // console.log("Telegram API ok", method);
   }
   return res;
 }
 
-function kbMarkup() {
-  return { keyboard: adminKeyboard(), resize_keyboard: true };
+async function reply(env, chatId, text, extra = {}) {
+  return tgApi(env, "sendMessage", { chat_id: chatId, text, ...extra });
 }
 
-async function reply(env, chatId, text, extra = {}) {
-  // без parse_mode! (plain-text, щоби не ловити can't parse entities)
-  return tgApi(env, "sendMessage", { chat_id: chatId, text, ...extra });
+// Нормалізація клавіатури з adminKeyboard()
+// Підтримує як масив рядків/кнопок, так і об’єкт { keyboard: [...], ... }
+function kbMarkup() {
+  const k = adminKeyboard();
+
+  if (!k) return undefined;
+
+  if (Array.isArray(k)) {
+    return { keyboard: k, resize_keyboard: true, is_persistent: false };
+  }
+
+  if (k && Array.isArray(k.keyboard)) {
+    // зберігаємо додаткові прапорці, якщо вони прийшли з фабрики
+    const { keyboard, ...rest } = k;
+    return { keyboard, resize_keyboard: true, is_persistent: false, ...rest };
+  }
+
+  // якщо формат дивний — не відправляємо клавіатуру, щоб не ламати відповіді
+  console.warn("adminKeyboard() returned unsupported shape:", k);
+  return undefined;
 }
 
 function pickText(msg = {}) {
@@ -57,7 +70,7 @@ export default async function webhook(request, env, ctx) {
     return new Response("forbidden", { status: 403 });
   }
 
-  // Безпечна реєстрація команд
+  // Реєстрація команд у фоновому режимі
   ctx.waitUntil(ensureBotCommands(env).catch(() => {}));
 
   let update = {};
@@ -79,16 +92,19 @@ export default async function webhook(request, env, ctx) {
   const textRaw = pickText(msg).trim();
   const textLower = textRaw.toLowerCase();
 
+  const rm = kbMarkup(); // готуємо клавіатуру один раз
+
   // ---- базові команди
   if (textLower === "/ping") {
-    await reply(env, chatId, "pong 🟢");
+    await reply(env, chatId, "pong 🟢", { reply_markup: rm });
     return new Response("ok");
   }
   if (textLower === "/help" || textLower === "/start") {
     await reply(
       env,
       chatId,
-      "Доступні команди:\n/start — запустити бота\n/menu — адмін-меню\n/ping — перевірка зв'язку"
+      "Доступні команди:\n/start — запустити бота\n/menu — адмін-меню\n/ping — перевірка зв'язку",
+      { reply_markup: rm }
     );
     return new Response("ok");
   }
@@ -100,7 +116,7 @@ export default async function webhook(request, env, ctx) {
     const url = parts[0];
     const name = parts[1] || "";
     if (!/^https?:\/\//i.test(url)) {
-      await reply(env, chatId, "Надішли, будь ласка, валідний URL (http/https).");
+      await reply(env, chatId, "Надішли, будь ласка, валідний URL (http/https).", { reply_markup: rm });
       return new Response("ok");
     }
     try {
@@ -109,10 +125,10 @@ export default async function webhook(request, env, ctx) {
         env,
         chatId,
         `Збережено: ${res.name}\nПосилання: ${res.link}`,
-        { reply_markup: kbMarkup() }
+        { reply_markup: rm }
       );
     } catch (e) {
-      await reply(env, chatId, "Помилка збереження: " + String(e?.message || e));
+      await reply(env, chatId, "Помилка збереження: " + String(e?.message || e), { reply_markup: rm });
     }
     await clearState(env, chatId);
     return new Response("ok");
@@ -121,26 +137,24 @@ export default async function webhook(request, env, ctx) {
   if (state.expect === "append-checklist") {
     const line = textRaw.replace(/\r?\n/g, " ").trim();
     if (!line) {
-      await reply(env, chatId, "Надішли один непорожній рядок.");
+      await reply(env, chatId, "Надішли один непорожній рядок.", { reply_markup: rm });
       return new Response("ok");
     }
     try {
       await driveAppendLog(env, "senti_checklist.md", line);
-      await reply(env, chatId, "Додано до senti_checklist.md:\n• " + line, {
-        reply_markup: kbMarkup(),
-      });
+      await reply(env, chatId, "Додано до senti_checklist.md:\n• " + line, { reply_markup: rm });
     } catch (e) {
-      await reply(env, chatId, "Помилка додавання: " + String(e?.message || e));
+      await reply(env, chatId, "Помилка додавання: " + String(e?.message || e), { reply_markup: rm });
     }
     await clearState(env, chatId);
     return new Response("ok");
   }
 
-  // ---- адмін меню
+  // ---- адмін-меню по ключових словах
   if (wantAdmin(textRaw) || textLower === "/menu") {
     const res = await handleAdminCommand(env, chatId, "/menu");
     if (res) {
-      await reply(env, chatId, res.text, { reply_markup: kbMarkup() });
+      await reply(env, chatId, res.text, { reply_markup: rm });
       return new Response("ok");
     }
   }
@@ -149,9 +163,7 @@ export default async function webhook(request, env, ctx) {
   const handled = await handleAdminCommand(env, chatId, textRaw);
   if (handled) {
     if (handled.expect) await setState(env, chatId, { expect: handled.expect });
-    await reply(env, chatId, handled.text, {
-      reply_markup: handled.keyboard ? kbMarkup() : undefined,
-    });
+    await reply(env, chatId, handled.text, { reply_markup: rm });
     return new Response("ok");
   }
 
@@ -161,16 +173,14 @@ export default async function webhook(request, env, ctx) {
       env,
       chatId,
       "Поки що я працюю з текстом та кнопками. Натисни «Меню» нижче або надішли /menu чи /ping.",
-      { reply_markup: kbMarkup() }
+      { reply_markup: rm }
     );
     return new Response("ok");
   }
 
   // ---- фолбек
   if (textRaw) {
-    await reply(env, chatId, "Не впізнав команду. Спробуй /menu або /ping.", {
-      reply_markup: kbMarkup(),
-    });
+    await reply(env, chatId, "Не впізнав команду. Спробуй /menu або /ping.", { reply_markup: rm });
   }
   return new Response("ok");
 }
