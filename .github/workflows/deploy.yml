@@ -1,19 +1,22 @@
-name: 🚀 Deploy Worker
+name: Deploy Worker
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read
+
     steps:
       - name: 🛠️ Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🧰 Setup Node.js
+      - name: 🧰 Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -22,22 +25,24 @@ jobs:
         run: npm install -g wrangler@3
 
       - name: 🚀 Deploy to Cloudflare
-        run: wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: wrangler deploy
 
-      - name: 🔖 Record snapshot after successful deploy
+      # ⬇️ автолог у чеклист після успішного деплою
+      - name: ✍️ Append deploy info to senti_checklist.md
         if: success()
         env:
-          WORKER_HOST: ${{ secrets.WORKER_HOST }}
-          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }} # додай у Secrets репозиторію
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
         run: |
-          if [ -z "$WORKER_HOST" ]; then
-            echo "WORKER_HOST is empty — skip snapshot."
-            exit 0
-          fi
-          SNAP_URL="https://${WORKER_HOST}/postdeploy?key=${WEBHOOK_SECRET}&repo=${GITHUB_REPOSITORY}&sha=${GITHUB_SHA}"
-          echo "📦 Sending snapshot to: https://${WORKER_HOST}/postdeploy?repo=${GITHUB_REPOSITORY}&sha=${GITHUB_SHA}"
-          # не валимо пайплайн, якщо снепшот не вдалось відправити
-          curl -sS --max-time 15 "$SNAP_URL" || true
+          MSG="Deploy OK | repo=${REPO} | sha=${SHA} | run=${RUN_URL}"
+          # GitHub автоматично маскує $WEBHOOK_SECRET у логах
+          curl -sS "https://senti-bot-worker.restsva.workers.dev/gdrive/log" \
+            --get \
+            --data-urlencode "key=${WEBHOOK_SECRET}" \
+            --data-urlencode "file=senti_checklist.md" \
+            --data-urlencode "msg=${MSG}"
