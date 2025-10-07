@@ -34,7 +34,8 @@ export async function ensureBotCommands(env) {
  *  - { text, expect: 'backup-url'|'append-checklist', keyboard? } — якщо чекаємо наступний крок
  */
 export async function handleAdminCommand(env, chatId, text) {
-  const t = String(text || "").trim();
+  const tRaw = String(text || "").trim();
+  const t = tRaw.toLowerCase();
 
   // 1) Просто показати меню
   if (wantAdmin(t)) {
@@ -48,9 +49,8 @@ export async function handleAdminCommand(env, chatId, text) {
     };
   }
 
-  // 2) Кнопки з клавіатури
-  //    Підписи повинні збігатися з тими, що генерує adminKeyboard()
-  if (t === "drive ✅" || t === "/gdrive_ping_btn") {
+  // 2) Кнопки з клавіатури (підписи повинні збігатися з adminKeyboard())
+  if (tRaw === "Drive ✅" || t === "/gdrive_ping_btn") {
     try {
       await drivePing(env);
       return { text: "🟢 Drive OK", keyboard: adminKeyboard() };
@@ -59,7 +59,7 @@ export async function handleAdminCommand(env, chatId, text) {
     }
   }
 
-  if (t === "list 10 🧾" || t === "list 10" || t === "/list10_btn") {
+  if (tRaw === "List 10 🧾" || t === "list 10" || t === "/list10_btn") {
     try {
       const list = await driveListLatest(env, 10); // [{name, webViewLink, modifiedTime}]
       if (!list?.length) {
@@ -80,7 +80,7 @@ export async function handleAdminCommand(env, chatId, text) {
     }
   }
 
-  if (t === "backup url ⬆️" || t === "/backup_btn") {
+  if (tRaw === "Backup URL ⬆️" || t === "/backup_btn") {
     return {
       text: "Надішли URL для збереження у Drive. Можна додати назву після пробілу:\n`https://... файл.zip`",
       expect: "backup-url",
@@ -88,7 +88,7 @@ export async function handleAdminCommand(env, chatId, text) {
     };
   }
 
-  if (t === "checklist ➕" || t === "/checklist_add_btn") {
+  if (tRaw === "Checklist ➕" || t === "/checklist_add_btn") {
     return {
       text: "Надішли *один рядок*, який додати в `senti_checklist.md`.",
       expect: "append-checklist",
