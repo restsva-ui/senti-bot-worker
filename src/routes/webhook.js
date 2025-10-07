@@ -14,7 +14,15 @@ function json(data, init = {}) {
   });
 }
 
-async function tgPost(url, body) {
+async function sendMessage(env, chatId, text, extra = {}) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
+  const body = {
+    chat_id: chatId,
+    text,
+    parse_mode: "Markdown",
+    disable_web_page_preview: true,
+    ...extra,
+  };
   try {
     await fetch(url, {
       method: "POST",
@@ -22,22 +30,6 @@ async function tgPost(url, body) {
       body: JSON.stringify(body),
     });
   } catch (_) {}
-}
-
-async function sendMessage(env, chatId, text, extra = {}) {
-  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
-  await tgPost(url, {
-    chat_id: chatId,
-    text,
-    parse_mode: "Markdown",
-    disable_web_page_preview: true,
-    ...extra,
-  });
-}
-
-async function sendJSON(env, chatId, obj, extra = {}) {
-  const pretty = "```\n" + JSON.stringify(obj, null, 2) + "\n```";
-  await sendMessage(env, chatId, pretty, extra);
 }
 
 async function logReply(env, chatId) {
@@ -57,6 +49,74 @@ async function isOwner(env, fromId) {
   } catch {
     return false;
   }
+}
+
+// ── Time / TZ ─────────────────────────────────────────────────────────────────
+function toLocalKyiv(ts, env) {
+  const tz = (env.TZ || "Europe/Kyiv").trim() || "Europe/Kyiv";
+  try {
+    const d = new Date(ts);
+    return d.toLocaleString("uk-UA", {
+      timeZone: tz,
+      hour12: false,
+    });
+  } catch {
+    return ts;
+  }
+}
+
+// ── Admin Keyboard ────────────────────────────────────────────────────────────
+function adminKeyboard() {
+  return {
+    keyboard: [
+      [{ text: "Drive ✅" }, { text: "List 10 📄" }],
+      [{ text: "Backup URL ⬆️" }, { text: "Checklist ➕" }],
+      [{ text: "Меню" }],
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+  };
+}
+
+async function showAdmin(env, chatId) {
+  await sendMessage(
+    env,
+    chatId,
+    [
+      "*Senti Admin*",
+      "— мінімальне меню керування:",
+      "• Drive пінг і список файлів",
+      "• Швидкий бекап за URL",
+      "• Додавання в чеклист",
+    ].join("\n"),
+    { reply_markup: adminKeyboard() }
+  );
+}
+
+// ── Персональні стейти (STATE_KV) ────────────────────────────────────────────
+const STATE_KEY = (chatId) => `state:${chatId}`;
+
+async function setState(env, chatId, stateObj) {
+  try {
+    await env.STATE_KV.put(STATE_KEY(chatId), JSON.stringify(stateObj), {
+      expirationTtl: 60 * 10, // 10 хвилин на дію
+    });
+  } catch {}
+}
+
+async function getState(env, chatId) {
+  try {
+    const raw = await env.STATE_KV.get(STATE_KEY(chatId));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function clearState(env, chatId) {
+  try {
+    await env.STATE_KV.delete(STATE_KEY(chatId));
+  } catch {}
 }
 
 // ── Автологування у STATE_KV ─────────────────────────────────────────────────
@@ -127,46 +187,35 @@ function formatTodos(list) {
   return "📝 Чек-лист:\n" + list.map((x, i) => `${i + 1}. ${x.text}`).join("\n");
 }
 
-// ── Admin helpers/state ──────────────────────────────────────────────────────
-const ADMIN_EXPECT = {
-  BACKUP_URL: (chatId) => `admin:expect:backup-url:${chatId}`,
-  CHECKLINE: (chatId) => `admin:expect:checkline:${chatId}`,
-};
+// ── Допоміжні для Drive показу ───────────────────────────────────────────────
+async function showDriveStatusAndList(env, chatId) {
+  try {
+    await drivePing(env);
+    await sendMessage(env, chatId, "🟢 Drive OK", {
+      reply_markup: adminKeyboard(),
+    });
+  } catch (e) {
+    await sendMessage(env, chatId, "🔴 Drive помилка: " + String(e?.message || e), {
+      reply_markup: adminKeyboard(),
+    });
+    return;
+  }
 
-const CHECKLIST_FILE = "senti_checklist.md";
-
-function adminKeyboard() {
-  return {
-    keyboard: [
-      [
-        { text: "Drive ✅" },
-        { text: "List 10 📄" },
-      ],
-      [
-        { text: "Backup URL ⬆️" },
-        { text: "Checklist ➕" },
-      ],
-      [{ text: "Меню" }],
-    ],
-    resize_keyboard: true,
-    is_persistent: true,
-  };
-}
-
-async function ensureBotCommands(env) {
-  // зареєструємо стандартні команди + /admin
-  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/setMyCommands`;
-  const commands = [
-    { command: "start", description: "Запустити бота" },
-    { command: "help", description: "Довідка" },
-    { command: "ping", description: "Перевірка зв'язку" },
-    { command: "menu", description: "Меню" },
-    { command: "todo", description: "Показати чек-лист" },
-    { command: "log", description: "Автолог: status/on/off" },
-    { command: "gdrive", description: "Drive команди" },
-    { command: "admin", description: "Адмін-панель" },
-  ];
-  await tgPost(url, { commands });
+  try {
+    const files = await driveList(env, 10);
+    const mapped = files.map((f, i) => {
+      const when = f.modifiedTime ? toLocalKyiv(f.modifiedTime, env) : "";
+      return `${i + 1}. *${f.name}*\n   🕒 ${when}\n   🔗 ${f.webViewLink || `https://drive.google.com/file/d/${f.id}/view`}`;
+    });
+    await sendMessage(
+      env,
+      chatId,
+      ["*Останні 10 файлів:*", ...mapped].join("\n\n"),
+      { reply_markup: adminKeyboard() }
+    );
+  } catch (e) {
+    await sendMessage(env, chatId, "⚠️ Не вдалося отримати список файлів: " + String(e?.message || e));
+  }
 }
 
 // ── Основний обробник ────────────────────────────────────────────────────────
@@ -200,132 +249,115 @@ export default async function webhook(request, env, ctx) {
   const text = (textRaw || "").trim();
   if (!chatId) return json({ ok: true });
 
-  // Під час /start /admin /menu — реєструємо команди
-  if (text === "/start" || text === "/menu" || text === "/admin") {
-    ctx.waitUntil(ensureBotCommands(env));
-  }
+  // ── Спочатку перевіряємо, чи очікуємо відповідь від користувача ────────────
+  const currentState = await getState(env, chatId);
 
-  // ── ADMIN: кнопки як прості текстові тригери ───────────────────────────────
-  const owner = await isOwner(env, fromId);
-
-  // /admin — показати панель
-  if (text === "/admin") {
-    if (!owner) {
-      await sendMessage(env, chatId, "🔒 Доступ лише для власника.");
+  if (currentState?.type === "await_backup_url") {
+    // чекаємо повідомлення з URL (і, можливо, назвою після пробілу)
+    const m = text.match(/^(https?:\/\/\S+)(?:\s+(.+))?$/i);
+    if (!m) {
+      await sendMessage(env, chatId, "❗️Це не схоже на URL. Спробуй ще раз: `https://... [назва]`");
       await logReply(env, chatId);
       return json({ ok: true });
     }
+    const url = m[1];
+    const name = (m[2] || "").trim();
+
+    try {
+      const saved = await driveSaveFromUrl(env, url, name);
+      await sendMessage(env, chatId, `✅ Збережено: *${saved.name}*\n🔗 ${saved.link}`, {
+        reply_markup: adminKeyboard(),
+      });
+
+      // Опціонально фіксуємо у чеклисті
+      try {
+        await driveAppendLog(env, "senti_checklist.md", `Backup: ${saved.name} — ${saved.link}`);
+      } catch (_) {}
+
+    } catch (e) {
+      await sendMessage(env, chatId, "❌ Не вдалося зберегти: " + String(e?.message || e));
+    }
+    await clearState(env, chatId);
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+
+  if (currentState?.type === "await_checklist_line") {
+    const line = text.replace(/\s+/g, " ").trim();
+    if (!line) {
+      await sendMessage(env, chatId, "❗️Надішли один непорожній рядок для чеклиста.");
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+    try {
+      const r = await driveAppendLog(env, "senti_checklist.md", line);
+      await sendMessage(
+        env,
+        chatId,
+        `🟩 Додано у *senti_checklist.md*.\n🔗 ${r.webViewLink}`,
+        { reply_markup: adminKeyboard() }
+      );
+    } catch (e) {
+      await sendMessage(env, chatId, "❌ Помилка при додаванні: " + String(e?.message || e));
+    }
+    await clearState(env, chatId);
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+
+  // ── Команди ────────────────────────────────────────────────────────────────
+
+  // /start та головне меню одразу з адмін-кнопками
+  if (text === "/start" || text === "/menu" || text === "Меню" || text === "/admin") {
+    await showAdmin(env, chatId);
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+
+  // Кнопки адмін-меню (reply keyboard)
+  if (text === "Drive ✅") {
+    await showDriveStatusAndList(env, chatId);
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+
+  if (text === "List 10 📄") {
+    try {
+      const files = await driveList(env, 10);
+      const mapped = files.map((f, i) => {
+        const when = f.modifiedTime ? toLocalKyiv(f.modifiedTime, env) : "";
+        return `${i + 1}. *${f.name}*\n   🕒 ${when}\n   🔗 ${f.webViewLink || `https://drive.google.com/file/d/${f.id}/view`}`;
+      });
+      await sendMessage(env, chatId, ["*Останні 10 файлів:*", ...mapped].join("\n\n"), {
+        reply_markup: adminKeyboard(),
+      });
+    } catch (e) {
+      await sendMessage(env, chatId, "⚠️ Не вдалося отримати список файлів: " + String(e?.message || e));
+    }
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+
+  if (text === "Backup URL ⬆️") {
+    await setState(env, chatId, { type: "await_backup_url" });
     await sendMessage(
       env,
       chatId,
-      "Senti Admin\n— мінімальне меню керування:\n• Drive пінг і список файлів\n• Швидкий бекап за URL\n• Додавання в чеклист",
+      "Надішли *URL* для збереження у Drive. Можна додати назву після пробілу:\n`https://... файл.zip`",
       { reply_markup: adminKeyboard() }
     );
     await logReply(env, chatId);
     return json({ ok: true });
   }
 
-  // Натискання на кнопки адмінки
-  if (owner && text === "Drive ✅") {
-    try {
-      await drivePing(env);
-      await sendMessage(env, chatId, "🟢 Drive OK");
-    } catch (e) {
-      await sendMessage(env, chatId, "❌ Drive помилка: " + String(e?.message || e));
-    }
+  if (text === "Checklist ➕") {
+    await setState(env, chatId, { type: "await_checklist_line" });
+    await sendMessage(env, chatId, "Надішли *один рядок*, який додати в *senti_checklist.md*.", {
+      reply_markup: adminKeyboard(),
+    });
     await logReply(env, chatId);
     return json({ ok: true });
   }
-
-  if (owner && text === "List 10 📄") {
-    try {
-      const files = await driveList(env, 10);
-      await sendJSON(env, chatId, { ok: true, files });
-      await sendMessage(env, chatId, "Відповідай *рядком*, який додати в `senti_checklist.md`");
-    } catch (e) {
-      await sendMessage(env, chatId, "❌ List помилка: " + String(e?.message || e));
-    }
-    await logReply(env, chatId);
-    return json({ ok: true });
-  }
-
-  if (owner && text === "Backup URL ⬆️") {
-    await env.STATE_KV.put(ADMIN_EXPECT.BACKUP_URL(chatId), "1", { expirationTtl: 600 });
-    await sendMessage(
-      env,
-      chatId,
-      "Надішли *URL* для збереження у Drive. Можна додати назву після пробілу:\n`https://... файл.zip`"
-    );
-    await logReply(env, chatId);
-    return json({ ok: true });
-  }
-
-  if (owner && text === "Checklist ➕") {
-    await env.STATE_KV.put(ADMIN_EXPECT.CHECKLINE(chatId), "1", { expirationTtl: 600 });
-    await sendMessage(env, chatId, "Надішли *один рядок*, який додати в `senti_checklist.md`.");
-    await logReply(env, chatId);
-    return json({ ok: true });
-  }
-
-  if (owner && text === "Меню") {
-    await sendMessage(env, chatId, "Меню оновлено.", { reply_markup: adminKeyboard() });
-    await logReply(env, chatId);
-    return json({ ok: true });
-  }
-
-  // Очікування відповіді після "Backup URL ⬆️"
-  if (owner && (await env.STATE_KV.get(ADMIN_EXPECT.BACKUP_URL(chatId))) === "1") {
-    await env.STATE_KV.delete(ADMIN_EXPECT.BACKUP_URL(chatId));
-    // Формат: "<url> [name ...]"
-    const parts = text.split(/\s+/);
-    const url = parts[0];
-    const name = parts.length > 1 ? parts.slice(1).join(" ") : "";
-    if (!/^https?:\/\//i.test(url)) {
-      await sendMessage(env, chatId, "❗️ Це не схоже на URL. Спробуй ще раз через кнопку *Backup URL ⬆️*.");
-      await logReply(env, chatId);
-      return json({ ok: true });
-    }
-    try {
-      const saved = await driveSaveFromUrl(env, url, name);
-      await sendMessage(env, chatId, `📤 Збережено: *${saved.name}*\n🔗 ${saved.link}`, {
-        reply_markup: adminKeyboard(),
-      });
-    } catch (e) {
-      await sendMessage(env, chatId, "❌ Upload помилка: " + String(e?.message || e), {
-        reply_markup: adminKeyboard(),
-      });
-    }
-    await logReply(env, chatId);
-    return json({ ok: true });
-  }
-
-  // Очікування відповіді після "Checklist ➕"
-  if (owner && (await env.STATE_KV.get(ADMIN_EXPECT.CHECKLINE(chatId))) === "1") {
-    await env.STATE_KV.delete(ADMIN_EXPECT.CHECKLINE(chatId));
-    const line = text.trim();
-    if (!line) {
-      await sendMessage(env, chatId, "❗️ Порожній рядок. Спробуй ще раз через кнопку *Checklist ➕*.");
-      await logReply(env, chatId);
-      return json({ ok: true });
-    }
-    try {
-      const res = await driveAppendLog(env, CHECKLIST_FILE, line);
-      await sendMessage(
-        env,
-        chatId,
-        `✅ Додано в чеклист (${res.action}).\n🔗 ${res.webViewLink}`,
-        { reply_markup: adminKeyboard() }
-      );
-    } catch (e) {
-      await sendMessage(env, chatId, "❌ Append помилка: " + String(e?.message || e), {
-        reply_markup: adminKeyboard(),
-      });
-    }
-    await logReply(env, chatId);
-    return json({ ok: true });
-  }
-
-  // === Стандартні команди ===
 
   // /id
   if (text === "/id") {
@@ -337,9 +369,9 @@ export default async function webhook(request, env, ctx) {
   // /log on|off|status
   if (text.startsWith("/log")) {
     const sub = (text.split(" ")[1] || "status").toLowerCase();
-    const ownerOnly = await isOwner(env, fromId);
+    const owner = await isOwner(env, fromId);
 
-    if (!ownerOnly && sub !== "status") {
+    if (!owner && sub !== "status") {
       await sendMessage(
         env,
         chatId,
@@ -414,7 +446,27 @@ export default async function webhook(request, env, ctx) {
     return json({ ok: true });
   }
 
-  // === Google Drive команди ===
+  // Автологування: + пункт у чек-лист
+  if (await getAutolog(env)) {
+    const m = text.match(/^\s*\+\s*(.+)$/s);
+    if (m) {
+      const itemText = m[1].trim();
+      if (itemText) {
+        const { added, list } = await addTodo(env, chatId, itemText);
+        await sendMessage(
+          env,
+          chatId,
+          added
+            ? `➕ Додав у чек-лист: ${itemText}\n\n${formatTodos(list)}`
+            : `ℹ️ Вже є в списку: ${itemText}\n\n${formatTodos(list)}`
+        );
+        await logReply(env, chatId);
+        return json({ ok: true });
+      }
+    }
+  }
+
+  // === Google Drive команди (зручно з телефона) ===
   if (text === "/gdrive ping") {
     try {
       await drivePing(env);
@@ -429,6 +481,7 @@ export default async function webhook(request, env, ctx) {
   // /gdrive save <url> [name]
   if (/^\/gdrive\s+save\s+/i.test(text)) {
     const parts = text.split(/\s+/);
+    // /gdrive save <url> [name...]
     const url = parts[2];
     const name = parts.length > 3 ? parts.slice(3).join(" ") : "";
     if (!url) {
@@ -439,6 +492,7 @@ export default async function webhook(request, env, ctx) {
     try {
       const saved = await driveSaveFromUrl(env, url, name);
       await sendMessage(env, chatId, `📤 Залив у Drive: *${saved.name}*\n🔗 ${saved.link}`);
+      try { await driveAppendLog(env, "senti_checklist.md", `Manual save: ${saved.name} — ${saved.link}`); } catch {}
     } catch (e) {
       await sendMessage(env, chatId, "❌ Не вдалося залити: " + String(e?.message || e));
     }
@@ -459,6 +513,7 @@ export default async function webhook(request, env, ctx) {
       chatId,
       [
         "*Команди:*",
+        "/menu — головне меню (адмін-кнопки)",
         "/ping, /id",
         "/log status | /log on | /log off",
         "/todo — показати список",
@@ -469,34 +524,12 @@ export default async function webhook(request, env, ctx) {
         "/gdrive ping — перевірка доступу до папки",
         "/gdrive save <url> [назва] — зберегти файл із URL у Google Drive",
         "",
-        "*Admin:*",
-        "/admin — адмін-панель (кнопки керування)",
-        "",
         "Коли увімкнено автологування — пиши `+ завдання`, і я додам у чек-лист.",
-      ].join("\n")
+      ].join("\n"),
+      { reply_markup: adminKeyboard() }
     );
     await logReply(env, chatId);
     return json({ ok: true });
-  }
-
-  // Автологування: + пункт у чек-лист
-  if (await getAutolog(env)) {
-    const m = text.match(/^\s*\+\s*(.+)$/s);
-    if (m) {
-      const itemText = m[1].trim();
-      if (itemText) {
-        const { added, list } = await addTodo(env, chatId, itemText);
-        await sendMessage(
-          env,
-          chatId,
-          added
-            ? `➕ Додав у чек-лист: ${itemText}\n\n${formatTodos(list)}`
-            : `ℹ️ Вже є в списку: ${itemText}\n\n${formatTodos(list)}`
-        );
-        await logReply(env, chatId);
-        return json({ ok: true });
-      }
-    }
   }
 
   return json({ ok: true });
