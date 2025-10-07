@@ -114,6 +114,78 @@ function formatTodos(list) {
   return "📝 Чек-лист:\n" + list.map((x, i) => `${i + 1}. ${x.text}`).join("\n");
 }
 
+// ── Autosave (Telegram → Drive) ──────────────────────────────────────────────
+const AUTOSAVE_KEY = "autosave:enabled";
+
+async function getAutosave(env) {
+  try {
+    const v = await env.STATE_KV.get(AUTOSAVE_KEY);
+    return v === "1";
+  } catch {
+    return false;
+  }
+}
+async function setAutosave(env, on) {
+  try {
+    await env.STATE_KV.put(AUTOSAVE_KEY, on ? "1" : "0", {
+      expirationTtl: 60 * 60 * 24 * 365,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Telegram getFile → direct URL
+async function tgGetFileDirectUrl(env, fileId) {
+  const api = `https://api.telegram.org/bot${env.BOT_TOKEN}`;
+  const fileInfo = await fetch(`${api}/getFile?file_id=${encodeURIComponent(fileId)}`).then(r => r.json());
+  if (!fileInfo.ok) throw new Error("getFile failed: " + JSON.stringify(fileInfo));
+  const filePath = fileInfo.result.file_path;
+  return `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${filePath}`;
+}
+
+function sanitizeName(s, fallback) {
+  const name = (s || fallback || "file.bin").replace(/[\\/:*?"<>|]/g, "_").trim();
+  return name || (fallback || "file.bin");
+}
+
+async function autosaveIfNeeded(env, chatId, msg) {
+  if (!(await getAutosave(env))) return false;
+
+  // Фото: беремо найбільше
+  if (Array.isArray(msg.photo) && msg.photo.length) {
+    const largest = msg.photo[msg.photo.length - 1];
+    const direct = await tgGetFileDirectUrl(env, largest.file_id);
+    const name = sanitizeName(`tg_photo_${largest.file_unique_id}.jpg`);
+    const saved = await driveSaveFromUrl(env, direct, name);
+    await sendMessage(env, chatId, `🖼️ Фото збережено: [${saved.name}](${saved.link})`);
+    return true;
+  }
+
+  // Документ
+  if (msg.document) {
+    const d = msg.document;
+    const direct = await tgGetFileDirectUrl(env, d.file_id);
+    const name = sanitizeName(d.file_name || `tg_doc_${d.file_unique_id}`);
+    const saved = await driveSaveFromUrl(env, direct, name);
+    await sendMessage(env, chatId, `📄 Документ збережено: [${saved.name}](${saved.link})`);
+    return true;
+  }
+
+  // Відео
+  if (msg.video) {
+    const v = msg.video;
+    const direct = await tgGetFileDirectUrl(env, v.file_id);
+    const name = sanitizeName(`tg_video_${v.file_unique_id}.mp4`);
+    const saved = await driveSaveFromUrl(env, direct, name);
+    await sendMessage(env, chatId, `🎞️ Відео збережено: [${saved.name}](${saved.link})`);
+    return true;
+  }
+
+  return false;
+}
+
 // ── Основний обробник ────────────────────────────────────────────────────────
 export default async function webhook(request, env, ctx) {
   let update;
@@ -148,6 +220,36 @@ export default async function webhook(request, env, ctx) {
   // /id
   if (text === "/id") {
     await sendMessage(env, chatId, `👤 Твій Telegram ID: \`${fromId}\``);
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+
+  // /autosave on|off|status (вмикати/вимикати може лише власник)
+  if (text.startsWith("/autosave")) {
+    const sub = (text.split(" ")[1] || "status").toLowerCase();
+    const owner = await isOwner(env, fromId);
+
+    if (!owner && sub !== "status") {
+      await sendMessage(env, chatId, "🔒 Керувати autosave може лише власник. Використай `/autosave status`.");
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+
+    if (sub === "on") {
+      const ok = await setAutosave(env, true);
+      await sendMessage(env, chatId, ok ? "✅ Autosave УВІМКНЕНО." : "⚠️ Не вдалося увімкнути autosave.");
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+    if (sub === "off") {
+      const ok = await setAutosave(env, false);
+      await sendMessage(env, chatId, ok ? "⏹️ Autosave вимкнено." : "⚠️ Не вдалося вимкнути autosave.");
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+
+    const on = await getAutosave(env);
+    await sendMessage(env, chatId, `ℹ️ Autosave: *${on ? "ON" : "OFF"}*`);
     await logReply(env, chatId);
     return json({ ok: true });
   }
@@ -299,6 +401,7 @@ export default async function webhook(request, env, ctx) {
       [
         "*Команди:*",
         "/ping, /id",
+        "/autosave status | /autosave on | /autosave off",
         "/log status | /log on | /log off",
         "/todo — показати список",
         "/done N — завершити пункт №N",
@@ -309,10 +412,25 @@ export default async function webhook(request, env, ctx) {
         "/gdrive save <url> [назва] — зберегти файл із URL у Google Drive",
         "",
         "Коли увімкнено автологування — пиши `+ завдання`, і я додам у чек-лист.",
+        "Коли увімкнено autosave — надсилай фото/док/відео, і я покладу їх у Drive.",
       ].join("\n")
     );
     await logReply(env, chatId);
     return json({ ok: true });
+  }
+
+  // Якщо це не команда — спробуємо автосейв медіа (якщо увімкнено)
+  try {
+    if (msg) {
+      const saved = await autosaveIfNeeded(env, chatId, msg);
+      if (saved) {
+        await logReply(env, chatId);
+        return json({ ok: true });
+      }
+    }
+  } catch (e) {
+    // проковтнемо, але не зламаємо вебхук
+    await sendMessage(env, chatId, `⚠️ Autosave помилка: \`${String(e?.message || e)}\``);
   }
 
   return json({ ok: true });
