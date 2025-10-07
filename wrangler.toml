@@ -5,18 +5,16 @@ workers_dev = true
 
 [vars]
 TZ = "Europe/Kyiv"
-
-# 🔗 Google Drive (вкажи це як Variable у Cloudflare → Settings → Variables)
-# ID папки в Google Drive, куди складати бекапи (з URL папки після /folders/)
 DRIVE_FOLDER_ID = "1lMcN4cRlYNzOU1D1y5eirq5y1W7by9T-"
 
-# 🛡️ WEBHOOK_SECRET вже використовується у проекті (для HTTP-ручок)
-# Переконайся, що значення збігається з тим, що ти використовуєш у ТГ тестах
-# WEBHOOK_SECRET = "senti1984"   # (задай у Cloudflare як Variable, якщо ще не задано)
+# Потрібні для OAuth (заповни у Cloudflare → Settings → Variables/Secrets)
+# В UI вони можуть перекривати значення з файлу — це ок.
+GOOGLE_CLIENT_ID = "740975815203-vbp832vkdqq4c502aip148p1pgkvdobh.apps.googleusercontent.com"
+# GOOGLE_CLIENT_SECRET = "<твій секрет>"   # краще як Secret у Cloudflare
+# WEBHOOK_SECRET = "<твій ключ>"
 
-# 🔑 Секрет із JSON сервісного акаунта (додай у Cloudflare → Settings → Secrets):
-# Name: GOOGLE_DRIVE_CREDENTIALS
-# Value: ВЕСЬ JSON, який ти завантажив із Google Cloud (цілком, з { ... })
+# Секрет сервісного акаунта (JSON цілком) — як Secret у Cloudflare:
+# GOOGLE_DRIVE_CREDENTIALS = "{ ... }"
 
 [[kv_namespaces]]
 binding = "STATE_KV"
@@ -29,3 +27,7 @@ id = "20d81d7b68fa4ac6b9913e2fbd3465d5"   # senti-dedup
 [[kv_namespaces]]
 binding = "TODO_KV"
 id = "497eac980691495ea2a0bc8611892d65"   # senti-cache
+
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "e2a8d3941b4e41728318781e739a4d47"   # senti_oauth
