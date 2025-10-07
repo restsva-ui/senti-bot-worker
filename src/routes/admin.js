@@ -1,10 +1,33 @@
-// Адмін-модуль
-import { adminKeyboard } from "../lib/index.js"; // <- лише з index.js
-import { driveList, driveAppendLog } from "../lib/drive.js"; // якщо вже є у drive.js
+import { adminKeyboard } from "../lib/keyboard.js";
+import { driveList, driveAppendLog } from "../lib/drive.js";
 
+/** Чи хочемо показати адмін-панель для цього тексту */
+export function wantAdmin(text) {
+  return text === "/admin" || text === "/menu" || text === "Меню";
+}
+
+/** Регіструємо команди бота (щоб у підказках з’явилася /admin) */
+export async function ensureBotCommands(env) {
+  try {
+    const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/setMyCommands`;
+    const commands = [
+      { command: "start", description: "Запустити бота" },
+      { command: "help", description: "Довідка" },
+      { command: "ping", description: "Перевірка зв'язку" },
+      { command: "menu", description: "Меню" },
+      { command: "admin", description: "Адмін-панель" },
+    ];
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commands, scope: { type: "default" }, language_code: "uk" }),
+    });
+  } catch (_) {}
+}
+
+/** Обробник кнопок/команд адмін-панелі */
 export async function handleAdminCommand(env, chatId, text) {
-  // стартове повідомлення адмінки
-  if (text === "/admin") {
+  if (text === "/admin" || text === "/menu" || text === "Меню") {
     return {
       text:
         "Senti Admin\n— мінімальне меню керування:\n" +
@@ -16,7 +39,6 @@ export async function handleAdminCommand(env, chatId, text) {
   }
 
   if (text === "Drive ✅") {
-    // простий пінг, можна реюзнути drivePing, якщо є
     return { text: "🟢 Drive OK" };
   }
 
@@ -33,7 +55,6 @@ export async function handleAdminCommand(env, chatId, text) {
   }
 
   if (text === "Checklist ➕") {
-    // перемикаємо діалог у режим очікування рядка для чеклиста
     return {
       text: "Надішли *один рядок*, який додати в `senti_checklist.md`.",
       expect: { mode: "append-checklist" },
