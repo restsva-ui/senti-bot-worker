@@ -27,6 +27,15 @@ async function sendMessage(env, chatId, text, extra = {}) {
   } catch (_) {}
 }
 
+async function answerCallback(env, cbId, text = "", showAlert = false) {
+  if (!cbId) return;
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/answerCallbackQuery`;
+  const body = { callback_query_id: cbId, text, show_alert: showAlert };
+  try {
+    await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  } catch {}
+}
+
 async function logReply(env, chatId) {
   try {
     await env.STATE_KV.put(`last-reply:${chatId}`, new Date().toISOString(), {
@@ -123,31 +132,44 @@ export default async function webhook(request, env, ctx) {
     return json({ ok: false, error: "bad json" }, { status: 400 });
   }
 
+  const cb = update.callback_query || null;
   const msg =
     update.message ||
     update.edited_message ||
-    update.callback_query?.message ||
+    cb?.message ||
     null;
 
   const chatId = msg?.chat?.id;
   const fromId =
     update.message?.from?.id ??
     update.edited_message?.from?.id ??
-    update.callback_query?.from?.id ??
+    cb?.from?.id ??
     null;
 
   const textRaw =
     update.message?.text ??
     update.edited_message?.text ??
-    update.callback_query?.data ??
+    cb?.data ??
     "";
 
   const text = (textRaw || "").trim();
   if (!chatId) return json({ ok: true });
 
-  // ==== ADMIN PANEL ====
-  if (text.startsWith("/admin")) {
-    await adminHandler({ text, chatId, fromId }, env);
+  // ==== ADMIN PANEL (текст/колбеки/force-reply) ====
+  if (text.startsWith("/admin") || (cb && (cb.data || "").startsWith("ADM:"))) {
+    await adminHandler(
+      {
+        chatId,
+        fromId,
+        text,
+        cbId: cb?.id || null,
+        cbData: cb?.data || null,
+        isCallback: !!cb,
+        isText: !!text && !cb,
+      },
+      env
+    );
+    if (cb?.id) await answerCallback(env, cb.id); // на всяк випадок закрити "годинник"
     await logReply(env, chatId);
     return json({ ok: true });
   }
@@ -251,7 +273,7 @@ export default async function webhook(request, env, ctx) {
           chatId,
           added
             ? `➕ Додав у чек-лист: ${itemText}\n\n${formatTodos(list)}`
-            : `ℹ️ ВAlready у списку: ${itemText}\n\n${formatTodos(list)}`
+            : `ℹ️ Вже є в списку: ${itemText}\n\n${formatTodos(list)}`
         );
         await logReply(env, chatId);
         return json({ ok: true });
@@ -259,7 +281,7 @@ export default async function webhook(request, env, ctx) {
     }
   }
 
-  // === Google Drive команди (зручно з телефона) ===
+  // === Google Drive команди
   if (text === "/gdrive ping") {
     try {
       await drivePing(env);
@@ -314,9 +336,9 @@ export default async function webhook(request, env, ctx) {
         "/gdrive ping — перевірка доступу до папки",
         "/gdrive save <url> [назва] — зберегти файл із URL у Google Drive",
         "",
-        "Коли увімкнено автологування — пиши `+ завдання`, і я додам у чек-лист.",
-        "",
-        "*Адмін:* `/admin`",
+        "*Адмін:* `/admin` — компактне меню",
+        "  • Drive ping | List 10",
+        "  • Backup URL | Checklist add",
       ].join("\n")
     );
     await logReply(env, chatId);
