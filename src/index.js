@@ -1,13 +1,22 @@
 // src/index.js
 import webhook from "./routes/webhook.js";
-import { drivePing, driveSaveFromUrl, driveList, driveAppendLog } from "./lib/drive.js";
+// ⬇️ головна зміна: підтягуємо driveListLatest під ім'ям driveList
+import {
+  drivePing,
+  driveSaveFromUrl,
+  driveListLatest as driveList,
+  driveAppendLog,
+} from "./lib/drive.js";
 
 function textResponse(text, status = 200, type = "text/plain") {
   return new Response(text, { status, headers: { "content-type": type } });
 }
 
 function htmlResponse(html, status = 200) {
-  return new Response(html, { status, headers: { "content-type": "text/html; charset=utf-8" } });
+  return new Response(html, {
+    status,
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
 }
 
 function jsonResponse(obj, status = 200) {
