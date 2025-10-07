@@ -1,5 +1,5 @@
 // src/routes/webhook.js
-import { drivePing, driveSaveFromUrl } from "../lib/drive.js";
+import { drivePing, driveSaveFromUrl, driveAppendLog, driveReadTextByName } from "../lib/drive.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function json(data, init = {}) {
@@ -27,6 +27,11 @@ async function sendMessage(env, chatId, text, extra = {}) {
   } catch (_) {}
 }
 
+async function sendHtml(env, chatId, html) {
+  // окремий відправник для /cl show
+  return sendMessage(env, chatId, html, { parse_mode: "HTML" });
+}
+
 async function logReply(env, chatId) {
   try {
     await env.STATE_KV.put(`last-reply:${chatId}`, new Date().toISOString(), {
@@ -45,6 +50,8 @@ async function isOwner(env, fromId) {
     return false;
   }
 }
+
+const CHECKLIST_FILE = "senti_checklist.md";
 
 // ── Автологування у STATE_KV ─────────────────────────────────────────────────
 const AUTOLOG_KEY = "autolog:enabled";
@@ -114,27 +121,10 @@ function formatTodos(list) {
   return "📝 Чек-лист:\n" + list.map((x, i) => `${i + 1}. ${x.text}`).join("\n");
 }
 
-// ── Autosave (Telegram → Drive) ──────────────────────────────────────────────
+// ── Autosave flag ────────────────────────────────────────────────────────────
 const AUTOSAVE_KEY = "autosave:enabled";
-
-async function getAutosave(env) {
-  try {
-    const v = await env.STATE_KV.get(AUTOSAVE_KEY);
-    return v === "1";
-  } catch {
-    return false;
-  }
-}
-async function setAutosave(env, on) {
-  try {
-    await env.STATE_KV.put(AUTOSAVE_KEY, on ? "1" : "0", {
-      expirationTtl: 60 * 60 * 24 * 365,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
+async function getAutosave(env) { try { return (await env.STATE_KV.get(AUTOSAVE_KEY)) === "1"; } catch { return false; } }
+async function setAutosave(env, on) { try { await env.STATE_KV.put(AUTOSAVE_KEY, on ? "1" : "0", { expirationTtl: 31536000 }); return true; } catch { return false; } }
 
 // Telegram getFile → direct URL
 async function tgGetFileDirectUrl(env, fileId) {
@@ -153,13 +143,14 @@ function sanitizeName(s, fallback) {
 async function autosaveIfNeeded(env, chatId, msg) {
   if (!(await getAutosave(env))) return false;
 
-  // Фото: беремо найбільше
+  // Фото
   if (Array.isArray(msg.photo) && msg.photo.length) {
     const largest = msg.photo[msg.photo.length - 1];
     const direct = await tgGetFileDirectUrl(env, largest.file_id);
     const name = sanitizeName(`tg_photo_${largest.file_unique_id}.jpg`);
     const saved = await driveSaveFromUrl(env, direct, name);
     await sendMessage(env, chatId, `🖼️ Фото збережено: [${saved.name}](${saved.link})`);
+    await driveAppendLog(env, CHECKLIST_FILE, `Фото збережено: ${saved.name}`);
     return true;
   }
 
@@ -170,6 +161,7 @@ async function autosaveIfNeeded(env, chatId, msg) {
     const name = sanitizeName(d.file_name || `tg_doc_${d.file_unique_id}`);
     const saved = await driveSaveFromUrl(env, direct, name);
     await sendMessage(env, chatId, `📄 Документ збережено: [${saved.name}](${saved.link})`);
+    await driveAppendLog(env, CHECKLIST_FILE, `Документ збережено: ${saved.name}`);
     return true;
   }
 
@@ -180,6 +172,7 @@ async function autosaveIfNeeded(env, chatId, msg) {
     const name = sanitizeName(`tg_video_${v.file_unique_id}.mp4`);
     const saved = await driveSaveFromUrl(env, direct, name);
     await sendMessage(env, chatId, `🎞️ Відео збережено: [${saved.name}](${saved.link})`);
+    await driveAppendLog(env, CHECKLIST_FILE, `Відео збережено: ${saved.name}`);
     return true;
   }
 
@@ -224,7 +217,7 @@ export default async function webhook(request, env, ctx) {
     return json({ ok: true });
   }
 
-  // /autosave on|off|status (вмикати/вимикати може лише власник)
+  // /autosave on|off|status
   if (text.startsWith("/autosave")) {
     const sub = (text.split(" ")[1] || "status").toLowerCase();
     const owner = await isOwner(env, fromId);
@@ -307,6 +300,68 @@ export default async function webhook(request, env, ctx) {
     return json({ ok: true });
   }
 
+  // === CHECKLIST команди ===
+  if (text.startsWith("/cl ")) {
+    const owner = await isOwner(env, fromId);
+    const sub = text.slice(4).trim();
+
+    if (sub === "show") {
+      try {
+        const content = await driveReadTextByName(env, CHECKLIST_FILE);
+        const out = content ? content.slice(0, 3000) : "Поки що порожньо.";
+        await sendHtml(env, chatId, `<b>Checklist (${CHECKLIST_FILE})</b><pre>${escapeHtml(out)}</pre>`);
+      } catch (e) {
+        await sendMessage(env, chatId, "❌ Не можу прочитати чекліст: " + String(e?.message || e));
+      }
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+
+    if (sub === "link") {
+      try {
+        // швидкий трюк: додамо no-op рядок і повернемо веблінк із резулту
+        const res = await driveAppendLog(env, CHECKLIST_FILE, "ping");
+        await sendMessage(env, chatId, `🔗 Лінк: ${res.webViewLink || "(онови сторінку диска)"}`);
+      } catch (e) {
+        await sendMessage(env, chatId, "❌ Не можу отримати лінк: " + String(e?.message || e));
+      }
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+
+    if (sub.startsWith("add ")) {
+      if (!owner) {
+        await sendMessage(env, chatId, "🔒 Додавати у чекліст може лише власник.");
+        await logReply(env, chatId);
+        return json({ ok: true });
+      }
+      const line = sub.slice(4).trim();
+      if (!line) {
+        await sendMessage(env, chatId, "ℹ️ Використання: `/cl add <текст>`");
+        await logReply(env, chatId);
+        return json({ ok: true });
+      }
+      try {
+        await driveAppendLog(env, CHECKLIST_FILE, line);
+        await sendMessage(env, chatId, "✅ Додав у чекліст.");
+      } catch (e) {
+        await sendMessage(env, chatId, "❌ Не вдалося додати: " + String(e?.message || e));
+      }
+      await logReply(env, chatId);
+      return json({ ok: true });
+    }
+
+    // help
+    await sendMessage(env, chatId, [
+      "*Checklist команди:*",
+      "`/cl show` — показати перші ~3000 символів",
+      "`/cl link` — дати лінк на файл",
+      "`/cl add <текст>` — додати пункт (owner)",
+    ].join("\n"));
+    await logReply(env, chatId);
+    return json({ ok: true });
+  }
+
   // /todo, /todo clear, /done N
   if (text === "/todo") {
     const list = await loadTodos(env, chatId);
@@ -341,6 +396,7 @@ export default async function webhook(request, env, ctx) {
       const itemText = m[1].trim();
       if (itemText) {
         const { added, list } = await addTodo(env, chatId, itemText);
+        await driveAppendLog(env, CHECKLIST_FILE, `TODO: ${itemText}`);
         await sendMessage(
           env,
           chatId,
@@ -369,7 +425,6 @@ export default async function webhook(request, env, ctx) {
   // /gdrive save <url> [name]
   if (/^\/gdrive\s+save\s+/i.test(text)) {
     const parts = text.split(/\s+/);
-    // /gdrive save <url> [name...]
     const url = parts[2];
     const name = parts.length > 3 ? parts.slice(3).join(" ") : "";
     if (!url) {
@@ -380,6 +435,7 @@ export default async function webhook(request, env, ctx) {
     try {
       const saved = await driveSaveFromUrl(env, url, name);
       await sendMessage(env, chatId, `📤 Залив у Drive: *${saved.name}*\n🔗 ${saved.link}`);
+      await driveAppendLog(env, CHECKLIST_FILE, `Залив файл: ${saved.name}`);
     } catch (e) {
       await sendMessage(env, chatId, "❌ Не вдалося залити: " + String(e?.message || e));
     }
@@ -411,6 +467,11 @@ export default async function webhook(request, env, ctx) {
         "/gdrive ping — перевірка доступу до папки",
         "/gdrive save <url> [назва] — зберегти файл із URL у Google Drive",
         "",
+        "*Checklist:*",
+        "/cl show — показати вміст",
+        "/cl link — лінк на файл",
+        "/cl add <текст> — додати пункт (owner)",
+        "",
         "Коли увімкнено автологування — пиши `+ завдання`, і я додам у чек-лист.",
         "Коли увімкнено autosave — надсилай фото/док/відео, і я покладу їх у Drive.",
       ].join("\n")
@@ -419,7 +480,7 @@ export default async function webhook(request, env, ctx) {
     return json({ ok: true });
   }
 
-  // Якщо це не команда — спробуємо автосейв медіа (якщо увімкнено)
+  // Спробуємо автосейв медіа (якщо увімкнено)
   try {
     if (msg) {
       const saved = await autosaveIfNeeded(env, chatId, msg);
@@ -429,9 +490,13 @@ export default async function webhook(request, env, ctx) {
       }
     }
   } catch (e) {
-    // проковтнемо, але не зламаємо вебхук
     await sendMessage(env, chatId, `⚠️ Autosave помилка: \`${String(e?.message || e)}\``);
   }
 
   return json({ ok: true });
+}
+
+// HTML escape для /cl show
+function escapeHtml(s) {
+  return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
