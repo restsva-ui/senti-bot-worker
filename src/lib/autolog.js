@@ -1,11 +1,11 @@
+// src/lib/autolog.js
 // Уніфіковане зберігання прапорця автологування
 
 const KEY = "autolog:enabled";
 
-// Вибираємо правильний KV з кількох можливих назв биндингів.
-// За скрінами у тебе: LIKES_KV → senti-state, SENTI_CACHE → senti-cache.
+// Єдиний KV — STATE_KV (щоб не було плутанини з LIKES_KV/SENTI_CACHE)
 function pickKV(env) {
-  return env.SENTI_STATE || env.LIKES_KV || env.SENTI_CACHE || null;
+  return env.STATE_KV || null;
 }
 
 export async function getAutolog(env) {
