@@ -6,6 +6,10 @@ function textResponse(text, status = 200, type = "text/plain") {
   return new Response(text, { status, headers: { "content-type": type } });
 }
 
+function htmlResponse(html, status = 200) {
+  return new Response(html, { status, headers: { "content-type": "text/html; charset=utf-8" } });
+}
+
 function jsonResponse(obj, status = 200) {
   return new Response(JSON.stringify(obj, null, 2), {
     status,
@@ -19,10 +23,74 @@ function auth(url, env) {
   return ok;
 }
 
+// === OAuth helper: будуємо URL авторизації Google ===
+function buildGoogleOAuthUrl(env) {
+  const clientId = env.GOOGLE_CLIENT_ID; // має бути у Variables/Secrets
+  const redirectUri = "https://senti-bot-worker.restsva.workers.dev/auth"; // УВАГА: restsva!
+  const scope = encodeURIComponent("https://www.googleapis.com/auth/drive.file");
+  const base = "https://accounts.google.com/o/oauth2/v2/auth";
+  const q = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    response_type: "code",
+    access_type: "offline",
+    prompt: "consent",
+    scope,
+  });
+  return `${base}?${q.toString()}`;
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
+
+    // === HTML тест-панель ===
+    if (path === "/panel") {
+      const oauthUrl = buildGoogleOAuthUrl(env);
+      return htmlResponse(`
+        <html>
+          <head><meta charset="utf-8"><title>Senti Panel</title></head>
+          <body style="font-family:system-ui;background:#0b0b0b;color:#eee;padding:32px">
+            <h2>Senti Drive Link — Testing</h2>
+            <p>Крок 1: авторизуй Google Drive через офіційний флоу.</p>
+            <p>
+              <a href="${oauthUrl}"
+                 style="display:inline-block;margin:12px 0;padding:12px 18px;background:#00bfa5;color:#fff;text-decoration:none;border-radius:8px">
+                 🔑 Авторизувати Google Drive
+              </a>
+            </p>
+            <hr style="border:0;border-top:1px solid #2a2a2a;margin:24px 0" />
+            <p>Швидкі тести (потрібен ?key=...):</p>
+            <ul>
+              <li><a style="color:#00bfa5" href="/gdrive/ping?key=${encodeURIComponent(env.WEBHOOK_SECRET || "")}">/gdrive/ping</a></li>
+              <li><a style="color:#00bfa5" href="/gdrive/list?key=${encodeURIComponent(env.WEBHOOK_SECRET || "")}">/gdrive/list</a></li>
+            </ul>
+          </body>
+        </html>
+      `);
+    }
+
+    // === OAuth redirect handler (поки що показуємо code для перевірки) ===
+    if (path === "/auth") {
+      const code = url.searchParams.get("code");
+      const error = url.searchParams.get("error");
+      if (error) {
+        return htmlResponse(`<h3>OAuth error</h3><pre>${error}</pre>`, 400);
+      }
+      if (!code) {
+        return htmlResponse(`<h3>Немає ?code=...</h3><p>Схоже, авторизацію не підтверджено.</p>`, 400);
+      }
+      return htmlResponse(`
+        <html><body style="font-family:system-ui;background:#0b0b0b;color:#eee;padding:24px">
+          <h2>✅ Редірект працює</h2>
+          <p>Отримали <b>code</b> від Google:</p>
+          <pre style="white-space:pre-wrap;background:#111;padding:12px;border-radius:8px">${code}</pre>
+          <p>Далі обміняємо його на токени в наступному кроці.</p>
+          <p><a style="color:#00bfa5" href="/panel">⬅ Назад до панелі</a></p>
+        </body></html>
+      `);
+    }
 
     // === Telegram webhook ===
     if (path === "/webhook" && request.method === "POST") {
