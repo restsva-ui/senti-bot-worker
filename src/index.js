@@ -23,11 +23,11 @@ function auth(url, env) {
   return ok;
 }
 
-// === OAuth helper: будуємо URL авторизації Google ===
+// === OAuth helper ===
 function buildGoogleOAuthUrl(env) {
-  const clientId = env.GOOGLE_CLIENT_ID; // має бути у Variables/Secrets
-  const redirectUri = "https://senti-bot-worker.restsva.workers.dev/auth"; // УВАГА: restsva!
-  const scope = encodeURIComponent("https://www.googleapis.com/auth/drive.file");
+  const clientId = env.GOOGLE_CLIENT_ID;
+  const redirectUri = "https://senti-bot-worker.restsva.workers.dev/auth";
+  const scope = "https://www.googleapis.com/auth/drive.file"; // ❗ без encodeURIComponent
   const base = "https://accounts.google.com/o/oauth2/v2/auth";
   const q = new URLSearchParams({
     client_id: clientId,
@@ -35,7 +35,7 @@ function buildGoogleOAuthUrl(env) {
     response_type: "code",
     access_type: "offline",
     prompt: "consent",
-    scope,
+    scope, // чистий URL
   });
   return `${base}?${q.toString()}`;
 }
@@ -45,7 +45,7 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // === HTML тест-панель ===
+    // === Панель ===
     if (path === "/panel") {
       const oauthUrl = buildGoogleOAuthUrl(env);
       return htmlResponse(`
@@ -71,23 +71,19 @@ export default {
       `);
     }
 
-    // === OAuth redirect handler (поки що показуємо code для перевірки) ===
+    // === Обробка редіректу ===
     if (path === "/auth") {
       const code = url.searchParams.get("code");
       const error = url.searchParams.get("error");
-      if (error) {
-        return htmlResponse(`<h3>OAuth error</h3><pre>${error}</pre>`, 400);
-      }
-      if (!code) {
-        return htmlResponse(`<h3>Немає ?code=...</h3><p>Схоже, авторизацію не підтверджено.</p>`, 400);
-      }
+      if (error) return htmlResponse(`<h3>OAuth error</h3><pre>${error}</pre>`, 400);
+      if (!code) return htmlResponse(`<h3>Немає ?code=...</h3>`, 400);
       return htmlResponse(`
         <html><body style="font-family:system-ui;background:#0b0b0b;color:#eee;padding:24px">
           <h2>✅ Редірект працює</h2>
           <p>Отримали <b>code</b> від Google:</p>
           <pre style="white-space:pre-wrap;background:#111;padding:12px;border-radius:8px">${code}</pre>
-          <p>Далі обміняємо його на токени в наступному кроці.</p>
-          <p><a style="color:#00bfa5" href="/panel">⬅ Назад до панелі</a></p>
+          <p>Далі обміняємо його на токени.</p>
+          <a style="color:#00bfa5" href="/panel">⬅ Назад до панелі</a>
         </body></html>
       `);
     }
@@ -98,13 +94,9 @@ export default {
     }
 
     // === Health ===
-    if (path === "/ping") {
-      return textResponse("pong 🟢");
-    }
+    if (path === "/ping") return textResponse("pong 🟢");
 
-    // === Google Drive: тести з телефона (GET з ?key=...) ===
-
-    // 1) Перевірка доступності папки
+    // === Google Drive API тестові ===
     if (path === "/gdrive/ping" && request.method === "GET") {
       if (!auth(url, env)) return textResponse("forbidden", 403);
       try {
@@ -115,7 +107,6 @@ export default {
       }
     }
 
-    // 2) Список останніх 10 файлів
     if (path === "/gdrive/list" && request.method === "GET") {
       if (!auth(url, env)) return textResponse("forbidden", 403);
       try {
@@ -126,7 +117,6 @@ export default {
       }
     }
 
-    // 3) Зберегти файл за URL
     if (path === "/gdrive/save" && request.method === "GET") {
       if (!auth(url, env)) return textResponse("forbidden", 403);
       const fileUrl = url.searchParams.get("url");
@@ -140,8 +130,6 @@ export default {
       }
     }
 
-    // 4) Додати рядок у лог-файл (створює, якщо нема)
-    //    /gdrive/log?key=...&msg=Hello%20world[&file=my_log.txt]
     if (path === "/gdrive/log" && request.method === "GET") {
       if (!auth(url, env)) return textResponse("forbidden", 403);
       const msg = url.searchParams.get("msg") || "";
