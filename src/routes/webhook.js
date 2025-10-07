@@ -4,47 +4,60 @@ import { adminKeyboard } from "../lib/keyboard.js";
 import { wantAdmin, handleAdminCommand, ensureBotCommands } from "./admin.js";
 import { driveSaveFromUrl, driveAppendLog } from "../lib/drive.js";
 
-function tgApi(env, method, body) {
+// === helpers ===
+async function tgApi(env, method, body) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`;
-  return fetch(url, {
+  const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
+  // Жорсткий логінг усіх помилок Telegram
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    console.error("Telegram API error", method, res.status, t || res.statusText);
+  } else {
+    // опціонально можна увімкнути:
+    // console.log("Telegram API ok", method);
+  }
+  return res;
+}
+
+function kbMarkup() {
+  return { keyboard: adminKeyboard(), resize_keyboard: true };
 }
 
 async function reply(env, chatId, text, extra = {}) {
-  return tgApi(env, "sendMessage", {
-    chat_id: chatId,
-    text,
-    parse_mode: "Markdown",
-    ...extra,
-  });
+  // без parse_mode! (plain-text, щоби не ловити can't parse entities)
+  return tgApi(env, "sendMessage", { chat_id: chatId, text, ...extra });
 }
 
 function pickText(msg = {}) {
-  // 1) звичайний текст
   if (msg.text) return String(msg.text);
-  // 2) підпис до фото/відео/документа
   if (msg.caption) return String(msg.caption);
-  // 3) команди з кнопок через entities (рідко)
   return "";
 }
 
 function hasNonTextPayload(msg = {}) {
   return Boolean(
     msg.photo?.length ||
-      msg.video ||
-      msg.document ||
-      msg.sticker ||
-      msg.voice ||
-      msg.audio ||
-      msg.animation
+    msg.video ||
+    msg.document ||
+    msg.sticker ||
+    msg.voice ||
+    msg.audio ||
+    msg.animation
   );
 }
 
 export default async function webhook(request, env, ctx) {
-  // реєструємо команди раз у кілька годин (дешево і безпечно)
+  // Перевірка секрету Telegram (якщо заданий)
+  const tgSecret = request.headers.get("x-telegram-bot-api-secret-token");
+  if (env.TELEGRAM_SECRET_TOKEN && tgSecret !== env.TELEGRAM_SECRET_TOKEN) {
+    return new Response("forbidden", { status: 403 });
+  }
+
+  // Безпечна реєстрація команд
   ctx.waitUntil(ensureBotCommands(env).catch(() => {}));
 
   let update = {};
@@ -59,13 +72,14 @@ export default async function webhook(request, env, ctx) {
     update.edited_message ||
     update.channel_post ||
     update.callback_query?.message;
+
   if (!msg || !msg.chat?.id) return new Response("no message", { status: 200 });
 
   const chatId = msg.chat.id;
   const textRaw = pickText(msg).trim();
   const textLower = textRaw.toLowerCase();
 
-  // --- /ping & /help швидкі відповіді
+  // ---- базові команди
   if (textLower === "/ping") {
     await reply(env, chatId, "pong 🟢");
     return new Response("ok");
@@ -79,7 +93,7 @@ export default async function webhook(request, env, ctx) {
     return new Response("ok");
   }
 
-  // --- Обробка очікуваних кроків (state machine)
+  // ---- state machine
   const state = (await getState(env, chatId)) || {};
   if (state.expect === "backup-url") {
     const parts = textRaw.split(/\s+/, 2);
@@ -94,8 +108,8 @@ export default async function webhook(request, env, ctx) {
       await reply(
         env,
         chatId,
-        `✅ Збережено: *${res.name}*\n🔗 ${res.link}`,
-        { reply_markup: { keyboard: adminKeyboard(), resize_keyboard: true } }
+        `Збережено: ${res.name}\nПосилання: ${res.link}`,
+        { reply_markup: kbMarkup() }
       );
     } catch (e) {
       await reply(env, chatId, "Помилка збереження: " + String(e?.message || e));
@@ -103,16 +117,17 @@ export default async function webhook(request, env, ctx) {
     await clearState(env, chatId);
     return new Response("ok");
   }
+
   if (state.expect === "append-checklist") {
     const line = textRaw.replace(/\r?\n/g, " ").trim();
     if (!line) {
-      await reply(env, chatId, "Надішли *один* непорожній рядок.");
+      await reply(env, chatId, "Надішли один непорожній рядок.");
       return new Response("ok");
     }
     try {
       await driveAppendLog(env, "senti_checklist.md", line);
-      await reply(env, chatId, "✅ Додано до `senti_checklist.md`:\n• " + line, {
-        reply_markup: { keyboard: adminKeyboard(), resize_keyboard: true },
+      await reply(env, chatId, "Додано до senti_checklist.md:\n• " + line, {
+        reply_markup: kbMarkup(),
       });
     } catch (e) {
       await reply(env, chatId, "Помилка додавання: " + String(e?.message || e));
@@ -121,50 +136,41 @@ export default async function webhook(request, env, ctx) {
     return new Response("ok");
   }
 
-  // --- Адмін меню / кнопки
+  // ---- адмін меню
   if (wantAdmin(textRaw) || textLower === "/menu") {
     const res = await handleAdminCommand(env, chatId, "/menu");
     if (res) {
-      await reply(env, chatId, res.text, {
-        reply_markup: { keyboard: res.keyboard, resize_keyboard: true },
-      });
+      await reply(env, chatId, res.text, { reply_markup: kbMarkup() });
       return new Response("ok");
     }
   }
 
-  // спробуємо інтерпретувати як кнопку адмін-панелі
+  // ---- кнопки/команди з adminKeyboard
   const handled = await handleAdminCommand(env, chatId, textRaw);
   if (handled) {
-    if (handled.expect) {
-      await setState(env, chatId, { expect: handled.expect });
-    }
+    if (handled.expect) await setState(env, chatId, { expect: handled.expect });
     await reply(env, chatId, handled.text, {
-      reply_markup: handled.keyboard
-        ? { keyboard: handled.keyboard, resize_keyboard: true }
-        : undefined,
+      reply_markup: handled.keyboard ? kbMarkup() : undefined,
     });
     return new Response("ok");
   }
 
-  // --- Не текст: дати зрозуміти, що все ок, але потрібен текст/команда
+  // ---- не-текстові повідомлення
   if (!textRaw && hasNonTextPayload(msg)) {
     await reply(
       env,
       chatId,
-      "Я поки працюю з текстом та кнопками. Натисни *Меню* нижче або надішли одну з команд: /menu /ping",
-      { reply_markup: { keyboard: adminKeyboard(), resize_keyboard: true } }
+      "Поки що я працюю з текстом та кнопками. Натисни «Меню» нижче або надішли /menu чи /ping.",
+      { reply_markup: kbMarkup() }
     );
     return new Response("ok");
   }
 
-  // --- Фолбек
+  // ---- фолбек
   if (textRaw) {
-    await reply(
-      env,
-      chatId,
-      "Не впізнав команду. Спробуй /menu або /ping 🙂",
-      { reply_markup: { keyboard: adminKeyboard(), resize_keyboard: true } }
-    );
+    await reply(env, chatId, "Не впізнав команду. Спробуй /menu або /ping.", {
+      reply_markup: kbMarkup(),
+    });
   }
   return new Response("ok");
 }
