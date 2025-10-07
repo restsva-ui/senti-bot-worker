@@ -1,5 +1,6 @@
 // src/routes/admin.js
 import { adminKeyboard } from "../lib/keyboard.js";
+import { drivePing, driveListLatest } from "../lib/drive.js";
 
 /** Команда, яка відкриває адмін-меню */
 export function wantAdmin(text = "") {
@@ -7,51 +8,35 @@ export function wantAdmin(text = "") {
   return t === "/admin" || t === "меню" || t === "/menu";
 }
 
-// Невеличкий хелпер для звернень до Telegram API
-async function tgCall(env, method, payload) {
-  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload || {}),
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!json.ok) {
-    throw new Error(`${method} failed: ${res.status} ${res.statusText} ${JSON.stringify(json)}`);
-  }
-  return json.result;
-}
-
-/** Зареєструвати (і почистити старі) команди бота в Telegram */
-export async function ensureBotCommands(env, chatId = null) {
+/** Зареєструвати команди бота в Telegram (щоб були в системному меню) */
+export async function ensureBotCommands(env) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/setMyCommands`;
   const commands = [
     { command: "start", description: "Запустити бота" },
-    { command: "menu",  description: "Показати меню" },
-    { command: "admin", description: "Адмін-меню (керування)" },
+    { command: "menu",  description: "Адмін-меню (керування)" },
     { command: "ping",  description: "Перевірка зв'язку" },
-    { command: "help",  description: "Довідка" },
   ];
-
-  // Скидаємо chat-scope і ставимо нові
-  if (chatId) {
-    try { await tgCall(env, "deleteMyCommands", { scope: { type: "chat", chat_id: chatId } }); } catch (_) {}
-    try { await tgCall(env, "setMyCommands", { commands, scope: { type: "chat", chat_id: chatId } }); } catch (_) {}
-  }
-  // На всяк випадок оновимо і default-scope
-  try { await tgCall(env, "deleteMyCommands", {}); } catch (_) {}
-  try { await tgCall(env, "setMyCommands", { commands }); } catch (_) {}
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commands }),
+    });
+  } catch (_) {}
 }
 
 /**
  * Обробка адмін-команд і кнопок.
  * Повертає:
- *  - { text, keyboard }
- *  - { text, expect: 'backup-url'|'append-checklist', keyboard? }
+ *  - { text, keyboard } — повідомлення + клавіатура
+ *  - { text, expect: 'backup-url'|'append-checklist', keyboard? } — якщо чекаємо наступний крок
  */
 export async function handleAdminCommand(env, chatId, text) {
-  const t = String(text || "").trim();
+  // Нормалізуємо: обрізаємо й до нижнього регістру
+  const raw = String(text || "").trim();
+  const t = raw.toLowerCase();
 
-  // Показати меню
+  // 1) Просто показати меню
   if (wantAdmin(t)) {
     return {
       text:
@@ -63,13 +48,41 @@ export async function handleAdminCommand(env, chatId, text) {
     };
   }
 
-  // Ці кнопки обробляє webhook, тут тільки дефолтні відповіді (UX)
+  // 2) Кнопки з клавіатури (порівнюємо НИЖНІМ РЕГІСТРОМ)
   if (t === "drive ✅" || t === "/gdrive_ping_btn") {
-    return { text: "Перевіряю Drive…", keyboard: adminKeyboard() };
+    try {
+      await drivePing(env);
+      return { text: "🟢 Drive OK", keyboard: adminKeyboard() };
+    } catch (e) {
+      return {
+        text: "🔴 Drive помилка: " + String(e?.message || e),
+        keyboard: adminKeyboard(),
+      };
+    }
   }
 
   if (t === "list 10 🧾" || t === "list 10" || t === "/list10_btn") {
-    return { text: "Збираю останні 10 файлів…", keyboard: adminKeyboard() };
+    try {
+      const list = await driveListLatest(env, 10); // [{name, webViewLink, modifiedTime}]
+      if (!list?.length) {
+        return { text: "Список порожній.", keyboard: adminKeyboard() };
+      }
+      const lines = list.map((f, i) => {
+        const dt = new Date(f.modifiedTime || Date.now());
+        const time = dt.toISOString().replace("T", " ").replace("Z", "");
+        return [
+          `${i + 1}. *${f.name}*`,
+          `🕓 ${time}`,
+          f.webViewLink ? `🔗 ${f.webViewLink}` : "",
+        ].filter(Boolean).join("\n");
+      });
+      return { text: "Останні 10 файлів:\n\n" + lines.join("\n\n"), keyboard: adminKeyboard() };
+    } catch (e) {
+      return {
+        text: "Не вдалося отримати список: " + String(e?.message || e),
+        keyboard: adminKeyboard(),
+      };
+    }
   }
 
   if (t === "backup url ⬆️" || t === "/backup_btn") {
@@ -88,5 +101,6 @@ export async function handleAdminCommand(env, chatId, text) {
     };
   }
 
+  // Якщо не впізнали — повертаємо null, щоб webhook.js проігнорував
   return null;
 }
