@@ -5,29 +5,23 @@ workers_dev = true
 
 [vars]
 TZ = "Europe/Kyiv"
-DRIVE_FOLDER_ID = "1lMcN4cRlYNzOU1D1y5eirq5y1W7by9T-"
-
-# Потрібні для OAuth (заповни у Cloudflare → Settings → Variables/Secrets)
-# В UI вони можуть перекривати значення з файлу — це ок.
+# ЦЕЙ ID МАЄ СПІВПАСТИ З ПАПКОЮ, ЯКУ ТИ ШЕРИШ У DRIVE
+DRIVE_FOLDER_ID = "1McN4cRlYNzOU1D1y5eirq5y1W7by9T-"  # <- твій реальний
 GOOGLE_CLIENT_ID = "740975815203-vbp832vkdqq4c502aip148p1pgkvdobh.apps.googleusercontent.com"
-# GOOGLE_CLIENT_SECRET = "<твій секрет>"   # краще як Secret у Cloudflare
-# WEBHOOK_SECRET = "<твій ключ>"
-
-# Секрет сервісного акаунта (JSON цілком) — як Secret у Cloudflare:
-# GOOGLE_DRIVE_CREDENTIALS = "{ ... }"
+# GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, WEBHOOK_SECRET — класти як Secret у Dashboard
 
 [[kv_namespaces]]
-binding = "STATE_KV"
-id = "7b32e2d1f60846ddb1c653eb52180bf7"   # senti-state
+binding = "STATE_KV"       # для стану/автологу
+id = "7b32e2d1f60846ddb1c653eb52180bf7"
 
 [[kv_namespaces]]
-binding = "DEDUP_KV"
-id = "20d81d7b68fa4ac6b9913e2fbd3465d5"   # senti-dedup
+binding = "DEDUP_KV"       # дедуплікація повідомлень
+id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
 
 [[kv_namespaces]]
-binding = "TODO_KV"
-id = "497eac980691495ea2a0bc8611892d65"   # senti-cache
+binding = "TODO_KV"        # чекліст/кеш
+id = "497eac980691495ea2a0bc8611892d65"
 
 [[kv_namespaces]]
-binding = "OAUTH_KV"
-id = "e2a8d3941b4e41728318781e739a4d47"   # senti_oauth
+binding = "OAUTH_KV"       # якщо колись збережемо токени
+id = "e2a8d3941b4e41728318781e739a4d47"
