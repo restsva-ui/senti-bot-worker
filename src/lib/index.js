@@ -1,3 +1,4 @@
-// Єдина точка імпорту утиліт з /lib
-export * from "./state.js";
-export * from "./keyboard.js";
+// src/lib/index.js
+export { getState, setState, clearState } from "./state.js";
+export { adminKeyboard } from "./keyboard.js";
+export * from "./drive.js"; // за потреби, але не обов'язково
