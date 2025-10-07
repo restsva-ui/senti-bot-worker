@@ -2,26 +2,46 @@ name = "senti-bot-worker"
 main = "src/index.js"
 compatibility_date = "2025-01-10"
 workers_dev = true
+# Якщо використовуєш Node-сумісність (require, Buffer і т.п.) — розкоментуй:
+# compatibility_flags = ["nodejs_compat"]
 
 [vars]
 TZ = "Europe/Kyiv"
-# ЦЕЙ ID МАЄ СПІВПАСТИ З ПАПКОЮ, ЯКУ ТИ ШЕРИШ У DRIVE
-DRIVE_FOLDER_ID = "1McN4cRlYNzOU1D1y5eirq5y1W7by9T-"  # <- твій реальний
+
+# 👉 Папка у Google Drive, куди пишемо лог/чек-лист та файли.
+#    Має бути ТОЧНИЙ ID із адреси Drive після `/folders/`.
+DRIVE_FOLDER_ID = "1McN4cRlYNzOU1D1y5eirq5y1W7by9T-"
+
+# 👉 OAuth клієнт (ID залишаємо у vars, а secret/refresh — тільки як Secrets)
 GOOGLE_CLIENT_ID = "740975815203-vbp832vkdqq4c502aip148p1pgkvdobh.apps.googleusercontent.com"
-# GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, WEBHOOK_SECRET — класти як Secret у Dashboard
 
+# ❗ ЦІ значення ТІЛЬКИ як Secrets у Dashboard / GitHub:
+# GOOGLE_CLIENT_SECRET
+# GOOGLE_REFRESH_TOKEN
+# WEBHOOK_SECRET
+
+# ───────────────────── KV ─────────────────────
+# Можеш лишити ті самі ID і як preview_id, щоб не ламалось у preview.
 [[kv_namespaces]]
-binding = "STATE_KV"       # для стану/автологу
+binding = "STATE_KV"
 id = "7b32e2d1f60846ddb1c653eb52180bf7"
+preview_id = "7b32e2d1f60846ddb1c653eb52180bf7"
 
 [[kv_namespaces]]
-binding = "DEDUP_KV"       # дедуплікація повідомлень
+binding = "DEDUP_KV"
 id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
+preview_id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
 
 [[kv_namespaces]]
-binding = "TODO_KV"        # чекліст/кеш
+binding = "TODO_KV"
 id = "497eac980691495ea2a0bc8611892d65"
+preview_id = "497eac980691495ea2a0bc8611892d65"
 
 [[kv_namespaces]]
-binding = "OAUTH_KV"       # якщо колись збережемо токени
+binding = "OAUTH_KV"
 id = "e2a8d3941b4e41728318781e739a4d47"
+preview_id = "e2a8d3941b4e41728318781e739a4d47"
+
+# ──────────────────── CRON (якщо потрібно) ────────────────────
+# [triggers]
+# crons = ["0 6 * * *"] # приклад: щодня о 06:00 за TZ
