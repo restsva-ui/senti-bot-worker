@@ -1,19 +1,58 @@
 // src/lib/drive.js
 //
-// Працює через OAuth access token у env.GDRIVE_TOKEN
-// і ID цільової папки у env.DRIVE_FOLDER_ID.
+// Підтримує два способи автентифікації:
+// 1) env.GDRIVE_TOKEN — готовий access token (робить як і раніше)
+// 2) env.GOOGLE_REFRESH_TOKEN + GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET —
+//    автоматичний обмін на access token (рекомендовано)
+//
+// Обов'язково: env.DRIVE_FOLDER_ID — ID цільової папки в Drive
 
 const API = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
+const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 
-// ── Utils ─────────────────────────────────────────────────────────────────────
-function assertEnv(env) {
-  if (!env?.GDRIVE_TOKEN) throw new Error("GDRIVE_TOKEN is missing");
-  if (!env?.DRIVE_FOLDER_ID) throw new Error("DRIVE_FOLDER_ID is missing");
+/** Отримати робочий access token */
+async function getAccessToken(env) {
+  // 1) Якщо дали напряму — використовуємо.
+  if (env.GDRIVE_TOKEN && String(env.GDRIVE_TOKEN).trim()) {
+    return env.GDRIVE_TOKEN.trim();
+  }
+
+  // 2) Якщо є рефреш — міняємо на access token.
+  const rt = env.GOOGLE_REFRESH_TOKEN;
+  const cid = env.GOOGLE_CLIENT_ID;
+  const csec = env.GOOGLE_CLIENT_SECRET;
+
+  if (rt && cid && csec) {
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: rt,
+      client_id: cid,
+      client_secret: csec,
+    });
+
+    const res = await fetch(OAUTH_TOKEN_URL, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.access_token) {
+      throw new Error(
+        `OAuth exchange failed: ${res.status} ${res.statusText} ${JSON.stringify(data)}`
+      );
+    }
+    return data.access_token;
+  }
+
+  // 3) Інакше — нічим автентифікуватися
+  throw new Error("GDRIVE_TOKEN is missing (або налаштуйте GOOGLE_REFRESH_TOKEN + CLIENT_ID + CLIENT_SECRET)");
 }
 
-function authHeaders(env) {
-  return { Authorization: `Bearer ${env.GDRIVE_TOKEN}` };
+async function authHeaders(env) {
+  const token = await getAccessToken(env);
+  return { Authorization: `Bearer ${token}` };
 }
 
 async function gjson(res) {
@@ -32,77 +71,63 @@ async function gtext(res) {
   return res.text();
 }
 
-// ── API ───────────────────────────────────────────────────────────────────────
 export async function drivePing(env) {
-  assertEnv(env);
-  const url = `${API}/files?` + new URLSearchParams({
-    q: `'${env.DRIVE_FOLDER_ID}' in parents and trashed=false`,
-    pageSize: "1",
-    fields: "files(id)",
-    spaces: "drive",
-    supportsAllDrives: "true",
-    includeItemsFromAllDrives: "true",
-  }).toString();
-
-  const res = await fetch(url, { headers: authHeaders(env) });
+  if (!env.DRIVE_FOLDER_ID) throw new Error("DRIVE_FOLDER_ID is missing");
+  const headers = await authHeaders(env);
+  const url = `${API}/files?pageSize=1&fields=files(id)&q=${encodeURIComponent(
+    `'${env.DRIVE_FOLDER_ID}' in parents and trashed=false`
+  )}`;
+  const res = await fetch(url, { headers });
   await gjson(res);
   return true;
 }
 
 export async function driveListLatest(env, n = 10) {
-  assertEnv(env);
-  const url = `${API}/files?` + new URLSearchParams({
-    q: `'${env.DRIVE_FOLDER_ID}' in parents and trashed=false`,
-    orderBy: "modifiedTime desc",
-    pageSize: String(n),
-    fields: "files(id,name,webViewLink,modifiedTime,mimeType,owners(emailAddress))",
-    spaces: "drive",
-    supportsAllDrives: "true",
-    includeItemsFromAllDrives: "true",
-  }).toString();
+  if (!env.DRIVE_FOLDER_ID) throw new Error("DRIVE_FOLDER_ID is missing");
+  const headers = await authHeaders(env);
 
-  const res = await fetch(url, { headers: authHeaders(env) });
+  const url =
+    `${API}/files?` +
+    new URLSearchParams({
+      q: `'${env.DRIVE_FOLDER_ID}' in parents and trashed=false`,
+      orderBy: "modifiedTime desc",
+      pageSize: String(n),
+      fields: "files(id,name,webViewLink,modifiedTime)",
+      spaces: "drive",
+      supportsAllDrives: "true",
+      includeItemsFromAllDrives: "true",
+    }).toString();
+
+  const res = await fetch(url, { headers });
   const data = await gjson(res);
   return data.files || [];
 }
 
 async function findByName(env, name) {
-  assertEnv(env);
+  const headers = await authHeaders(env);
   const q = [
     `'${env.DRIVE_FOLDER_ID}' in parents`,
     "trashed=false",
     `name='${String(name).replace(/'/g, "\\'")}'`,
   ].join(" and ");
 
-  const url = `${API}/files?` + new URLSearchParams({
-    q,
-    pageSize: "1",
-    fields: "files(id,name,webViewLink,modifiedTime)",
-    spaces: "drive",
-    supportsAllDrives: "true",
-    includeItemsFromAllDrives: "true",
-  }).toString();
-
-  const res = await fetch(url, { headers: authHeaders(env) });
+  const url = `${API}/files?q=${encodeURIComponent(
+    q
+  )}&fields=files(id,name,webViewLink,modifiedTime)&pageSize=1`;
+  const res = await fetch(url, { headers });
   const data = await gjson(res);
   return (data.files && data.files[0]) || null;
 }
 
 async function getFileContent(env, id) {
-  assertEnv(env);
-  const url = `${API}/files/${id}?alt=media&supportsAllDrives=true`;
-  const res = await fetch(url, { headers: authHeaders(env) });
+  const headers = await authHeaders(env);
+  const url = `${API}/files/${id}?alt=media`;
+  const res = await fetch(url, { headers });
   return await gtext(res);
 }
 
-async function uploadMultipart(env, {
-  id,
-  name,
-  mime = "application/octet-stream",
-  content,
-}) {
-  assertEnv(env);
-
+async function uploadMultipart(env, { id, name, mime = "application/octet-stream", content }) {
+  const headers = await authHeaders(env);
   const boundary = "boundary" + Math.random().toString(16).slice(2);
   const meta = JSON.stringify({
     name,
@@ -134,24 +159,22 @@ async function uploadMultipart(env, {
   const res = await fetch(url, {
     method: id ? "PATCH" : "POST",
     headers: {
-      ...authHeaders(env),
+      ...headers,
       "Content-Type": `multipart/related; boundary=${boundary}`,
     },
     body,
   });
   const data = await gjson(res);
 
-  // Добираємо потрібні поля (upload повертає лише id)
   const infoRes = await fetch(
-    `${API}/files/${data.id}?fields=id,name,webViewLink,modifiedTime&supportsAllDrives=true`,
-    { headers: authHeaders(env) }
+    `${API}/files/${data.id}?fields=id,name,webViewLink,modifiedTime`,
+    { headers }
   );
   return await gjson(infoRes);
 }
 
 /** Додати один рядок у markdown-файл (створить, якщо не існує) */
 export async function driveAppendLog(env, filename, line) {
-  assertEnv(env);
   const safeLine = String(line || "").replace(/\r?\n/g, " ").trim();
   let file = await findByName(env, filename);
 
@@ -177,10 +200,8 @@ export async function driveAppendLog(env, filename, line) {
   return updatedFile;
 }
 
-/** Завантажити файл у Drive із зовнішнього URL. */
+/** Завантажити файл у Drive із зовнішнього URL */
 export async function driveSaveFromUrl(env, url, name = "") {
-  assertEnv(env);
-
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`Завантаження URL: ${resp.status} ${resp.statusText}`);
 
@@ -208,7 +229,5 @@ export async function driveSaveFromUrl(env, url, name = "") {
   return { id: saved.id, name: saved.name, link: saved.webViewLink };
 }
 
-/* === АЛІАС, ЩОБ СТАРИЙ КОД НЕ ПАДАВ === */
-export async function driveList(env, limit = 10) {
-  return await driveListLatest(env, limit);
-}
+/* === АЛІАС ДЛЯ ЗВОРОТНОЇ СУМІСНОСТІ === */
+export const driveList = driveListLatest;
