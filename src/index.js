@@ -1,178 +1,235 @@
 // src/index.js
-// Прості роуты для OAuth і роботи з Drive
+import { drivePing, driveList, saveUrlToDrive, appendToChecklist, getAccessToken } from "./lib/drive.js";
+import { TG } from "./lib/tg.js";
+import { getUserTokens, putUserTokens, userListFiles, userSaveUrl } from "./lib/userDrive.js";
 
-import {
-  getAccessToken,
-  drivePing,
-  listFiles as driveList,
-  saveUrlToDrive,
-  appendToChecklist,
-} from "./lib/drive.js";
+const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8" },
-  });
-}
-
-function html(body, status = 200) {
-  return new Response(
-    `<!doctype html><meta charset="utf-8"><body style="font-family:system-ui,Segoe UI,Arial,sans-serif;padding:16px">${body}</body>`,
-    { status, headers: { "content-type": "text/html; charset=utf-8" } }
-  );
-}
-
-function buildRedirectUri(url) {
-  const u = new URL(url);
-  u.pathname = "/oauth2/callback";
-  u.search = "";
-  u.hash = "";
-  return u.toString();
-}
-
-function buildAuthUrl(env, redirectUri) {
-  const u = new URL("https://accounts.google.com/o/oauth2/v2/auth");
-  u.searchParams.set("client_id", env.GOOGLE_CLIENT_ID);
-  u.searchParams.set("redirect_uri", redirectUri);
-  u.searchParams.set("response_type", "code");
-  u.searchParams.set("scope", "https://www.googleapis.com/auth/drive.file");
-  u.searchParams.set("access_type", "offline");
-  u.searchParams.set("prompt", "consent");
-  u.searchParams.set("include_granted_scopes", "true");
-  return u.toString();
-}
-
-async function exchangeCodeForTokens(env, code, redirectUri) {
-  const body = new URLSearchParams({
-    code,
-    client_id: env.GOOGLE_CLIENT_ID,
-    client_secret: env.GOOGLE_CLIENT_SECRET,
-    redirect_uri: redirectUri,
-    grant_type: "authorization_code",
-  });
-
-  const r = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body,
-  });
-
-  const d = await r.json();
-  if (!r.ok) {
-    throw new Error(`Auth ${r.status}: ${JSON.stringify(d)}`);
-  }
-
-  // збережемо в KV у форматі, який очікує lib/drive.js
-  const expiry = Math.floor(Date.now() / 1000) + (d.expires_in || 3600) - 60;
-  await env.OAUTH_KV.put(
-    "google_oauth",
-    JSON.stringify({
-      access_token: d.access_token,
-      refresh_token: d.refresh_token, // може бути undefined, якщо повторна згода
-      expiry,
-    })
-  );
-
-  return d;
-}
+function html(s){ return new Response(s, {headers:{ "content-type":"text/html; charset=utf-8" }}) }
+function json(o, status=200){ return new Response(JSON.stringify(o,null,2), {status, headers:{ "content-type":"application/json" }}) }
 
 export default {
-  async fetch(request, env) {
+  async fetch(req, env) {
+    const url = new URL(req.url);
+    const p = url.pathname;
+
     try {
-      const url = new URL(request.url);
-      const { pathname, searchParams } = url;
-
-      // --- кореневий пінг
-      if (pathname === "/") {
-        return new Response("Senti Worker Active", { status: 200 });
+      // ---- Health & helpers ----
+      if (p === "/") return html("Senti Worker Active");
+      if (p === "/health") return json({ ok:true, service: env.SERVICE_HOST });
+      if (p === "/tg/get-webhook") {
+        const r = await TG.getWebhook(env.BOT_TOKEN); return new Response(await r.text(), {headers:{'content-type':'application/json'}});
+      }
+      if (p === "/tg/set-webhook") {
+        const target = `https://${env.SERVICE_HOST}/webhook`;
+        const r = await TG.setWebhook(env.BOT_TOKEN, target);
+        return new Response(await r.text(), {headers:{'content-type':'application/json'}});
       }
 
-      // --- старт OAuth
-      if (pathname === "/auth") {
-        const redirectUri = buildRedirectUri(request.url);
-        const authUrl = buildAuthUrl(env, redirectUri);
-        return Response.redirect(authUrl, 302);
-      }
-
-      // --- callback OAuth
-      if (pathname === "/oauth2/callback") {
-        const code = searchParams.get("code");
-        if (!code) return html(`<h3>Немає code</h3>`, 400);
-
-        try {
-          await exchangeCodeForTokens(env, code, buildRedirectUri(request.url));
-        } catch (e) {
-          return html(
-            `<h3>Помилка обміну токена</h3><pre>${String(e)}</pre>`,
-            400
-          );
-        }
-
-        // швидкі лінки
-        const base = `${url.origin}`;
-        return html(
-          `<h2>✅ Редірект працює</h2>
-           <p>Отримали та зберегли токени. Можеш перевірити:</p>
-           <ul>
-             <li><a href="${base}/gdrive/ping">/gdrive/ping</a></li>
-             <li><a href="${base}/gdrive/list">/gdrive/list</a></li>
-           </ul>`
-        );
-      }
-
-      // --- GDrive: ping
-      if (pathname === "/gdrive/ping") {
-        try {
-          const out = await drivePing(env);
-          return json({ ok: true, ...out });
-        } catch (e) {
-          return json({ ok: false, error: String(e) }, 400);
-        }
-      }
-
-      // --- GDrive: list у папці
-      if (pathname === "/gdrive/list") {
+      // ---- Admin Drive quick checks (твій існуючий функціонал) ----
+      if (p === "/gdrive/ping") {
         try {
           const token = await getAccessToken(env);
           const files = await driveList(env, token);
-          return json({ ok: true, ...files });
-        } catch (e) {
-          return json({ ok: false, error: String(e) }, 400);
-        }
+          return json({ ok: true, files: files.files || [] });
+        } catch (e) { return json({ ok:false, error:String(e) }, 500); }
+      }
+      if (p === "/gdrive/save") {
+        const token = await getAccessToken(env);
+        const fileUrl = url.searchParams.get("url");
+        const name = url.searchParams.get("name") || "from_web.md";
+        const file = await saveUrlToDrive(env, token, fileUrl, name);
+        return json({ ok:true, file });
+      }
+      if (p === "/gdrive/checklist") {
+        const token = await getAccessToken(env);
+        const line = url.searchParams.get("line") || `tick ${new Date().toISOString()}`;
+        await appendToChecklist(env, token, line);
+        return json({ ok:true });
       }
 
-      // --- GDrive: зберегти файл із URL
-      if (pathname === "/gdrive/save") {
-        const fileUrl = searchParams.get("url");
-        const name = searchParams.get("name") || "file.bin";
-        if (!fileUrl) return json({ ok: false, error: "Missing ?url=" }, 400);
-        try {
+      // ---- User OAuth (персональний Google Drive) ----
+      if (p === "/auth/start") {
+        const u = url.searchParams.get("u"); // telegram user id
+        const state = btoa(JSON.stringify({ u }));
+        const redirect_uri = `https://${env.SERVICE_HOST}/auth/cb`;
+        const auth = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+        auth.searchParams.set("client_id", env.GOOGLE_CLIENT_ID);
+        auth.searchParams.set("redirect_uri", redirect_uri);
+        auth.searchParams.set("response_type", "code");
+        auth.searchParams.set("access_type", "offline");
+        auth.searchParams.set("prompt", "consent");
+        auth.searchParams.set("scope", "https://www.googleapis.com/auth/drive.file");
+        auth.searchParams.set("state", state);
+        return Response.redirect(auth.toString(), 302);
+      }
+
+      if (p === "/auth/cb") {
+        const state = JSON.parse(atob(url.searchParams.get("state")||"e30="));
+        const code = url.searchParams.get("code");
+        const redirect_uri = `https://${env.SERVICE_HOST}/auth/cb`;
+        const body = new URLSearchParams({
+          code,
+          client_id: env.GOOGLE_CLIENT_ID,
+          client_secret: env.GOOGLE_CLIENT_SECRET,
+          redirect_uri,
+          grant_type: "authorization_code",
+        });
+        const r = await fetch("https://oauth2.googleapis.com/token", {
+          method:"POST",
+          headers:{ "Content-Type":"application/x-www-form-urlencoded" },
+          body,
+        });
+        const d = await r.json();
+        if(!r.ok) return html(`<pre>${JSON.stringify(d,null,2)}</pre>`);
+        const tokens = {
+          access_token: d.access_token,
+          refresh_token: d.refresh_token,
+          expiry: Math.floor(Date.now()/1000) + (d.expires_in||3600) - 60,
+        };
+        await putUserTokens(env, state.u, tokens);
+        return html(`<h3>✅ Редирект працює</h3>
+<p>Отримали та зберегли токени для користувача <b>${state.u}</b>.</p>
+<ul>
+<li><a href="/tg/test?u=${state.u}">/tg/test</a></li>
+<li><a href="/webhook">/webhook</a> (вебхук)</li>
+</ul>`);
+      }
+
+      // ---- Telegram webhook ----
+      if (p === "/webhook" && req.method === "POST") {
+        const update = await req.json();
+        const msg = update.message || update.edited_message || update.channel_post;
+        if (!msg) return json({ok:true});
+
+        const chatId = msg.chat.id;
+        const userId = msg.from?.id;
+        const text = (msg.text || "").trim();
+
+        // командне меню
+        if (text === "/start") {
+          await TG.text(chatId,
+`Привіт! Я Senti 🤖
+Команди:
+• /admin — адмін-меню (тільки для власника)
+• /link_drive — прив'язати мій Google Drive
+• /my_files — мої файли з диску
+• /save_url <url> <name> — зберегти файл за URL до мого диску`, { token: env.BOT_TOKEN });
+          return json({ok:true});
+        }
+
+        if (text === "/admin") {
+          if (!ADMIN(env, userId)) {
+            await TG.text(chatId, "⛔ Лише для адміна.", { token: env.BOT_TOKEN });
+            return json({ok:true});
+          }
+          await TG.text(chatId,
+`Адмін меню:
+• /admin_ping — ping диска
+• /admin_list — список файлів (адмін-диск)
+• /admin_checklist <рядок> — допис у чеклист
+• /admin_setwebhook — виставити вебхук`, { token: env.BOT_TOKEN });
+          return json({ok:true});
+        }
+
+        if (text.startsWith("/admin_ping")) {
+          if (!ADMIN(env, userId)) return json({ok:true});
+          try {
+            const r = await drivePing(env);
+            await TG.text(chatId, `✅ Admin Drive OK. filesCount: ${r.filesCount}`, { token: env.BOT_TOKEN });
+          } catch(e) {
+            await TG.text(chatId, `❌ ${e}`, { token: env.BOT_TOKEN });
+          }
+          return json({ok:true});
+        }
+
+        if (text.startsWith("/admin_list")) {
+          if (!ADMIN(env, userId)) return json({ok:true});
           const token = await getAccessToken(env);
-          const res = await saveUrlToDrive(env, token, fileUrl, name);
-          return json({ ok: true, file: res });
-        } catch (e) {
-          return json({ ok: false, error: String(e) }, 400);
+          const files = await driveList(env, token);
+          const names = (files.files||[]).map(f=>`• ${f.name} (${f.id})`).join("\n") || "порожньо";
+          await TG.text(chatId, `Адмін диск:\n${names}`, { token: env.BOT_TOKEN });
+          return json({ok:true});
         }
-      }
 
-      // --- GDrive: дописати в чекліст
-      if (pathname === "/gdrive/checklist/add") {
-        const line = searchParams.get("line");
-        if (!line) return json({ ok: false, error: "Missing ?line=" }, 400);
-        try {
+        if (text.startsWith("/admin_checklist")) {
+          if (!ADMIN(env, userId)) return json({ok:true});
+          const line = text.replace("/admin_checklist","").trim() || `tick ${new Date().toISOString()}`;
           const token = await getAccessToken(env);
           await appendToChecklist(env, token, line);
-          return json({ ok: true });
-        } catch (e) {
-          return json({ ok: false, error: String(e) }, 400);
+          await TG.text(chatId, `✅ Додано: ${line}`, { token: env.BOT_TOKEN });
+          return json({ok:true});
         }
+
+        if (text.startsWith("/admin_setwebhook")) {
+          if (!ADMIN(env, userId)) return json({ok:true});
+          const target = `https://${env.SERVICE_HOST}/webhook`;
+          await TG.setWebhook(env.BOT_TOKEN, target);
+          await TG.text(chatId, `✅ Вебхук → ${target}`, { token: env.BOT_TOKEN });
+          return json({ok:true});
+        }
+
+        // ---- user drive commands ----
+        if (text === "/link_drive") {
+          const authUrl = `https://${env.SERVICE_HOST}/auth/start?u=${userId}`;
+          await TG.text(chatId, `Перейди за посиланням і дозволь доступ до свого Google Drive (режим *drive.file*):\n${authUrl}`, { token: env.BOT_TOKEN });
+          return json({ok:true});
+        }
+
+        if (text === "/unlink_drive") {
+          await putUserTokens(env, userId, null); // перезапишемо null
+          await TG.text(chatId, `Гаразд, зв'язок із твоїм диском скинуто.`, { token: env.BOT_TOKEN });
+          return json({ok:true});
+        }
+
+        if (text === "/my_files") {
+          try {
+            const files = await userListFiles(env, userId);
+            const names = (files.files||[]).map(f=>`• ${f.name}`).join("\n") || "порожньо";
+            await TG.text(chatId, `Твої файли:\n${names}`, { token: env.BOT_TOKEN });
+          } catch(e) {
+            const msgErr = String(e).includes("not_linked")
+              ? "Спочатку /link_drive"
+              : `Помилка: ${e}`;
+            await TG.text(chatId, msgErr, { token: env.BOT_TOKEN });
+          }
+          return json({ok:true});
+        }
+
+        if (text.startsWith("/save_url")) {
+          const parts = text.split(/\s+/);
+          const fileUrl = parts[1];
+          const name = parts.slice(2).join(" ") || "from_telegram.bin";
+          if(!fileUrl){
+            await TG.text(chatId, "Використання: /save_url <url> <опц.назва>", { token: env.BOT_TOKEN });
+            return json({ok:true});
+          }
+          try{
+            const f = await userSaveUrl(env, userId, fileUrl, name);
+            await TG.text(chatId, `✅ Збережено: ${f.name}`, { token: env.BOT_TOKEN });
+          }catch(e){
+            const msgErr = String(e).includes("not_linked")
+              ? "Спочатку /link_drive"
+              : `Помилка: ${e}`;
+            await TG.text(chatId, msgErr, { token: env.BOT_TOKEN });
+          }
+          return json({ok:true});
+        }
+
+        // echo на інші
+        return json({ok:true});
       }
 
-      // якщо нічого не підходить
-      return json({ ok: false, error: "Not found" }, 404);
-    } catch (err) {
-      return json({ ok: false, error: String(err) }, 500);
+      // ---- test TG send after OAuth ----
+      if (p === "/tg/test") {
+        const u = url.searchParams.get("u");
+        await TG.text(u, "Senti тут. Все працює ✅", { token: env.BOT_TOKEN });
+        return json({ ok:true });
+      }
+
+      return json({ ok:false, error:"Not found" }, 404);
+    } catch (e) {
+      return json({ ok:false, error:String(e) }, 500);
     }
-  },
+  }
 };
