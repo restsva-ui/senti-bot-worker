@@ -13,8 +13,8 @@ TELEGRAM_ADMIN_ID = "123456789"                          # твій user_id у T
 
 [[kv_namespaces]]
 binding = "OAUTH_KV"         # адмінські токени (як було)
-id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+id = "e2a8d3941b4e41728318781e739a4d47"
 
 [[kv_namespaces]]
 binding = "USER_OAUTH_KV"    # токени користувачів
-id = "b8fbae4a0f3944179d1d95c83ff3596"
+id = "b8fbae4a0f3944179d1d95c83ff35996"
