@@ -1,20 +1,33 @@
 name = "senti-bot-worker"
 main = "src/index.js"
-compatibility_date = "2024-09-10"
+compatibility_date = "2025-01-10"
 workers_dev = true
 
 [vars]
-SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"   # твій актуальний воркер-домен
-DRIVE_FOLDER_ID = "root"                                 # або твій id
-TELEGRAM_ADMIN_ID = "123456789"                          # твій user_id у TG
+TZ = "Europe/Kyiv"
+DRIVE_FOLDER_ID = "1lMcN4cRlYNzOU1D1y5eirq5y1W7by9T-"
 
-# ці секрети додати через dashboard або `wrangler secret put`
-# BOT_TOKEN, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+# Потрібні для OAuth (заповни у Cloudflare → Settings → Variables/Secrets)
+# В UI вони можуть перекривати значення з файлу — це ок.
+GOOGLE_CLIENT_ID = "740975815203-vbp832vkdqq4c502aip148p1pgkvdobh.apps.googleusercontent.com"
+# GOOGLE_CLIENT_SECRET = "<твій секрет>"   # краще як Secret у Cloudflare
+# WEBHOOK_SECRET = "<твій ключ>"
+
+# Секрет сервісного акаунта (JSON цілком) — як Secret у Cloudflare:
+# GOOGLE_DRIVE_CREDENTIALS = "{ ... }"
 
 [[kv_namespaces]]
-binding = "OAUTH_KV"         # адмінські токени (як було)
-id = "e2a8d3941b4e41728318781e739a4d47"
+binding = "STATE_KV"
+id = "7b32e2d1f60846ddb1c653eb52180bf7"   # senti-state
 
 [[kv_namespaces]]
-binding = "USER_OAUTH_KV"    # токени користувачів
-id = "b8fbae4a0f3944179d1d95c83ff35996"
+binding = "DEDUP_KV"
+id = "20d81d7b68fa4ac6b9913e2fbd3465d5"   # senti-dedup
+
+[[kv_namespaces]]
+binding = "TODO_KV"
+id = "497eac980691495ea2a0bc8611892d65"   # senti-cache
+
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "e2a8d3941b4e41728318781e739a4d47"   # senti_oauth
