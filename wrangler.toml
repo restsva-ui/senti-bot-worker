@@ -1,27 +1,20 @@
 name = "senti-bot-worker"
 main = "src/index.js"
-compatibility_date = "2025-01-10"
+compatibility_date = "2024-09-10"
 workers_dev = true
 
 [vars]
-TZ = "Europe/Kyiv"
-# ЦЕЙ ID МАЄ СПІВПАСТИ З ПАПКОЮ, ЯКУ ТИ ШЕРИШ У DRIVE
-DRIVE_FOLDER_ID = "1XJfSyyT2EwP6QisaOjhsnmqGC2wSFhvp"
-GOOGLE_CLIENT_ID = "740975815203-vbp832vkdqq4c502aip148p1pgkvdobh.apps.googleusercontent.com"
-# GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, WEBHOOK_SECRET — класти як Secrets у Dashboard
+SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"   # твій актуальний воркер-домен
+DRIVE_FOLDER_ID = "root"                                 # або твій id
+TELEGRAM_ADMIN_ID = "123456789"                          # твій user_id у TG
+
+# ці секрети додати через dashboard або `wrangler secret put`
+# BOT_TOKEN, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
 
 [[kv_namespaces]]
-binding = "STATE_KV"       # для стану/автологу
-id = "7b32e2d1f60846ddb1c653eb52180bf7"
+binding = "OAUTH_KV"         # адмінські токени (як було)
+id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 [[kv_namespaces]]
-binding = "DEDUP_KV"       # дедуплікація повідомлень
-id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
-
-[[kv_namespaces]]
-binding = "TODO_KV"        # чекліст/кеш
-id = "497eac980691495ea2a0bc8611892d65"
-
-[[kv_namespaces]]
-binding = "OAUTH_KV"       # СХОВИЩЕ ДЛЯ OAUTH-ТОКЕНІВ (обов’язково!)
-id = "e2a8d3941b4e41728318781e739a4d47"
+binding = "USER_OAUTH_KV"    # токени користувачів
+id = "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
