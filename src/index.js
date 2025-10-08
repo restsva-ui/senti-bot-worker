@@ -69,7 +69,7 @@ async function handleIncomingMedia(env, chatId, userId, msg){
 
   const ut = await getUserTokens(env, userId);
   if (!ut?.refresh_token) {
-    await TG.text(chatId, "Щоб зберігати у свій Google Drive — спочатку зроби /user → /link_drive", { token: env.BOT_TOKEN });
+    await TG.text(chatId, "Щоб зберігати у свій Google Drive — спочатку зроби /link_drive", { token: env.BOT_TOKEN });
     return true;
   }
 
@@ -79,42 +79,29 @@ async function handleIncomingMedia(env, chatId, userId, msg){
   return true;
 }
 
-// ---------------- Menu presets ----------------
-function userMenuKeyboard(){
-  return {
-    keyboard: [
-      [{text:"/link_drive"},{text:"/my_files"}],
-      [{text:"/drive_on"},{text:"/drive_off"}],
-      [{text:"/save"}],
-      [{text:"/ping"}],
-    ],
-    resize_keyboard: true
-  };
-}
-function adminMenuKeyboard(){
-  return {
-    keyboard: [
-      [{text:"/admin_ping"},{text:"/admin_list"}],
-      [{text:"/admin_checklist tick"},{text:"/admin_refreshcheck"}],
-      [{text:"/admin_setwebhook"}],
-      [{text:"/user"}]
-    ],
-    resize_keyboard: true
-  };
-}
-
 // ---------------- Commands installers ----------------
 async function installCommands(env){
-  // 1) Глобальні (дефолтні) — показуємо лише /user (щоб не засмічувати меню)
+  // Мінімальний набір для всіх користувачів
   await TG.setCommands(env.BOT_TOKEN, { type:"default" }, [
-    { command: "user", description: "Відкрити меню користувача" },
+    { command: "start",      description: "Запустити бота" },
+    { command: "link_drive", description: "Прив'язати мій Google Drive" },
+    { command: "my_files",   description: "Показати мої файли з диску" },
   ]);
 
-  // 2) Персонально для адміна — тільки /admin (видно лише тобі, в твоєму приватному чаті)
+  // Персонально для адміна: показати лише /admin
   if (!env.TELEGRAM_ADMIN_ID) throw new Error("TELEGRAM_ADMIN_ID not set");
   await TG.setCommands(env.BOT_TOKEN, { type:"chat", chat_id: Number(env.TELEGRAM_ADMIN_ID) }, [
     { command: "admin", description: "Відкрити адмін-меню" },
   ]);
+}
+
+async function clearCommands(env){
+  // Прибрати всі глобальні команди
+  await TG.setCommands(env.BOT_TOKEN, { type:"default" }, []);
+  // Прибрати персональні для адміна
+  if (env.TELEGRAM_ADMIN_ID) {
+    await TG.setCommands(env.BOT_TOKEN, { type:"chat", chat_id: Number(env.TELEGRAM_ADMIN_ID) }, []);
+  }
 }
 
 export default {
@@ -132,22 +119,24 @@ export default {
         const r = await TG.getWebhook(env.BOT_TOKEN);
         return new Response(await r.text(), {headers:{'content-type':'application/json'}});
       }
-
       if (p === "/tg/set-webhook") {
         const target = `https://${env.SERVICE_HOST}/webhook`;
         const r = await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
         return new Response(await r.text(), {headers:{'content-type':'application/json'}});
       }
-
       if (p === "/tg/del-webhook") {
         const r = await TG.deleteWebhook?.(env.BOT_TOKEN) || await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteWebhook`);
         return new Response(await r.text(), {headers:{'content-type':'application/json'}});
       }
 
-      // NEW: інсталяція команд
+      // NEW: керування підказками команд
       if (p === "/tg/install-commands") {
         await installCommands(env);
         return json({ ok:true, installed:true });
+      }
+      if (p === "/tg/clear-commands") {
+        await clearCommands(env);
+        return json({ ok:true, cleared:true });
       }
 
       // ---- Admin Drive quick checks ----
@@ -158,7 +147,6 @@ export default {
           return json({ ok: true, files: files.files || [] });
         } catch (e) { return json({ ok:false, error:String(e) }, 500); }
       }
-
       if (p === "/gdrive/save") {
         const token = await getAccessToken(env);
         const fileUrl = url.searchParams.get("url");
@@ -166,7 +154,6 @@ export default {
         const file = await saveUrlToDrive(env, token, fileUrl, name);
         return json({ ok:true, file });
       }
-
       if (p === "/gdrive/checklist") {
         const token = await getAccessToken(env);
         const line = url.searchParams.get("line") || `tick ${new Date().toISOString()}`;
@@ -189,7 +176,6 @@ export default {
         auth.searchParams.set("state", state);
         return Response.redirect(auth.toString(), 302);
       }
-
       if (p === "/auth/cb") {
         const state = JSON.parse(atob(url.searchParams.get("state")||"e30="));
         const code = url.searchParams.get("code");
@@ -223,13 +209,10 @@ export default {
       }
 
       // ---- Telegram webhook ----
-
-      // GET /webhook — швидкий ping
       if (p === "/webhook" && req.method !== "POST") {
         return json({ ok:true, note:"webhook alive (GET)" });
       }
 
-      // POST /webhook — прийом апдейтів (із перевіркою секрету, якщо заданий)
       if (p === "/webhook" && req.method === "POST") {
         const sec = req.headers.get("x-telegram-bot-api-secret-token");
         if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
@@ -268,29 +251,19 @@ export default {
         if (text === "/start") {
           await safe(async () => {
             const isAdmin = ADMIN(env, userId);
-            const base = "Привіт! Я Senti 🤖\n\nДоступні меню:\n• /user — меню користувача";
-            const tail = isAdmin ? "\n• /admin — адмін-меню (видно тільки власнику)" : "";
-            await TG.text(chatId, base + tail, { token: env.BOT_TOKEN });
-          });
-          return json({ok:true});
-        }
+            const base =
+`Привіт! Я Senti 🤖
 
-        if (text === "/user") {
-          await safe(async () => {
-            await TG.text(
-              chatId,
-              `👤 Користувацьке меню
-
+Команди:
 • /link_drive — прив'язати мій Google Drive
 • /my_files — мої файли з диску
 • /save_url <url> <name> — зберегти файл з URL у мій диск
-• /drive_on — автозбереження медіа (1 год)
-• /drive_off — вимкнути автозбереження
-• /save — відповісти на медіа, щоб зберегти саме його
-• /drive_status — стан режиму
-• /ping — перевірити, що бот живий`,
-              { token: env.BOT_TOKEN, reply_markup: userMenuKeyboard() }
-            );
+• /ping — перевірити, що бот живий`;
+            const tail = isAdmin ? `
+
+Адмін:
+• /admin — адмін-меню (видно лише власнику)` : "";
+            await TG.text(chatId, base + tail, { token: env.BOT_TOKEN });
           });
           return json({ok:true});
         }
@@ -303,14 +276,14 @@ export default {
             }
             await TG.text(
               chatId,
-              `🛠 Адмін-меню
+`🛠 Адмін-меню
 
 • /admin_ping — ping адмін-диска
 • /admin_list — список файлів (адмін-диск)
 • /admin_checklist <рядок> — допис у чеклист
 • /admin_setwebhook — виставити вебхук
 • /admin_refreshcheck — ручний рефреш`,
-              { token: env.BOT_TOKEN, reply_markup: adminMenuKeyboard() }
+              { token: env.BOT_TOKEN }
             );
           });
           return json({ok:true});
