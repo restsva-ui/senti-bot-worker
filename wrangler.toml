@@ -21,7 +21,7 @@ id = "497eac980691495ea2a0bc8611892d65"
 
 [[kv_namespaces]]
 binding = "USER_OAUTH_KV"
-id = "b8fbae4a0f3944179d195c83ff955996"
+id = "470d4f5c164a4a828c569eb9a52a5133"  # <-- встав новий ID
 
 [vars]
 SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
