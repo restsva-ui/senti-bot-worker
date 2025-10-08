@@ -6,7 +6,7 @@ workers_dev = true
 [vars]
 TZ = "Europe/Kyiv"
 # ЦЕЙ ID МАЄ СПІВПАСТИ З ПАПКОЮ, ЯКУ ТИ ШЕРИШ У DRIVE
-DRIVE_FOLDER_ID = "1McN4cRlYNzOU1D1y5eirq5y1W7by9T-"
+DRIVE_FOLDER_ID = "1XJfSyyT2EwP6QisaOjhsnmqGC2wSFhvp"
 GOOGLE_CLIENT_ID = "740975815203-vbp832vkdqq4c502aip148p1pgkvdobh.apps.googleusercontent.com"
 # GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, WEBHOOK_SECRET — класти як Secrets у Dashboard
 
