@@ -1,5 +1,5 @@
 // src/lib/drive.js
-// Повна версія з фіксом папки, більш явними помилками і підтримкою старих імпортів
+// Повна стабільна версія з фіксом ENV refresh, адмін-режимом без кешу, сумісністю та безпечними помилками.
 
 const DRIVE_API = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
@@ -33,17 +33,46 @@ async function writeKvTokens(env, data) {
   await kv.put(OAUTH_KEY, JSON.stringify(data));
 }
 
+// ---------- Отримання access_token ----------
 export async function getAccessToken(env) {
+  // Спробуємо кеш
   const kv = await readKvTokens(env);
   if (kv?.access_token && kv.expiry > nowSec() + 10) return kv.access_token;
 
+  // Якщо є refresh у KV
   if (kv?.refresh_token) {
     const next = await refreshAccessToken(env, kv.refresh_token);
     await writeKvTokens(env, next);
     return next.access_token;
   }
 
+  // Якщо ні — fallback на ENV refresh
+  if (env.GOOGLE_REFRESH_TOKEN) {
+    const next = await refreshAccessToken(env, env.GOOGLE_REFRESH_TOKEN);
+    await writeKvTokens(env, next);
+    return next.access_token;
+  }
+
   throw new Error("Google Drive auth missing — пройди авторизацію /auth");
+}
+
+// ---------- Прямий refresh без кешу ----------
+export async function directAdminAccessToken(env) {
+  const body = new URLSearchParams({
+    client_id: env.GOOGLE_CLIENT_ID,
+    client_secret: env.GOOGLE_CLIENT_SECRET,
+    refresh_token: env.GOOGLE_REFRESH_TOKEN,
+    grant_type: "refresh_token",
+  });
+  const r = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  const d = await r.json();
+  if (!r.ok || !d.access_token)
+    throw new Error(`Admin refresh ${r.status}: ${JSON.stringify(d)}`);
+  return d.access_token;
 }
 
 async function refreshAccessToken(env, refreshToken) {
@@ -63,11 +92,11 @@ async function refreshAccessToken(env, refreshToken) {
   return {
     access_token: d.access_token,
     refresh_token,
-    expiry: Math.floor(Date.now()/1000) + (d.expires_in || 3600) - 60,
+    expiry: Math.floor(Date.now() / 1000) + (d.expires_in || 3600) - 60,
   };
 }
 
-// ---------- Фікс вибору папки ----------
+// ---------- Вибір папки ----------
 function getFolderId(env) {
   const raw = (env.DRIVE_FOLDER_ID || "").trim();
   if (raw && raw !== "." && raw.toLowerCase() !== "root") return raw;
@@ -81,7 +110,10 @@ export async function listFiles(env, token) {
   url.searchParams.set("q", `'${fid}' in parents and trashed=false`);
   url.searchParams.set("fields", "files(id,name,modifiedTime)");
   const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!r.ok) throw new Error(`List ${r.status}`);
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`List ${r.status}: ${t}`);
+  }
   return r.json();
 }
 
@@ -101,7 +133,10 @@ export async function appendToChecklist(env, token, line) {
     },
     body,
   });
-  if (!r.ok) throw new Error(`Update ${r.status}`);
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`Update ${r.status}: ${t}`);
+  }
   return true;
 }
 
@@ -124,7 +159,7 @@ export async function ensureChecklist(env, token) {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
-      "Content-Type": "multipart/related; boundary=x"
+      "Content-Type": "multipart/related; boundary=x",
     },
     body,
   });
@@ -149,7 +184,7 @@ export async function saveUrlToDrive(env, token, fileUrl, name) {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
-      "Content-Type": "multipart/related; boundary=x"
+      "Content-Type": "multipart/related; boundary=x",
     },
     body: full,
   });
@@ -158,13 +193,18 @@ export async function saveUrlToDrive(env, token, fileUrl, name) {
   return j;
 }
 
-// ---------- Старі alias-експорти для сумісності ----------
-export async function drivePing(env) {
-  const token = await getAccessToken(env);
+// ---------- Старі alias-експорти ----------
+export async function drivePing(env, tokenOpt) {
+  const token = tokenOpt || (await getAccessToken(env));
   const files = await listFiles(env, token);
   return { ok: true, filesCount: files.files?.length || 0 };
 }
-export const driveList = listFiles;
+
+export async function driveList(env, tokenOpt) {
+  const token = tokenOpt || (await getAccessToken(env));
+  return listFiles(env, token);
+}
+
 export const driveListLatest = listFiles;
 export const driveSaveFromUrl = saveUrlToDrive;
 export const driveAppendLog = appendToChecklist;
