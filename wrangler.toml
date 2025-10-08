@@ -1,41 +1,40 @@
 name = "senti-bot-worker"
-main = "index.js"
+main = "src/index.js"          # <-- тут твій фактичний index
 compatibility_date = "2024-10-01"
 workers_dev = true
 
 [vars]
+# твій робочий хост воркера
 SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
-DRIVE_FOLDER_ID = "root"            # або конкретний ID папки
-TELEGRAM_ADMIN_ID = "784869835"     # твій Telegram ID
 
-# ---------- KV bindings ----------
+# папка Google Drive для "адмінки"
+DRIVE_FOLDER_ID = "1XJfSyyT2EwP6QisaOjhsnmqGC2wSFhvp"
 
-# 1️⃣ Дедуплікація повідомлень
+# твій Telegram id (з userinfobot)
+TELEGRAM_ADMIN_ID = "784869835"
+
+# ---------------- KV bindings ----------------
+# dedup / анти-спам і кеш подій
 [[kv_namespaces]]
 binding = "DEDUP_KV"
-id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
-preview_id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
+id = "20d81d7b68fa4ac6b9913e2fbd3465d5"        # senti-dedup
 
-# 2️⃣ OAuth (адмінський, ботівський)
+# токен Senti (адмінський GDrive OAuth)
 [[kv_namespaces]]
 binding = "OAUTH_KV"
-id = "e2a8d3941b4e41728318781e739a4d47"
-preview_id = "e2a8d3941b4e41728318781e739a4d47"
+id = "e2a8d3941b4e41728318781e739a4d47"        # senti_oauth
 
-# 3️⃣ Стан/автолог/сесії
+# стан діалогів / техничні стейти
 [[kv_namespaces]]
 binding = "STATE_KV"
-id = "7b32e2d1f60846ddb1c653eb52180bf7"
-preview_id = "7b32e2d1f60846ddb1c653eb52180bf7"
+id = "7b32e2d1f60846ddb1c653eb52180bf7"        # senti-state
 
-# 4️⃣ TODO/кеш/чекліст
+# todo/чекліст/кеш бота
 [[kv_namespaces]]
 binding = "TODO_KV"
-id = "497eac980691495ea2a0bc8611892d65"
-preview_id = "497eac980691495ea2a0bc8611892d65"
+id = "497eac980691495ea2a0bc8611892d65"        # senti-cache
 
-# 5️⃣ OAuth користувачів (USER)
+# користувацькі підключення Google Drive (окремо від адмінського)
 [[kv_namespaces]]
 binding = "USER_OAUTH_KV"
-id = "b8fbae4a0f3944179fd95c83ff955996"
-preview_id = "b8fbae4a0f3944179fd95c83ff955996"
+id = "b8fbae4a0f3944179fd95c83ff955996"        # senti-user-oauth-kv
