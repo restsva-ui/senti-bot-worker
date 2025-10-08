@@ -17,4 +17,4 @@ id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 [[kv_namespaces]]
 binding = "USER_OAUTH_KV"    # токени користувачів
-id = "b8fbae4a0f3944179d1d95c83ff35996"
+id = "b8fbae4a0f3944179d1d95c83ff3596"
