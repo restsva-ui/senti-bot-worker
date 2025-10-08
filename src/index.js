@@ -16,8 +16,7 @@ function ensureState(env) {
 }
 async function setDriveMode(env, userId, on) {
   const kv = ensureState(env);
-  // TTL 1h, щоб режим не «зависав» назавжди
-  await kv.put(DRIVE_MODE_KEY(userId), on ? "1" : "0", { expirationTtl: 3600 });
+  await kv.put(DRIVE_MODE_KEY(userId), on ? "1" : "0", { expirationTtl: 3600 }); // TTL 1h
 }
 async function getDriveMode(env, userId) {
   const kv = ensureState(env);
@@ -29,11 +28,9 @@ async function getDriveMode(env, userId) {
 function pickPhoto(msg){
   const arr = msg.photo;
   if (!Array.isArray(arr) || !arr.length) return null;
-  // беремо найбільше фото
   const ph = arr[arr.length - 1];
   return { type:"photo", file_id: ph.file_id, name: `photo_${ph.file_unique_id}.jpg` };
 }
-
 function detectAttachment(msg){
   if (!msg) return null;
   if (msg.document) {
@@ -60,30 +57,19 @@ function detectAttachment(msg){
   if (ph) return ph;
   return null;
 }
-
 async function tgFileUrl(env, file_id){
-  // getFile (POST JSON) → result.file_path
   const d = await TG.api(env.BOT_TOKEN, "getFile", { file_id });
   const path = d?.result?.file_path;
   if (!path) throw new Error("getFile: file_path missing");
   return `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${path}`;
 }
-
-/**
- * handleIncomingMedia:
- *  - знаходить вкладення у повідомленні
- *  - дістає direct URL з Telegram File API
- *  - зберігає у персональний Drive користувача (через userSaveUrl)
- * Повертає true, якщо щось було оброблено.
- */
 async function handleIncomingMedia(env, chatId, userId, msg){
   const att = detectAttachment(msg);
   if (!att) return false;
 
-  // Перевіримо, що юзер підв’язав свій диск
   const ut = await getUserTokens(env, userId);
   if (!ut?.refresh_token) {
-    await TG.text(chatId, "Щоб зберігати у свій Google Drive — спочатку зроби /link_drive", { token: env.BOT_TOKEN });
+    await TG.text(chatId, "Щоб зберігати у свій Google Drive — спочатку зроби /user → /link_drive", { token: env.BOT_TOKEN });
     return true;
   }
 
@@ -91,6 +77,44 @@ async function handleIncomingMedia(env, chatId, userId, msg){
   const saved = await userSaveUrl(env, userId, url, att.name);
   await TG.text(chatId, `✅ Збережено на твоєму диску: ${saved.name}`, { token: env.BOT_TOKEN });
   return true;
+}
+
+// ---------------- Menu presets ----------------
+function userMenuKeyboard(){
+  return {
+    keyboard: [
+      [{text:"/link_drive"},{text:"/my_files"}],
+      [{text:"/drive_on"},{text:"/drive_off"}],
+      [{text:"/save"}],
+      [{text:"/ping"}],
+    ],
+    resize_keyboard: true
+  };
+}
+function adminMenuKeyboard(){
+  return {
+    keyboard: [
+      [{text:"/admin_ping"},{text:"/admin_list"}],
+      [{text:"/admin_checklist tick"},{text:"/admin_refreshcheck"}],
+      [{text:"/admin_setwebhook"}],
+      [{text:"/user"}]
+    ],
+    resize_keyboard: true
+  };
+}
+
+// ---------------- Commands installers ----------------
+async function installCommands(env){
+  // 1) Глобальні (дефолтні) — показуємо лише /user (щоб не засмічувати меню)
+  await TG.setCommands(env.BOT_TOKEN, { type:"default" }, [
+    { command: "user", description: "Відкрити меню користувача" },
+  ]);
+
+  // 2) Персонально для адміна — тільки /admin (видно лише тобі, в твоєму приватному чаті)
+  if (!env.TELEGRAM_ADMIN_ID) throw new Error("TELEGRAM_ADMIN_ID not set");
+  await TG.setCommands(env.BOT_TOKEN, { type:"chat", chat_id: Number(env.TELEGRAM_ADMIN_ID) }, [
+    { command: "admin", description: "Відкрити адмін-меню" },
+  ]);
 }
 
 export default {
@@ -118,6 +142,12 @@ export default {
       if (p === "/tg/del-webhook") {
         const r = await TG.deleteWebhook?.(env.BOT_TOKEN) || await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteWebhook`);
         return new Response(await r.text(), {headers:{'content-type':'application/json'}});
+      }
+
+      // NEW: інсталяція команд
+      if (p === "/tg/install-commands") {
+        await installCommands(env);
+        return json({ ok:true, installed:true });
       }
 
       // ---- Admin Drive quick checks ----
@@ -230,36 +260,36 @@ export default {
           try { await fn(); }
           catch (e) {
             console.log("Handler error:", e);
-            try {
-              await TG.text(chatId, `❌ Помилка: ${String(e)}`, { token: env.BOT_TOKEN });
-            } catch (e2) {
-              console.log("Send error:", e2);
-            }
+            try { await TG.text(chatId, `❌ Помилка: ${String(e)}`, { token: env.BOT_TOKEN }); } catch {}
           }
         };
 
-        // ---- Команди ----
+        // ---------------- TOP-LEVEL MENUS ----------------
         if (text === "/start") {
           await safe(async () => {
-            await TG.text(chatId,
-`Привіт! Я Senti 🤖
-Команди:
-• /admin — адмін-меню (тільки для власника)
+            const isAdmin = ADMIN(env, userId);
+            const base = "Привіт! Я Senti 🤖\n\nДоступні меню:\n• /user — меню користувача";
+            const tail = isAdmin ? "\n• /admin — адмін-меню (видно тільки власнику)" : "";
+            await TG.text(chatId, base + tail, { token: env.BOT_TOKEN });
+          });
+          return json({ok:true});
+        }
+
+        if (text === "/user") {
+          await safe(async () => {
+            await TG.text(
+              chatId,
+              `👤 Користувацьке меню
+
 • /link_drive — прив'язати мій Google Drive
 • /my_files — мої файли з диску
-• /save_url <url> <name> — зберегти файл за URL до мого диску
-• /drive_debug — діагностика OAuth
-• /ping — перевірити, що бот живий
-• /drive_on — увімкнути режим диска (автозбереження медіа)
-• /drive_off — вимкнути режим диска
-• /save — зберегти лише повідомлення, на яке відповідаєш`,
-              {
-                token: env.BOT_TOKEN,
-                reply_markup: {
-                  keyboard: [[{text:"/drive_on"},{text:"/drive_off"}],[{text:"/my_files"},{text:"/save"}]],
-                  resize_keyboard: true
-                }
-              }
+• /save_url <url> <name> — зберегти файл з URL у мій диск
+• /drive_on — автозбереження медіа (1 год)
+• /drive_off — вимкнути автозбереження
+• /save — відповісти на медіа, щоб зберегти саме його
+• /drive_status — стан режиму
+• /ping — перевірити, що бот живий`,
+              { token: env.BOT_TOKEN, reply_markup: userMenuKeyboard() }
             );
           });
           return json({ok:true});
@@ -271,17 +301,22 @@ export default {
               await TG.text(chatId, "⛔ Лише для адміна.", { token: env.BOT_TOKEN });
               return;
             }
-            await TG.text(chatId,
-`Адмін меню:
-• /admin_ping — ping диска
+            await TG.text(
+              chatId,
+              `🛠 Адмін-меню
+
+• /admin_ping — ping адмін-диска
 • /admin_list — список файлів (адмін-диск)
 • /admin_checklist <рядок> — допис у чеклист
 • /admin_setwebhook — виставити вебхук
-• /admin_refreshcheck — ручний рефреш та перевірка`, { token: env.BOT_TOKEN });
+• /admin_refreshcheck — ручний рефреш`,
+              { token: env.BOT_TOKEN, reply_markup: adminMenuKeyboard() }
+            );
           });
           return json({ok:true});
         }
 
+        // ---------------- ADMIN CMDS ----------------
         if (text.startsWith("/admin_ping")) {
           await safe(async () => {
             if (!ADMIN(env, userId)) return;
@@ -294,29 +329,21 @@ export default {
         if (text.startsWith("/admin_list")) {
           await safe(async () => {
             if (!ADMIN(env, userId)) return;
-
             const once = async () => {
               const token = await getAccessToken(env);
               const files = await driveList(env, token);
               const arr = files.files || [];
-              if (!arr.length) {
-                await TG.text(chatId, "📁 Диск порожній.", { token: env.BOT_TOKEN });
-              } else {
-                let msgOut = "Адмін диск:\n";
-                msgOut += arr.map(f => `• ${f.name} (${f.id})`).join("\n");
-                await TG.text(chatId, msgOut, { token: env.BOT_TOKEN });
-              }
-              try {
-                await appendToChecklist(env, token, `admin_list OK ${new Date().toISOString()}`);
-              } catch (e) { console.log("Checklist write failed (admin_list):", e); }
+              const msgOut = arr.length
+                ? "Адмін диск:\n" + arr.map(f => `• ${f.name} (${f.id})`).join("\n")
+                : "📁 Диск порожній.";
+              await TG.text(chatId, msgOut, { token: env.BOT_TOKEN });
+              try { await appendToChecklist(env, token, `admin_list OK ${new Date().toISOString()}`); } catch {}
             };
-
             try { await once(); }
             catch (e) {
               const s = String(e || "");
-              if (s.includes("invalid_grant") || s.includes("Refresh 400")) {
-                try { await once(); } catch (e2) { throw e2; }
-              } else { throw e; }
+              if (s.includes("invalid_grant") || s.includes("Refresh 400")) { await once(); }
+              else throw e;
             }
           });
           return json({ok:true});
@@ -356,7 +383,7 @@ export default {
           return json({ok:true});
         }
 
-        // ---- user drive commands ----
+        // ---------------- USER CMDS ----------------
         if (text === "/link_drive") {
           await safe(async () => {
             const authUrl = `https://${env.SERVICE_HOST}/auth/start?u=${userId}`;
@@ -390,7 +417,6 @@ export default {
           return json({ok:true});
         }
 
-        // ---- NEW: user drive mode commands ----
         if (text === "/drive_on") {
           await safe(async () => {
             await setDriveMode(env, userId, true);
@@ -439,7 +465,6 @@ export default {
           return json({ok:true});
         }
 
-        // NEW: разове збереження за reply
         if (text === "/save") {
           await safe(async () => {
             const reply = msg.reply_to_message;
@@ -455,7 +480,6 @@ export default {
           return json({ok:true});
         }
 
-        // ---- ping ----
         if (text === "/ping") {
           await safe(async () => {
             await TG.text(chatId, "🔔 Pong! Я на зв'язку.", { token: env.BOT_TOKEN });
@@ -472,9 +496,7 @@ export default {
           }
         } catch (mediaErr) {
           console.log("Media save (mode) error:", mediaErr);
-          try {
-            await TG.text(chatId, `❌ Не вдалось зберегти вкладення: ${String(mediaErr)}`, { token: env.BOT_TOKEN });
-          } catch {}
+          try { await TG.text(chatId, `❌ Не вдалось зберегти вкладення: ${String(mediaErr)}`, { token: env.BOT_TOKEN }); } catch {}
           return json({ ok:true });
         }
 
