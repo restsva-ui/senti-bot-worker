@@ -1,5 +1,6 @@
 // src/lib/drive.js
 // Повна стабільна версія з фіксом ENV refresh, адмін-режимом без кешу, сумісністю та безпечними помилками.
+// + Фікс ReferenceError refresh_token not defined
 
 const DRIVE_API = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
@@ -24,7 +25,11 @@ async function readKvTokens(env) {
   const kv = ensureKv(env);
   const raw = await kv.get(OAUTH_KEY);
   if (!raw) return null;
-  try { return JSON.parse(raw); } catch { return null; }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 async function writeKvTokens(env, data) {
@@ -69,29 +74,46 @@ export async function directAdminAccessToken(env) {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   });
-  const d = await r.json();
-  if (!r.ok || !d.access_token)
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || !d.access_token) {
     throw new Error(`Admin refresh ${r.status}: ${JSON.stringify(d)}`);
+  }
   return d.access_token;
 }
 
+// ---------- Основна функція refresh з фіксом ----------
 async function refreshAccessToken(env, refreshToken) {
+  if (!refreshToken || typeof refreshToken !== "string") {
+    throw new Error("refreshAccessToken: refreshToken відсутній або невалідний");
+  }
+
   const body = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID,
     client_secret: env.GOOGLE_CLIENT_SECRET,
     refresh_token: refreshToken,
     grant_type: "refresh_token",
   });
+
   const r = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   });
-  const d = await r.json();
-  if (!r.ok) throw new Error(`Refresh ${r.status}: ${JSON.stringify(d)}`);
+
+  let d = {};
+  try {
+    d = await r.json();
+  } catch {
+    throw new Error(`Refresh parse error ${r.status}`);
+  }
+
+  if (!r.ok || !d.access_token) {
+    throw new Error(`Refresh ${r.status}: ${JSON.stringify(d)}`);
+  }
+
   return {
     access_token: d.access_token,
-    refresh_token,
+    refresh_token: refreshToken, // ← фіксовано правильне ім’я змінної
     expiry: Math.floor(Date.now() / 1000) + (d.expires_in || 3600) - 60,
   };
 }
