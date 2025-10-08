@@ -17,16 +17,24 @@ export default {
       // ---- Health & helpers ----
       if (p === "/") return html("Senti Worker Active");
       if (p === "/health") return json({ ok:true, service: env.SERVICE_HOST });
+
       if (p === "/tg/get-webhook") {
-        const r = await TG.getWebhook(env.BOT_TOKEN); return new Response(await r.text(), {headers:{'content-type':'application/json'}});
-      }
-      if (p === "/tg/set-webhook") {
-        const target = `https://${env.SERVICE_HOST}/webhook`;
-        const r = await TG.setWebhook(env.BOT_TOKEN, target);
+        const r = await TG.getWebhook(env.BOT_TOKEN);
         return new Response(await r.text(), {headers:{'content-type':'application/json'}});
       }
 
-      // ---- Admin Drive quick checks (твій існуючий функціонал) ----
+      if (p === "/tg/set-webhook") {
+        const target = `https://${env.SERVICE_HOST}/webhook`;
+        const r = await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
+        return new Response(await r.text(), {headers:{'content-type':'application/json'}});
+      }
+
+      if (p === "/tg/del-webhook") {
+        const r = await TG.deleteWebhook(env.BOT_TOKEN);
+        return new Response(await r.text(), {headers:{'content-type':'application/json'}});
+      }
+
+      // ---- Admin Drive quick checks ----
       if (p === "/gdrive/ping") {
         try {
           const token = await getAccessToken(env);
@@ -34,6 +42,7 @@ export default {
           return json({ ok: true, files: files.files || [] });
         } catch (e) { return json({ ok:false, error:String(e) }, 500); }
       }
+
       if (p === "/gdrive/save") {
         const token = await getAccessToken(env);
         const fileUrl = url.searchParams.get("url");
@@ -41,6 +50,7 @@ export default {
         const file = await saveUrlToDrive(env, token, fileUrl, name);
         return json({ ok:true, file });
       }
+
       if (p === "/gdrive/checklist") {
         const token = await getAccessToken(env);
         const line = url.searchParams.get("line") || `tick ${new Date().toISOString()}`;
@@ -97,10 +107,33 @@ export default {
       }
 
       // ---- Telegram webhook ----
+
+      // 1) GET /webhook — ручна перевірка
+      if (p === "/webhook" && req.method !== "POST") {
+        return json({ ok:true, note:"webhook alive (GET)" });
+      }
+
+      // 2) POST /webhook — прийом апдейтів із перевіркою секрету
       if (p === "/webhook" && req.method === "POST") {
-        const update = await req.json();
+        // Перевірка секрету (якщо заданий у env)
+        const sec = req.headers.get("x-telegram-bot-api-secret-token");
+        if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
+          console.log("Webhook: wrong secret", sec);
+          return json({ ok:false, error:"unauthorized" }, 401);
+        }
+
+        // Приймаємо та логуємо апдейт
+        let update;
+        try {
+          update = await req.json();
+          console.log("TG update:", JSON.stringify(update));
+        } catch (e) {
+          console.log("Webhook parse error:", e);
+          return json({ ok:false }, 400);
+        }
+
         const msg = update.message || update.edited_message || update.channel_post;
-        if (!msg) return json({ok:true});
+        if (!msg) return json({ok:true}); // нічого відповідати
 
         const chatId = msg.chat.id;
         const userId = msg.from?.id;
@@ -164,7 +197,7 @@ export default {
         if (text.startsWith("/admin_setwebhook")) {
           if (!ADMIN(env, userId)) return json({ok:true});
           const target = `https://${env.SERVICE_HOST}/webhook`;
-          await TG.setWebhook(env.BOT_TOKEN, target);
+          await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
           await TG.text(chatId, `✅ Вебхук → ${target}`, { token: env.BOT_TOKEN });
           return json({ok:true});
         }
