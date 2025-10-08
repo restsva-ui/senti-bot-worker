@@ -1,85 +1,85 @@
 // src/lib/tg.js
-// Надійні виклики Telegram API з автосплітом довгих повідомлень
-// і явною обробкою помилок (щоб safe(...) міг показати ❌ у чаті).
-
-const TG_API = "https://api.telegram.org";
-const SAFE_TG_MSG_LEN = 3500; // запас до жорсткого ліміту ~4096
-
-// Внутрішній хелпер виклику API з перевіркою res.ok
-async function call(botToken, method, payload) {
-  const res = await fetch(`${TG_API}/bot${botToken}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: payload ? JSON.stringify(payload) : undefined,
-  });
-
-  if (!res.ok) {
-    // читаємо тіло, щоб побачити помилку Telegram
-    let body = "";
-    try { body = await res.text(); } catch {}
-    throw new Error(`TG ${method} ${res.status}: ${body || "<empty>"}`);
-  }
-  return res;
-}
-
-// Розбиваємо довгі тексти на шматки ≤ SAFE_TG_MSG_LEN
-function splitForTg(text, limit = SAFE_TG_MSG_LEN) {
-  if (!text) return [""];
-  if (text.length <= limit) return [text];
-
-  const parts = [];
-  let rest = text;
-
-  while (rest.length > limit) {
-    // намагаємось різати по переносу рядка або пробілу
-    let cut = rest.lastIndexOf("\n", limit);
-    if (cut < 0) cut = rest.lastIndexOf(" ", limit);
-    // якщо нормальної точки розрізу нема — просто ріжемо "в лоб"
-    if (cut < 0 || cut < limit * 0.5) cut = limit;
-
-    parts.push(rest.slice(0, cut));
-    rest = rest.slice(cut).replace(/^\s+/, "");
-  }
-  if (rest) parts.push(rest);
-  return parts;
-}
-
 export const TG = {
-  api: call,
+  async api(botToken, method, payload) {
+    const url = `https://api.telegram.org/bot${botToken}/${method}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload ? JSON.stringify(payload) : undefined,
+    });
 
-  // Надсилання тексту з автосплітом і явною перевіркою помилок
-  async text(chat_id, text, opts = {}) {
-    const token = opts.token;
-    const chunks = splitForTg(text, SAFE_TG_MSG_LEN);
+    // Спробуємо розпарсити відповідь, навіть якщо статус не 200
+    let data = {};
+    try { data = await res.json(); } catch {}
 
-    for (const chunk of chunks) {
-      await call(token, "sendMessage", {
-        chat_id,
-        text: chunk,
-        parse_mode: "Markdown",
-        disable_web_page_preview: true,
-        reply_markup: opts.reply_markup,
-      });
+    if (!res.ok || data?.ok === false) {
+      const desc = data?.description || "";
+      throw new Error(`Telegram API error ${method} ${res.status} ${desc}`);
     }
+    return data;
+  },
+
+  /**
+   * Надсилання тексту в чат.
+   * - За замовчуванням БЕЗ parse_mode (plain text) — безпечніше для довільного контенту.
+   * - Якщо потрібно, передай opts.parse_mode ("MarkdownV2" або "HTML").
+   * - Довгі повідомлення діляться на шматки ~3500 символів.
+   */
+  async text(chat_id, text, opts = {}) {
+    const base = {
+      chat_id,
+      text,
+      disable_web_page_preview: true,
+      // додаємо reply_markup, якщо є
+      ...(opts.reply_markup ? { reply_markup: opts.reply_markup } : {}),
+    };
+    // Додаємо parse_mode лише якщо явно переданий
+    if (opts.parse_mode) base.parse_mode = opts.parse_mode;
+
+    // Телеграм має ліміт ~4096 символів. Візьмемо трохи запасу.
+    const MAX = 3500;
+    const chunks = [];
+
+    const s = String(text ?? "");
+    if (s.length <= MAX) {
+      chunks.push(s);
+    } else {
+      // Розбиваємо по рядках, намагаючись не різати слова.
+      let buf = "";
+      for (const line of s.split("\n")) {
+        if ((buf + line + "\n").length > MAX) {
+          chunks.push(buf);
+          buf = "";
+        }
+        buf += line + "\n";
+      }
+      if (buf) chunks.push(buf);
+    }
+
+    let last;
+    for (const part of chunks) {
+      last = await this.api(opts.token, "sendMessage", { ...base, text: part });
+    }
+    return last;
   },
 
   setCommands(token, scope = null, commands = []) {
-    return call(token, "setMyCommands", { commands, scope });
+    return this.api(token, "setMyCommands", { commands, scope });
   },
 
   getWebhook(token) {
-    return fetch(`${TG_API}/bot${token}/getWebhookInfo`);
+    return fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`);
   },
 
-  // передаємо secret_token (опційно)
+  // Передаємо secret_token (опційно)
   setWebhook(token, url, secret) {
-    const u = new URL(`${TG_API}/bot${token}/setWebhook`);
+    const u = new URL(`https://api.telegram.org/bot${token}/setWebhook`);
     u.searchParams.set("url", url);
     if (secret) u.searchParams.set("secret_token", secret);
     return fetch(u.toString());
   },
 
   deleteWebhook(token) {
-    return fetch(`${TG_API}/bot${token}/deleteWebhook`);
+    return fetch(`https://api.telegram.org/bot${token}/deleteWebhook`);
   }
 };
