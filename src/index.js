@@ -8,6 +8,39 @@ const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 function html(s){ return new Response(s, {headers:{ "content-type":"text/html; charset=utf-8" }}) }
 function json(o, status=200){ return new Response(JSON.stringify(o,null,2), {status, headers:{ "content-type":"application/json" }}) }
 
+// ---- helpers ----
+function normalizeCommandFromMessage(update) {
+  // 1) базовий текст із різних типів апдейтів
+  const msg = update.message || update.edited_message || update.channel_post || update.callback_query?.message || null;
+  const raw =
+    update.message?.text ??
+    update.edited_message?.text ??
+    update.channel_post?.text ??
+    update.callback_query?.data ??
+    update.message?.caption ?? // про всяк випадок
+    "";
+
+  // 2) перший токен — до пробілу
+  let firstToken = (raw || "").trim().split(/\s+/)[0] || "";
+
+  // 3) якщо Telegram прислав /cmd@botname — обрізаємо @... (на випадок груп)
+  if (firstToken.includes("@")) firstToken = firstToken.split("@")[0];
+
+  // 4) уніфікуємо регістр
+  firstToken = firstToken.toLowerCase();
+
+  // 5) аліаси без підкреслень, щоб користувачеві було зручніше
+  const aliases = {
+    "/myfiles": "/my_files",
+    "/saveurl": "/save_url",
+    "/linkdrive": "/link_drive",
+    "/drivedebug": "/drive_debug",
+  };
+  if (aliases[firstToken]) firstToken = aliases[firstToken];
+
+  return { msg, rawText: raw, command: firstToken };
+}
+
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
@@ -122,7 +155,7 @@ export default {
           return json({ ok:false, error:"unauthorized" }, 401);
         }
 
-        // Приймаємо та логуємо апдейт
+        // Приймаємо та логуємо апдейт (урізаємо, щоб не смітити лог)
         let update;
         try {
           update = await req.json();
@@ -132,21 +165,12 @@ export default {
           return json({ ok:false }, 400);
         }
 
-        const msg = update.message || update.edited_message || update.channel_post || update.callback_query?.message;
-        const textRaw = update.message?.text || update.edited_message?.text || update.callback_query?.data || "";
+        const { msg, rawText, command } = normalizeCommandFromMessage(update);
         if (!msg) return json({ok:true});
 
         const chatId = msg.chat.id;
         const userId = msg.from?.id;
-        const text = (textRaw || "").trim();
 
-        // Хелпер: перевірити команду з урахуванням @username і аргументів
-        const cmd = (name) => {
-          const re = new RegExp(`^\\/${name}(?:@\\w+)?(?:\\s|$)`, "i");
-          return re.test(text);
-        };
-
-        // обгортка: будь-яка помилка піде в чат, а не «в тишу»
         const safe = async (fn) => {
           try { await fn(); }
           catch (e) {
@@ -160,21 +184,22 @@ export default {
         };
 
         // ---- Команди ----
-        if (cmd("start")) {
+        if (command === "/start") {
           await safe(async () => {
             await TG.text(chatId,
 `Привіт! Я Senti 🤖
 Команди:
-• /admin — адмін-меню (тільки для власника)
-• /link_drive — прив'язати мій Google Drive
-• /my_files — мої файли з диску
-• /save_url <url> <name> — зберегти файл за URL до мого диску
-• /drive_debug — діагностика OAuth`, { token: env.BOT_TOKEN });
+• \`/admin\` — адмін-меню (тільки для власника)
+• \`/link_drive\` — прив'язати мій Google Drive
+• \`/my_files\` — мої файли з диску
+• \`/save_url <url> <name>\` — зберегти файл за URL до мого диску
+• \`/drive_debug\` — діагностика OAuth
+• \`/ping\` — перевірити, що бот живий`, { token: env.BOT_TOKEN });
           });
           return json({ok:true});
         }
 
-        if (cmd("admin")) {
+        if (command === "/admin") {
           await safe(async () => {
             if (!ADMIN(env, userId)) {
               await TG.text(chatId, "⛔ Лише для адміна.", { token: env.BOT_TOKEN });
@@ -182,15 +207,15 @@ export default {
             }
             await TG.text(chatId,
 `Адмін меню:
-• /admin_ping — ping диска
-• /admin_list — список файлів (адмін-диск)
-• /admin_checklist <рядок> — допис у чеклист
-• /admin_setwebhook — виставити вебхук`, { token: env.BOT_TOKEN });
+• \`/admin_ping\` — ping диска
+• \`/admin_list\` — список файлів (адмін-диск)
+• \`/admin_checklist <рядок>\` — допис у чеклист
+• \`/admin_setwebhook\` — виставити вебхук`, { token: env.BOT_TOKEN });
           });
           return json({ok:true});
         }
 
-        if (cmd("admin_ping")) {
+        if (command === "/admin_ping") {
           await safe(async () => {
             if (!ADMIN(env, userId)) return;
             const r = await drivePing(env);
@@ -199,7 +224,7 @@ export default {
           return json({ok:true});
         }
 
-        if (cmd("admin_list")) {
+        if (command === "/admin_list") {
           await safe(async () => {
             if (!ADMIN(env, userId)) return;
             const token = await getAccessToken(env);
@@ -210,10 +235,10 @@ export default {
           return json({ok:true});
         }
 
-        if (cmd("admin_checklist")) {
+        if (command === "/admin_checklist") {
           await safe(async () => {
             if (!ADMIN(env, userId)) return;
-            const line = text.replace(/^\/admin_checklist(?:@\w+)?\s*/i, "").trim() || `tick ${new Date().toISOString()}`;
+            const line = (rawText||"").replace("/admin_checklist","").trim() || `tick ${new Date().toISOString()}`;
             const token = await getAccessToken(env);
             await appendToChecklist(env, token, line);
             await TG.text(chatId, `✅ Додано: ${line}`, { token: env.BOT_TOKEN });
@@ -221,7 +246,7 @@ export default {
           return json({ok:true});
         }
 
-        if (cmd("admin_setwebhook")) {
+        if (command === "/admin_setwebhook") {
           await safe(async () => {
             if (!ADMIN(env, userId)) return;
             const target = `https://${env.SERVICE_HOST}/webhook`;
@@ -231,8 +256,16 @@ export default {
           return json({ok:true});
         }
 
+        // ---- ping ----
+        if (command === "/ping") {
+          await safe(async () => {
+            await TG.text(chatId, "🏓 Пінг! Senti активний і слухає ✅", { token: env.BOT_TOKEN });
+          });
+          return json({ok:true});
+        }
+
         // ---- user drive commands ----
-        if (cmd("link_drive")) {
+        if (command === "/link_drive") {
           await safe(async () => {
             const authUrl = `https://${env.SERVICE_HOST}/auth/start?u=${userId}`;
             await TG.text(chatId, `Перейди за посиланням і дозволь доступ до свого Google Drive (режим *drive.file*):\n${authUrl}`, { token: env.BOT_TOKEN });
@@ -240,7 +273,7 @@ export default {
           return json({ok:true});
         }
 
-        if (cmd("unlink_drive")) {
+        if (command === "/unlink_drive") {
           await safe(async () => {
             await putUserTokens(env, userId, null);
             await TG.text(chatId, `Гаразд, зв'язок із твоїм диском скинуто.`, { token: env.BOT_TOKEN });
@@ -248,7 +281,7 @@ export default {
           return json({ok:true});
         }
 
-        if (cmd("drive_debug")) {
+        if (command === "/drive_debug") {
           await safe(async () => {
             const t = await getUserTokens(env, userId);
             if (!t) {
@@ -265,7 +298,7 @@ export default {
           return json({ok:true});
         }
 
-        if (cmd("my_files")) {
+        if (command === "/my_files") {
           await safe(async () => {
             const files = await userListFiles(env, userId);
             const names = (files.files||[]).map(f=>`• ${f.name}`).join("\n") || "порожньо";
@@ -274,15 +307,14 @@ export default {
           return json({ok:true});
         }
 
-        if (cmd("save_url")) {
+        if (command === "/save_url") {
           await safe(async () => {
-            // Вирізаємо команду з можливим @bot і беремо аргументи
-            const args = text.replace(/^\/save_url(?:@\w+)?\s*/i, "").trim();
-            const parts = args.split(/\s+/);
-            const fileUrl = parts[0];
-            const name = parts.slice(1).join(" ") || "from_telegram.bin";
+            // беремо всі аргументи після команди
+            const parts = (rawText || "").trim().split(/\s+/);
+            const fileUrl = parts[1];
+            const name = parts.slice(2).join(" ") || "from_telegram.bin";
             if(!fileUrl){
-              await TG.text(chatId, "Використання: /save_url <url> <опц.назва>", { token: env.BOT_TOKEN });
+              await TG.text(chatId, "Використання: `/save_url <url> <опц.назва>`", { token: env.BOT_TOKEN });
               return;
             }
             const f = await userSaveUrl(env, userId, fileUrl, name);
@@ -293,7 +325,7 @@ export default {
 
         // Дефолт, щоб завжди була відповідь
         await safe(async () => {
-          await TG.text(chatId, "Команда не впізнана. Спробуй /start", { token: env.BOT_TOKEN });
+          await TG.text(chatId, "Команда не впізнана. Спробуй `/start`", { token: env.BOT_TOKEN });
         });
         return json({ok:true});
       }
