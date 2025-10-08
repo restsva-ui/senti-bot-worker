@@ -26,6 +26,7 @@ export default {
 
       if (p === "/tg/set-webhook") {
         const target = `https://${env.SERVICE_HOST}/webhook`;
+        // Працює і з секретом, і без — залежно від наявності env.TG_WEBHOOK_SECRET
         const r = await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
         return new Response(await r.text(), {headers:{'content-type':'application/json'}});
       }
@@ -126,6 +127,7 @@ export default {
         let update;
         try {
           update = await req.json();
+          // важливо: ліміт логів, щоб не захаращувати
           console.log("TG update:", JSON.stringify(update).slice(0, 2000));
         } catch (e) {
           console.log("Webhook parse error:", e);
@@ -180,7 +182,8 @@ export default {
 • /admin_ping — ping диска
 • /admin_list — список файлів (адмін-диск)
 • /admin_checklist <рядок> — допис у чеклист
-• /admin_setwebhook — виставити вебхук`, { token: env.BOT_TOKEN });
+• /admin_setwebhook — виставити вебхук
+• /admin_refreshcheck — ручний рефреш та перевірка`, { token: env.BOT_TOKEN });
           });
           return json({ok:true});
         }
@@ -194,27 +197,41 @@ export default {
           return json({ok:true});
         }
 
-        // --- ОНОВЛЕНО: /admin_list з красивим форматуванням + запис у чеклист ---
+        // --- РЕТРАЙ і лог успіху для /admin_list ---
         if (text.startsWith("/admin_list")) {
           await safe(async () => {
             if (!ADMIN(env, userId)) return;
-            const token = await getAccessToken(env);
-            const files = await driveList(env, token);
-            const arr = files.files || [];
-            if (!arr.length) {
-              await TG.text(chatId, "📁 Диск порожній.", { token: env.BOT_TOKEN });
-            } else {
-              let msgOut = "📂 *Адмін диск:*\n";
-              msgOut += arr
-                .map(f => `• ${f.name}\n  🔗 https://drive.google.com/file/d/${f.id}/view`)
-                .join("\n\n");
-              await TG.text(chatId, msgOut, { token: env.BOT_TOKEN });
-            }
-            // зафіксувати успіх у чеклисті
+
+            const once = async () => {
+              const token = await getAccessToken(env);
+              const files = await driveList(env, token);
+              const arr = files.files || [];
+              if (!arr.length) {
+                await TG.text(chatId, "📁 Диск порожній.", { token: env.BOT_TOKEN });
+              } else {
+                let msgOut = "Адмін диск:\n";
+                msgOut += arr.map(f => `• ${f.name} (${f.id})`).join("\n");
+                await TG.text(chatId, msgOut, { token: env.BOT_TOKEN });
+              }
+              // фіксуємо успіх у чеклисті
+              try {
+                await appendToChecklist(env, token, `admin_list OK ${new Date().toISOString()}`);
+              } catch (e) {
+                console.log("Checklist write failed (admin_list):", e);
+              }
+            };
+
             try {
-              await appendToChecklist(env, token, `admin_list OK ${new Date().toISOString()}`);
+              await once();
             } catch (e) {
-              console.log("Checklist write failed (admin_list):", e);
+              const s = String(e || "");
+              if (s.includes("invalid_grant") || s.includes("Refresh 400")) {
+                // одна спроба повторити після проблеми з рефрешем
+                try { await once(); }
+                catch (e2) { throw e2; }
+              } else {
+                throw e;
+              }
             }
           });
           return json({ok:true});
@@ -237,6 +254,19 @@ export default {
             const target = `https://${env.SERVICE_HOST}/webhook`;
             await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
             await TG.text(chatId, `✅ Вебхук → ${target}${env.TG_WEBHOOK_SECRET ? " (секрет застосовано)" : ""}`, { token: env.BOT_TOKEN });
+          });
+          return json({ok:true});
+        }
+
+        if (text.startsWith("/admin_refreshcheck")) {
+          await safe(async () => {
+            if (!ADMIN(env, userId)) return;
+            try {
+              const tok = await getAccessToken(env); // підтягне access_token (і рефрешне за потреби)
+              await TG.text(chatId, `✅ Refresh OK (отримано access_token).`, { token: env.BOT_TOKEN });
+            } catch (e) {
+              await TG.text(chatId, `❌ Refresh failed: ${String(e)}`, { token: env.BOT_TOKEN });
+            }
           });
           return json({ok:true});
         }
@@ -301,7 +331,7 @@ export default {
 
         if (text === "/ping") {
           await safe(async () => {
-            await TG.text(chatId, "🍭 Pong! Я на зв'язку.", { token: env.BOT_TOKEN });
+            await TG.text(chatId, "🔔 Pong! Я на зв'язку.", { token: env.BOT_TOKEN });
           });
           return json({ok:true});
         }
