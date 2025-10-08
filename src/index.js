@@ -1,5 +1,5 @@
 // src/index.js
-import { drivePing, driveList, saveUrlToDrive, appendToChecklist, getAccessToken } from "./lib/drive.js";
+import { drivePing, driveList, saveUrlToDrive, appendToChecklist /*, getAccessToken*/ } from "./lib/drive.js";
 import { TG } from "./lib/tg.js";
 import { getUserTokens, putUserTokens, userListFiles, userSaveUrl } from "./lib/userDrive.js";
 
@@ -8,8 +8,8 @@ const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 function html(s){ return new Response(s, {headers:{ "content-type":"text/html; charset=utf-8" }}) }
 function json(o, status=200){ return new Response(JSON.stringify(o,null,2), {status, headers:{ "content-type":"application/json" }}) }
 
-/** Робимо прямий refresh, минаючи будь-які інші шари, щоб діагностувати ENV */
-async function tryAdminRefresh(env){
+/** Пряме отримання access_token із ENV refresh_token — БЕЗ кешів */
+async function adminAccessToken(env){
   const body = new URLSearchParams({
     grant_type: "refresh_token",
     client_id: env.GOOGLE_CLIENT_ID || "",
@@ -22,7 +22,21 @@ async function tryAdminRefresh(env){
     body
   });
   const data = await r.json().catch(()=> ({}));
-  return { ok: r.ok, status: r.status, data };
+  if (!r.ok || !data.access_token) {
+    throw new Error(`Refresh ${r.status}: ${JSON.stringify(data)}`);
+  }
+  return data.access_token;
+}
+
+/** Та сама діагностика, що й /admin_refreshcheck */
+async function tryAdminRefresh(env){
+  try {
+    const token = await adminAccessToken(env);
+    return { ok:true, status:200, data:{ access_token: token } };
+  } catch (e){
+    // витягнемо статус/тіло якщо є
+    return { ok:false, status:400, data:{ error:String(e) } };
+  }
 }
 
 export default {
@@ -37,9 +51,8 @@ export default {
 
       // Діагностика refresh-токена адміна у браузері
       if (p === "/gdrive/refresh-check") {
-        const { ok, status, data } = await tryAdminRefresh(env);
-        // Нічого не маскуємо, щоб точно зрозуміти, у чому причина
-        return json({ ok, status, data, client_id_tail: (env.GOOGLE_CLIENT_ID||"").slice(-8) });
+        const r = await tryAdminRefresh(env);
+        return json({ ...r, client_id_tail: (env.GOOGLE_CLIENT_ID||"").slice(-8) });
       }
 
       // ---- Telegram helpers ----
@@ -59,17 +72,17 @@ export default {
         return new Response(await r.text(), {headers:{'content-type':'application/json'}});
       }
 
-      // ---- Admin Drive quick checks ----
+      // ---- Admin Drive quick checks (для браузера) ----
       if (p === "/gdrive/ping") {
         try {
-          const token = await getAccessToken(env);
+          const token = await adminAccessToken(env);            // ← без кешу
           const files = await driveList(env, token);
           return json({ ok: true, files: files.files || [] });
         } catch (e) { return json({ ok:false, error:String(e) }, 500); }
       }
 
       if (p === "/gdrive/save") {
-        const token = await getAccessToken(env);
+        const token = await adminAccessToken(env);              // ← без кешу
         const fileUrl = url.searchParams.get("url");
         const name = url.searchParams.get("name") || "from_web.md";
         const file = await saveUrlToDrive(env, token, fileUrl, name);
@@ -77,7 +90,7 @@ export default {
       }
 
       if (p === "/gdrive/checklist") {
-        const token = await getAccessToken(env);
+        const token = await adminAccessToken(env);              // ← без кешу
         const line = url.searchParams.get("line") || `tick ${new Date().toISOString()}`;
         await appendToChecklist(env, token, line);
         return json({ ok:true });
@@ -219,7 +232,7 @@ export default {
             if (ok && data.access_token) {
               await TG.text(
                 chatId,
-                `✅ Refresh OK (status ${status}). Отримано access_token. client_id …${(env.GOOGLE_CLIENT_ID||"").slice(-8)}`,
+                `✅ Refresh OK (status ${status}). Отримано accesstoken. clientid …${(env.GOOGLE_CLIENT_ID||"").slice(-8)}`,
                 { token: env.BOT_TOKEN }
               );
             } else {
@@ -236,7 +249,8 @@ export default {
         if (text.startsWith("/admin_ping")) {
           await safe(async () => {
             if (!ADMIN(env, userId)) return;
-            const r = await drivePing(env);
+            const token = await adminAccessToken(env);          // ← без кешу
+            const r = await drivePing(env, token);
             await TG.text(chatId, `✅ Admin Drive OK. filesCount: ${r.filesCount}`, { token: env.BOT_TOKEN });
           });
           return json({ok:true});
@@ -245,7 +259,7 @@ export default {
         if (text.startsWith("/admin_list")) {
           await safe(async () => {
             if (!ADMIN(env, userId)) return;
-            const token = await getAccessToken(env);
+            const token = await adminAccessToken(env);          // ← без кешу
             const files = await driveList(env, token);
             const names = (files.files||[]).map(f=>`• ${f.name} (${f.id})`).join("\n") || "порожньо";
             await TG.text(chatId, `Адмін диск:\n${names}`, { token: env.BOT_TOKEN });
@@ -257,7 +271,7 @@ export default {
           await safe(async () => {
             if (!ADMIN(env, userId)) return;
             const line = text.replace("/admin_checklist","").trim() || `tick ${new Date().toISOString()}`;
-            const token = await getAccessToken(env);
+            const token = await adminAccessToken(env);          // ← без кешу
             await appendToChecklist(env, token, line);
             await TG.text(chatId, `✅ Додано: ${line}`, { token: env.BOT_TOKEN });
           });
