@@ -1,33 +1,41 @@
 name = "senti-bot-worker"
-main = "src/index.js"
-compatibility_date = "2025-01-10"
+main = "index.js"
+compatibility_date = "2024-10-01"
 workers_dev = true
 
 [vars]
-TZ = "Europe/Kyiv"
-DRIVE_FOLDER_ID = "1lMcN4cRlYNzOU1D1y5eirq5y1W7by9T-"
+SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
+DRIVE_FOLDER_ID = "root"            # або конкретний ID папки
+TELEGRAM_ADMIN_ID = "784869835"     # твій Telegram ID
 
-# Потрібні для OAuth (заповни у Cloudflare → Settings → Variables/Secrets)
-# В UI вони можуть перекривати значення з файлу — це ок.
-GOOGLE_CLIENT_ID = "740975815203-vbp832vkdqq4c502aip148p1pgkvdobh.apps.googleusercontent.com"
-# GOOGLE_CLIENT_SECRET = "<твій секрет>"   # краще як Secret у Cloudflare
-# WEBHOOK_SECRET = "<твій ключ>"
+# ---------- KV bindings ----------
 
-# Секрет сервісного акаунта (JSON цілком) — як Secret у Cloudflare:
-# GOOGLE_DRIVE_CREDENTIALS = "{ ... }"
-
-[[kv_namespaces]]
-binding = "STATE_KV"
-id = "7b32e2d1f60846ddb1c653eb52180bf7"   # senti-state
-
+# 1️⃣ Дедуплікація повідомлень
 [[kv_namespaces]]
 binding = "DEDUP_KV"
-id = "20d81d7b68fa4ac6b9913e2fbd3465d5"   # senti-dedup
+id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
+preview_id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
 
-[[kv_namespaces]]
-binding = "TODO_KV"
-id = "497eac980691495ea2a0bc8611892d65"   # senti-cache
-
+# 2️⃣ OAuth (адмінський, ботівський)
 [[kv_namespaces]]
 binding = "OAUTH_KV"
-id = "e2a8d3941b4e41728318781e739a4d47"   # senti_oauth
+id = "e2a8d3941b4e41728318781e739a4d47"
+preview_id = "e2a8d3941b4e41728318781e739a4d47"
+
+# 3️⃣ Стан/автолог/сесії
+[[kv_namespaces]]
+binding = "STATE_KV"
+id = "7b32e2d1f60846ddb1c653eb52180bf7"
+preview_id = "7b32e2d1f60846ddb1c653eb52180bf7"
+
+# 4️⃣ TODO/кеш/чекліст
+[[kv_namespaces]]
+binding = "TODO_KV"
+id = "497eac980691495ea2a0bc8611892d65"
+preview_id = "497eac980691495ea2a0bc8611892d65"
+
+# 5️⃣ OAuth користувачів (USER)
+[[kv_namespaces]]
+binding = "USER_OAUTH_KV"
+id = "b8fbae4a0f3944179fd95c83ff955996"
+preview_id = "b8fbae4a0f3944179fd95c83ff955996"
