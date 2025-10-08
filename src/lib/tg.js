@@ -30,21 +30,15 @@ export const TG = {
       chat_id,
       text,
       disable_web_page_preview: true,
-      // додаємо reply_markup, якщо є
       ...(opts.reply_markup ? { reply_markup: opts.reply_markup } : {}),
     };
-    // Додаємо parse_mode лише якщо явно переданий
     if (opts.parse_mode) base.parse_mode = opts.parse_mode;
 
-    // Телеграм має ліміт ~4096 символів. Візьмемо трохи запасу.
     const MAX = 3500;
     const chunks = [];
-
     const s = String(text ?? "");
-    if (s.length <= MAX) {
-      chunks.push(s);
-    } else {
-      // Розбиваємо по рядках, намагаючись не різати слова.
+    if (s.length <= MAX) chunks.push(s);
+    else {
       let buf = "";
       for (const line of s.split("\n")) {
         if ((buf + line + "\n").length > MAX) {
@@ -63,6 +57,7 @@ export const TG = {
     return last;
   },
 
+  // ---------- Commands ----------
   setCommands(token, scope = null, commands = []) {
     return this.api(token, "setMyCommands", { commands, scope });
   },
@@ -71,7 +66,7 @@ export const TG = {
     return fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`);
   },
 
-  // Передаємо secret_token (опційно)
+  // ---------- Webhook ----------
   setWebhook(token, url, secret) {
     const u = new URL(`https://api.telegram.org/bot${token}/setWebhook`);
     u.searchParams.set("url", url);
@@ -81,5 +76,17 @@ export const TG = {
 
   deleteWebhook(token) {
     return fetch(`https://api.telegram.org/bot${token}/deleteWebhook`);
-  }
+  },
+
+  // ---------- Files ----------
+  /**
+   * Отримує метадані файлу Telegram (file_path)
+   * і повертає пряме посилання https://api.telegram.org/file/bot<token>/<file_path>
+   */
+  async getFileLink(botToken, file_id) {
+    const data = await this.api(botToken, "getFile", { file_id });
+    const path = data?.result?.file_path;
+    if (!path) throw new Error(`Не вдалося отримати file_path для ${file_id}`);
+    return `https://api.telegram.org/file/bot${botToken}/${path}`;
+  },
 };
