@@ -81,17 +81,19 @@ async function handleIncomingMedia(env, chatId, userId, msg){
 
 // ---------------- Commands installers ----------------
 async function installCommands(env){
-  // Мінімальний набір для всіх користувачів
+  // Мінімальний набір для всіх користувачів (зрозумілі назви дій)
   await TG.setCommands(env.BOT_TOKEN, { type:"default" }, [
-    { command: "start",      description: "Запустити бота" },
+    { command: "start", description: "Запустити бота" },
+    { command: "disk",  description: "Диск: увімкнути роботу з Google Drive" },
+    { command: "send",  description: "Відправити: зберегти файл/медіа або URL у диск" },
+    { command: "view",  description: "Переглянути: відкрити мій Google Drive" },
     { command: "link_drive", description: "Прив'язати мій Google Drive" },
-    { command: "my_files",   description: "Показати мої файли з диску" },
   ]);
 
-  // Персонально для адміна: показати лише /admin
+  // Персонально для адміна — тільки /admin
   if (!env.TELEGRAM_ADMIN_ID) throw new Error("TELEGRAM_ADMIN_ID not set");
   await TG.setCommands(env.BOT_TOKEN, { type:"chat", chat_id: Number(env.TELEGRAM_ADMIN_ID) }, [
-    { command: "admin", description: "Відкрити адмін-меню" },
+    { command: "admin", description: "Адмін-меню" },
   ]);
 }
 
@@ -129,7 +131,7 @@ export default {
         return new Response(await r.text(), {headers:{'content-type':'application/json'}});
       }
 
-      // NEW: керування підказками команд
+      // Керування підказками команд
       if (p === "/tg/install-commands") {
         await installCommands(env);
         return json({ ok:true, installed:true });
@@ -247,17 +249,18 @@ export default {
           }
         };
 
-        // ---------------- TOP-LEVEL MENUS ----------------
+        // ---------------- TOP-LEVEL ----------------
         if (text === "/start") {
           await safe(async () => {
             const isAdmin = ADMIN(env, userId);
             const base =
 `Привіт! Я Senti 🤖
 
-Команди:
+Команди (для диска):
+• /disk — увімкнути роботу з Google Drive
+• /send — зберегти: відповісти на вкладення АБО /send <url> <опц.назва>
+• /view — відкрити мій Google Drive (посилання)
 • /link_drive — прив'язати мій Google Drive
-• /my_files — мої файли з диску
-• /save_url <url> <name> — зберегти файл з URL у мій диск
 • /ping — перевірити, що бот живий`;
             const tail = isAdmin ? `
 
@@ -268,6 +271,7 @@ export default {
           return json({ok:true});
         }
 
+        // ---------------- ADMIN ----------------
         if (text === "/admin") {
           await safe(async () => {
             if (!ADMIN(env, userId)) {
@@ -289,7 +293,6 @@ export default {
           return json({ok:true});
         }
 
-        // ---------------- ADMIN CMDS ----------------
         if (text.startsWith("/admin_ping")) {
           await safe(async () => {
             if (!ADMIN(env, userId)) return;
@@ -356,7 +359,63 @@ export default {
           return json({ok:true});
         }
 
-        // ---------------- USER CMDS ----------------
+        // ---------------- USER: основні три команди ----------------
+
+        // /disk — увімкнути режим автозбереження в Drive
+        if (text === "/disk") {
+          await safe(async () => {
+            await setDriveMode(env, userId, true);
+            await TG.text(
+              chatId,
+              `🗂 Режим диска: ON
+Надсилай медіа чи документи — збережу на твій Google Drive.
+
+Команди:
+• /send — зберегти: відповісти на повідомлення з вкладенням АБО /send <url> <опц.назва>
+• /view — посилання на твій Google Drive
+• /link_drive — якщо ще не прив'язано
+• /ping — перевірка зв'язку`,
+              { token: env.BOT_TOKEN }
+            );
+          });
+          return json({ok:true});
+        }
+
+        // /send — зберегти вкладення або URL
+        if (text.startsWith("/send")) {
+          await safe(async () => {
+            const reply = msg.reply_to_message;
+            const args = text.split(/\s+/).slice(1);
+            if (reply) {
+              const ok = await handleIncomingMedia(env, chatId, userId, reply);
+              if (!ok) {
+                await TG.text(chatId, "У відповіді немає підтримуваного вкладення. Спробуй фото/відео/документ/аудіо/voice.", { token: env.BOT_TOKEN });
+              }
+              return;
+            }
+            if (args.length) {
+              const fileUrl = args[0];
+              const name = args.slice(1).join(" ") || "from_telegram.bin";
+              const saved = await userSaveUrl(env, userId, fileUrl, name);
+              await TG.text(chatId, `✅ Збережено: ${saved.name}`, { token: env.BOT_TOKEN });
+              return;
+            }
+            await TG.text(chatId, "Використання: відповісти /send на повідомлення з медіа/документом АБО /send <url> <опц.назва>", { token: env.BOT_TOKEN });
+          });
+          return json({ok:true});
+        }
+
+        // /view — чисте посилання на диск без зайвого тексту
+        if (text === "/view") {
+          await safe(async () => {
+            // просто лінк; не додаємо жодного зайвого тексту
+            const link = "https://drive.google.com/drive/my-drive";
+            await TG.text(chatId, link, { token: env.BOT_TOKEN });
+          });
+          return json({ok:true});
+        }
+
+        // ---------------- USER: інші/залишкові ----------------
         if (text === "/link_drive") {
           await safe(async () => {
             const authUrl = `https://${env.SERVICE_HOST}/auth/start?u=${userId}`;
@@ -390,30 +449,7 @@ export default {
           return json({ok:true});
         }
 
-        if (text === "/drive_on") {
-          await safe(async () => {
-            await setDriveMode(env, userId, true);
-            await TG.text(chatId, "📁 Режим диска: ON\nНадсилай медіа — збережу на твій Google Drive.\nКоманда: /drive_off — щоб вимкнути.", { token: env.BOT_TOKEN });
-          });
-          return json({ok:true});
-        }
-
-        if (text === "/drive_off") {
-          await safe(async () => {
-            await setDriveMode(env, userId, false);
-            await TG.text(chatId, "📁 Режим диска: OFF", { token: env.BOT_TOKEN });
-          });
-          return json({ok:true});
-        }
-
-        if (text === "/drive_status") {
-          await safe(async () => {
-            const on = await getDriveMode(env, userId);
-            await TG.text(chatId, `📁 Режим диска: ${on ? "ON" : "OFF"}`, { token: env.BOT_TOKEN });
-          });
-          return json({ok:true});
-        }
-
+        // Сумісність: старі команди залишаємо працюючими
         if (text === "/my_files") {
           await safe(async () => {
             const files = await userListFiles(env, userId);
@@ -434,21 +470,6 @@ export default {
             }
             const f = await userSaveUrl(env, userId, fileUrl, name);
             await TG.text(chatId, `✅ Збережено: ${f.name}`, { token: env.BOT_TOKEN });
-          });
-          return json({ok:true});
-        }
-
-        if (text === "/save") {
-          await safe(async () => {
-            const reply = msg.reply_to_message;
-            if (!reply) {
-              await TG.text(chatId, "Використання: відповісти командою /save на фото/відео/документ, щоб зберегти в Google Drive.", { token: env.BOT_TOKEN });
-              return;
-            }
-            const handled = await handleIncomingMedia(env, chatId, userId, reply);
-            if (!handled) {
-              await TG.text(chatId, "Тут немає підтримуваного вкладення. Спробуй відповісти на фото/відео/документ/аудіо/voice.", { token: env.BOT_TOKEN });
-            }
           });
           return json({ok:true});
         }
