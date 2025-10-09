@@ -1,162 +1,119 @@
-// KV-чеклист + архіви для Senti
-// Використовує binding TODO_KV
-// Ключі:
-//   checklist_md         — сам чеклист (markdown)
-//   archive:<ts>_<name>  — json з b64 вмістом архіву
+// src/lib/adminChecklist.js
+// Маршрути адмін-чеκлиста поверх KV з безпечним error handling
+import {
+  readChecklist,
+  writeChecklist,
+  appendChecklist,
+  saveArchive,
+  getArchive,
+  checklistHtml,
+} from "./kvChecklist.js";
 
-const CHECK_KEY = "checklist_md";
-const ARCHIVE_PREFIX = "archive:";
-
-// ---------- базові операції з чеклистом ----------
-
-export async function readChecklist(env) {
-  const v = await env.TODO_KV.get(CHECK_KEY);
-  return v ?? "# Senti checklist\n";
+function html(text, status = 200) {
+  return new Response(text, {
+    status,
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
+}
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj, null, 2), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
+function text(s, status = 200) {
+  return new Response(String(s), {
+    status,
+    headers: { "content-type": "text/plain; charset=utf-8" },
+  });
 }
 
-export async function writeChecklist(env, text) {
-  await env.TODO_KV.put(CHECK_KEY, text ?? "");
-  return true;
+// Захист за секретом: ?s=<WEBHOOK_SECRET>
+function checkSecret(url, env) {
+  const s = url.searchParams.get("s") || "";
+  return s && env.WEBHOOK_SECRET && s === env.WEBHOOK_SECRET;
 }
 
-export async function appendChecklist(env, line) {
-  const cur = await readChecklist(env);
-  const next = (cur.endsWith("\n") ? cur : cur + "\n") + `- ${line}\n`;
-  await writeChecklist(env, next);
-  return true;
-}
+/**
+ * Головний роутер для /admin/checklist/*
+ * Повертає Response або null (коли шлях не наш).
+ */
+export async function routeAdminChecklist(req, env, url) {
+  const p = url.pathname;
 
-// ---------- архіви в KV ----------
+  if (!p.startsWith("/admin/checklist")) return null;
 
-export async function listArchives(env, limit = 100) {
-  const list = await env.TODO_KV.list({ prefix: ARCHIVE_PREFIX, limit });
-  const out = [];
-  for (const k of list.keys) {
-    try {
-      const raw = await env.TODO_KV.get(k.name);
-      const obj = JSON.parse(raw);
-      out.push({
-        key: k.name,
-        name: obj.name,
-        size: obj.size,
-        ts: obj.ts,
-        ct: obj.ct || "application/zip",
-      });
-    } catch {
-      // якщо колись покладено не json
-      out.push({
-        key: k.name,
-        name: k.name.slice(ARCHIVE_PREFIX.length),
-        size: 0,
-        ts: 0,
-        ct: "application/octet-stream",
+  // тільки адмін (по секрету)
+  if (!checkSecret(url, env)) {
+    return html("<h3>Forbidden</h3><p>Invalid secret.</p>", 403);
+  }
+
+  try {
+    // GET: HTML редактор
+    if (p === "/admin/checklist/html") {
+      const page = await checklistHtml(env, url.searchParams.get("s") || "");
+      return html(page);
+    }
+
+    // POST: додати рядок
+    if (p === "/admin/checklist/append" && req.method === "POST") {
+      const fd = await req.formData();
+      const line = (fd.get("line") || "").toString().trim();
+      if (!line) return html("<p>Порожній рядок.</p>", 400);
+      await appendChecklist(env, line);
+      return html('<meta http-equiv="refresh" content="0;url=../html?s=' + encodeURIComponent(url.searchParams.get("s") || "") + '">');
+    }
+
+    // POST: зберегти весь текст
+    if (p === "/admin/checklist/save" && req.method === "POST") {
+      const fd = await req.formData().catch(() => null);
+      let body = "";
+      if (fd && fd.get("body") != null) {
+        body = fd.get("body").toString();
+      } else {
+        // як fallback — читаємо сирий body
+        body = await req.text();
+      }
+      await writeChecklist(env, body);
+      return html('<meta http-equiv="refresh" content="0;url=../html?s=' + encodeURIComponent(url.searchParams.get("s") || "") + '">');
+    }
+
+    // POST: завантажити файл в архіви KV
+    if (p === "/admin/checklist/upload" && req.method === "POST") {
+      const fd = await req.formData();
+      const file = fd.get("file");
+      if (!file || typeof file.arrayBuffer !== "function") {
+        return html("<p>Файл не надіслано.</p>", 400);
+      }
+      const meta = await saveArchive(env, file);
+      await appendChecklist(env, `uploaded ${meta.name} (${meta.size} B)`);
+      return html('<meta http-equiv="refresh" content="0;url=../html?s=' + encodeURIComponent(url.searchParams.get("s") || "") + '">');
+    }
+
+    // GET: завантажити архів назад з KV
+    if (p === "/admin/checklist/archive") {
+      const key = url.searchParams.get("id") || "";
+      if (!key) return html("<p>id обов'язковий</p>", 400);
+      const obj = await getArchive(env, key);
+      if (!obj) return html("<p>Не знайдено</p>", 404);
+      return new Response(obj.buf, {
+        status: 200,
+        headers: {
+          "content-type": obj.ct,
+          "content-disposition": `attachment; filename="${encodeURIComponent(obj.name)}"`,
+        },
       });
     }
+
+    // Якщо шлях невідомий — 404
+    return html("<h3>Not found</h3>", 404);
+  } catch (err) {
+    // детальний текст помилки (щоб не було 1101)
+    const msg = (err && err.stack) ? err.stack : String(err);
+    return html(`<h3>Server error</h3><pre>${escapeHtml(msg)}</pre>`, 500);
   }
-  out.sort((a, b) => (b.ts || 0) - (a.ts || 0));
-  return out;
 }
 
-// збереження файлу з <input type=file>
-export async function saveArchive(env, file) {
-  const buf = await file.arrayBuffer();
-  return saveArchiveFromBuffer(env, buf, file.name || "archive.zip", file.type || "application/zip");
-}
-
-// збереження з ArrayBuffer/Uint8Array
-export async function saveArchiveFromBuffer(env, bufLike, name, ct = "application/zip") {
-  const buf = bufLike instanceof ArrayBuffer ? new Uint8Array(bufLike) : new Uint8Array(bufLike.buffer ?? bufLike);
-  const b64 = btoa(String.fromCharCode(...buf));
-  const meta = {
-    name: sanitizeName(name || "archive.zip"),
-    size: buf.byteLength,
-    ts: Date.now(),
-    ct,
-    b64, // власне вміст
-  };
-  const key = `${ARCHIVE_PREFIX}${meta.ts}_${meta.name}`;
-  await env.TODO_KV.put(key, JSON.stringify(meta));
-  return { key, name: meta.name, size: meta.size, ts: meta.ts, ct: meta.ct };
-}
-
-export async function getArchive(env, key) {
-  if (!key?.startsWith(ARCHIVE_PREFIX)) throw new Error("invalid key");
-  const raw = await env.TODO_KV.get(key);
-  if (!raw) return null;
-  const obj = JSON.parse(raw);
-  const bin = Uint8Array.from(atob(obj.b64), (c) => c.charCodeAt(0));
-  return {
-    name: obj.name,
-    size: obj.size,
-    ct: obj.ct || "application/zip",
-    buf: bin.buffer,
-  };
-}
-
-function sanitizeName(n) {
-  return String(n).replace(/[^\w.\-]+/g, "_").slice(0, 128) || "archive.zip";
-}
-
-// ---------- HTML (очікуване ім'я: checklistHtml) ----------
-// Повертає готовий HTML (рядок). Підтягує контент самостійно з KV.
-export async function checklistHtml(env, secret) {
-  const text = await readChecklist(env);
-  const archives = await listArchives(env);
-
-  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-  const items =
-    archives.length === 0
-      ? `<li><em>Архівів ще немає.</em></li>`
-      : archives
-          .map(
-            (a) =>
-              `<li><a href="/admin/checklist/archive?id=${encodeURIComponent(a.key)}&s=${encodeURIComponent(
-                secret
-              )}">${esc(a.name)}</a> — ${a.size} B — ${new Date(a.ts).toLocaleString()}</li>`
-          )
-          .join("");
-
-  return `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <title>Senti Checklist</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <style>
-    body{font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";}
-    .bar{display:flex;gap:.5rem;align-items:center;margin:.5rem 0}
-    textarea{width:100%;min-height:60vh;font:16px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-    .card{border:1px solid #ddd;border-radius:12px;padding:12px;margin-top:8px}
-    button,input[type="submit"]{padding:.5rem .75rem;border-radius:10px;border:1px solid #aaa;background:#fff}
-    .muted{color:#666}
-  </style>
-</head>
-<body>
-  <h2>🧾 Senti checklist</h2>
-
-  <form class="bar" method="post" action="/admin/checklist/append?s=${encodeURIComponent(secret)}">
-    <input name="line" placeholder="Додати рядок у чеклист…" style="flex:1"/>
-    <input type="submit" value="Append"/>
-  </form>
-
-  <div class="card">
-    <form method="post" action="/admin/checklist/save?s=${encodeURIComponent(secret)}">
-      <textarea name="body">${esc(text)}</textarea>
-      <div class="bar">
-        <input type="submit" value="Зберегти цілком"/>
-        <span class="muted">— повністю замінює вміст</span>
-      </div>
-    </form>
-  </div>
-
-  <h3>📦 Архіви</h3>
-  <div class="card">
-    <form method="post" action="/admin/checklist/upload?s=${encodeURIComponent(secret)}" enctype="multipart/form-data">
-      <input type="file" name="file" accept=".zip,.tar,.tgz,.gz,.txt,.md,.json" required/>
-      <input type="submit" value="Завантажити в KV"/>
-    </form>
-    <ul>${items}</ul>
-  </div>
-</body>
-</html>`;
+function escapeHtml(s) {
+  return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 }
