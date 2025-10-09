@@ -5,7 +5,12 @@ import { TG } from "./lib/tg.js";
 import { getUserTokens, putUserTokens, userListFiles, userSaveUrl } from "./lib/userDrive.js";
 
 // KV checklist + audit
-import { readChecklist, appendChecklist, checklistHtml } from "./lib/kvChecklist.js";
+import {
+  readChecklist,
+  writeChecklist,      // ⬅ додано
+  appendChecklist,
+  checklistHtml
+} from "./lib/kvChecklist.js";
 import { logHeartbeat, logDeploy } from "./lib/audit.js";
 
 // ---------------- small utils ----------------
@@ -163,18 +168,28 @@ export default {
       // ---- Admin checklist HTML (захист секретом) ----
       if (p === "/admin/checklist/html") {
         const s = url.searchParams.get("s");
-        if (env.WEBHOOK_SECRET && s !== env.WEBHOOK_SECRET) return html("<h3>401</h3>");
+        if (env.WEBHOOK_SECRET && s !== env.WEBHOOK_SECRET) {
+          return html("<h3>401</h3>");
+        }
+
         if (req.method === "POST") {
+          // приймаємо лише стандартну форму з нашої сторінки
+          const ctype = req.headers.get("content-type") || "";
+          if (!ctype.includes("application/x-www-form-urlencoded") && !ctype.includes("multipart/form-data")) {
+            return json({ ok:false, error:"unsupported content-type" }, 415);
+          }
           const form = await req.formData();
           const mode = (url.searchParams.get("mode") || "").toLowerCase();
+
           if (mode === "replace") {
-            const full = form.get("full") || "";
+            const full = form.get("full") ?? "";
             await writeChecklist(env, String(full));
           } else {
             const line = (form.get("line") || "").toString().trim();
             if (line) await appendChecklist(env, line);
           }
         }
+
         const text = await readChecklist(env);
         return checklistHtml({ text, submitPath: "/admin/checklist/html" });
       }
@@ -323,7 +338,7 @@ export default {
         }
 
         // ------- ADMIN CMDS (KV) -------
-        if (text.startsWith("/admin_check ")) {
+        if (text === "/admin_check") {
           await safe(async () => {
             if (!ADMIN(env, userId)) return;
             const link = `https://${env.SERVICE_HOST}/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`;
