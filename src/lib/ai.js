@@ -1,27 +1,29 @@
 // src/lib/ai.js
 export const AI = {
-  async ask(env, {system="", prompt, context=[]}) {
-    if(!env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY missing");
-    const model = env.OPENROUTER_MODEL_VISION ? "gemini-1.5-flash" : "gemini-1.5-flash"; // лишаємо flash
-    const parts = [];
-    if (system) parts.push({role:"user", parts:[{text:`[SYSTEM]\n${system}`}]});
-    if (context?.length) {
-      const ctxText = context.map((c,i)=>`[CTX #${i+1}] ${c}`).join("\n\n");
-      parts.push({role:"user", parts:[{text: ctxText}]});
+  async ask(env, { system="", prompt="", context=[] }) {
+    // якщо нема ключа — відповідаємо чемно
+    if (!env.GEMINI_API_KEY) {
+      return "🤖 (Gemini не налаштовано) Додай GEMINI_API_KEY у Workers Secrets, і я відповідатиму розумно.";
     }
-    parts.push({role:"user", parts:[{text: prompt}]});
 
-    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`, {
+    const parts = [];
+    if (system) parts.push(`SYSTEM:\n${system}`);
+    if (context?.length) {
+      parts.push("CONTEXT:\n" + context.map((c,i)=>`[${i+1}] ${c.title||c.id||"doc"}: ${c.snippet||""}`).join("\n"));
+    }
+    parts.push(`USER:\n${prompt}`);
+    const content = parts.join("\n\n");
+
+    // Простий виклик Gemini 1.5 текст (compatible JSON payload)
+    const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key="+env.GEMINI_API_KEY, {
       method: "POST",
-      headers: { "content-type":"application/json" },
+      headers: { "Content-Type":"application/json" },
       body: JSON.stringify({
-        contents: parts,
-        generationConfig: { temperature: 0.6, topK: 40, topP: 0.95, maxOutputTokens: 1024 }
+        contents: [{ parts: [{ text: content }]}]
       })
     });
-    const d = await r.json();
-    if(!r.ok) throw new Error(`Gemini: ${d.error?.message||r.statusText}`);
-    const text = d.candidates?.[0]?.content?.parts?.map(p=>p.text).join("") || "";
-    return text.trim();
+    const j = await r.json();
+    const txt = j?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    return txt.trim() || "(немає відповіді)";
   }
 };
