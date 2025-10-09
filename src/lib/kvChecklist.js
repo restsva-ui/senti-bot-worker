@@ -1,11 +1,11 @@
-// src/lib/kvChecklist.js
 // Простий чеклист у KV + міні-HTML UI для адміна
+// Працює з KV-біндінгом env.TODO_KV (з твого wrangler.toml)
 
 const KEY = "senti_checklist.md";
 
 function ensureKv(env) {
-  const kv = env.CHECKLIST_KV;
-  if (!kv) throw new Error("CHECKLIST_KV binding missing (wrangler.toml)!");
+  const kv = env.TODO_KV; // <-- важливо: використовуємо TODO_KV
+  if (!kv) throw new Error("TODO_KV binding missing (wrangler.toml)!");
   return kv;
 }
 
@@ -13,7 +13,10 @@ function stamp() {
   const dt = new Date();
   const pad = (n) => String(n).padStart(2, "0");
   const iso = dt.toISOString();
-  return { iso, nice: `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}` };
+  return {
+    iso,
+    nice: `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}`,
+  };
 }
 
 export async function readChecklist(env) {
@@ -24,31 +27,32 @@ export async function readChecklist(env) {
 
 export async function writeChecklist(env, text) {
   const kv = ensureKv(env);
-  await kv.put(KEY, text);
+  await kv.put(KEY, String(text ?? ""));
   return true;
 }
 
 export async function appendChecklist(env, line) {
   const cur = await readChecklist(env);
   const { nice } = stamp();
-  const add = `- ${nice} — ${line}\n`;
+  const add = `- ${nice} — ${String(line ?? "").trim()}\n`;
   await writeChecklist(env, cur + add);
   return add;
 }
 
 // ---- HTML admin UI ----
-export function checklistHtml({ title = "Senti Checklist", text = "" , submitPath = "/admin/checklist/html" } = {}) {
-  const esc = (s) => s.replace(/[&<>]/g, (c)=>({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
-  return new Response(`<!doctype html>
+export function checklistHtml({ title = "Senti Checklist", text = "", submitPath = "/admin/checklist/html" } = {}) {
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  return new Response(
+    `<!doctype html>
 <meta charset="utf-8">
 <title>${title}</title>
 <style>
-  body{font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin:20px; line-height:1.45}
-  textarea{width:100%; height:60vh; font:14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace}
-  .box{max-width:980px; margin:0 auto}
-  .row{display:flex; gap:10px; margin:10px 0}
-  button{padding:8px 14px; border-radius:8px; border:1px solid #ccc; background:#fafafa; cursor:pointer}
-  input[type=text]{flex:1; padding:8px 10px; border-radius:8px; border:1px solid #ccc}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:20px;line-height:1.45}
+  textarea{width:100%;height:60vh;font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .box{max-width:980px;margin:0 auto}
+  .row{display:flex;gap:10px;margin:10px 0}
+  button{padding:8px 14px;border-radius:8px;border:1px solid #ccc;background:#fafafa;cursor:pointer}
+  input[type=text]{flex:1;padding:8px 10px;border-radius:8px;border:1px solid #ccc}
 </style>
 <div class="box">
   <h2>📋 ${title}</h2>
@@ -64,5 +68,7 @@ export function checklistHtml({ title = "Senti Checklist", text = "" , submitPat
     <textarea name="full">${esc(text)}</textarea>
     <div class="row"><button type="submit">💾 Зберегти цілком</button></div>
   </form>
-</div>`, { headers: { "content-type": "text/html; charset=utf-8" }});
+</div>`,
+    { headers: { "content-type": "text/html; charset=utf-8" } }
+  );
 }
