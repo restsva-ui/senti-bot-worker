@@ -3,6 +3,7 @@ main = "src/index.js"
 compatibility_date = "2024-09-25"
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
 
+# Кв-пам'ять
 [[kv_namespaces]]
 binding = "DEDUP_KV"
 id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
@@ -23,7 +24,16 @@ id = "497eac980691495ea2a0bc8611892d65"
 binding = "USER_OAUTH_KV"
 id = "470d4f5c164a4a828c569eb9a52a5133"  # <-- встав новий ID
 
+# Крон для автологу деплоїв (кожні 15 хв)
+[triggers]
+crons = ["*/15 * * * *"]
+
+# Публічні змінні середовища
 [vars]
 SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
 DRIVE_FOLDER_ID = "1XJfSyyT2EwP6QisaOjhsnmqGC2wSFhvp"
 TELEGRAM_ADMIN_ID = "784869835"
+
+# Використовується для фіксації деплою у чеклисті.
+# У CI підставляй сюди унікальне значення (наприклад, SHA коміту).
+DEPLOY_ID = "local-dev"
