@@ -98,6 +98,19 @@ function inlineOpenDrive(){
 }
 
 // ---------------- Commands installers ----------------
+// UX-варіант: у підказках лише /drive і /senti (для всіх), і /admin — лише для твого чату
+async function installCommandsUX(env){
+  await TG.setCommands(env.BOT_TOKEN, { type:"default" }, [
+    { command: "drive", description: "Google Drive: увімкнути/працювати" },
+    { command: "senti", description: "Senti: звичайний чат" },
+    { command: "view",  description: "Відкрити мій Google Drive" },
+  ]);
+  if (!env.TELEGRAM_ADMIN_ID) throw new Error("TELEGRAM_ADMIN_ID not set");
+  await TG.setCommands(env.BOT_TOKEN, { type:"chat", chat_id: Number(env.TELEGRAM_ADMIN_ID) }, [
+    { command: "admin", description: "Адмін-меню" },
+  ]);
+}
+
 // Мінімалізуємо підказки: прибираємо всі глобальні, лишаємо лише /admin для твого чату
 async function installCommandsMinimal(env){
   await TG.setCommands(env.BOT_TOKEN, { type:"default" }, []); // прибрати меню BotFather
@@ -142,6 +155,10 @@ export default {
       if (p === "/tg/install-commands-min") {
         await installCommandsMinimal(env);
         return json({ ok:true, installed:"minimal" });
+      }
+      if (p === "/tg/install-commands-ux") {
+        await installCommandsUX(env);
+        return json({ ok:true, installed:"ux" });
       }
       if (p === "/tg/clear-commands") {
         await clearCommands(env);
@@ -240,7 +257,7 @@ export default {
 
         const chatId = msg.chat.id;
         const userId = msg.from?.id;
-        const text = (textRaw || "").trim();
+        let text = (textRaw || "").trim();
 
         const safe = async (fn) => {
           try { await fn(); }
@@ -249,6 +266,16 @@ export default {
             try { await TG.text(chatId, `❌ Помилка: ${String(e)}`, { token: env.BOT_TOKEN }); } catch {}
           }
         };
+
+        // --- Зручні синоніми: /drive, /senti, /view працюють як кнопки ---
+        if (text === "/drive") text = BTN_DRIVE;
+        if (text === "/senti") text = BTN_SENTI;
+        if (text === "/view") {
+          await safe(async () => {
+            await TG.text(chatId, "Переглянути вміст диска:", { token: env.BOT_TOKEN, reply_markup: inlineOpenDrive() });
+          });
+          return json({ ok:true });
+        }
 
         // ---------------- TOP-LEVEL UX ----------------
         if (text === "/start") {
@@ -282,7 +309,6 @@ export default {
               "📁 Режим диска: ON\nНадсилай фото/відео/документи — збережу на твій Google Drive.",
               { token: env.BOT_TOKEN, reply_markup: mainKeyboard() }
             );
-            // Дамо швидку кнопку «Відкрити Диск»
             await TG.text(chatId, "Переглянути вміст диска:", { token: env.BOT_TOKEN, reply_markup: inlineOpenDrive() });
           });
           return json({ok:true});
@@ -301,7 +327,7 @@ export default {
           return json({ok:true});
         }
 
-        // ---------------- ADMIN (команда прихована у підказках, але доступна тобі) ----------------
+        // ---------------- ADMIN ----------------
         if (text === "/admin") {
           await safe(async () => {
             if (!ADMIN(env, userId)) {
@@ -404,7 +430,6 @@ export default {
 
         // Дефолт
         await safe(async () => {
-          // не засипаємо чат підказками — просто повторюємо клавіатуру
           await TG.text(chatId, "Готовий 👋", { token: env.BOT_TOKEN, reply_markup: mainKeyboard() });
         });
         return json({ok:true});
