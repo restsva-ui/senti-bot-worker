@@ -31,7 +31,7 @@ crons = ["*/15 * * * *"]
 # Публічні змінні середовища
 [vars]
 SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
-DRIVE_FOLDER_ID = "1XJfSyyT2EwP6QisaOjhsnmqGC2wSFhvp"
+DRIVE_FOLDER_ID = "root"
 TELEGRAM_ADMIN_ID = "784869835"
 
 # Використовується для фіксації деплою у чеклисті.
