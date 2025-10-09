@@ -7,9 +7,13 @@ import { getUserTokens, putUserTokens, userListFiles, userSaveUrl } from "./lib/
 // KV checklist + audit
 import {
   readChecklist,
-  writeChecklist,      // ⬅ додано
+  writeChecklist,
   appendChecklist,
-  checklistHtml
+  checklistHtml,
+  saveArchive,
+  listArchives,
+  getArchive,
+  deleteArchive,
 } from "./lib/kvChecklist.js";
 import { logHeartbeat, logDeploy } from "./lib/audit.js";
 
@@ -18,6 +22,10 @@ const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 
 function html(s){ return new Response(s, {headers:{ "content-type":"text/html; charset=utf-8" }}) }
 function json(o, status=200){ return new Response(JSON.stringify(o,null,2), {status, headers:{ "content-type":"application/json" }}) }
+function needSecret(env, url){
+  const s = url.searchParams.get("s");
+  return !!(env.WEBHOOK_SECRET && s !== env.WEBHOOK_SECRET);
+}
 
 // ---------------- Drive-mode state (user area) ----------------
 const DRIVE_MODE_KEY = (uid) => `drive_mode:${uid}`;
@@ -156,8 +164,7 @@ export default {
 
       // ---- CI deploy note (через KV) ----
       if (p === "/ci/deploy-note") {
-        const s = url.searchParams.get("s");
-        if (env.WEBHOOK_SECRET && s !== env.WEBHOOK_SECRET) return json({ ok:false, error:"unauthorized" }, 401);
+        if (needSecret(env, url)) return json({ ok:false, error:"unauthorized" }, 401);
         const commit = url.searchParams.get("commit") || "";
         const actor  = url.searchParams.get("actor") || "";
         const depId  = url.searchParams.get("deploy") || env.DEPLOY_ID || "";
@@ -167,13 +174,9 @@ export default {
 
       // ---- Admin checklist HTML (захист секретом) ----
       if (p === "/admin/checklist/html") {
-        const s = url.searchParams.get("s");
-        if (env.WEBHOOK_SECRET && s !== env.WEBHOOK_SECRET) {
-          return html("<h3>401</h3>");
-        }
+        if (needSecret(env, url)) return html("<h3>401</h3>");
 
         if (req.method === "POST") {
-          // приймаємо лише стандартну форму з нашої сторінки
           const ctype = req.headers.get("content-type") || "";
           if (!ctype.includes("application/x-www-form-urlencoded") && !ctype.includes("multipart/form-data")) {
             return json({ ok:false, error:"unsupported content-type" }, 415);
@@ -196,8 +199,7 @@ export default {
 
       // ---- Admin checklist JSON ----
       if (p === "/admin/checklist") {
-        const s = url.searchParams.get("s");
-        if (env.WEBHOOK_SECRET && s !== env.WEBHOOK_SECRET) return json({ ok:false, error:"unauthorized" }, 401);
+        if (needSecret(env, url)) return json({ ok:false, error:"unauthorized" }, 401);
         if (req.method === "POST") {
           const body = await req.json().catch(()=>({}));
           const line = (body.line || "").toString().trim();
@@ -207,6 +209,76 @@ export default {
         }
         const text = await readChecklist(env);
         return json({ ok:true, text });
+      }
+
+      // ===== NEW: upload file into archive and append to checklist =====
+      if (p === "/admin/checklist/upload") {
+        if (needSecret(env, url)) return html("<h3>401</h3>");
+        if (req.method !== "POST") return json({ ok:false, error:"method" }, 405);
+
+        const form = await req.formData();
+        const file = form.get("file");
+        if (!file) return html("<h3>400: file required</h3>", 400);
+
+        const { key, name, size } = await saveArchive(env, file);
+        const link = `/admin/archive/get?key=${encodeURIComponent(key)}&s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`;
+        await appendChecklist(env, `upload: ${name} (${size} bytes) → ${link}`);
+        return Response.redirect(`/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`, 302);
+      }
+
+      // ===== NEW: start a new day section in checklist =====
+      if (p === "/admin/checklist/newday") {
+        if (needSecret(env, url)) return html("<h3>401</h3>");
+        const d = new Date();
+        const pad = (n)=>String(n).padStart(2,"0");
+        const hdr = `\n\n## ${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}\n`;
+        const cur = await readChecklist(env);
+        await writeChecklist(env, cur.endsWith("\n") ? cur + hdr.trimStart() : cur + "\n" + hdr.trimStart());
+        return Response.redirect(`/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`, 302);
+      }
+
+      // ===== NEW: archive list (simple HTML) =====
+      if (p === "/admin/archive/list") {
+        if (needSecret(env, url)) return html("<h3>401</h3>");
+        const keys = await listArchives(env);
+        const items = keys.map(k=>{
+          const name = k.split("__").slice(1).join("__") || k;
+          const dl  = `/admin/archive/get?key=${encodeURIComponent(k)}&s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`;
+          const del = `/admin/archive/delete?key=${encodeURIComponent(k)}&s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`;
+          return `<li><a href="${dl}">${name}</a> &nbsp; <a href="${del}" onclick="return confirm('Delete ${name}?')">🗑</a></li>`;
+        }).join("");
+        return html(`<!doctype html><meta charset="utf-8"><title>Archive</title>
+          <div style="font-family:system-ui;margin:20px;max-width:900px">
+            <h2>📚 Архів</h2>
+            <p><a href="/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}">← назад до чеклиста</a></p>
+            <ul>${items || "<li>порожньо</li>"}</ul>
+          </div>`);
+      }
+
+      // ===== NEW: archive get/download =====
+      if (p === "/admin/archive/get") {
+        if (needSecret(env, url)) return html("<h3>401</h3>");
+        const key = url.searchParams.get("key");
+        if (!key) return html("<h3>400: key required</h3>", 400);
+        const b64 = await getArchive(env, key);
+        if (!b64) return html("<h3>404</h3>", 404);
+        const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+        const filename = (key.split("__").slice(1).join("__") || "file.bin").replace(/[^\w.\-]+/g,"_");
+        return new Response(bin, {
+          headers: {
+            "content-type": "application/octet-stream",
+            "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`
+          }
+        });
+      }
+
+      // ===== NEW: archive delete =====
+      if (p === "/admin/archive/delete") {
+        if (needSecret(env, url)) return html("<h3>401</h3>");
+        const key = url.searchParams.get("key");
+        if (!key) return html("<h3>400: key required</h3>", 400);
+        await deleteArchive(env, key);
+        return Response.redirect(`/admin/archive/list?s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`, 302);
       }
 
       // ---- User OAuth (персональний Google Drive) ----
