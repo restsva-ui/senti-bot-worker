@@ -30,19 +30,21 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: wrangler deploy
 
-      # ⬇️ автолог у чеклист після успішного деплою
-      - name: ✍️ Append deploy info to senti_checklist.md
-        if: success()
+      # ⬇️ автолог у чеклист після деплою
+      - name: ✍️ Note deploy to Checklist
+        if: always()
         env:
-          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }} # додай у Secrets репозиторію
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          SHA: ${{ github.sha }}
-          REPO: ${{ github.repository }}
+          WORKER_HOST: ${{ secrets.WORKER_HOST }}          # напр. senti-bot-worker.restsva.workers.dev
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}    # має збігатися з env.WEBHOOK_SECRET у Worker
+          COMMIT_SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+          STATUS: ${{ job.status }}
         run: |
-          MSG="Deploy OK | repo=${REPO} | sha=${SHA} | run=${RUN_URL}"
-          # GitHub автоматично маскує $WEBHOOK_SECRET у логах
-          curl -sS "https://senti-bot-worker.restsva.workers.dev/gdrive/log" \
-            --get \
-            --data-urlencode "key=${WEBHOOK_SECRET}" \
-            --data-urlencode "file=senti_checklist.md" \
-            --data-urlencode "msg=${MSG}"
+          curl -sS --get "https://${WORKER_HOST}/ci/deploy-note" \
+            --data-urlencode "s=${WEBHOOK_SECRET}" \
+            --data-urlencode "commit=${COMMIT_SHA}" \
+            --data-urlencode "actor=${ACTOR}" \
+            --data-urlencode "deploy=${RUN_ID}" \
+            --data-urlencode "status=${STATUS}" \
+            --data-urlencode "from=github-actions" || true
