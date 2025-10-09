@@ -71,7 +71,8 @@ export async function deleteArchive(env, key) {
 // ВАЖЛИВО: ця версія приймає ТІЛЬКИ об'єкт опцій,
 // як і раніше викликається в src/index.js.
 export function checklistHtml({ title = "Senti Checklist", text = "", submitPath = "/admin/checklist/html" } = {}) {
-  const esc = (s) => String(s).replace(/[&<>]/g, (c)=>({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
+  const esc = (s) => String(s).replace(/[&<>]/g, (c)=>({ "&":"&amp;","<":"&lt;","&gt;":"&gt;" }[c] || c));
+  const secret = "senti1984"; // 🔒 додаємо до всіх POST-запитів
   return new Response(`<!doctype html>
 <meta charset="utf-8">
 <title>${title}</title>
@@ -86,7 +87,7 @@ export function checklistHtml({ title = "Senti Checklist", text = "", submitPath
 </style>
 <div class="box">
   <h2>📋 ${title}</h2>
-  <form method="POST" action="${submitPath}">
+  <form method="POST" action="${submitPath}?s=${secret}">
     <div class="row">
       <input type="text" name="line" placeholder="Додати рядок у чеклист...">
       <button type="submit">Append</button>
@@ -94,7 +95,7 @@ export function checklistHtml({ title = "Senti Checklist", text = "", submitPath
   </form>
 
   <h3>Вміст</h3>
-  <form method="POST" action="${submitPath}?mode=replace">
+  <form method="POST" action="${submitPath}?s=${secret}&mode=replace">
     <textarea name="full">${esc(text)}</textarea>
     <div class="row"><button type="submit">💾 Зберегти цілком</button></div>
   </form>
