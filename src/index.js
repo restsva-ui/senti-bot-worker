@@ -2,23 +2,22 @@
 import { drivePing, driveList, saveUrlToDrive, appendToChecklist, getAccessToken } from "./lib/drive.js";
 import { TG } from "./lib/tg.js";
 import { getUserTokens, putUserTokens, userListFiles, userSaveUrl } from "./lib/userDrive.js";
+import { logHeartbeat, logDeploy } from "./lib/audit.js";
 
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 
 function html(s){ return new Response(s, {headers:{ "content-type":"text/html; charset=utf-8" }}) }
 function json(o, status=200){ return new Response(JSON.stringify(o,null,2), {status, headers:{ "content-type":"application/json" }}) }
 
-// ---------------- KV state keys ----------------
+// ---------------- Drive-mode state (user area) ----------------
 const DRIVE_MODE_KEY = (uid) => `drive_mode:${uid}`;
-const LAST_DEPLOY_KEY = "last_deploy_id";
-
 function ensureState(env) {
   if (!env.STATE_KV) throw new Error("STATE_KV binding missing");
   return env.STATE_KV;
 }
 async function setDriveMode(env, userId, on) {
   const kv = ensureState(env);
-  await kv.put(DRIVE_MODE_KEY(userId), on ? "1" : "0", { expirationTtl: 3600 });
+  await kv.put(DRIVE_MODE_KEY(userId), on ? "1" : "0", { expirationTtl: 3600 }); // TTL 1h
 }
 async function getDriveMode(env, userId) {
   const kv = ensureState(env);
@@ -26,37 +25,7 @@ async function getDriveMode(env, userId) {
   return v === "1";
 }
 
-// ---------------- User tokens: get fresh access_token ----------------
-async function getFreshUserAccessToken(env, userId){
-  const rec = await getUserTokens(env, userId);
-  if (!rec?.refresh_token) throw new Error("user_google: not linked");
-  const now = Math.floor(Date.now()/1000);
-  if (rec.access_token && rec.expiry && rec.expiry > now+30) return rec.access_token;
-
-  // refresh
-  const body = new URLSearchParams({
-    client_id: env.GOOGLE_CLIENT_ID,
-    client_secret: env.GOOGLE_CLIENT_SECRET,
-    refresh_token: rec.refresh_token,
-    grant_type: "refresh_token",
-  });
-  const r = await fetch("https://oauth2.googleapis.com/token", {
-    method:"POST",
-    headers:{ "Content-Type":"application/x-www-form-urlencoded" },
-    body
-  });
-  const d = await r.json();
-  if (!r.ok) throw new Error("refresh_user_token: "+JSON.stringify(d));
-  const upd = {
-    access_token: d.access_token,
-    refresh_token: rec.refresh_token,
-    expiry: Math.floor(Date.now()/1000) + (d.expires_in||3600) - 60,
-  };
-  await putUserTokens(env, userId, upd);
-  return upd.access_token;
-}
-
-// ---------------- Upload helpers ----------------
+// ---------------- Helpers: detect & save media ----------------
 function pickPhoto(msg){
   const arr = msg.photo;
   if (!Array.isArray(arr) || !arr.length) return null;
@@ -95,47 +64,10 @@ async function tgFileUrl(env, file_id){
   if (!path) throw new Error("getFile: file_path missing");
   return `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${path}`;
 }
-async function userSaveText(env, userId, content, name){
-  const access = await getFreshUserAccessToken(env, userId);
-  const boundary = "----senti" + Math.random().toString(16).slice(2);
-  const metadata = { name };
-  const enc = new TextEncoder();
-
-  const bodyParts = [
-    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
-      JSON.stringify(metadata) + `\r\n`,
-    `--${boundary}\r\nContent-Type: text/markdown; charset=UTF-8\r\n\r\n`,
-  ];
-
-  // assemble a readable stream to avoid huge string concat
-  const stream = new ReadableStream({
-    start(controller){
-      controller.enqueue(enc.encode(bodyParts[0]));
-      controller.enqueue(enc.encode(bodyParts[1]));
-      controller.enqueue(enc.encode(content));
-      controller.enqueue(enc.encode(`\r\n--${boundary}--\r\n`));
-      controller.close();
-    }
-  });
-
-  const r = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
-    method:"POST",
-    headers:{
-      "Authorization": `Bearer ${access}`,
-      "Content-Type": `multipart/related; boundary=${boundary}`
-    },
-    body: stream
-  });
-  const d = await r.json();
-  if (!r.ok) throw new Error("userSaveText failed: "+JSON.stringify(d));
-  return d; // {id, name, ...}
-}
-
 async function handleIncomingMedia(env, chatId, userId, msg){
   const att = detectAttachment(msg);
   if (!att) return false;
 
-  // ensure linkage
   const ut = await getUserTokens(env, userId);
   if (!ut?.refresh_token) {
     await TG.text(chatId, "Щоб зберігати у свій Google Drive — спочатку натисни «Google Drive» і дозволь доступ.", { token: env.BOT_TOKEN });
@@ -148,33 +80,31 @@ async function handleIncomingMedia(env, chatId, userId, msg){
   return true;
 }
 
-async function handleIncomingText(env, chatId, userId, text){
-  const isCmd = text.startsWith("/");
-  if (isCmd) return false;
-  const now = new Date().toISOString().replace(/[:.]/g,"-");
-  const name = `text_${now}.md`;
-  const md = `# From Telegram\n\n${text}\n`;
-  const f = await userSaveText(env, userId, md, name);
-  await TG.text(chatId, `✅ Збережено: ${f.name}`, { token: env.BOT_TOKEN });
-  return true;
-}
-
-// ---------------- Keyboards ----------------
+// ---------------- Reply Keyboards ----------------
 const BTN_DRIVE = "Google Drive";
 const BTN_SENTI = "Senti";
 const BTN_ADMIN = "Admin";
-function mainKeyboard(isAdmin = false){
-  const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
+function mainKeyboard(isAdmin=false){
+  const rows = [
+    [{ text: BTN_DRIVE }, { text: BTN_SENTI }],
+  ];
   if (isAdmin) rows.push([{ text: BTN_ADMIN }]);
-  return { keyboard: rows, resize_keyboard: true, one_time_keyboard: false };
+  return {
+    keyboard: rows,
+    resize_keyboard: true,
+    one_time_keyboard: false
+  };
 }
 function inlineOpenDrive(){
-  return { inline_keyboard: [[{ text: "Відкрити Диск", url: "https://drive.google.com/drive/my-drive" }]] };
+  return {
+    inline_keyboard: [[{ text: "Відкрити Диск", url: "https://drive.google.com/drive/my-drive" }]]
+  };
 }
 
 // ---------------- Commands installers ----------------
+// Мінімалізуємо підказки: прибираємо всі глобальні, лишаємо лише /admin для твого чату
 async function installCommandsMinimal(env){
-  await TG.setCommands(env.BOT_TOKEN, { type:"default" }, []);
+  await TG.setCommands(env.BOT_TOKEN, { type:"default" }, []); // прибрати меню BotFather
   if (!env.TELEGRAM_ADMIN_ID) throw new Error("TELEGRAM_ADMIN_ID not set");
   await TG.setCommands(env.BOT_TOKEN, { type:"chat", chat_id: Number(env.TELEGRAM_ADMIN_ID) }, [
     { command: "admin", description: "Відкрити адмін-меню" },
@@ -186,51 +116,7 @@ async function clearCommands(env){
     await TG.setCommands(env.BOT_TOKEN, { type:"chat", chat_id: Number(env.TELEGRAM_ADMIN_ID) }, []);
   }
 }
-async function nukeAllCommands(env){
-  const langs = [undefined, "uk", "ru", "en", "uk-UA", "ru-RU", "en-US"];
-  const scopes = [
-    { type: "default" },
-    { type: "all_private_chats" },
-    { type: "all_group_chats" },
-    { type: "all_chat_administrators" },
-  ];
-  for (const lang of langs) for (const scope of scopes) {
-    const payload = { commands: [], scope };
-    if (lang) payload.language_code = lang;
-    try { await TG.api(env.BOT_TOKEN, "setMyCommands", payload); } catch (e) {}
-  }
-  if (env.TELEGRAM_ADMIN_ID) {
-    for (const lang of langs) {
-      const payload = { commands: [], scope: { type:"chat", chat_id:Number(env.TELEGRAM_ADMIN_ID) } };
-      if (lang) payload.language_code = lang;
-      try { await TG.api(env.BOT_TOKEN, "setMyCommands", payload); } catch (e) {}
-    }
-  }
-}
 
-// ---------------- Deploy log helpers ----------------
-async function recordDeployIfChanged(env, note){
-  const kv = ensureState(env);
-  const newId = (note?.id || env.DEPLOY_ID || "").trim();
-  if (!newId) return; // nothing to compare
-  const prev = await kv.get(LAST_DEPLOY_KEY);
-  if (prev === newId) return;
-  await kv.put(LAST_DEPLOY_KEY, newId);
-  try {
-    const adminTok = await getAccessToken(env);
-    const line = `[DEPLOY] ${new Date().toISOString()} | id=${newId}` +
-      (note?.commit ? ` | commit=${note.commit}` : "") +
-      (note?.branch ? ` | branch=${note.branch}` : "") +
-      (note?.actor ? ` | by=${note.actor}` : "") +
-      (note?.url ? ` | url=${note.url}` : "") +
-      (env.SERVICE_HOST ? ` | host=${env.SERVICE_HOST}` : "");
-    await appendToChecklist(env, adminTok, line);
-  } catch (e) {
-    console.log("append deploy failed", e);
-  }
-}
-
-// ---------------- Worker export ----------------
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
@@ -256,15 +142,23 @@ export default {
         return new Response(await r.text(), {headers:{'content-type':'application/json'}});
       }
 
-      // Commands manage
-      if (p === "/tg/install-commands-min") { await installCommandsMinimal(env); return json({ ok:true, installed:"minimal" }); }
-      if (p === "/tg/clear-commands") { await clearCommands(env); return json({ ok:true, cleared:true }); }
-      if (p === "/tg/nuke-commands") { await nukeAllCommands(env); return json({ ok:true, nuked:true }); }
+      // Меню-підказки
+      if (p === "/tg/install-commands-min") {
+        await installCommandsMinimal(env);
+        return json({ ok:true, installed:"minimal" });
+      }
+      if (p === "/tg/clear-commands") {
+        await clearCommands(env);
+        return json({ ok:true, cleared:true });
+      }
 
       // ---- Admin Drive quick checks ----
       if (p === "/gdrive/ping") {
-        try { const token = await getAccessToken(env); const files = await driveList(env, token); return json({ ok:true, files: files.files||[] }); }
-        catch (e) { return json({ ok:false, error:String(e) }, 500); }
+        try {
+          const token = await getAccessToken(env);
+          const files = await driveList(env, token);
+          return json({ ok: true, files: files.files || [] });
+        } catch (e) { return json({ ok:false, error:String(e) }, 500); }
       }
       if (p === "/gdrive/save") {
         const token = await getAccessToken(env);
@@ -274,28 +168,33 @@ export default {
         return json({ ok:true, file });
       }
       if (p === "/gdrive/checklist") {
-        const token = await getAccessToken(env,);
+        const token = await getAccessToken(env);
         const line = url.searchParams.get("line") || `tick ${new Date().toISOString()}`;
         await appendToChecklist(env, token, line);
         return json({ ok:true });
       }
 
-      // ---- Deploy webhook ----
-      if (p === "/deploy/webhook" && req.method === "POST") {
-        const body = await req.json().catch(()=> ({}));
-        await recordDeployIfChanged(env, {
-          id: body.id || body.version || body.deploy_id || body.commit || "",
-          commit: body.commit || body.sha,
-          branch: body.branch || body.ref,
-          actor: body.actor || body.author || body.user,
-          url: body.url || body.preview_url || body.page || ""
-        });
-        return json({ ok:true, stored:true });
+      // ---- CI hook: deploy note ----
+      // Викликається з GitHub Actions після publsih: GET /ci/deploy-note?s=<WEBHOOK_SECRET>&commit=...&actor=...
+      if (p === "/ci/deploy-note") {
+        const s = url.searchParams.get("s");
+        if (env.WEBHOOK_SECRET && s !== env.WEBHOOK_SECRET) return json({ ok:false, error:"unauthorized" }, 401);
+        const commit = url.searchParams.get("commit") || "";
+        const actor  = url.searchParams.get("actor") || "";
+        const depId  = url.searchParams.get("deploy") || env.DEPLOY_ID || "";
+        const line = await logDeploy(env, { source:"ci", commit, actor, deployId: depId });
+        return json({ ok:true, line });
+      }
+
+      // ---- Manual heartbeat (optional) ----
+      if (p === "/admin/heartbeat") {
+        const line = await logHeartbeat(env, "manual");
+        return json({ ok:true, line });
       }
 
       // ---- User OAuth (персональний Google Drive) ----
       if (p === "/auth/start") {
-        const u = url.searchParams.get("u");
+        const u = url.searchParams.get("u"); // telegram user id
         const state = btoa(JSON.stringify({ u }));
         const redirect_uri = `https://${env.SERVICE_HOST}/auth/cb`;
         const auth = new URL("https://accounts.google.com/o/oauth2/v2/auth");
@@ -336,15 +235,26 @@ export default {
       }
 
       // ---- Telegram webhook ----
-      if (p === "/webhook" && req.method !== "POST") return json({ ok:true, note:"webhook alive (GET)" });
+      if (p === "/webhook" && req.method !== "POST") {
+        return json({ ok:true, note:"webhook alive (GET)" });
+      }
 
       if (p === "/webhook" && req.method === "POST") {
         const sec = req.headers.get("x-telegram-bot-api-secret-token");
-        if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) return json({ ok:false, error:"unauthorized" }, 401);
+        if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
+          console.log("Webhook: wrong secret", sec);
+          return json({ ok:false, error:"unauthorized" }, 401);
+        }
 
+        // Приймаємо та логуємо апдейт
         let update;
-        try { update = await req.json(); }
-        catch { return json({ ok:false }, 400); }
+        try {
+          update = await req.json();
+          console.log("TG update:", JSON.stringify(update).slice(0, 2000));
+        } catch (e) {
+          console.log("Webhook parse error:", e);
+          return json({ ok:false }, 400);
+        }
 
         const msg = update.message || update.edited_message || update.channel_post || update.callback_query?.message;
         const textRaw = update.message?.text || update.edited_message?.text || update.callback_query?.data || "";
@@ -354,46 +264,74 @@ export default {
         const userId = msg.from?.id;
         const text = (textRaw || "").trim();
 
-        const safe = async (fn) => { try { await fn(); } catch (e) { try { await TG.text(chatId, `❌ Помилка: ${String(e)}`, { token: env.BOT_TOKEN }); } catch {} } };
+        const safe = async (fn) => {
+          try { await fn(); }
+          catch (e) {
+            console.log("Handler error:", e);
+            try { await TG.text(chatId, `❌ Помилка: ${String(e)}`, { token: env.BOT_TOKEN }); } catch {}
+          }
+        };
 
-        // ----- UX -----
+        // ---------------- TOP-LEVEL UX ----------------
         if (text === "/start") {
           await safe(async () => {
-            await setDriveMode(env, userId, false);
             const isAdmin = ADMIN(env, userId);
-            await TG.text(chatId, "Привіт! Я Senti 🤖", { token: env.BOT_TOKEN, reply_markup: mainKeyboard(isAdmin) });
+            await setDriveMode(env, userId, false); // під час старту — звичайний чат
+            await TG.text(
+              chatId,
+              "Привіт! Я Senti 🤖",
+              { token: env.BOT_TOKEN, reply_markup: mainKeyboard(isAdmin) }
+            );
           });
           return json({ok:true});
         }
 
-        // Buttons
+        // Натиснута кнопка "Google Drive"
         if (text === BTN_DRIVE) {
           await safe(async () => {
             const ut = await getUserTokens(env, userId);
             if (!ut?.refresh_token) {
               const authUrl = `https://${env.SERVICE_HOST}/auth/start?u=${userId}`;
-              await TG.text(chatId, `Дай доступ до свого Google Drive:\n${authUrl}\n\nПісля дозволу повернись у чат і ще раз натисни «${BTN_DRIVE}».`, { token: env.BOT_TOKEN });
+              await TG.text(
+                chatId,
+                `Дай доступ до свого Google Drive:\n${authUrl}\n\nПісля дозволу повернись у чат і ще раз натисни «${BTN_DRIVE}».`,
+                { token: env.BOT_TOKEN }
+              );
               return;
             }
             await setDriveMode(env, userId, true);
-            const isAdmin = ADMIN(env, userId);
-            await TG.text(chatId, "📁 Режим диска: ON\nНадсилай фото/відео/документи або текст — все збережу у твій Диск.", { token: env.BOT_TOKEN, reply_markup: mainKeyboard(isAdmin) });
+            await TG.text(
+              chatId,
+              "📁 Режим диска: ON\nНадсилай фото/відео/документи — збережу на твій Google Drive.",
+              { token: env.BOT_TOKEN, reply_markup: mainKeyboard(ADMIN(env, userId)) }
+            );
             await TG.text(chatId, "Переглянути вміст диска:", { token: env.BOT_TOKEN, reply_markup: inlineOpenDrive() });
           });
           return json({ok:true});
         }
+
+        // Натиснута кнопка "Senti"
         if (text === BTN_SENTI) {
           await safe(async () => {
             await setDriveMode(env, userId, false);
-            const isAdmin = ADMIN(env, userId);
-            await TG.text(chatId, "Режим диска вимкнено. Це звичайний чат Senti.", { token: env.BOT_TOKEN, reply_markup: mainKeyboard(isAdmin) });
+            await TG.text(
+              chatId,
+              "Режим диска вимкнено. Це звичайний чат Senti.",
+              { token: env.BOT_TOKEN, reply_markup: mainKeyboard(ADMIN(env, userId)) }
+            );
           });
           return json({ok:true});
         }
-        if (text === BTN_ADMIN) {
+
+        // Натиснута кнопка "Admin" (лише для власника)
+        if (text === BTN_ADMIN || text === "/admin") {
           await safe(async () => {
-            if (!ADMIN(env, userId)) { await TG.text(chatId, "⛔ Лише для адміна.", { token: env.BOT_TOKEN }); return; }
-            await TG.text(chatId,
+            if (!ADMIN(env, userId)) {
+              await TG.text(chatId, "⛔ Лише для адміна.", { token: env.BOT_TOKEN });
+              return;
+            }
+            await TG.text(
+              chatId,
 `🛠 Адмін-меню
 
 • /admin_ping — ping адмін-диска
@@ -401,54 +339,49 @@ export default {
 • /admin_checklist <рядок> — допис у чеклист
 • /admin_setwebhook — виставити вебхук
 • /admin_refreshcheck — ручний рефреш
-• /view — відкрити мій Google Drive (посилання)`,
-              { token: env.BOT_TOKEN });
+• /admin_note_deploy — тестова деплой-нотатка`,
+              { token: env.BOT_TOKEN }
+            );
           });
           return json({ok:true});
         }
 
-        // Admin slash
-        if (text === "/admin") {
-          await safe(async () => {
-            if (!ADMIN(env, userId)) { await TG.text(chatId, "⛔ Лише для адміна.", { token: env.BOT_TOKEN }); return; }
-            await TG.text(chatId,
-`🛠 Адмін-меню
-
-• /admin_ping — ping адмін-диска
-• /admin_list — список файлів (адмін-диск)
-• /admin_checklist <рядок> — допис у чеклист
-• /admin_setwebhook — виставити вебхук
-• /admin_refreshcheck — ручний рефреш
-• /view — відкрити мій Google Drive (посилання)`,
-              { token: env.BOT_TOKEN });
-          });
-          return json({ok:true});
-        }
-
-        // Admin actions
+        // ---------------- ADMIN CMDS ----------------
         if (text.startsWith("/admin_ping")) {
-          await safe(async () => { if (!ADMIN(env, userId)) return;
+          await safe(async () => {
+            if (!ADMIN(env, userId)) return;
             const r = await drivePing(env);
             await TG.text(chatId, `✅ Admin Drive OK. filesCount: ${r.filesCount}`, { token: env.BOT_TOKEN });
           });
           return json({ok:true});
         }
+
         if (text.startsWith("/admin_list")) {
-          await safe(async () => { if (!ADMIN(env, userId)) return;
+          await safe(async () => {
+            if (!ADMIN(env, userId)) return;
             const once = async () => {
               const token = await getAccessToken(env);
               const files = await driveList(env, token);
               const arr = files.files || [];
-              const msgOut = arr.length ? "Адмін диск:\n" + arr.map(f => `• ${f.name} (${f.id})`).join("\n") : "📁 Диск порожній.";
+              const msgOut = arr.length
+                ? "Адмін диск:\n" + arr.map(f => `• ${f.name} (${f.id})`).join("\n")
+                : "📁 Диск порожній.";
               await TG.text(chatId, msgOut, { token: env.BOT_TOKEN });
               try { await appendToChecklist(env, token, `admin_list OK ${new Date().toISOString()}`); } catch {}
             };
-            try { await once(); } catch (e) { const s = String(e||""); if (s.includes("invalid_grant") || s.includes("Refresh 400")) { await once(); } else throw e; }
+            try { await once(); }
+            catch (e) {
+              const s = String(e || "");
+              if (s.includes("invalid_grant") || s.includes("Refresh 400")) { await once(); }
+              else throw e;
+            }
           });
           return json({ok:true});
         }
+
         if (text.startsWith("/admin_checklist")) {
-          await safe(async () => { if (!ADMIN(env, userId)) return;
+          await safe(async () => {
+            if (!ADMIN(env, userId)) return;
             const line = text.replace("/admin_checklist","").trim() || `tick ${new Date().toISOString()}`;
             const token = await getAccessToken(env);
             await appendToChecklist(env, token, line);
@@ -456,48 +389,55 @@ export default {
           });
           return json({ok:true});
         }
+
         if (text.startsWith("/admin_setwebhook")) {
-          await safe(async () => { if (!ADMIN(env, userId)) return;
+          await safe(async () => {
+            if (!ADMIN(env, userId)) return;
             const target = `https://${env.SERVICE_HOST}/webhook`;
             await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
             await TG.text(chatId, `✅ Вебхук → ${target}${env.TG_WEBHOOK_SECRET ? " (секрет застосовано)" : ""}`, { token: env.BOT_TOKEN });
           });
           return json({ok:true});
         }
+
         if (text.startsWith("/admin_refreshcheck")) {
-          await safe(async () => { if (!ADMIN(env, userId)) return;
-            try { const tok = await getAccessToken(env); if (tok) await TG.text(chatId, `✅ Refresh OK (отримано access_token).`, { token: env.BOT_TOKEN }); }
-            catch (e) { await TG.text(chatId, `❌ Refresh failed: ${String(e)}`, { token: env.BOT_TOKEN }); }
-          });
-          return json({ok:true});
-        }
-
-        // User helpers
-        if (text === "/view") {
           await safe(async () => {
-            await TG.text(chatId, "Твій Google Drive:", { token: env.BOT_TOKEN, reply_markup: inlineOpenDrive() });
+            if (!ADMIN(env, userId)) return;
+            try {
+              const tok = await getAccessToken(env);
+              if (tok) await TG.text(chatId, `✅ Refresh OK (отримано access_token).`, { token: env.BOT_TOKEN });
+            } catch (e) {
+              await TG.text(chatId, `❌ Refresh failed: ${String(e)}`, { token: env.BOT_TOKEN });
+            }
           });
           return json({ok:true});
         }
 
-        // ---- Drive-mode: save media/text automatically ----
+        if (text.startsWith("/admin_note_deploy")) {
+          await safe(async () => {
+            if (!ADMIN(env, userId)) return;
+            const line = await logDeploy(env, { source:"manual", actor:String(userId) });
+            await TG.text(chatId, `📝 ${line}`, { token: env.BOT_TOKEN });
+          });
+          return json({ok:true});
+        }
+
+        // ---- Якщо режим ON — пробуємо зберегти будь-який медіаконтент ----
         try {
           const mode = await getDriveMode(env, userId);
           if (mode) {
-            if (await handleIncomingMedia(env, chatId, userId, msg)) return json({ ok:true });
-            if (text) {
-              if (await handleIncomingText(env, chatId, userId, text)) return json({ ok:true });
-            }
+            const handled = await handleIncomingMedia(env, chatId, userId, msg);
+            if (handled) return json({ ok:true });
           }
         } catch (mediaErr) {
-          try { await TG.text(chatId, `❌ Не вдалось зберегти: ${String(mediaErr)}`, { token: env.BOT_TOKEN }); } catch {}
+          console.log("Media save (mode) error:", mediaErr);
+          try { await TG.text(chatId, `❌ Не вдалось зберегти вкладення: ${String(mediaErr)}`, { token: env.BOT_TOKEN }); } catch {}
           return json({ ok:true });
         }
 
-        // default echo/keyboard refresh
+        // Дефолт
         await safe(async () => {
-          const isAdmin = ADMIN(env, userId);
-          await TG.text(chatId, "Готовий 👋", { token: env.BOT_TOKEN, reply_markup: mainKeyboard(isAdmin) });
+          await TG.text(chatId, "Готовий 👋", { token: env.BOT_TOKEN, reply_markup: mainKeyboard(ADMIN(env, userId)) });
         });
         return json({ok:true});
       }
@@ -509,15 +449,18 @@ export default {
         return json({ ok:true });
       }
 
-      // 404
+      // ---- 404 ----
       return json({ ok:false, error:"Not found" }, 404);
     } catch (e) {
+      console.log("Top-level error:", e);
       return json({ ok:false, error:String(e) }, 500);
     }
   },
 
-  // ---- CRON: every 15 min (configure in wrangler.toml) ----
-  async scheduled(event, env, ctx){
-    await recordDeployIfChanged(env, { id: env.DEPLOY_ID });
+  // ---- CRON (heartbeat кожні 15 хв) ----
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil((async () => {
+      try { await logHeartbeat(env); } catch (e) { console.log("heartbeat error", e); }
+    })());
   }
 };
