@@ -4,6 +4,10 @@ import { TG } from "./lib/tg.js";
 import { getUserTokens, putUserTokens, userListFiles, userSaveUrl } from "./lib/userDrive.js";
 import { logHeartbeat, logDeploy } from "./lib/audit.js";
 
+// ==== NEW: “мозок” + RAG ====
+import { AI } from "./lib/ai.js";
+import { RAG } from "./lib/rag.js";
+
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 
 function html(s){ return new Response(s, {headers:{ "content-type":"text/html; charset=utf-8" }}) }
@@ -192,6 +196,29 @@ export default {
         return json({ ok:true, line });
       }
 
+      // ---- RAG manual reindex (ADMIN) ----
+      if (p === "/rag/reindex") {
+        if (req.method !== "POST") return json({ ok:false, error:"POST only" }, 405);
+        const sec = req.headers.get("x-admin");
+        if (!sec || String(sec) !== String(env.TELEGRAM_ADMIN_ID)) return json({ ok:false, error:"forbidden" }, 403);
+        try {
+          const token = await getAccessToken(env);
+          const listFn = async () => {
+            const files = await driveList(env, token);
+            return (files.files||[]).map(f=>({id:f.id, name:f.name, mimeType:f.mimeType||""}));
+          };
+          const readFn = async (id, n) => {
+            const r = await fetch(`https://www.googleapis.com/drive/v3/files/${id}?alt=media`, {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            const buf = new Uint8Array(await r.arrayBuffer());
+            return new TextDecoder("utf-8").decode(buf.slice(0, n));
+          };
+          const res = await RAG.ingest(env, listFn, readFn);
+          return json({ ok:true, ...res });
+        } catch(e){ return json({ ok:false, error:String(e) }, 500); }
+      }
+
       // ---- User OAuth (персональний Google Drive) ----
       if (p === "/auth/start") {
         const u = url.searchParams.get("u"); // telegram user id
@@ -339,7 +366,9 @@ export default {
 • /admin_checklist <рядок> — допис у чеклист
 • /admin_setwebhook — виставити вебхук
 • /admin_refreshcheck — ручний рефреш
-• /admin_note_deploy — тестова деплой-нотатка`,
+• /admin_note_deploy — тестова деплой-нотатка
+• /ask <запит> — питання до Senti (Gemini + RAG)
+• (reply) /summarize — стиснути виділений текст/повідомлення`,
               { token: env.BOT_TOKEN }
             );
           });
@@ -422,6 +451,35 @@ export default {
           return json({ok:true});
         }
 
+        // ==== NEW: “розум” команди (ADMIN only) ====
+        if (text.startsWith("/ask")) {
+          await safe(async ()=>{
+            if (!ADMIN(env, userId)) return;
+            const q = text.replace("/ask","").trim() || "Поясни поточний стан проекту коротко.";
+            let ctx = [];
+            try { ctx = await RAG.search(env, q, 4); } catch(e){ console.log("RAG search err", e); }
+            const system = "Ти технічний асистент Senti. Відповідай стисло, по суті. Якщо даєш кроки — нумеруй. Користуйся контекстом, але не вигадуй.";
+            const ans = await AI.ask(env, { system, prompt: q, context: ctx });
+            await TG.text(chatId, ans || "…", { token: env.BOT_TOKEN });
+          });
+          return json({ok:true});
+        }
+
+        if (text.startsWith("/summarize")) {
+          await safe(async ()=>{
+            if (!ADMIN(env, userId)) return;
+            const src = msg.reply_to_message?.text || msg.reply_to_message?.caption || "";
+            if(!src){
+              await TG.text(chatId,"Відповідай /summarize на повідомлення/текст.",{token:env.BOT_TOKEN});
+              return;
+            }
+            const system = "Стисни зміст до 5 пунктів із конкретикою. Не загальні фрази.";
+            const ans = await AI.ask(env, { system, prompt: src });
+            await TG.text(chatId, ans || "…", { token: env.BOT_TOKEN });
+          });
+          return json({ok:true});
+        }
+
         // ---- Якщо режим ON — пробуємо зберегти будь-який медіаконтент ----
         try {
           const mode = await getDriveMode(env, userId);
@@ -457,10 +515,28 @@ export default {
     }
   },
 
-  // ---- CRON (heartbeat кожні 15 хв) ----
+  // ---- CRON (heartbeat кожні 15 хв) + RAG індексація ----
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
       try { await logHeartbeat(env); } catch (e) { console.log("heartbeat error", e); }
+      // Легка індексація для RAG (якщо доступний адмін-диск)
+      try {
+        const token = await getAccessToken(env);
+        if (token) {
+          const listFn = async () => {
+            const files = await driveList(env, token);
+            return (files.files||[]).map(f=>({id:f.id, name:f.name, mimeType:f.mimeType||""}));
+          };
+          const readFn = async (id, n) => {
+            const r = await fetch(`https://www.googleapis.com/drive/v3/files/${id}?alt=media`, {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            const buf = new Uint8Array(await r.arrayBuffer());
+            return new TextDecoder("utf-8").decode(buf.slice(0, n));
+          };
+          await RAG.ingest(env, listFn, readFn);
+        }
+      } catch (e) { console.log("RAG ingest (cron) error", e); }
     })());
   }
 };
