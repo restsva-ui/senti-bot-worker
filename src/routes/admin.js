@@ -1,122 +1,156 @@
 // src/routes/admin.js
-// Адмін-меню та дії
+import { TG } from "../lib/tg.js";
+import { drivePing, driveList, appendToChecklist, getAccessToken } from "../lib/drive.js";
 
-import { drivePing, driveList, driveSaveFromUrl, driveAppendLog } from "../lib/drive.js";
-import { getState, setState, clearState } from "../lib/state.js";
-import { sendMessage, escape } from "../lib/telegram.js";
+export const adminRoutes = async (req, env, url) => {
+  const p = url.pathname;
 
-export function adminKeyboard() {
-  // ВАЖЛИВО: keyboard = масив рядків (масив масивів)
-  return {
-    keyboard: [
-      [{ text: "Drive ✅" }, { text: "List 10 🧾" }],
-      [{ text: "Backup URL ⬆️" }, { text: "Checklist +" }],
-      [{ text: "Меню" }],
-    ],
-    resize_keyboard: true,
-    is_persistent: true,
-  };
-}
-
-export async function showAdminMenu(env, chatId) {
-  await clearState(env, chatId, "awaiting_url");
-  await clearState(env, chatId, "awaiting_checklist_line");
-  return sendMessage(
-    env,
-    chatId,
-    "Senti Admin\n— мінімальне меню керування:\n• Drive пінг і список файлів\n• Швидкий бекап за URL\n• Додавання в чеклист",
-    { reply_markup: adminKeyboard() }
-  );
-}
-
-export async function handleAdminButtons(env, chatId, text) {
-  const t = (text || "").trim();
-
-  if (t === "Drive ✅") {
-    await clearState(env, chatId, "awaiting_url");
-    try {
-      await drivePing(env);
-      return sendMessage(env, chatId, "🟢 Drive доступний");
-    } catch (e) {
-      return sendMessage(env, chatId, `🔴 Drive помилка: ${escape(e.message)}`);
+  // Меню-підказки мінімальні
+  if (p === "/tg/install-commands-min") {
+    await TG.setCommands(env.BOT_TOKEN, { type:"default" }, []);
+    if (!env.TELEGRAM_ADMIN_ID) throw new Error("TELEGRAM_ADMIN_ID not set");
+    await TG.setCommands(env.BOT_TOKEN, { type:"chat", chat_id: Number(env.TELEGRAM_ADMIN_ID) }, [
+      { command: "admin", description: "Відкрити адмін-меню" },
+    ]);
+    return new Response(JSON.stringify({ ok:true, installed:"minimal" }), { headers:{ "content-type":"application/json" }});
+  }
+  if (p === "/tg/clear-commands") {
+    await TG.setCommands(env.BOT_TOKEN, { type:"default" }, []);
+    if (env.TELEGRAM_ADMIN_ID) {
+      await TG.setCommands(env.BOT_TOKEN, { type:"chat", chat_id: Number(env.TELEGRAM_ADMIN_ID) }, []);
     }
+    return new Response(JSON.stringify({ ok:true, cleared:true }), { headers:{ "content-type":"application/json" }});
   }
 
-  if (t === "List 10 🧾") {
-    await clearState(env, chatId, "awaiting_url");
+  // Швидкі перевірки диска
+  if (p === "/gdrive/ping") {
     try {
-      const files = await driveList(env, 10);
-      if (!files?.length) return sendMessage(env, chatId, "Порожньо.");
-      const lines = files.map(
-        (f, i) => `${i + 1}. ${escape(f.name)} — ${escape(f.webViewLink || f.id)}`
-      );
-      return sendMessage(env, chatId, lines.join("\n"));
+      const token = await getAccessToken(env);
+      const files = await driveList(env, token);
+      return new Response(JSON.stringify({ ok:true, files: files.files || [] }), { headers:{ "content-type":"application/json" }});
     } catch (e) {
-      return sendMessage(env, chatId, `Не вдалося отримати список: ${escape(e.message)}`);
+      return new Response(JSON.stringify({ ok:false, error:String(e) }), { status:500, headers:{ "content-type":"application/json" }});
     }
   }
+  if (p === "/gdrive/checklist") {
+    const token = await getAccessToken(env);
+    const line = url.searchParams.get("line") || `tick ${new Date().toISOString()}`;
+    await appendToChecklist(env, token, line);
+    return new Response(JSON.stringify({ ok:true }), { headers:{ "content-type":"application/json" }});
+  }
 
-  if (t === "Backup URL ⬆️") {
-    await setState(env, chatId, "awaiting_url", true);
-    return sendMessage(
-      env,
-      chatId,
-      "Надішли URL для збереження у Drive.\nМожна додати назву після пробілу: `https://... файл.zip`",
-      { parse_mode: "Markdown" }
+  // CI note
+  if (p === "/ci/deploy-note") {
+    const s = url.searchParams.get("s");
+    if (env.WEBHOOK_SECRET && s !== env.WEBHOOK_SECRET) {
+      return new Response(JSON.stringify({ ok:false, error:"unauthorized" }), { status:401, headers:{ "content-type":"application/json" }});
+    }
+    const commit = url.searchParams.get("commit") || "";
+    const actor  = url.searchParams.get("actor") || "";
+    const depId  = url.searchParams.get("deploy") || env.DEPLOY_ID || "";
+    const line = `[deploy] ${new Date().toISOString()} actor=${actor} commit=${commit} deploy=${depId}`;
+    const token = await getAccessToken(env);
+    await appendToChecklist(env, token, line);
+    return new Response(JSON.stringify({ ok:true, line }), { headers:{ "content-type":"application/json" }});
+  }
+
+  return null;
+};
+
+export const handleAdminCommand = async ({ env, chatId, userId, text, msg, isAdmin, TG, getAccessToken, driveList, appendToChecklist, logDeploy, RAG }) => {
+  if (!isAdmin) {
+    await TG.text(chatId, "⛔ Лише для адміна.", { token: env.BOT_TOKEN });
+    return;
+  }
+
+  if (text === "/admin") {
+    await TG.text(chatId,
+`🛠 Адмін-меню
+
+• /admin_ping — ping адмін-диска
+• /admin_list — список файлів (адмін-диск)
+• /admin_checklist <рядок> — допис у чеклист
+• /admin_setwebhook — виставити вебхук
+• /admin_refreshcheck — ручний рефреш
+• /admin_note_deploy — тестова деплой-нотатка
+• /ask <запит> — питання до Senti (Gemini + RAG)
+• (reply) /summarize — стиснути виділений текст/повідомлення`,
+      { token: env.BOT_TOKEN }
     );
+    return;
   }
 
-  if (t === "Checklist +") {
-    await setState(env, chatId, "awaiting_checklist_line", true);
-    return sendMessage(env, chatId, "Надішли рядок, який додати до `senti_checklist.md`", {
-      parse_mode: "Markdown",
-    });
+  if (text.startsWith("/admin_ping")) {
+    const r = await (await import("../lib/drive.js")).drivePing(env);
+    await TG.text(chatId, `✅ Admin Drive OK. filesCount: ${r.filesCount}`, { token: env.BOT_TOKEN });
+    return;
   }
 
-  if (t === "Меню") {
-    await clearState(env, chatId, "awaiting_url");
-    await clearState(env, chatId, "awaiting_checklist_line");
-    return sendMessage(
-      env,
-      chatId,
-      "Доступні команди:\n/start — запустити бота\n/menu — адмін-меню\n/ping — перевірка зв'язку"
-    );
+  if (text.startsWith("/admin_list")) {
+    const token = await getAccessToken(env);
+    const files = await driveList(env, token);
+    const arr = files.files || [];
+    const msgOut = arr.length
+      ? "Адмін диск:\n" + arr.map(f => `• ${f.name} (${f.id})`).join("\n")
+      : "📁 Диск порожній.";
+    await TG.text(chatId, msgOut, { token: env.BOT_TOKEN });
+    try { await appendToChecklist(env, token, `admin_list OK ${new Date().toISOString()}`); } catch {}
+    return;
   }
 
-  // ——— СТАНИ ———
-  const waitUrl = await getState(env, chatId, "awaiting_url");
-  if (waitUrl) {
-    const m = t.match(/^(\S+)(?:\s+(.+))?$/); // URL [name]
-    const url = m?.[1] || "";
-    const name = m?.[2] || "";
-    if (!/^https?:\/\//i.test(url)) {
-      return sendMessage(env, chatId, "Надішли, будь ласка, валідний URL (http/https).");
-    }
+  if (text.startsWith("/admin_checklist")) {
+    const line = text.replace("/admin_checklist","").trim() || `tick ${new Date().toISOString()}`;
+    const token = await getAccessToken(env);
+    await appendToChecklist(env, token, line);
+    await TG.text(chatId, `✅ Додано: ${line}`, { token: env.BOT_TOKEN });
+    return;
+  }
+
+  if (text.startsWith("/admin_setwebhook")) {
+    const target = `https://${env.SERVICE_HOST}/webhook`;
+    await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
+    await TG.text(chatId, `✅ Вебхук → ${target}${env.TG_WEBHOOK_SECRET ? " (секрет застосовано)" : ""}`, { token: env.BOT_TOKEN });
+    return;
+  }
+
+  if (text.startsWith("/admin_refreshcheck")) {
     try {
-      const saved = await driveSaveFromUrl(env, url, name);
-      await clearState(env, chatId, "awaiting_url");
-      return sendMessage(
-        env,
-        chatId,
-        `✅ Збережено: ${escape(saved.name)}\n${escape(saved.link)}`
-      );
+      const tok = await getAccessToken(env);
+      if (tok) await TG.text(chatId, `✅ Refresh OK (отримано access_token).`, { token: env.BOT_TOKEN });
     } catch (e) {
-      return sendMessage(env, chatId, `Помилка збереження: ${escape(e.message)}`);
+      await TG.text(chatId, `❌ Refresh failed: ${String(e)}`, { token: env.BOT_TOKEN });
     }
+    return;
   }
 
-  const waitLine = await getState(env, chatId, "awaiting_checklist_line");
-  if (waitLine) {
-    if (!t) return sendMessage(env, chatId, "Надішли не порожній рядок.");
-    try {
-      await driveAppendLog(env, "senti_checklist.md", t);
-      await clearState(env, chatId, "awaiting_checklist_line");
-      return sendMessage(env, chatId, "✅ Додано до чеклисту.");
-    } catch (e) {
-      return sendMessage(env, chatId, `Помилка: ${escape(e.message)}`);
-    }
+  if (text.startsWith("/admin_note_deploy")) {
+    const line = await logDeploy(env, { source:"manual", actor:String(userId) });
+    await TG.text(chatId, `📝 ${line}`, { token: env.BOT_TOKEN });
+    return;
   }
 
-  // fallback
-  return showAdminMenu(env, chatId);
-}
+  // “розум”
+  if (text.startsWith("/ask")) {
+    const { AI } = await import("../lib/ai.js");
+    const q = text.replace("/ask","").trim() || "Поясни поточний стан проекту коротко.";
+    let ctx = [];
+    try { ctx = await RAG.search(env, q, 4); } catch(e){ console.log("RAG search err", e); }
+    const system = "Ти технічний асистент Senti. Відповідай стисло, по суті. Якщо даєш кроки — нумеруй. Користуйся контекстом, але не вигадуй.";
+    const ans = await AI.ask(env, { system, prompt: q, context: ctx });
+    await TG.text(chatId, ans || "…", { token: env.BOT_TOKEN });
+    return;
+  }
+
+  if (text.startsWith("/summarize")) {
+    const { AI } = await import("../lib/ai.js");
+    const src = msg.reply_to_message?.text || msg.reply_to_message?.caption || "";
+    if(!src){
+      await TG.text(chatId,"Відповідай /summarize на повідомлення/текст.",{token:env.BOT_TOKEN});
+      return;
+    }
+    const system = "Стисни зміст до 5 пунктів із конкретикою. Не загальні фрази.";
+    const ans = await AI.ask(env, { system, prompt: src });
+    await TG.text(chatId, ans || "…", { token: env.BOT_TOKEN });
+    return;
+  }
+};
