@@ -3,37 +3,47 @@ main = "src/index.js"
 compatibility_date = "2024-09-25"
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
 
-# Кв-пам'ять
-[[kv_namespaces]]
-binding = "DEDUP_KV"
-id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
-
-[[kv_namespaces]]
-binding = "OAUTH_KV"
-id = "e2a8d3941b4e41728318781e739a4d47"
-
-[[kv_namespaces]]
-binding = "STATE_KV"
-id = "7b32e2d1f60846ddb1c653eb52180bf7"
-
-[[kv_namespaces]]
-binding = "TODO_KV"
-id = "497eac980691495ea2a0bc8611892d65"
-
-[[kv_namespaces]]
-binding = "USER_OAUTH_KV"
-id = "470d4f5c164a4a828c569eb9a52a5133"  # <-- встав новий ID
-
-# Крон для автологу деплоїв (кожні 15 хв)
+# --- CRON: heartbeat / деплой-лог кожні 15 хв ---
 [triggers]
 crons = ["*/15 * * * *"]
 
-# Публічні змінні середовища
+# --- Публічні змінні середовища ---
 [vars]
 SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
 DRIVE_FOLDER_ID = "root"
 TELEGRAM_ADMIN_ID = "784869835"
-
-# Використовується для фіксації деплою у чеклисті.
-# У CI підставляй сюди унікальне значення (наприклад, SHA коміту).
+# Для нотатки про деплой (у CI підставляй SHA коміту)
 DEPLOY_ID = "local-dev"
+
+# --- KV bindings ---
+# дедуплікація/різні службові ключі
+[[kv_namespaces]]
+binding = "DEDUP_KV"
+id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
+
+# старий oauth-кеш (може більше не знадобитись, але не видаляємо)
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "e2a8d3941b4e41728318781e739a4d47"
+
+# короткоживучий стан (режим диска тощо)
+[[kv_namespaces]]
+binding = "STATE_KV"
+id = "7b32e2d1f60846ddb1c653eb52180bf7"
+
+# кеш/загальні нотатки (існуючий)
+[[kv_namespaces]]
+binding = "TODO_KV"
+id = "497eac980691495ea2a0bc8611892d65"
+
+# персональні токени юзерів (існуючий)
+[[kv_namespaces]]
+binding = "USER_OAUTH_KV"
+id = "470d4f5c164a4a828c569eb9a52a5133"
+
+# ✅ Нове: чек-лист у KV
+# Поки що БІНДИМО до того ж ID, що й TODO_KV, щоб запрацювало одразу.
+# Хочеш окреме сховище — створи новий KV і заміни тут id.
+[[kv_namespaces]]
+binding = "CHECKLIST_KV"
+id = "497eac980691495ea2a0bc8611892d65"
