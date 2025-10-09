@@ -4,7 +4,7 @@ import { TG } from "./lib/tg.js";
 // user Drive OAuth area
 import { getUserTokens, putUserTokens, userListFiles, userSaveUrl } from "./lib/userDrive.js";
 
-// KV checklist + audit
+// KV checklist + audit + archive
 import {
   readChecklist,
   writeChecklist,
@@ -25,6 +25,11 @@ function json(o, status=200){ return new Response(JSON.stringify(o,null,2), {sta
 function needSecret(env, url){
   const s = url.searchParams.get("s");
   return !!(env.WEBHOOK_SECRET && s !== env.WEBHOOK_SECRET);
+}
+// абсолютні редіректи (інакше Workers кидає TypeError)
+function redir(req, to){
+  const abs = new URL(to, req.url).toString();
+  return Response.redirect(abs, 302);
 }
 
 // ---------------- Drive-mode state (user area) ----------------
@@ -211,7 +216,7 @@ export default {
         return json({ ok:true, text });
       }
 
-      // ===== NEW: upload file into archive and append to checklist =====
+      // ===== Upload file → archive + запис у чеклист =====
       if (p === "/admin/checklist/upload") {
         if (needSecret(env, url)) return html("<h3>401</h3>");
         if (req.method !== "POST") return json({ ok:false, error:"method" }, 405);
@@ -223,10 +228,10 @@ export default {
         const { key, name, size } = await saveArchive(env, file);
         const link = `/admin/archive/get?key=${encodeURIComponent(key)}&s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`;
         await appendChecklist(env, `upload: ${name} (${size} bytes) → ${link}`);
-        return Response.redirect(`/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`, 302);
+        return redir(req, `/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`);
       }
 
-      // ===== NEW: start a new day section in checklist =====
+      // ===== Новий день у чеклисті =====
       if (p === "/admin/checklist/newday") {
         if (needSecret(env, url)) return html("<h3>401</h3>");
         const d = new Date();
@@ -234,10 +239,10 @@ export default {
         const hdr = `\n\n## ${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}\n`;
         const cur = await readChecklist(env);
         await writeChecklist(env, cur.endsWith("\n") ? cur + hdr.trimStart() : cur + "\n" + hdr.trimStart());
-        return Response.redirect(`/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`, 302);
+        return redir(req, `/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`);
       }
 
-      // ===== NEW: archive list (simple HTML) =====
+      // ===== Archive list =====
       if (p === "/admin/archive/list") {
         if (needSecret(env, url)) return html("<h3>401</h3>");
         const keys = await listArchives(env);
@@ -255,7 +260,7 @@ export default {
           </div>`);
       }
 
-      // ===== NEW: archive get/download =====
+      // ===== Archive get/download =====
       if (p === "/admin/archive/get") {
         if (needSecret(env, url)) return html("<h3>401</h3>");
         const key = url.searchParams.get("key");
@@ -272,13 +277,13 @@ export default {
         });
       }
 
-      // ===== NEW: archive delete =====
+      // ===== Archive delete =====
       if (p === "/admin/archive/delete") {
         if (needSecret(env, url)) return html("<h3>401</h3>");
         const key = url.searchParams.get("key");
         if (!key) return html("<h3>400: key required</h3>", 400);
         await deleteArchive(env, key);
-        return Response.redirect(`/admin/archive/list?s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`, 302);
+        return redir(req, `/admin/archive/list?s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`);
       }
 
       // ---- User OAuth (персональний Google Drive) ----
