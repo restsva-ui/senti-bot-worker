@@ -1,68 +1,83 @@
-// src/lib/kvChecklist.js
-// Простий чеклист у KV + міні-HTML UI для адміна
+// Простий чеклист + архіви поверх KV
+// Використовує TODO_KV як сховище (ключі: checklist_md, archive:*)
 
-const KEY = "senti_checklist.md";
+const CHECK_KEY = "checklist_md";
+const ARCHIVE_PREFIX = "archive:";
 
-function ensureKv(env) {
-  const kv = env.CHECKLIST_KV;
-  if (!kv) throw new Error("CHECKLIST_KV binding missing (wrangler.toml)!");
-  return kv;
+// ---------- текст чеклиста ----------
+export async function getChecklistKV(env) {
+  const v = await env.TODO_KV.get(CHECK_KEY);
+  return v ?? "# Senti checklist\n";
 }
 
-function stamp() {
-  const dt = new Date();
-  const pad = (n) => String(n).padStart(2, "0");
-  const iso = dt.toISOString();
-  return { iso, nice: `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}` };
-}
-
-export async function readChecklist(env) {
-  const kv = ensureKv(env);
-  const val = await kv.get(KEY);
-  return val || "# Senti checklist\n";
-}
-
-export async function writeChecklist(env, text) {
-  const kv = ensureKv(env);
-  await kv.put(KEY, text);
+export async function setChecklistKV(env, text) {
+  await env.TODO_KV.put(CHECK_KEY, text ?? "");
   return true;
 }
 
-export async function appendChecklist(env, line) {
-  const cur = await readChecklist(env);
-  const { nice } = stamp();
-  const add = `- ${nice} — ${line}\n`;
-  await writeChecklist(env, cur + add);
-  return add;
+export async function appendChecklistKV(env, line) {
+  const cur = await getChecklistKV(env);
+  const next = (cur.endsWith("\n") ? cur : cur + "\n") + `- ${line}\n`;
+  await setChecklistKV(env, next);
+  return true;
 }
 
-// ---- HTML admin UI ----
-export function checklistHtml({ title = "Senti Checklist", text = "" , submitPath = "/admin/checklist/html" } = {}) {
-  const esc = (s) => s.replace(/[&<>]/g, (c)=>({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
-  return new Response(`<!doctype html>
-<meta charset="utf-8">
-<title>${title}</title>
-<style>
-  body{font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin:20px; line-height:1.45}
-  textarea{width:100%; height:60vh; font:14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace}
-  .box{max-width:980px; margin:0 auto}
-  .row{display:flex; gap:10px; margin:10px 0}
-  button{padding:8px 14px; border-radius:8px; border:1px solid #ccc; background:#fafafa; cursor:pointer}
-  input[type=text]{flex:1; padding:8px 10px; border-radius:8px; border:1px solid #ccc}
-</style>
-<div class="box">
-  <h2>📋 ${title}</h2>
-  <form method="POST" action="${submitPath}">
-    <div class="row">
-      <input type="text" name="line" placeholder="Додати рядок у чеклист...">
-      <button type="submit">Append</button>
-    </div>
-  </form>
+// ---------- архіви ----------
+export async function listArchivesKV(env, limit = 100) {
+  const list = await env.TODO_KV.list({ prefix: ARCHIVE_PREFIX, limit });
+  // повертаємо метадані з ключа
+  const out = [];
+  for (const k of list.keys) {
+    try {
+      const raw = await env.TODO_KV.get(k.name);
+      const obj = JSON.parse(raw);
+      out.push({
+        key: k.name,
+        name: obj.name,
+        size: obj.size,
+        ts: obj.ts,
+        ct: obj.ct || "application/zip",
+      });
+    } catch {
+      out.push({ key: k.name, name: k.name.slice(ARCHIVE_PREFIX.length), size: 0, ts: 0, ct: "application/zip" });
+    }
+  }
+  // нові зверху
+  out.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  return out;
+}
 
-  <h3>Вміст</h3>
-  <form method="POST" action="${submitPath}?mode=replace">
-    <textarea name="full">${esc(text)}</textarea>
-    <div class="row"><button type="submit">💾 Зберегти цілком</button></div>
-  </form>
-</div>`, { headers: { "content-type": "text/html; charset=utf-8" }});
+export async function saveArchiveKV(env, file) {
+  // file: {name, type, arrayBuffer()}
+  const buf = await file.arrayBuffer();
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+  const meta = {
+    name: sanitizeName(file.name || "archive.zip"),
+    size: buf.byteLength,
+    ts: Date.now(),
+    ct: file.type || "application/zip",
+    // сам вміст
+    b64,
+  };
+  const key = `${ARCHIVE_PREFIX}${meta.ts}_${meta.name}`;
+  await env.TODO_KV.put(key, JSON.stringify(meta));
+  return { key, ...meta, b64: undefined };
+}
+
+export async function getArchiveKV(env, key) {
+  if (!key?.startsWith(ARCHIVE_PREFIX)) throw new Error("invalid key");
+  const raw = await env.TODO_KV.get(key);
+  if (!raw) return null;
+  const obj = JSON.parse(raw);
+  const bin = Uint8Array.from(atob(obj.b64), c => c.charCodeAt(0));
+  return {
+    name: obj.name,
+    size: obj.size,
+    ct: obj.ct || "application/zip",
+    buf: bin.buffer,
+  };
+}
+
+function sanitizeName(n) {
+  return String(n).replace(/[^\w.\-]+/g, "_").slice(0, 128) || "archive.zip";
 }
