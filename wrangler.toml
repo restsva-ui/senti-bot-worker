@@ -50,3 +50,11 @@ id = "470d4f5c164a4a828c569eb9a52a5133"
 [[kv_namespaces]]
 binding = "CHECKLIST_KV"
 id = "497eac980691495ea2a0bc8611892d65"
+# --- CRON tasks ---
+[triggers]
+# Перевірка стану / лог кожні 15 хв
+crons = ["*/15 * * * *", "0 * * * *"] 
+
+# де:
+#  • */15 * * * *  → вже існуючий heartbeat
+#  • 0 * * * *     → щогодинний автопромоут через /ai/evolve/auto
