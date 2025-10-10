@@ -9,7 +9,7 @@ import {
 } from "./lib/kvChecklist.js";
 import { logHeartbeat, logDeploy } from "./lib/audit.js";
 
-// 🧠 підключення мозку Senti (за наявності)
+// 🧠 мозок Senti
 import { SentiCore } from "./brain/sentiCore.js";
 
 // ---------- utils ----------
@@ -20,11 +20,16 @@ const json = (o, status=200)=> new Response(JSON.stringify(o,null,2), {status, h
 // ---------- drive-mode state ----------
 const DRIVE_MODE_KEY = (uid) => `drive_mode:${uid}`;
 function ensureState(env) { if (!env.STATE_KV) throw new Error("STATE_KV binding missing"); return env.STATE_KV; }
-async function setDriveMode(env, userId, on){ await ensureState(env).put(DRIVE_MODE_KEY(userId), on?"1":"0", {expirationTtl:3600}); }
+async function setDriveMode(env, userId, on){ await ensureState(env).put(DRIVE_MODE_KEY(userId), on?"1":"0", { expirationTtl: 3600 }); }
 async function getDriveMode(env, userId){ return (await ensureState(env).get(DRIVE_MODE_KEY(userId)))==="1"; }
 
 // ---------- media helpers ----------
-function pickPhoto(msg){ const a=msg.photo; if(!Array.isArray(a)||!a.length) return null; const ph=a[a.length-1]; return {type:"photo",file_id:ph.file_id,name:`photo_${ph.file_unique_id}.jpg`}; }
+function pickPhoto(msg){
+  const a=msg.photo;
+  if(!Array.isArray(a)||!a.length) return null;
+  const ph=a[a.length-1];
+  return {type:"photo",file_id:ph.file_id,name:`photo_${ph.file_unique_id}.jpg`};
+}
 function detectAttachment(msg){
   if (!msg) return null;
   if (msg.document) { const d=msg.document; return {type:"document",file_id:d.file_id,name:d.file_name||`document_${d.file_unique_id}`}; }
@@ -40,35 +45,40 @@ async function tgFileUrl(env, file_id){
   if (!path) throw new Error("getFile: file_path missing");
   return `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${path}`;
 }
+
+/**
+ * Страхувальник: якщо у користувача ще нема токенів — навіть не пробуємо зберігати,
+ * а повертаємо підказку, як пройти OAuth.
+ */
 async function handleIncomingMedia(env, chatId, userId, msg){
   const att = detectAttachment(msg);
   if (!att) return false;
+
   const ut = await getUserTokens(env, userId);
-  if (!ut?.refresh_token) {
-    await TG.text(chatId,"Щоб зберігати у свій Google Drive — спочатку натисни «Google Drive» і дозволь доступ.",{token:env.BOT_TOKEN});
-    return true;
+  if (!ut || !ut.refresh_token) {
+    const authUrl = `https://${env.SERVICE_HOST}/auth/start?u=${encodeURIComponent(userId)}`;
+    await TG.text(
+      chatId,
+      `⛔ Спочатку дай доступ до Google Drive.\n\nНатисни: ${authUrl}\n` +
+      `Після дозволу повернись у чат і ще раз натисни «Google Drive».`,
+      { token: env.BOT_TOKEN }
+    );
+    return true; // ми "обробили" апдейт повідомленням, зберігати не намагались
   }
+
   const url = await tgFileUrl(env, att.file_id);
-
-  // лог початку операції (не блокує)
-  try { await appendChecklist(env, `drive: start save ${att.type} -> ${att.name} (user=${userId})`); } catch {}
-
-  try {
-    const saved = await userSaveUrl(env, userId, url, att.name);
-    await TG.text(chatId, `✅ Збережено на твоєму диску: ${saved.name}`, { token: env.BOT_TOKEN });
-    // лог успіху
-    try { await appendChecklist(env, `drive: ok ${att.name} (user=${userId})`); } catch {}
-  } catch (e) {
-    // лог помилки
-    try { await appendChecklist(env, `drive: FAIL ${att.name} (user=${userId}) :: ${String(e)}`); } catch {}
-    throw e;
-  }
+  const saved = await userSaveUrl(env, userId, url, att.name);
+  await TG.text(chatId, `✅ Збережено на твоєму диску: ${saved.name}`, { token: env.BOT_TOKEN });
   return true;
 }
 
 // ---------- keyboards ----------
 const BTN_DRIVE="Google Drive", BTN_SENTI="Senti", BTN_ADMIN="Admin", BTN_CHECK="Checklist";
-function mainKeyboard(isAdmin=false){ const rows=[[{text:BTN_DRIVE},{text:BTN_SENTI}]]; if(isAdmin) rows.push([{text:BTN_ADMIN},{text:BTN_CHECK}]); return {keyboard:rows,resize_keyboard:true}; }
+function mainKeyboard(isAdmin=false){
+  const rows=[[{text:BTN_DRIVE},{text:BTN_SENTI}]];
+  if(isAdmin) rows.push([{text:BTN_ADMIN},{text:BTN_CHECK}]);
+  return {keyboard:rows,resize_keyboard:true};
+}
 const inlineOpenDrive = ()=>({ inline_keyboard: [[{ text:"Відкрити Диск", url:"https://drive.google.com/drive/my-drive"}]] });
 
 // ---------- commands ----------
@@ -81,58 +91,13 @@ async function installCommandsMinimal(env){
     {command:"admin_checklist",description:"Append рядок у чеклист"},
     {command:"admin_start_mind",description:"Запустити мозок Senti"},
     {command:"admin_snapshot",description:"Env snapshot → чеклист"},
-    {command:"admin_diag",description:"Діагностика системи"}
   ]);
 }
 async function clearCommands(env){
   await TG.setCommands(env.BOT_TOKEN,{type:"default"},[]);
-  if(env.TELEGRAM_ADMIN_ID){ await TG.setCommands(env.BOT_TOKEN,{type:"chat",chat_id:Number(env.TELEGRAM_ADMIN_ID)},[]); }
-}
-
-// ---------- helpers: diagnostics ----------
-async function doDiagnostics(env){
-  const out = {
-    service: env.SERVICE_HOST || "",
-    time: new Date().toISOString()
-  };
-
-  // Telegram webhook
-  try {
-    const r = await TG.getWebhook(env.BOT_TOKEN);
-    const txt = await r.text();
-    out.telegram = r.ok ? "ok" : `http-${r.status}`;
-    out.telegram_raw = txt.slice(0, 2000);
-  } catch (e) {
-    out.telegram = "error";
-    out.telegram_error = String(e);
+  if(env.TELEGRAM_ADMIN_ID){
+    await TG.setCommands(env.BOT_TOKEN,{type:"chat",chat_id:Number(env.TELEGRAM_ADMIN_ID)},[]);
   }
-
-  // KV quick check (STATE_KV & checklist KV)
-  try {
-    await ensureState(env).put("diag:ping", "1", { expirationTtl: 30 });
-    const _ = await readChecklist(env);
-    out.kv = "ok";
-  } catch (e) {
-    out.kv = "error";
-    out.kv_error = String(e);
-  }
-
-  // Google (адміністратор)
-  try {
-    const ut = await getUserTokens(env, env.TELEGRAM_ADMIN_ID);
-    if (ut?.refresh_token) {
-      const files = await userListFiles(env, env.TELEGRAM_ADMIN_ID, { pageSize: 1 });
-      out.google = "ok";
-      out.google_sample = files?.files?.[0]?.name || "(no files)";
-    } else {
-      out.google = "no-admin-token";
-    }
-  } catch (e) {
-    out.google = "error";
-    out.google_error = String(e);
-  }
-
-  return out;
 }
 
 // ---------- HTTP worker ----------
@@ -143,25 +108,34 @@ export default {
     const needSecret = () => (env.WEBHOOK_SECRET && (url.searchParams.get("s") !== env.WEBHOOK_SECRET));
 
     try {
-      // health (+опціональний лог у чеклист ?log=1 та секрет)
+      // health
       if (p === "/") return html("Senti Worker Active");
       if (p === "/health") {
-        const body = { ok:true, service: env.SERVICE_HOST };
-        if (url.searchParams.get("log") === "1" && !needSecret()) {
-          try { await appendChecklist(env, "health: ok"); } catch {}
-        }
-        return json(body);
+        const now = new Date().toISOString();
+        // мінімальна діагностика вебхука
+        let tg = "skip", tgRaw = "";
+        try {
+          const r = await TG.getWebhook(env.BOT_TOKEN);
+          tgRaw = await r.text();
+          tg = "ok";
+        } catch { tg = "error"; }
+        return json({ ok:true, service: env.SERVICE_HOST, time: now, telegram: tg, telegram_raw: tgRaw });
       }
 
       // tg helpers
-      if (p === "/tg/get-webhook") { const r=await TG.getWebhook(env.BOT_TOKEN); return new Response(await r.text(),{headers:{'content-type':'application/json'}}); }
+      if (p === "/tg/get-webhook") {
+        const r=await TG.getWebhook(env.BOT_TOKEN);
+        return new Response(await r.text(),{headers:{'content-type':'application/json'}});
+      }
       if (p === "/tg/set-webhook") {
         const target=`https://${env.SERVICE_HOST}/webhook`;
         const r=await TG.setWebhook(env.BOT_TOKEN,target,env.TG_WEBHOOK_SECRET);
-        try { await appendChecklist(env, `webhook: set ${target} ${env.TG_WEBHOOK_SECRET?"(secret)":""}`); } catch {}
         return new Response(await r.text(),{headers:{'content-type':'application/json'}});
       }
-      if (p === "/tg/del-webhook") { const r=await TG.deleteWebhook?.(env.BOT_TOKEN)||await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteWebhook`); return new Response(await r.text(),{headers:{'content-type':'application/json'}}); }
+      if (p === "/tg/del-webhook") {
+        const r=await TG.deleteWebhook?.(env.BOT_TOKEN)||await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteWebhook`);
+        return new Response(await r.text(),{headers:{'content-type':'application/json'}});
+      }
 
       if (p === "/tg/install-commands-min") { await installCommandsMinimal(env); return json({ok:true}); }
       if (p === "/tg/clear-commands")       { await clearCommands(env);       return json({ok:true}); }
@@ -171,8 +145,6 @@ export default {
         if (needSecret()) return json({ ok:false, error:"unauthorized" }, 401);
         const commit=url.searchParams.get("commit")||"", actor=url.searchParams.get("actor")||"", depId=url.searchParams.get("deploy")||env.DEPLOY_ID||"", status=url.searchParams.get("status")||"";
         const line = await logDeploy(env,{source:"ci",commit,actor,deployId:depId,status});
-        // автолог короткий у чеклист
-        try { await appendChecklist(env, `deploy: ${status||"note"} ${commit?commit.slice(0,7):""} ${depId}`); } catch {}
         return json({ ok:true, line });
       }
 
@@ -265,31 +237,9 @@ export default {
       }
 
       // -------- Brain (адмін REST) ----------
-      if (p === "/admin/brain/boot") {
-        if (needSecret()) return json({ ok:false, error:"unauthorized" }, 401);
-        const r = await SentiCore.boot?.(env, "admin");
-        return json({ ok:true, ...r });
-      }
-      if (p === "/admin/brain/check") {
-        if (needSecret()) return json({ ok:false, error:"unauthorized" }, 401);
-        const r = await SentiCore.selfCheck?.(env);
-        return json({ ok:true, ...r });
-      }
-      if (p === "/admin/brain/snapshot") {
-        if (needSecret()) return json({ ok:false, error:"unauthorized" }, 401);
-        const r = await SentiCore.snapshot?.(env);
-        return json({ ok:true, ...r });
-      }
-
-      // -------- Diagnostics (HTML/JSON) ----------
-      if (p === "/admin/diag" || p === "/admin_diag") {
-        if (needSecret()) return json({ ok:false, error:"unauthorized" }, 401);
-        const data = await doDiagnostics(env);
-        if (url.searchParams.get("log") === "1") {
-          try { await appendChecklist(env, `diag: ${data.telegram}/${data.kv}/${data.google}`); } catch {}
-        }
-        return json({ ok:true, ...data });
-      }
+      if (p === "/admin/brain/boot") { if (needSecret()) return json({ ok:false, error:"unauthorized" }, 401); const r = await SentiCore.boot(env, "admin"); return json({ ok:true, ...r }); }
+      if (p === "/admin/brain/check") { if (needSecret()) return json({ ok:false, error:"unauthorized" }, 401); const r = await SentiCore.selfCheck(env); return json({ ok:true, ...r }); }
+      if (p === "/admin/brain/snapshot") { if (needSecret()) return json({ ok:false, error:"unauthorized" }, 401); const r = await SentiCore.snapshot(env); return json({ ok:true, ...r }); }
 
       // ---------- Telegram webhook ----------
       if (p === "/webhook" && req.method !== "POST") return json({ ok:true, note:"webhook alive (GET)" });
@@ -344,8 +294,7 @@ export default {
 • /admin_refreshcheck — тест доступності (KV)
 • /admin_note_deploy — тестова деплой-нотатка
 • /admin_start_mind — запустити мозок
-• /admin_snapshot — env snapshot
-• /admin_diag — діагностика`,
+• /admin_snapshot — env snapshot`,
           { token: env.BOT_TOKEN });
         }); return json({ok:true}); }
 
@@ -357,26 +306,14 @@ export default {
 
         if (text === "/admin_start_mind") { await safe(async ()=>{
           if (!ADMIN(env, userId)) return;
-          await SentiCore?.boot?.(env, "tg");
+          await SentiCore.boot(env, "tg");
           await TG.text(chatId, `🧠 Мозок Senti запущено`, { token: env.BOT_TOKEN });
         }); return json({ok:true}); }
 
         if (text === "/admin_snapshot") { await safe(async ()=>{
           if (!ADMIN(env, userId)) return;
-          await SentiCore?.snapshot?.(env);
+          await SentiCore.snapshot(env);
           await TG.text(chatId, `📦 Snapshot додано у чеклист`, { token: env.BOT_TOKEN });
-        }); return json({ok:true}); }
-
-        if (text === "/admin_diag") { await safe(async ()=>{
-          if (!ADMIN(env, userId)) return;
-          const d = await doDiagnostics(env);
-          const link = `https://${env.SERVICE_HOST}/admin/diag?s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`;
-          await TG.text(chatId,
-`🩺 Діагностика:
-• Telegram: ${d.telegram}
-• KV: ${d.kv}
-• Google: ${d.google}
-JSON: ${link}`, { token: env.BOT_TOKEN });
         }); return json({ok:true}); }
 
         if (text.startsWith("/admin_checklist")) { await safe(async ()=>{
@@ -391,7 +328,6 @@ JSON: ${link}`, { token: env.BOT_TOKEN });
           const target=`https://${env.SERVICE_HOST}/webhook`;
           await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
           await TG.text(chatId, `✅ Вебхук → ${target}${env.TG_WEBHOOK_SECRET?" (секрет застосовано)":""}`, { token: env.BOT_TOKEN });
-          try { await appendChecklist(env, `webhook: set via /admin_setwebhook by ${userId}`); } catch {}
         }); return json({ok:true}); }
 
         if (text.startsWith("/admin_refreshcheck")) { await safe(async ()=>{
@@ -404,15 +340,23 @@ JSON: ${link}`, { token: env.BOT_TOKEN });
           if (!ADMIN(env, userId)) return;
           const line = await logDeploy(env, { source:"manual", actor:String(userId) });
           await TG.text(chatId, `📝 ${line}`, { token: env.BOT_TOKEN });
-          try { await appendChecklist(env, `deploy: note ${line}`); } catch {}
         }); return json({ok:true}); }
 
-        // Drive-mode media
+        // Drive-mode media (додатковий запобіжник перед збереженням)
         try {
           if (await getDriveMode(env, userId)) {
+            const ut = await getUserTokens(env, userId);
+            if (!ut || !ut.refresh_token) {
+              const authUrl = `https://${env.SERVICE_HOST}/auth/start?u=${encodeURIComponent(userId)}`;
+              await TG.text(chatId, `⛔ Доступ до диска не надано.\nПерейди за посиланням і авторизуйся: ${authUrl}`, { token: env.BOT_TOKEN });
+              return json({ ok:true });
+            }
             if (await handleIncomingMedia(env, chatId, userId, msg)) return json({ ok:true });
           }
-        } catch (e) { try{ await TG.text(chatId,`❌ Не вдалось зберегти вкладення: ${String(e)}`,{token:env.BOT_TOKEN}); }catch{} return json({ok:true}); }
+        } catch (e) {
+          try{ await TG.text(chatId,`❌ Не вдалось зберегти вкладення: ${String(e)}`,{token:env.BOT_TOKEN}); }catch{}
+          return json({ok:true});
+        }
 
         await TG.text(chatId, "Готовий 👋", { token: env.BOT_TOKEN, reply_markup: mainKeyboard(ADMIN(env, userId)) });
         return json({ ok:true });
@@ -437,11 +381,25 @@ JSON: ${link}`, { token: env.BOT_TOKEN });
         const state = JSON.parse(atob(url.searchParams.get("state")||"e30="));
         const code = url.searchParams.get("code");
         const redirect_uri = `https://${env.SERVICE_HOST}/auth/cb`;
-        const body = new URLSearchParams({ code, client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, redirect_uri, grant_type: "authorization_code" });
-        const r = await fetch("https://oauth2.googleapis.com/token",{ method:"POST", headers:{ "Content-Type":"application/x-www-form-urlencoded" }, body });
+        const body = new URLSearchParams({
+          code,
+          client_id: env.GOOGLE_CLIENT_ID,
+          client_secret: env.GOOGLE_CLIENT_SECRET,
+          redirect_uri,
+          grant_type: "authorization_code"
+        });
+        const r = await fetch("https://oauth2.googleapis.com/token",{
+          method:"POST",
+          headers:{ "Content-Type":"application/x-www-form-urlencoded" },
+          body
+        });
         const d = await r.json();
         if(!r.ok) return html(`<pre>${JSON.stringify(d,null,2)}</pre>`);
-        const tokens = { access_token:d.access_token, refresh_token:d.refresh_token, expiry:Math.floor(Date.now()/1000)+(d.expires_in||3600)-60 };
+        const tokens = {
+          access_token:d.access_token,
+          refresh_token:d.refresh_token,
+          expiry:Math.floor(Date.now()/1000)+(d.expires_in||3600)-60
+        };
         await putUserTokens(env, state.u, tokens);
         return html(`<h3>✅ Готово</h3><p>Тепер повернись у Telegram і натисни <b>Google Drive</b> ще раз.</p>`);
       }
@@ -454,10 +412,6 @@ JSON: ${link}`, { token: env.BOT_TOKEN });
 
   // ---- CRON (heartbeat кожні 15 хв) ----
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => {
-      try {
-        await logHeartbeat(env);
-      } catch {}
-    })());
+    ctx.waitUntil((async () => { try { await logHeartbeat(env); } catch {} })());
   }
 };
