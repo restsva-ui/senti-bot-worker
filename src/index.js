@@ -24,7 +24,7 @@ import { handleCiDeploy }        from "./routes/ciDeploy.js";
 import { handleBrainApi }        from "./routes/brainApi.js";
 import { handleSelfTest }        from "./routes/selfTest.js";
 import { handleAiTrain }         from "./routes/aiTrain.js";
-import { handleAiEvolve }        from "./routes/aiEvolve.js"; // ⬅ додано новий модуль
+import { handleAiEvolve }        from "./routes/aiEvolve.js"; // ⬅ новий модуль
 
 // ---------- helpers ----------
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
@@ -126,6 +126,10 @@ function home(env) {
 
   <a class="btn" href="${linkS("/ai/evolve/run")}">
     <div class="ico">🔁</div><div><div class="ttl">AI-Evolve</div><div class="sub">порівняння версій</div></div>
+  </a>
+
+  <a class="btn" href="${linkS("/ai/evolve/auto")}">
+    <div class="ico">🚀</div><div><div class="ttl">AI-Evolve Auto</div><div class="sub">selftest + promote</div></div>
   </a>
 
 </div>`;
