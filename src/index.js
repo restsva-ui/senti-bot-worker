@@ -9,18 +9,20 @@ import {
 } from "./lib/kvChecklist.js";
 import { logHeartbeat, logDeploy } from "./lib/audit.js";
 
-// 🧠 мозок Senti
+// 🧠 підключення мозку Senti (додай файл src/brain/sentiCore.js)
 import { SentiCore } from "./brain/sentiCore.js";
 
 // ---------- utils ----------
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
-const html = (s)=> new Response(s, { headers:{ "content-type":"text/html; charset=utf-8" }});
-const json = (o, status=200)=> new Response(JSON.stringify(o,null,2), { status, headers:{ "content-type":"application/json" }});
+const html = (s)=> new Response(s, {headers:{ "content-type":"text/html; charset=utf-8" }});
+const json = (o, status=200)=> new Response(JSON.stringify(o,null,2), {status, headers:{ "content-type":"application/json" }});
+// абсолютний URL з урахуванням бази поточного запиту
+const abs = (pathOrUrl, reqUrl) => new URL(pathOrUrl, reqUrl).toString();
 
 // ---------- drive-mode state ----------
 const DRIVE_MODE_KEY = (uid) => `drive_mode:${uid}`;
 function ensureState(env) { if (!env.STATE_KV) throw new Error("STATE_KV binding missing"); return env.STATE_KV; }
-async function setDriveMode(env, userId, on){ await ensureState(env).put(DRIVE_MODE_KEY(userId), on?"1":"0", { expirationTtl:3600 }); }
+async function setDriveMode(env, userId, on){ await ensureState(env).put(DRIVE_MODE_KEY(userId), on?"1":"0", {expirationTtl:3600}); }
 async function getDriveMode(env, userId){ return (await ensureState(env).get(DRIVE_MODE_KEY(userId)))==="1"; }
 
 // ---------- media helpers ----------
@@ -67,6 +69,7 @@ async function installCommandsMinimal(env){
     {command:"admin",description:"Адмін-меню"},
     {command:"admin_check",description:"HTML чеклист"},
     {command:"admin_checklist",description:"Append рядок у чеклист"},
+    // нові
     {command:"admin_start_mind",description:"Запустити мозок Senti"},
     {command:"admin_snapshot",description:"Env snapshot → чеклист"},
   ]);
@@ -123,24 +126,20 @@ export default {
         return checklistHtml({ text, submitPath:"/admin/checklist/html", secret: env.WEBHOOK_SECRET || "" });
       }
 
-      // файл -> архів -> посилання у чеклист (дружній флоу)
-      if (p === "/admin/checklist/upload") {
-        if (needSecret()) return Response.redirect(`/admin/checklist/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`, 302);
-        if (req.method !== "POST") return Response.redirect(`/admin/checklist/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`, 302);
-
-        const form = await req.formData().catch(()=>null);
-        const file = form?.get("file");
-        if (!file || typeof file.arrayBuffer !== "function" || (file.size === 0 && !file.name)) {
-          return Response.redirect(`/admin/checklist/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`, 302);
-        }
-
+      // файл -> архів -> посилання у чеклист
+      if (p === "/admin/checklist/upload" && req.method === "POST") {
+        if (needSecret()) return json({ ok:false, error:"unauthorized" }, 401);
+        const form = await req.formData();
+        const file = form.get("file");
+        if (!file) return json({ ok:false, error:"file required" }, 400);
         const key = await saveArchive(env, file);
         const urlKey = encodeURIComponent(key);
         const who = url.searchParams.get("who") || "";
         const note = `upload: ${(file.name||"file")} (${file.size||"?"} bytes) → /admin/archive/get?key=${urlKey}${env.WEBHOOK_SECRET?`&s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}${who?`&who=${encodeURIComponent(who)}`:""}`;
         await appendChecklist(env, note);
 
-        return Response.redirect(`/admin/checklist/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`, 302);
+        const back = `${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`;
+        return Response.redirect(abs(`/admin/checklist/html${back}`, url), 302);
       }
 
       // JSON API чеклисту
@@ -184,7 +183,8 @@ export default {
         const key = url.searchParams.get("key");
         if (!key) return json({ ok:false, error:"key required" }, 400);
         await deleteArchive(env, key);
-        return Response.redirect(`/admin/repo/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`, 302);
+        const back = `${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`;
+        return Response.redirect(abs(`/admin/repo/html${back}`, url), 302);
       }
 
       // -------- STATUT ----------
