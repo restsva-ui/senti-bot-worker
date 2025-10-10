@@ -11,10 +11,11 @@ import { logHeartbeat, logDeploy } from "./lib/audit.js";
 import { SentiCore } from "./brain/sentiCore.js";
 
 // ---------- utils ----------
-import { abs } from "./utils/url.js"; // ⬅ винесено сюди
+import { abs } from "./utils/url.js";
 
-// ⬅ нове: роутер для Repo/Archive
+// routes
 import { handleAdminRepo } from "./routes/adminRepo.js";
+import { handleAdminChecklist } from "./routes/adminChecklist.js";
 
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 const html = (s)=> new Response(s, {headers:{ "content-type":"text/html; charset=utf-8" }});
@@ -105,52 +106,13 @@ export default {
         return json({ ok:true, line });
       }
 
-      // Checklist HTML + upload
-      if (p === "/admin/checklist/html") {
-        if (needSecret()) return html("<h3>401</h3>");
-        if (req.method === "POST") {
-          const ct = req.headers.get("content-type") || "";
-          if (!/form/.test(ct)) return json({ ok:false, error:"unsupported content-type" }, 415);
-          const form = await req.formData();
-          const mode = (url.searchParams.get("mode")||"").toLowerCase();
-          if (mode === "replace") {
-            await writeChecklist(env, String(form.get("full") ?? ""));
-          } else {
-            const line = String(form.get("line")||"").trim();
-            if (line) await appendChecklist(env, line);
-          }
-        }
-        const text = await readChecklist(env);
-        return checklistHtml({ text, submitPath: abs(env,"/admin/checklist/html"), secret: env.WEBHOOK_SECRET || "" });
+      // ---------- Checklist routes (винесено) ----------
+      if (p.startsWith("/admin/checklist")) {
+        const r = await handleAdminChecklist(req, env, url);
+        if (r) return r;
       }
 
-      if (p === "/admin/checklist/upload" && req.method === "POST") {
-        if (needSecret()) return json({ ok:false, error:"unauthorized" }, 401);
-        const form = await req.formData();
-        const file = form.get("file");
-        if (!file) return json({ ok:false, error:"file required" }, 400);
-        const key = await saveArchive(env, file);
-        const urlKey = encodeURIComponent(key);
-        const who = url.searchParams.get("who") || "";
-        const note = `upload: ${(file.name||"file")} (${file.size||"?"} bytes) → /admin/archive/get?key=${urlKey}${env.WEBHOOK_SECRET?`&s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}${who?`&who=${encodeURIComponent(who)}`:""}`;
-        await appendChecklist(env, note);
-        return Response.redirect(abs(env, `/admin/checklist/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`), 302);
-      }
-
-      if (p === "/admin/checklist") {
-        if (needSecret()) return json({ ok:false, error:"unauthorized" }, 401);
-        if (req.method === "POST") {
-          const body = await req.json().catch(()=>({}));
-          const line = (body.line || "").toString().trim();
-          if (!line) return json({ ok:false, error:"line required" }, 400);
-          const add = await appendChecklist(env, line);
-          return json({ ok:true, added:add });
-        }
-        const text = await readChecklist(env);
-        return json({ ok:true, text });
-      }
-
-      // ---------- Архів/Repo → винесено у окремий модуль ----------
+      // ---------- Архів/Repo (винесено) ----------
       if (p.startsWith("/admin/repo") || p.startsWith("/admin/archive")) {
         const routed = await handleAdminRepo(req, env, url);
         if (routed) return routed;
