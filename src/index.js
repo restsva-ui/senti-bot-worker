@@ -34,10 +34,8 @@ const json = (o, status=200)=> new Response(JSON.stringify(o, null, 2), { status
 // ⬇️ Дозволяємо selftest/внутрішні запити з секретом
 const needSecret = (env, url) => {
   const path = url.pathname || "";
-  // selftest і будь-який запит з правильним ?s=SECRET не вимагає додаткової перевірки
   if (path.startsWith("/selftest")) return false;
   if (env.WEBHOOK_SECRET && url.searchParams.get("s") === env.WEBHOOK_SECRET) return false;
-  // інакше доступ закритий, якщо ввімкнено секрет
   return !!env.WEBHOOK_SECRET;
 };
 
@@ -59,15 +57,17 @@ function home(env) {
     line-height:1.35;
     background: Canvas; color: CanvasText;
   }
-  header{display:flex; align-items:center; gap:8px; margin-bottom:12px}
+  header{display:flex; align-items:center; gap:8px; margin-bottom:6px}
   header h1{font-size:20px; margin:0}
   header small{opacity:.7}
+  .note{font-size:12px; opacity:.8; margin:4px 0 14px}
   .grid{
     display:grid; gap:10px;
     grid-template-columns: repeat(2, minmax(0,1fr));
   }
   @media (min-width: 720px){ .grid{ grid-template-columns: repeat(3, minmax(0,1fr)); } }
   a.btn{
+    position:relative;
     display:flex; align-items:center; gap:10px;
     min-height:56px; padding:12px 14px; border-radius:14px;
     text-decoration:none; color:inherit;
@@ -79,69 +79,122 @@ function home(env) {
   .ico{font-size:22px; width:28px; text-align:center}
   .ttl{font-weight:600}
   .sub{font-size:12px; opacity:.75}
+  /* статусна крапка */
+  .dot{
+    position:absolute; top:8px; right:8px;
+    width:10px; height:10px; border-radius:50%;
+    background: color-mix(in oklab, CanvasText 35%, Canvas 65%);
+    box-shadow: 0 0 0 2px color-mix(in oklab, Canvas 92%, CanvasText 8%) inset;
+  }
+  .dot.loading{ animation: pulse 1s infinite ease-in-out; }
+  .dot.ok{ background: #22c55e; }
+  .dot.fail{ background: #ef4444; }
+  .code{
+    position:absolute; bottom:8px; right:10px; font-size:11px; opacity:.65;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @keyframes pulse {
+    0%,100%{ opacity:.55 } 50%{ opacity:1 }
+  }
 </style>
 
 <header>
   <div class="ico">⚙️</div>
   <h1>Senti Worker Active</h1>
 </header>
-<p><small>Service: ${env.SERVICE_HOST || ""}</small></p>
+<p class="note"><small>Service: ${env.SERVICE_HOST || ""}</small></p>
+<p class="note">${env.WEBHOOK_SECRET ? "✅ Webhook secret застосовано — внутрішні перевірки будуть авторизовані." : "⚠️ Не задано WEBHOOK_SECRET — деякі перевірки можуть повертати 401/404."}</p>
 
 <div class="grid">
 
-  <a class="btn" href="${link("/health")}">
+  <a class="btn" id="btn-health" data-ping="${linkS("/health")}" href="${link("/health")}">
+    <span class="dot loading"></span><span class="code"></span>
     <div class="ico">✅</div><div><div class="ttl">Health</div><div class="sub">Ping сервісу</div></div>
   </a>
 
-  <a class="btn" href="${link("/webhook")}">
+  <a class="btn" id="btn-webhook" data-ping="${linkS("/webhook")}" href="${link("/webhook")}">
+    <span class="dot loading"></span><span class="code"></span>
     <div class="ico">📡</div><div><div class="ttl">Webhook</div><div class="sub">GET alive</div></div>
   </a>
 
-  <a class="btn" href="${linkS("/selftest/run")}">
+  <a class="btn" id="btn-selftest" data-ping="${linkS("/selftest/run")}" href="${linkS("/selftest/run")}">
+    <span class="dot loading"></span><span class="code"></span>
     <div class="ico">🧪</div><div><div class="ttl">SelfTest</div><div class="sub">Швидка перевірка</div></div>
   </a>
 
-  <a class="btn" href="${linkS("/admin/checklist/html")}">
+  <a class="btn" id="btn-checklist" data-ping="${linkS("/admin/checklist/html")}" href="${linkS("/admin/checklist/html")}">
+    <span class="dot loading"></span><span class="code"></span>
     <div class="ico">📋</div><div><div class="ttl">Checklist</div><div class="sub">HTML редактор</div></div>
   </a>
 
-  <a class="btn" href="${linkS("/admin/repo/html")}">
+  <a class="btn" id="btn-repo" data-ping="${linkS("/admin/repo/html")}" href="${linkS("/admin/repo/html")}">
+    <span class="dot loading"></span><span class="code"></span>
     <div class="ico">📚</div><div><div class="ttl">Repo / Архів</div><div class="sub">поточний та історія</div></div>
   </a>
 
-  <a class="btn" href="${linkS("/admin/statut/html")}">
+  <a class="btn" id="btn-statut" data-ping="${linkS("/admin/statut/html")}" href="${linkS("/admin/statut/html")}">
+    <span class="dot loading"></span><span class="code"></span>
     <div class="ico">📜</div><div><div class="ttl">Statut</div><div class="sub">правила / систем підказ</div></div>
   </a>
 
-  <a class="btn" href="${link("/api/brain/current")}">
+  <a class="btn" id="btn-brain-current" data-ping="${linkS("/api/brain/current")}" href="${link("/api/brain/current")}">
+    <span class="dot loading"></span><span class="code"></span>
     <div class="ico">🧠</div><div><div class="ttl">Brain: current</div><div class="sub">активний архів</div></div>
   </a>
 
-  <a class="btn" href="${linkS("/api/brain/list")}">
+  <a class="btn" id="btn-brain-list" data-ping="${linkS("/api/brain/list")}" href="${linkS("/api/brain/list")}">
+    <span class="dot loading"></span><span class="code"></span>
     <div class="ico">🗂️</div><div><div class="ttl">Brain: list</div><div class="sub">всі архіви</div></div>
   </a>
 
-  <a class="btn" href="${link("/brain/state")}">
+  <a class="btn" id="btn-brain-state" data-ping="${linkS("/brain/state")}" href="${link("/brain/state")}">
+    <span class="dot loading"></span><span class="code"></span>
     <div class="ico">🧩</div><div><div class="ttl">Brain state</div><div class="sub">JSON стан</div></div>
   </a>
 
-  <a class="btn" href="${linkS("/ai/train/analyze")}">
+  <a class="btn" id="btn-train-analyze" href="${linkS("/ai/train/analyze")}">
     <div class="ico">🤖</div><div><div class="ttl">AI-Train: Analyze</div><div class="sub">розбір діалогів</div></div>
   </a>
 
-  <a class="btn" href="${linkS("/ai/train/auto")}">
+  <a class="btn" id="btn-train-auto" href="${linkS("/ai/train/auto")}">
     <div class="ico">⚙️</div><div><div class="ttl">AI-Train: Auto</div><div class="sub">авто-promote</div></div>
   </a>
 
-  <a class="btn" href="${linkS("/ai/evolve/run")}">
+  <a class="btn" id="btn-evolve-run" href="${linkS("/ai/evolve/run")}">
     <div class="ico">🔁</div><div><div class="ttl">AI-Evolve</div><div class="sub">порівняння версій</div></div>
   </a>
 
-  <a class="btn" href="${linkS("/ai/evolve/auto")}">
+  <a class="btn" id="btn-evolve-auto" href="${linkS("/ai/evolve/auto")}">
     <div class="ico">🚀</div><div><div class="ttl">AI-Evolve Auto</div><div class="sub">selftest + promote</div></div>
   </a>
 
-</div>`;
+</div>
+
+<script>
+  // легкий клієнтський пінгер: бере всі .btn з data-ping і фарбує статус
+  async function ping(url){
+    try{
+      const r = await fetch(url, { method:"GET" });
+      return { ok:r.ok, status:r.status };
+    }catch{
+      return { ok:false, status:0 };
+    }
+  }
+  async function boot(){
+    const tiles = Array.from(document.querySelectorAll('a.btn[data-ping]'));
+    await Promise.all(tiles.map(async (el)=>{
+      const dot = el.querySelector('.dot');
+      const code = el.querySelector('.code');
+      const url = el.getAttribute('data-ping');
+      const { ok, status } = await ping(url);
+      dot.classList.remove('loading');
+      dot.classList.add(ok ? 'ok' : 'fail');
+      if (code) code.textContent = status ? status : "ERR";
+    }));
+  }
+  addEventListener('load', boot, { once:true });
+</script>
+`;
 }
 
 // ---------- HTTP worker ----------
