@@ -32,42 +32,102 @@ const html = (s)=> new Response(s, { headers:{ "content-type":"text/html; charse
 const json = (o, status=200)=> new Response(JSON.stringify(o, null, 2), { status, headers:{ "content-type":"application/json" }});
 const needSecret = (env, url) => (env.WEBHOOK_SECRET && (url.searchParams.get("s") !== env.WEBHOOK_SECRET));
 
-// ---------- small UI for root ----------
+// ---------- small UI for root (mobile-first) ----------
 function home(env) {
   const s = encodeURIComponent(env.WEBHOOK_SECRET || "");
-  const link = (path) => abs(env, path);
+  const link  = (path) => abs(env, path);
   const linkS = (path) => abs(env, `${path}${path.includes("?") ? "&" : "?"}s=${s}`);
 
   return `<!doctype html>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Senti Worker</title>
 <style>
   :root { color-scheme: light dark }
-  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell; margin:24px; line-height:1.45}
-  h1{margin:0 0 12px}
-  .grid{display:grid; gap:10px; grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
-  a.btn{display:block; padding:10px 12px; border:1px solid #ddd; border-radius:10px; text-decoration:none; color:inherit; background:#f9f9fb}
-  a.btn:hover{background:#f0f0f3}
-  small{color:#666}
+  body{
+    margin:16px;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif;
+    line-height:1.35;
+    background: Canvas; color: CanvasText;
+  }
+  header{display:flex; align-items:center; gap:8px; margin-bottom:12px}
+  header h1{font-size:20px; margin:0}
+  header small{opacity:.7}
+  .grid{
+    display:grid; gap:10px;
+    grid-template-columns: repeat(2, minmax(0,1fr));
+  }
+  @media (min-width: 720px){ .grid{ grid-template-columns: repeat(3, minmax(0,1fr)); } }
+  a.btn{
+    display:flex; align-items:center; gap:10px;
+    min-height:56px; padding:12px 14px; border-radius:14px;
+    text-decoration:none; color:inherit;
+    background: color-mix(in oklab, Canvas 96%, CanvasText 6%);
+    border:1px solid color-mix(in oklab, CanvasText 20%, Canvas 80%);
+    box-shadow: 0 1px 0 color-mix(in oklab, CanvasText 12%, Canvas 88%) inset;
+  }
+  a.btn:active{ transform: translateY(1px); }
+  .ico{font-size:22px; width:28px; text-align:center}
+  .ttl{font-weight:600}
+  .sub{font-size:12px; opacity:.75}
 </style>
-<h1>⚙️ Senti Worker Active</h1>
+
+<header>
+  <div class="ico">⚙️</div>
+  <h1>Senti Worker Active</h1>
+</header>
 <p><small>Service: ${env.SERVICE_HOST || ""}</small></p>
+
 <div class="grid">
-  <a class="btn" href="${link("/health")}">✅ Health</a>
-  <a class="btn" href="${link("/webhook")}">📡 Webhook (GET alive)</a>
-  <a class="btn" href="${linkS("/selftest/run")}">🧪 SelfTest</a>
 
-  <a class="btn" href="${linkS("/admin/checklist/html")}">📋 Checklist (HTML)</a>
-  <a class="btn" href="${linkS("/admin/repo/html")}">📚 Repo (HTML)</a>
-  <a class="btn" href="${linkS("/admin/statut/html")}">📜 Statut (HTML)</a>
+  <a class="btn" href="${link("/health")}">
+    <div class="ico">✅</div><div><div class="ttl">Health</div><div class="sub">Ping сервісу</div></div>
+  </a>
 
-  <a class="btn" href="${link("/api/brain/current")}">🧠 Brain: current</a>
-  <a class="btn" href="${linkS("/api/brain/list")}">🧠 Brain: list</a>
-  <a class="btn" href="${link("/brain/state")}">🧩 Brain state (JSON)</a>
+  <a class="btn" href="${link("/webhook")}">
+    <div class="ico">📡</div><div><div class="ttl">Webhook</div><div class="sub">GET alive</div></div>
+  </a>
 
-  <a class="btn" href="${linkS("/ai/train/analyze")}">🤖 AI-Train (Analyze)</a>
-  <a class="btn" href="${linkS("/ai/train/auto")}">⚙️ AI-Train (Auto-Promote)</a>
-  <a class="btn" href="${linkS("/ai/evolve/run")}">🔁 AI-Evolve (Compare)</a>
+  <a class="btn" href="${linkS("/selftest/run")}">
+    <div class="ico">🧪</div><div><div class="ttl">SelfTest</div><div class="sub">Швидка перевірка</div></div>
+  </a>
+
+  <a class="btn" href="${linkS("/admin/checklist/html")}">
+    <div class="ico">📋</div><div><div class="ttl">Checklist</div><div class="sub">HTML редактор</div></div>
+  </a>
+
+  <a class="btn" href="${linkS("/admin/repo/html")}">
+    <div class="ico">📚</div><div><div class="ttl">Repo / Архів</div><div class="sub">поточний та історія</div></div>
+  </a>
+
+  <a class="btn" href="${linkS("/admin/statut/html")}">
+    <div class="ico">📜</div><div><div class="ttl">Statut</div><div class="sub">правила / систем підказ</div></div>
+  </a>
+
+  <a class="btn" href="${link("/api/brain/current")}">
+    <div class="ico">🧠</div><div><div class="ttl">Brain: current</div><div class="sub">активний архів</div></div>
+  </a>
+
+  <a class="btn" href="${linkS("/api/brain/list")}">
+    <div class="ico">🗂️</div><div><div class="ttl">Brain: list</div><div class="sub">всі архіви</div></div>
+  </a>
+
+  <a class="btn" href="${link("/brain/state")}">
+    <div class="ico">🧩</div><div><div class="ttl">Brain state</div><div class="sub">JSON стан</div></div>
+  </a>
+
+  <a class="btn" href="${linkS("/ai/train/analyze")}">
+    <div class="ico">🤖</div><div><div class="ttl">AI-Train: Analyze</div><div class="sub">розбір діалогів</div></div>
+  </a>
+
+  <a class="btn" href="${linkS("/ai/train/auto")}">
+    <div class="ico">⚙️</div><div><div class="ttl">AI-Train: Auto</div><div class="sub">авто-promote</div></div>
+  </a>
+
+  <a class="btn" href="${linkS("/ai/evolve/run")}">
+    <div class="ico">🔁</div><div><div class="ttl">AI-Evolve</div><div class="sub">порівняння версій</div></div>
+  </a>
+
 </div>`;
 }
 
