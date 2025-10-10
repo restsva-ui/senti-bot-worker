@@ -283,6 +283,24 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
+    // стандартний heartbeat лог
     await logHeartbeat(env);
+
+    // Щогодинний автозапуск AI-Evolve Auto (кроном "0 * * * *")
+    try {
+      if (event && event.cron === "0 * * * *") {
+        const u = new URL("https://internal/ai/evolve/auto");
+        if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
+        // Викликаємо наш роут напряму
+        await handleAiEvolve(
+          new Request(u.toString(), { method: "POST" }),
+          env,
+          u
+        );
+      }
+    } catch (e) {
+      // Запис у чеклист, щоб було видно збій автозапуску
+      await appendChecklist(env, `[${new Date().toISOString()}] evolve_auto:error ${String(e)}`);
+    }
   }
 };
