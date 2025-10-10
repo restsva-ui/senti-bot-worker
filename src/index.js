@@ -23,7 +23,8 @@ import { handleBrainState }      from "./routes/brainState.js";
 import { handleCiDeploy }        from "./routes/ciDeploy.js";
 import { handleBrainApi }        from "./routes/brainApi.js";
 import { handleSelfTest }        from "./routes/selfTest.js";
-import { handleAiTrain }         from "./routes/aiTrain.js"; // ⬅ ДОДАНО
+import { handleAiTrain }         from "./routes/aiTrain.js";
+import { handleAiEvolve }        from "./routes/aiEvolve.js"; // ⬅ додано новий модуль
 
 // ---------- helpers ----------
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
@@ -64,7 +65,9 @@ function home(env) {
   <a class="btn" href="${linkS("/api/brain/list")}">🧠 Brain: list</a>
   <a class="btn" href="${link("/brain/state")}">🧩 Brain state (JSON)</a>
 
-  <a class="btn" href="${linkS("/ai/train/analyze")}">🤖 AI-Train (Analyze)</a> <!-- ⬅ НОВЕ -->
+  <a class="btn" href="${linkS("/ai/train/analyze")}">🤖 AI-Train (Analyze)</a>
+  <a class="btn" href="${linkS("/ai/train/auto")}">⚙️ AI-Train (Auto-Promote)</a>
+  <a class="btn" href="${linkS("/ai/evolve/run")}">🔁 AI-Evolve (Compare)</a>
 </div>`;
 }
 
@@ -104,6 +107,12 @@ export default {
       // ---- AI-Train ----
       if (p.startsWith("/ai/train")) {
         const r = await handleAiTrain(req, env, url);
+        if (r) return r;
+      }
+
+      // ---- AI-Evolve ----
+      if (p.startsWith("/ai/evolve")) {
+        const r = await handleAiEvolve(req, env, url);
         if (r) return r;
       }
 
