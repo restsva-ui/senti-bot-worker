@@ -13,12 +13,13 @@ import { logHeartbeat, logDeploy } from "./lib/audit.js";
 import { abs } from "./utils/url.js";
 
 // ---------- modular routes (усі існують у твоєму /src/routes) ----------
-import { handleAdminRepo }      from "./routes/adminRepo.js";
-import { handleAdminChecklist } from "./routes/adminChecklist.js";
-import { handleAdminStatut }    from "./routes/adminStatut.js";
-import { handleAdminBrain }     from "./routes/adminBrain.js";
-import { handleTelegramWebhook }from "./routes/webhook.js";
-import { handleHealth }         from "./routes/health.js";
+import { handleAdminRepo }       from "./routes/adminRepo.js";
+import { handleAdminChecklist }  from "./routes/adminChecklist.js";
+import { handleAdminStatut }     from "./routes/adminStatut.js";
+import { handleAdminBrain }      from "./routes/adminBrain.js";
+import { handleTelegramWebhook } from "./routes/webhook.js";
+import { handleHealth }          from "./routes/health.js";
+import { handleBrainState }      from "./routes/brainState.js"; // ⬅ ДОДАНО (крок 2)
 
 // ---------- helpers ----------
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
@@ -40,6 +41,12 @@ export default {
         // fallback якщо модуль не повернув
         if (p === "/") return html("Senti Worker Active");
         return json({ ok:true, service: env.SERVICE_HOST });
+      }
+
+      // ---- Brain state (read-only JSON) ----
+      if (p === "/brain/state") {
+        const r = await handleBrainState(req, env, url); // ⬅ ДОДАНО (крок 2)
+        if (r) return r;
       }
 
       // ---- Admin: Checklist / Repo / Statut (модулі) ----
