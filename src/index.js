@@ -21,7 +21,8 @@ import { handleTelegramWebhook } from "./routes/webhook.js";
 import { handleHealth }          from "./routes/health.js";
 import { handleBrainState }      from "./routes/brainState.js";
 import { handleCiDeploy }        from "./routes/ciDeploy.js";
-import { handleBrainApi }        from "./routes/brainApi.js"; // ⬅ ДОДАНО
+import { handleBrainApi }        from "./routes/brainApi.js";
+import { handleSelfTest }        from "./routes/selfTest.js"; // ⬅ ДОДАНО
 
 // ---------- helpers ----------
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
@@ -50,9 +51,15 @@ export default {
         if (r) return r;
       }
 
-      // ---- Brain API (новий блок) ----
+      // ---- Brain API ----
       if (p.startsWith("/api/brain")) {
         const r = await handleBrainApi(req, env, url);
+        if (r) return r;
+      }
+
+      // ---- SelfTest (нове) ----
+      if (p.startsWith("/selftest")) {
+        const r = await handleSelfTest(req, env, url);
         if (r) return r;
       }
 
