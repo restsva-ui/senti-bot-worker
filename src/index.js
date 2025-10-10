@@ -22,13 +22,48 @@ import { handleHealth }          from "./routes/health.js";
 import { handleBrainState }      from "./routes/brainState.js";
 import { handleCiDeploy }        from "./routes/ciDeploy.js";
 import { handleBrainApi }        from "./routes/brainApi.js";
-import { handleSelfTest }        from "./routes/selfTest.js"; // ⬅ ДОДАНО
+import { handleSelfTest }        from "./routes/selfTest.js"; // ⬅ SelfTest
 
 // ---------- helpers ----------
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 const html = (s)=> new Response(s, { headers:{ "content-type":"text/html; charset=utf-8" }});
 const json = (o, status=200)=> new Response(JSON.stringify(o, null, 2), { status, headers:{ "content-type":"application/json" }});
 const needSecret = (env, url) => (env.WEBHOOK_SECRET && (url.searchParams.get("s") !== env.WEBHOOK_SECRET));
+
+// ---------- small UI for root ----------
+function home(env) {
+  const s = encodeURIComponent(env.WEBHOOK_SECRET || "");
+  const link = (path) => abs(env, path);
+  const linkS = (path) => abs(env, `${path}${path.includes("?") ? "&" : "?"}s=${s}`);
+
+  return `<!doctype html>
+<meta charset="utf-8">
+<title>Senti Worker</title>
+<style>
+  :root { color-scheme: light dark }
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell; margin:24px; line-height:1.45}
+  h1{margin:0 0 12px}
+  .grid{display:grid; gap:10px; grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+  a.btn{display:block; padding:10px 12px; border:1px solid #ddd; border-radius:10px; text-decoration:none; color:inherit; background:#f9f9fb}
+  a.btn:hover{background:#f0f0f3}
+  small{color:#666}
+</style>
+<h1>⚙️ Senti Worker Active</h1>
+<p><small>Service: ${env.SERVICE_HOST || ""}</small></p>
+<div class="grid">
+  <a class="btn" href="${link("/health")}">✅ Health</a>
+  <a class="btn" href="${link("/webhook")}">📡 Webhook (GET alive)</a>
+  <a class="btn" href="${linkS("/selftest/run")}">🧪 SelfTest</a>
+
+  <a class="btn" href="${linkS("/admin/checklist/html")}">📋 Checklist (HTML)</a>
+  <a class="btn" href="${linkS("/admin/repo/html")}">📚 Repo (HTML)</a>
+  <a class="btn" href="${linkS("/admin/statut/html")}">📜 Statut (HTML)</a>
+
+  <a class="btn" href="${link("/api/brain/current")}">🧠 Brain: current</a>
+  <a class="btn" href="${linkS("/api/brain/list")}">🧠 Brain: list</a>
+  <a class="btn" href="${link("/brain/state")}">🧩 Brain state (JSON)</a>
+</div>`;
+}
 
 // ---------- HTTP worker ----------
 export default {
@@ -41,7 +76,7 @@ export default {
       if (p === "/" || p === "/health") {
         const r = await handleHealth?.(req, env, url);
         if (r) return r;
-        if (p === "/") return html("Senti Worker Active");
+        if (p === "/") return html(home(env));
         return json({ ok:true, service: env.SERVICE_HOST });
       }
 
@@ -57,7 +92,7 @@ export default {
         if (r) return r;
       }
 
-      // ---- SelfTest (нове) ----
+      // ---- SelfTest ----
       if (p.startsWith("/selftest")) {
         const r = await handleSelfTest(req, env, url);
         if (r) return r;
