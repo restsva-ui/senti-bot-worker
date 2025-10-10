@@ -18,6 +18,11 @@ const html = (s)=> new Response(s, {headers:{ "content-type":"text/html; charset
 const json = (o, status=200)=> new Response(JSON.stringify(o,null,2), {status, headers:{ "content-type":"application/json" }});
 // абсолютний URL з урахуванням бази поточного запиту
 const abs = (pathOrUrl, reqUrl) => new URL(pathOrUrl, reqUrl).toString();
+// додати секрет у URL коректно (через ? або &)
+const withSecret = (u, secret) => {
+  if (!secret) return u;
+  return `${u}${u.includes("?") ? "&" : "?"}s=${encodeURIComponent(secret)}`;
+};
 
 // ---------- drive-mode state ----------
 const DRIVE_MODE_KEY = (uid) => `drive_mode:${uid}`;
@@ -130,14 +135,16 @@ export default {
       if (p === "/admin/checklist/upload" && req.method === "POST") {
         if (needSecret()) return json({ ok:false, error:"unauthorized" }, 401);
         const form = await req.formData();
-        const file = form.get("file");
-        if (!file) return json({ ok:false, error:"file required" }, 400);
-        const key = await saveArchive(env, file);
-        const urlKey = encodeURIComponent(key);
-        const who = url.searchParams.get("who") || "";
-        const note = `upload: ${(file.name||"file")} (${file.size||"?"} bytes) → /admin/archive/get?key=${urlKey}${env.WEBHOOK_SECRET?`&s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}${who?`&who=${encodeURIComponent(who)}`:""}`;
-        await appendChecklist(env, note);
-
+        thefile:
+        {
+          const file = form.get("file");
+          if (!file) return json({ ok:false, error:"file required" }, 400);
+          const key = await saveArchive(env, file);
+          const urlKey = encodeURIComponent(key);
+          const who = url.searchParams.get("who") || "";
+          const note = `upload: ${(file.name||"file")} (${file.size||"?"} bytes) → /admin/archive/get?key=${urlKey}${env.WEBHOOK_SECRET?`&s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}${who?`&who=${encodeURIComponent(who)}`:""}`;
+          await appendChecklist(env, note);
+        }
         const back = `${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`;
         return Response.redirect(abs(`/admin/checklist/html${back}`, url), 302);
       }
@@ -160,12 +167,16 @@ export default {
       if (p === "/admin/repo/html") {
         if (needSecret()) return html("<h3>401</h3>");
         const keys = await listArchives(env);
-        const q = env.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
-        const list = keys.map(k => `<li><a href="/admin/archive/get?key=${encodeURIComponent(k)}${q}">${k}</a> — <a href="/admin/archive/delete?key=${encodeURIComponent(k)}${q}" onclick="return confirm('Delete?')">🗑</a></li>`).join("") || "<li>Порожньо</li>";
+        const checklistHref = withSecret("/admin/checklist/html", env.WEBHOOK_SECRET);
+        const list = keys.map(k => {
+          const getHref = withSecret(`/admin/archive/get?key=${encodeURIComponent(k)}`, env.WEBHOOK_SECRET);
+          const delHref = withSecret(`/admin/archive/delete?key=${encodeURIComponent(k)}`, env.WEBHOOK_SECRET);
+          return `<li><a href="${getHref}">${k}</a> — <a href="${delHref}" onclick="return confirm('Delete?')">🗑</a></li>`;
+        }).join("") || "<li>Порожньо</li>";
         return html(`<!doctype html><meta charset="utf-8"><title>Repo</title>
         <div style="font-family:system-ui;margin:20px;max-width:900px">
           <h2>📚 Архів (Repo)</h2>
-          <p><a href="/admin/checklist/html${q}">⬅ До Checklist</a></p>
+          <p><a href="${checklistHref}">⬅ До Checklist</a></p>
           <ul>${list}</ul>
         </div>`);
       }
