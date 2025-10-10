@@ -25,7 +25,7 @@ import { handleBrainApi }        from "./routes/brainApi.js";
 import { handleSelfTest }        from "./routes/selfTest.js";
 import { handleAiTrain }         from "./routes/aiTrain.js";
 import { handleAiEvolve }        from "./routes/aiEvolve.js"; // ⬅ новий модуль
-import { handleBrainPromote }    from "./routes/brainPromote.js"; // ⬅ ДОДАНО: промоут архіву
+import { handleBrainPromote }    from "./routes/brainPromote.js"; // ⬅ промоут архіву
 
 // ---------- helpers ----------
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
@@ -80,7 +80,6 @@ function home(env) {
   .ico{font-size:22px; width:28px; text-align:center}
   .ttl{font-weight:600}
   .sub{font-size:12px; opacity:.75}
-  /* статусна крапка */
   .dot{
     position:absolute; top:8px; right:8px;
     width:10px; height:10px; border-radius:50%;
@@ -94,9 +93,7 @@ function home(env) {
     position:absolute; bottom:8px; right:10px; font-size:11px; opacity:.65;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   }
-  @keyframes pulse {
-    0%,100%{ opacity:.55 } 50%{ opacity:1 }
-  }
+  @keyframes pulse { 0%,100%{ opacity:.55 } 50%{ opacity:1 } }
 </style>
 
 <header>
@@ -172,7 +169,6 @@ function home(env) {
 </div>
 
 <script>
-  // легкий клієнтський пінгер: бере всі .btn з data-ping і фарбує статус
   async function ping(url){
     try{
       const r = await fetch(url, { method:"GET" });
@@ -219,7 +215,7 @@ export default {
         if (r) return r;
       }
 
-      // ---- Brain Promote (має стояти ПЕРЕД загальним /api/brain) ----
+      // ---- Brain Promote (перед загальним /api/brain*) ----
       if (p.startsWith("/api/brain/promote")) {
         const r = await handleBrainPromote(req, env, url);
         if (r) return r;
@@ -256,7 +252,7 @@ export default {
       }
       if (p.startsWith("/admin/repo") || p.startsWith("/admin/archive")) {
         const r = await handleAdminRepo(req, env, url);
-        if (r) return р;
+        if (r) return r; // ✅ виправлено (було 'return р;')
       }
       if (p.startsWith("/admin/statut")) {
         const r = await handleAdminStatut(req, env, url);
@@ -358,12 +354,12 @@ export default {
     // Щогодинний автозапуск AI-Evolve Auto (кроном "0 * * * *")
     try {
       if (event && event.cron === "0 * * * *") {
-        // Викликаємо наш роут безпосередньо як GET /ai/evolve/auto
-        const u = new URL("https://internal/ai/evolve/auto");
+        // ⬅️ ВАЖЛИВО: використовуємо реальний origin, а не "https://internal"
+        const u = new URL(abs(env, "/ai/evolve/auto"));
         if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
 
         const req = new Request(u.toString(), { method: "GET" });
-        await handleAiEvolve(req, env, new URL(u.toString()));
+        await handleAiEvolve(req, env, u);
       }
     } catch (e) {
       // Запис у чеклист, щоб було видно збій автозапуску
