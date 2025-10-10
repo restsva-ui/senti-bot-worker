@@ -30,7 +30,16 @@ import { handleAiEvolve }        from "./routes/aiEvolve.js"; // ⬅ новий 
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 const html = (s)=> new Response(s, { headers:{ "content-type":"text/html; charset=utf-8" }});
 const json = (o, status=200)=> new Response(JSON.stringify(o, null, 2), { status, headers:{ "content-type":"application/json" }});
-const needSecret = (env, url) => (env.WEBHOOK_SECRET && (url.searchParams.get("s") !== env.WEBHOOK_SECRET));
+
+// ⬇️ Дозволяємо selftest/внутрішні запити з секретом
+const needSecret = (env, url) => {
+  const path = url.pathname || "";
+  // selftest і будь-який запит з правильним ?s=SECRET не вимагає додаткової перевірки
+  if (path.startsWith("/selftest")) return false;
+  if (env.WEBHOOK_SECRET && url.searchParams.get("s") === env.WEBHOOK_SECRET) return false;
+  // інакше доступ закритий, якщо ввімкнено секрет
+  return !!env.WEBHOOK_SECRET;
+};
 
 // ---------- small UI for root (mobile-first) ----------
 function home(env) {
@@ -289,14 +298,12 @@ export default {
     // Щогодинний автозапуск AI-Evolve Auto (кроном "0 * * * *")
     try {
       if (event && event.cron === "0 * * * *") {
+        // Викликаємо наш роут безпосередньо як GET /ai/evolve/auto
         const u = new URL("https://internal/ai/evolve/auto");
         if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
-        // Викликаємо наш роут напряму
-        await handleAiEvolve(
-          new Request(u.toString(), { method: "POST" }),
-          env,
-          u
-        );
+
+        const req = new Request(u.toString(), { method: "GET" });
+        await handleAiEvolve(req, env, new URL(u.toString()));
       }
     } catch (e) {
       // Запис у чеклист, щоб було видно збій автозапуску
