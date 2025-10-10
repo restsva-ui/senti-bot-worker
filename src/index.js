@@ -252,7 +252,7 @@ export default {
       }
       if (p.startsWith("/admin/repo") || p.startsWith("/admin/archive")) {
         const r = await handleAdminRepo(req, env, url);
-        if (r) return r; // ✅ виправлено (було 'return р;')
+        if (r) return r;
       }
       if (p.startsWith("/admin/statut")) {
         const r = await handleAdminStatut(req, env, url);
@@ -354,7 +354,7 @@ export default {
     // Щогодинний автозапуск AI-Evolve Auto (кроном "0 * * * *")
     try {
       if (event && event.cron === "0 * * * *") {
-        // ⬅️ ВАЖЛИВО: використовуємо реальний origin, а не "https://internal"
+        // використовуємо реальний origin сервісу
         const u = new URL(abs(env, "/ai/evolve/auto"));
         if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
 
