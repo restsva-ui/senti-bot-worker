@@ -1,53 +1,111 @@
 // src/routes/brainApi.js
-import { listArchives, appendChecklist } from "../lib/kvChecklist.js";
+import { listArchives, appendChecklist, getArchive } from "../lib/kvChecklist.js";
 
-const json = (o, status = 200) =>
+// ── helpers ───────────────────────────────────────────────────────────────────
+const json = (o, status = 200, extraHeaders = {}) =>
   new Response(JSON.stringify(o, null, 2), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...extraHeaders,
+    },
   });
 
 const needSecret = (env, url) =>
   env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET;
 
-// KV-ключ де зберігаємо “актуальний” зелений архів
 const CUR_KEY = "brain:current";
 
+const cors = {
+  base: {
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "GET,POST,OPTIONS",
+    "access-control-allow-headers": "Content-Type,Authorization",
+  },
+  preflight() {
+    return new Response(null, { status: 204, headers: this.base });
+  },
+};
+
+// ── router ────────────────────────────────────────────────────────────────────
 export async function handleBrainApi(req, env, url) {
   const p = url.pathname;
 
-  // GET /api/brain/current  — хто зараз “актуальний”
+  // CORS preflight
+  if (req.method === "OPTIONS" && p.startsWith("/api/brain")) {
+    return cors.preflight();
+  }
+
+  // GET /api/brain/ping — простий ping
+  if (p === "/api/brain/ping" && req.method === "GET") {
+    return json({ ok: true }, 200, cors.base);
+  }
+
+  // GET /api/brain/current — хто зараз “актуальний”
   if (p === "/api/brain/current" && req.method === "GET") {
     const current = await env.CHECKLIST_KV.get(CUR_KEY);
-    return json({ ok: true, current, exists: !!current });
+    return json({ ok: true, current, exists: !!current }, 200, cors.base);
   }
 
   // GET /api/brain/list — перелік архівів (для зручного вибору)
+  // (залишаємо під секретом, як у твоєму варіанті)
   if (p === "/api/brain/list" && req.method === "GET") {
-    if (needSecret(env, url)) return json({ ok: false, error: "unauthorized" }, 401);
+    if (needSecret(env, url)) {
+      return json({ ok: false, error: "unauthorized" }, 401, cors.base);
+    }
     const keys = await listArchives(env);
-    return json({ ok: true, total: keys.length, items: keys });
+    return json({ ok: true, total: keys.length, items: keys }, 200, cors.base);
+  }
+
+  // GET /api/brain/get?key=...&s=... — віддати ZIP (бінарно)
+  if (p === "/api/brain/get" && req.method === "GET") {
+    if (needSecret(env, url)) {
+      return json({ ok: false, error: "unauthorized" }, 401, cors.base);
+    }
+    const key = url.searchParams.get("key");
+    if (!key) return json({ ok: false, error: "key required" }, 400, cors.base);
+
+    const b64 = await getArchive(env, key);
+    if (!b64) return json({ ok: false, error: "not found" }, 404, cors.base);
+
+    const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    return new Response(bin, {
+      status: 200,
+      headers: {
+        ...cors.base,
+        "content-type": "application/zip",
+        "content-disposition": `attachment; filename="${key.split("/").pop()}"`,
+      },
+    });
   }
 
   // /api/brain/promote — зробити архів “актуальним”
   //  • підтримує: POST (body: {key}) і GET (?key=...)
   if (p === "/api/brain/promote" && (req.method === "POST" || req.method === "GET")) {
-    if (needSecret(env, url)) return json({ ok: false, error: "unauthorized" }, 401);
+    if (needSecret(env, url)) {
+      return json({ ok: false, error: "unauthorized" }, 401, cors.base);
+    }
 
     let key = url.searchParams.get("key");
     if (req.method === "POST" && !key) {
       try {
         const body = await req.json();
         key = body?.key;
-      } catch {}
+      } catch {
+        // ignore
+      }
     }
-    if (!key) return json({ ok: false, error: "key required" }, 400);
+    if (!key) return json({ ok: false, error: "key required" }, 400, cors.base);
 
     await env.CHECKLIST_KV.put(CUR_KEY, key);
     await appendChecklist(env, `promote: ${key}`);
-
-    return json({ ok: true, promoted: key });
+    return json({ ok: true, promoted: key }, 200, cors.base);
   }
 
-  return null;
+  // Якщо шлях починається з /api/brain — чіткий 404
+  if (p.startsWith("/api/brain")) {
+    return json({ ok: false, error: "unknown endpoint" }, 404, cors.base);
+  }
+
+  return null; // не наш маршрут
 }
