@@ -1,8 +1,8 @@
 // src/routes/aiEvolve.js
-// Порівняння версій "мозку" + авто-промоут. Усі внутрішні запити з ?s=WEBHOOK_SECRET.
+// Порівняння версій "мозку" + авто-промоут.
+// Усі внутрішні запити формуємо від поточного url.origin і додаємо ?s=WEBHOOK_SECRET.
 
 import { listArchives, appendChecklist } from "../lib/kvChecklist.js";
-import { abs } from "../utils/url.js";
 
 const json = (o, status = 200) =>
   new Response(JSON.stringify(o, null, 2), {
@@ -10,10 +10,12 @@ const json = (o, status = 200) =>
     headers: { "content-type": "application/json; charset=utf-8" },
   });
 
-const withSec = (env, path) => {
+// Будує абсолютне посилання ВІД baseOrigin і підклеює секрет
+const withSecFrom = (env, baseOrigin, path) => {
+  const u = new URL(path, baseOrigin);
   const s = env.WEBHOOK_SECRET || "";
-  const sep = path.includes("?") ? "&" : "?";
-  return abs(env, `${path}${s ? `${sep}s=${encodeURIComponent(s)}` : ""}`);
+  if (s) u.searchParams.set("s", s);
+  return u.toString();
 };
 
 async function safeJson(url, init) {
@@ -37,8 +39,7 @@ export async function handleAiEvolve(req, env, url) {
     }
     const [current, previous] = [items[0], items[1]]; // від новішого до старішого
 
-    const msg =
-      `🧠 evolution: ${previous} > ${current}`;
+    const msg = `🧠 evolution: ${previous} > ${current}`;
     await appendChecklist(env, msg);
 
     return json({
@@ -50,8 +51,10 @@ export async function handleAiEvolve(req, env, url) {
 
   // GET /ai/evolve/auto — selftest → promote (найновіший архів)
   if (p === "/ai/evolve/auto" && req.method === "GET") {
+    const mk = (path) => withSecFrom(env, url.origin, path);
+
     // 1) selftest з секретом
-    const st = await safeJson(withSec(env, "/selftest/run"));
+    const st = await safeJson(mk("/selftest/run"));
     const stOk = !!st.ok && !!st.data?.ok;
 
     // 2) список архівів
@@ -63,7 +66,7 @@ export async function handleAiEvolve(req, env, url) {
 
     // 3) promote найновішого
     const key = items[0];
-    const pr = await safeJson(withSec(env, `/api/brain/promote?key=${encodeURIComponent(key)}`));
+    const pr = await safeJson(mk(`/api/brain/promote?key=${encodeURIComponent(key)}`));
 
     const emoji = pr.ok ? "🧠" : "⚠️";
     await appendChecklist(
@@ -72,12 +75,15 @@ export async function handleAiEvolve(req, env, url) {
         (stOk ? "" : " (selftest:fail)")
     );
 
-    return json({
-      ok: pr.ok,
-      selftest_ok: stOk,
-      promoted: pr.data?.promoted || key,
-      status: pr.status,
-    }, pr.ok ? 200 : 500);
+    return json(
+      {
+        ok: pr.ok,
+        selftest_ok: stOk,
+        promoted: pr.data?.promoted || key,
+        status: pr.status,
+      },
+      pr.ok ? 200 : 500
+    );
   }
 
   return null;
