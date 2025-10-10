@@ -9,18 +9,18 @@ import {
 } from "./lib/kvChecklist.js";
 import { logHeartbeat, logDeploy } from "./lib/audit.js";
 
-// 🧠 підключення мозку Senti (додай файл src/brain/sentiCore.js)
+// 🧠 мозок Senti
 import { SentiCore } from "./brain/sentiCore.js";
 
 // ---------- utils ----------
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
-const html = (s)=> new Response(s, {headers:{ "content-type":"text/html; charset=utf-8" }});
-const json = (o, status=200)=> new Response(JSON.stringify(o,null,2), {status, headers:{ "content-type":"application/json" }});
+const html = (s)=> new Response(s, { headers:{ "content-type":"text/html; charset=utf-8" }});
+const json = (o, status=200)=> new Response(JSON.stringify(o,null,2), { status, headers:{ "content-type":"application/json" }});
 
 // ---------- drive-mode state ----------
 const DRIVE_MODE_KEY = (uid) => `drive_mode:${uid}`;
 function ensureState(env) { if (!env.STATE_KV) throw new Error("STATE_KV binding missing"); return env.STATE_KV; }
-async function setDriveMode(env, userId, on){ await ensureState(env).put(DRIVE_MODE_KEY(userId), on?"1":"0", {expirationTtl:3600}); }
+async function setDriveMode(env, userId, on){ await ensureState(env).put(DRIVE_MODE_KEY(userId), on?"1":"0", { expirationTtl:3600 }); }
 async function getDriveMode(env, userId){ return (await ensureState(env).get(DRIVE_MODE_KEY(userId)))==="1"; }
 
 // ---------- media helpers ----------
@@ -67,7 +67,6 @@ async function installCommandsMinimal(env){
     {command:"admin",description:"Адмін-меню"},
     {command:"admin_check",description:"HTML чеклист"},
     {command:"admin_checklist",description:"Append рядок у чеклист"},
-    // нові
     {command:"admin_start_mind",description:"Запустити мозок Senti"},
     {command:"admin_snapshot",description:"Env snapshot → чеклист"},
   ]);
@@ -124,17 +123,30 @@ export default {
         return checklistHtml({ text, submitPath:"/admin/checklist/html", secret: env.WEBHOOK_SECRET || "" });
       }
 
-      // файл -> архів -> посилання у чеклист
-      if (p === "/admin/checklist/upload" && req.method === "POST") {
-        if (needSecret()) return json({ ok:false, error:"unauthorized" }, 401);
-        const form = await req.formData();
-        const file = form.get("file");
-        if (!file) return json({ ok:false, error:"file required" }, 400);
+      // файл -> архів -> посилання у чеклист (робимо дружнім)
+      if (p === "/admin/checklist/upload") {
+        // якщо секрет не збігся — просто назад у UI
+        if (needSecret()) return Response.redirect(`/admin/checklist/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`, 302);
+
+        if (req.method !== "POST") {
+          // хтось відкрив GET — повертаємо у чеклист
+          return Response.redirect(`/admin/checklist/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`, 302);
+        }
+
+        const form = await req.formData().catch(()=>null);
+        const file = form?.get("file");
+
+        // нічого не вибрано — теж просто редіректимо у UI, помилку підкаже JS
+        if (!file || typeof file.arrayBuffer !== "function" || (file.size === 0 && !file.name)) {
+          return Response.redirect(`/admin/checklist/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`, 302);
+        }
+
         const key = await saveArchive(env, file);
         const urlKey = encodeURIComponent(key);
         const who = url.searchParams.get("who") || "";
         const note = `upload: ${(file.name||"file")} (${file.size||"?"} bytes) → /admin/archive/get?key=${urlKey}${env.WEBHOOK_SECRET?`&s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}${who?`&who=${encodeURIComponent(who)}`:""}`;
         await appendChecklist(env, note);
+
         return Response.redirect(`/admin/checklist/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`, 302);
       }
 
@@ -358,11 +370,6 @@ export default {
 
   // ---- CRON (heartbeat кожні 15 хв) ----
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => {
-      try {
-        await logHeartbeat(env);
-        await SentiCore.selfCheck(env); // автосамо-перевірка мозку
-      } catch (e) { /* ignore */ }
-    })());
+    ctx.waitUntil((async () => { try { await logHeartbeat(env); } catch {} })());
   }
 };
