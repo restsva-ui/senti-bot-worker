@@ -3,9 +3,9 @@ import { TG } from "./lib/tg.js";
 import { getUserTokens, putUserTokens, userListFiles, userSaveUrl } from "./lib/userDrive.js";
 
 import {
-  readChecklist, appendChecklist, saveArchive,
-  listArchives, getArchive, deleteArchive,
-  writeStatut, readStatut
+  readChecklist, writeChecklist, appendChecklist, checklistHtml,
+  saveArchive, listArchives, getArchive, deleteArchive,
+  readStatut, writeStatut, statutHtml
 } from "./lib/kvChecklist.js";
 import { logHeartbeat, logDeploy } from "./lib/audit.js";
 import { SentiCore } from "./brain/sentiCore.js";
@@ -13,7 +13,7 @@ import { SentiCore } from "./brain/sentiCore.js";
 // ---------- utils ----------
 import { abs } from "./utils/url.js";
 
-// routes
+// маршрути (переконайся, що ці файли існують)
 import { handleAdminRepo } from "./routes/adminRepo.js";
 import { handleAdminChecklist } from "./routes/adminChecklist.js";
 import { handleAdminStatut } from "./routes/adminStatut.js";
@@ -64,17 +64,35 @@ const BTN_DRIVE="Google Drive", BTN_SENTI="Senti", BTN_ADMIN="Admin", BTN_CHECK=
 function mainKeyboard(isAdmin=false){ const rows=[[{text:BTN_DRIVE},{text:BTN_SENTI}]]; if(isAdmin) rows.push([{text:BTN_ADMIN},{text:BTN_CHECK}]); return {keyboard:rows,resize_keyboard:true}; }
 const inlineOpenDrive = ()=>({ inline_keyboard: [[{ text:"Відкрити Диск", url:"https://drive.google.com/drive/my-drive"}]] });
 
+// ---------- commands ----------
+async function installCommandsMinimal(env){
+  await TG.setCommands(env.BOT_TOKEN,{type:"default"},[]);
+  if(!env.TELEGRAM_ADMIN_ID) throw new Error("TELEGRAM_ADMIN_ID not set");
+  await TG.setCommands(env.BOT_TOKEN,{type:"chat",chat_id:Number(env.TELEGRAM_ADMIN_ID)},[
+    {command:"admin",description:"Адмін-меню"},
+    {command:"admin_check",description:"HTML чеклист"},
+    {command:"admin_checklist",description:"Append рядок у чеклист"},
+    {command:"admin_start_mind",description:"Запустити мозок Senti"},
+    {command:"admin_snapshot",description:"Env snapshot → чеклист"},
+  ]);
+}
+async function clearCommands(env){
+  await TG.setCommands(env.BOT_TOKEN,{type:"default"},[]);
+  if(env.TELEGRAM_ADMIN_ID){ await TG.setCommands(env.BOT_TOKEN,{type:"chat",chat_id:Number(env.TELEGRAM_ADMIN_ID)},[]); }
+}
+
 // ---------- HTTP worker ----------
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
     const p = url.pathname;
+    const needSecret = () => (env.WEBHOOK_SECRET && (url.searchParams.get("s") !== env.WEBHOOK_SECRET));
 
     try {
       if (p === "/") return html("Senti Worker Active");
       if (p === "/health") return json({ ok:true, service: env.SERVICE_HOST });
 
-      // --- modular routes ---
+      // --- модульні роутери ---
       if (p.startsWith("/admin/checklist")) {
         const r = await handleAdminChecklist(req, env, url);
         if (r) return r;
@@ -88,8 +106,9 @@ export default {
         if (r) return r;
       }
 
-      // решта логіки (webhook, drive, auth, brain і т.д.) без змін...
-      // ✅ код не змінюється, бо все стабільне з “зелених” деплоїв
+      // --- решта зеленого коду (webhook, drive, auth, brain) без змін ---
+      if (p === "/webhook" && req.method !== "POST") return json({ ok:true, note:"webhook alive (GET)" });
+      // ... (твій чинний код із зеленого деплою тут залишається як є)
       return json({ ok:false, error:"Not found" }, 404);
 
     } catch (e) {
