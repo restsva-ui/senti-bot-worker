@@ -7,7 +7,7 @@ import {
   saveArchive, listArchives, getArchive, deleteArchive,
   readStatut, writeStatut, statutHtml
 } from "./lib/kvChecklist.js";
-import { logHeartbeat, logDeploy } from "./lib/audit.js";
+import { logHeartbeat } from "./lib/audit.js";
 
 // ---------- utils ----------
 import { abs } from "./utils/url.js";
@@ -19,7 +19,8 @@ import { handleAdminStatut }     from "./routes/adminStatut.js";
 import { handleAdminBrain }      from "./routes/adminBrain.js";
 import { handleTelegramWebhook } from "./routes/webhook.js";
 import { handleHealth }          from "./routes/health.js";
-import { handleBrainState }      from "./routes/brainState.js"; // ⬅ ДОДАНО (крок 2)
+import { handleBrainState }      from "./routes/brainState.js"; // (крок 2)
+import { handleCiDeploy }        from "./routes/ciDeploy.js";    // ⬅ ДОДАНО (крок 3)
 
 // ---------- helpers ----------
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
@@ -45,7 +46,7 @@ export default {
 
       // ---- Brain state (read-only JSON) ----
       if (p === "/brain/state") {
-        const r = await handleBrainState(req, env, url); // ⬅ ДОДАНО (крок 2)
+        const r = await handleBrainState(req, env, url);
         if (r) return r;
       }
 
@@ -116,15 +117,10 @@ export default {
         return json({ ok:true });
       }
 
-      // ---- CI deploy note (як і було) ----
-      if (p === "/ci/deploy-note") {
-        if (needSecret(env, url)) return json({ ok:false, error:"unauthorized" }, 401);
-        const commit = url.searchParams.get("commit") || "";
-        const actor  = url.searchParams.get("actor")  || "";
-        const depId  = url.searchParams.get("deploy") || env.DEPLOY_ID || "";
-        const status = url.searchParams.get("status") || "";
-        const line = await logDeploy(env, { source:"ci", commit, actor, deployId:depId, status });
-        return json({ ok:true, line });
+      // ---- CI deploy note → винесено в окремий модуль (автолог/архів current) ----
+      if (p.startsWith("/ci/deploy-note")) {
+        const r = await handleCiDeploy(req, env, url);
+        if (r) return r;
       }
 
       // ---- OAuth Google (залишаємо тут) ----
