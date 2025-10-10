@@ -1,5 +1,5 @@
 // src/routes/aiEvolve.js
-// Порівняння двох останніх "мозків" + автопромоут при успішному selftest.
+// Порівняння версій "мозку" + авто-промоут. Усі внутрішні запити з ?s=WEBHOOK_SECRET.
 
 import { listArchives, appendChecklist } from "../lib/kvChecklist.js";
 import { abs } from "../utils/url.js";
@@ -10,97 +10,74 @@ const json = (o, status = 200) =>
     headers: { "content-type": "application/json; charset=utf-8" },
   });
 
-const needSecret = (env, url) =>
-  env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET;
+const withSec = (env, path) => {
+  const s = env.WEBHOOK_SECRET || "";
+  const sep = path.includes("?") ? "&" : "?";
+  return abs(env, `${path}${s ? `${sep}s=${encodeURIComponent(s)}` : ""}`);
+};
 
-const CUR_KEY = "brain:current";
-
-// Витягуємо 2 найсвіжіші архіви (latest, previous)
-async function latestTwo(env) {
-  const items = await listArchives(env); // очікуємо масив рядків ключів
-  if (!Array.isArray(items) || items.length < 1) {
-    return { latest: null, previous: null, items: [] };
+async function safeJson(url, init) {
+  try {
+    const r = await fetch(url, init);
+    const d = await r.json().catch(() => ({}));
+    return { ok: r.ok, status: r.status, data: d };
+  } catch {
+    return { ok: false, status: 0, data: {} };
   }
-  // масив повертається вже від нового до старого; перестрахуємось сортуванням
-  const sorted = [...items].sort((a, b) => (a > b ? -1 : 1));
-  return { latest: sorted[0] || null, previous: sorted[1] || null, items: sorted };
-}
-
-// Псевдо-аналіз: записуємо службовий рядок у чеклист
-async function saveEvolutionNote(env, latest, previous, extra = "") {
-  const line = `evolve compare :: latest=${latest || "-"} prev=${previous || "-"} ${extra}`.trim();
-  await appendChecklist(env, line);
 }
 
 export async function handleAiEvolve(req, env, url) {
   const p = url.pathname;
 
-  // ------- /ai/evolve/run ---------------
-  // Порівняти два останніх архіви і зберегти службовий запис
+  // GET /ai/evolve/run — бере 2 останні архіви і записує коротке резюме у чеклист
   if (p === "/ai/evolve/run" && req.method === "GET") {
-    if (needSecret(env, url)) return json({ ok: false, error: "unauthorized" }, 401);
-
-    const { latest, previous } = await latestTwo(env);
-    if (!latest || !previous) {
-      return json({ ok: false, error: "not_enough_archives" }, 400);
+    const items = await listArchives(env);
+    if (items.length < 2) {
+      return json({ ok: false, error: "not_enough_archives", total: items.length }, 400);
     }
+    const [current, previous] = [items[0], items[1]]; // від новішого до старішого
 
-    await saveEvolutionNote(env, latest, previous, "| summary=saved");
+    const msg =
+      `🧠 evolution: ${previous} > ${current}`;
+    await appendChecklist(env, msg);
+
     return json({
       ok: true,
       message: "evolution summary saved",
-      compared: { previous, current: latest },
+      compared: { previous, current },
     });
   }
 
-  // ------- /ai/evolve/auto --------------
-  // 1) Порівняти архіви
-  // 2) Прогнати selftest
-  // 3) Якщо selftest ok — виставити latest як brain:current
+  // GET /ai/evolve/auto — selftest → promote (найновіший архів)
   if (p === "/ai/evolve/auto" && req.method === "GET") {
-    if (needSecret(env, url)) return json({ ok: false, error: "unauthorized" }, 401);
+    // 1) selftest з секретом
+    const st = await safeJson(withSec(env, "/selftest/run"));
+    const stOk = !!st.ok && !!st.data?.ok;
 
-    const { latest, previous } = await latestTwo(env);
-    if (!latest || !previous) {
-      return json({ ok: false, error: "not_enough_archives" }, 400);
+    // 2) список архівів
+    const items = await listArchives(env);
+    if (!items.length) {
+      await appendChecklist(env, `❌ auto-promote skipped — no archives`);
+      return json({ ok: false, error: "no_archives" }, 400);
     }
 
-    // 1) Збережемо службову помітку про порівняння
-    await saveEvolutionNote(env, latest, previous, "| mode=auto");
+    // 3) promote найновішого
+    const key = items[0];
+    const pr = await safeJson(withSec(env, `/api/brain/promote?key=${encodeURIComponent(key)}`));
 
-    // 2) SelfTest (викликаємо локально з секретом)
-    const s = encodeURIComponent(env.WEBHOOK_SECRET || "");
-    const selfUrl = abs(env, `/selftest/run?s=${s}`);
-    let selfOk = false;
-    try {
-      const r = await fetch(selfUrl, { method: "GET" });
-      const d = await r.json();
-      selfOk = !!d?.ok;
-      await appendChecklist(env, `selftest:auto result=${selfOk ? "ok" : "fail"}`);
-    } catch (e) {
-      await appendChecklist(env, `selftest:auto error=${String(e)}`);
-      return json({ ok: false, error: "selftest_error" }, 500);
-    }
-
-    if (!selfOk) {
-      return json({
-        ok: false,
-        promoted: null,
-        reason: "selftest_failed",
-        compared: { previous, latest },
-      }, 409);
-    }
-
-    // 3) Промоут latest як активний мозок
-    await env.CHECKLIST_KV.put(CUR_KEY, latest);
-    await appendChecklist(env, `autopromote: ${latest}`);
+    const emoji = pr.ok ? "🧠" : "⚠️";
+    await appendChecklist(
+      env,
+      `${emoji} auto-promote ${pr.ok ? "success" : "fail"} → ${key}` +
+        (stOk ? "" : " (selftest:fail)")
+    );
 
     return json({
-      ok: true,
-      promoted: latest,
-      compared: { previous, latest },
-      note: "auto-promote after successful selftest",
-    });
+      ok: pr.ok,
+      selftest_ok: stOk,
+      promoted: pr.data?.promoted || key,
+      status: pr.status,
+    }, pr.ok ? 200 : 500);
   }
 
   return null;
