@@ -1,9 +1,12 @@
 // src/routes/webhook.js
-import { drivePing, driveSaveFromUrl, driveAppendLog, driveReadTextByName } from "../lib/drive.js";
-import { getUserTokens, userSaveUrl } from "../lib/userDrive.js";
+// Telegram webhook з інтеграцією "мозку" та перевірками доступу/режиму диска.
+// Додаємо Статут як системний підказник для AI на кожну текстову взаємодію.
+
+import { driveSaveFromUrl } from "../lib/drive.js";
+import { getUserTokens } from "../lib/userDrive.js";
 import { abs } from "../utils/url.js";
-// AI (якщо lib/brain.js є в репо — імпорт спрацює; інакше відповіді дає звичайний режим)
 import { think } from "../lib/brain.js";
+import { readStatut } from "../lib/kvChecklist.js";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 const json = (data, init = {}) =>
@@ -117,9 +120,14 @@ async function handleIncomingMedia(env, chatId, userId, msg) {
 // ── головний обробник вебхуку ────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
   // захист секретом Telegram webhook
-  const sec = req.headers.get("x-telegram-bot-api-secret-token");
-  if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
-    return json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (req.method === "POST") {
+    const sec = req.headers.get("x-telegram-bot-api-secret-token");
+    if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
+      return json({ ok: false, error: "unauthorized" }, { status: 401 });
+    }
+  } else {
+    // GET /webhook — сигнал alive
+    return json({ ok: true, note: "webhook alive (GET)" });
   }
 
   let update;
@@ -189,7 +197,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Декілька базових адмін-дій прямо з чату (посилання на HTML-панелі вже існують у /routes/admin*)
+  // Декілька базових адмін-дій прямо з чату (посилання на HTML-панелі)
   if (text === BTN_CHECK && isAdmin) {
     await safe(async () => {
       const link = abs(env, `/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET || "")}`);
@@ -221,12 +229,15 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Якщо це не команда і не медіа — відповідаємо AI (якщо think доступний)
+  // Якщо це не команда і не медіа — відповідаємо AI з підвантаженням Статуту
   if (text && !text.startsWith("/")) {
     try {
+      const statut = await readStatut(env).catch(() => "");
       const systemHint =
-        "Ти — Senti, помічник у Telegram. Відповідай стисло та дружньо. Якщо просять зберегти файл — нагадай про Google Drive.";
-      const out = await think(env, text, systemHint); // якщо модуля нема — це зловить нижній catch
+        (statut ? `${statut.trim()}\n\n` : "") +
+        "Ти — Senti, помічник у Telegram. Відповідай стисло та дружньо. " +
+        "Якщо просять зберегти файл — нагадай про Google Drive та розділ Checklist/Repo.";
+      const out = await think(env, text, systemHint); // якщо AI недоступний — впаде в catch
       await sendMessage(env, chatId, out || "🤔");
       return json({ ok: true });
     } catch {
