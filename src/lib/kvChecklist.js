@@ -19,6 +19,17 @@ function stamp() {
   };
 }
 
+// ---- helpers for absolute URLs ----
+function baseUrl(env) {
+  const host = env?.SERVICE_HOST;
+  if (!host) throw new Error("SERVICE_HOST is not set");
+  return `https://${host}`;
+}
+export function archiveLink(env, key) {
+  const s = env.WEBHOOK_SECRET ? `&s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
+  return `${baseUrl(env)}/admin/archive/get?key=${encodeURIComponent(key)}${s}`;
+}
+
 // ===== ЧЕКЛІСТ =====
 export async function readChecklist(env) {
   const kv = ensureKv(env);
@@ -46,11 +57,19 @@ export async function saveArchive(env, file) {
   const name = (file.name || "file.bin").replace(/[^\w.\-]+/g, "_");
   const key = `${ARCHIVE_PREFIX}${new Date().toISOString()}__${name}`;
   await kv.put(key, b64);
-  return key;
+
+  // повертаємо одразу все корисне + абсолютну URL для відкриття
+  return {
+    key,
+    name,
+    bytes: buf.byteLength,
+    url: archiveLink(env, key),
+  };
 }
 export async function listArchives(env) {
   const kv = ensureKv(env);
   const { keys } = await kv.list({ prefix: ARCHIVE_PREFIX });
+  // найновіші зверху
   return keys.map(k => k.name).sort().reverse();
 }
 export async function getArchive(env, key) {
@@ -90,7 +109,7 @@ export function checklistHtml({ title="Senti Checklist", text="", submitPath="/a
   textarea{width:100%;height:60vh;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace}
   button{padding:9px 14px;border:1px solid #ccc;border-radius:10px;background:#fafafa;cursor:pointer}
   .top{display:flex;align-items:center;gap:10px}
-  .pill{padding:6px 10px;border:1px solid #ddd;border-radius:999px;background:#fff}
+  .pill{padding:6px 10px;border:1px solid #ddd;border-radius:999px;background:#fff;text-decoration:none;color:inherit}
   .right{margin-left:auto}
 </style>
 <div class="box">
@@ -133,7 +152,7 @@ export function statutHtml({ title="STATUT", text="", submitPath="/admin/statut/
   .box{max-width:980px;margin:0 auto}
   textarea{width:100%;height:70vh;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace}
   button{padding:9px 14px;border:1px solid #ccc;border-radius:10px;background:#fafafa;cursor:pointer}
-  .pill{padding:6px 10px;border:1px solid #ddd;border-radius:999px;background:#fff}
+  .pill{padding:6px 10px;border:1px solid #ddd;border-radius:999px;background:#fff;text-decoration:none;color:inherit}
 </style>
 <div class="box">
   <h2>📌 ${title}</h2>
