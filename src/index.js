@@ -12,15 +12,16 @@ import { logHeartbeat } from "./lib/audit.js";
 // ---------- utils ----------
 import { abs } from "./utils/url.js";
 
-// ---------- modular routes (усі існують у твоєму /src/routes) ----------
+// ---------- modular routes ----------
 import { handleAdminRepo }       from "./routes/adminRepo.js";
 import { handleAdminChecklist }  from "./routes/adminChecklist.js";
 import { handleAdminStatut }     from "./routes/adminStatut.js";
 import { handleAdminBrain }      from "./routes/adminBrain.js";
 import { handleTelegramWebhook } from "./routes/webhook.js";
 import { handleHealth }          from "./routes/health.js";
-import { handleBrainState }      from "./routes/brainState.js"; // (крок 2)
-import { handleCiDeploy }        from "./routes/ciDeploy.js";    // ⬅ ДОДАНО (крок 3)
+import { handleBrainState }      from "./routes/brainState.js";
+import { handleCiDeploy }        from "./routes/ciDeploy.js";
+import { handleBrainApi }        from "./routes/brainApi.js"; // ⬅ ДОДАНО
 
 // ---------- helpers ----------
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
@@ -35,22 +36,27 @@ export default {
     const p = url.pathname;
 
     try {
-      // ---- health (в окремому модулі) ----
+      // ---- health ----
       if (p === "/" || p === "/health") {
         const r = await handleHealth?.(req, env, url);
         if (r) return r;
-        // fallback якщо модуль не повернув
         if (p === "/") return html("Senti Worker Active");
         return json({ ok:true, service: env.SERVICE_HOST });
       }
 
-      // ---- Brain state (read-only JSON) ----
+      // ---- Brain state ----
       if (p === "/brain/state") {
         const r = await handleBrainState(req, env, url);
         if (r) return r;
       }
 
-      // ---- Admin: Checklist / Repo / Statut (модулі) ----
+      // ---- Brain API (новий блок) ----
+      if (p.startsWith("/api/brain")) {
+        const r = await handleBrainApi(req, env, url);
+        if (r) return r;
+      }
+
+      // ---- Admin modules ----
       if (p.startsWith("/admin/checklist")) {
         const r = await handleAdminChecklist(req, env, url);
         if (r) return r;
@@ -63,16 +69,13 @@ export default {
         const r = await handleAdminStatut(req, env, url);
         if (r) return r;
       }
-
-      // ---- Admin: Brain (модуль) ----
       if (p.startsWith("/admin/brain")) {
         const r = await handleAdminBrain(req, env, url);
         if (r) return r;
       }
 
-      // ---- Telegram webhook (модуль) ----
+      // ---- Telegram webhook ----
       if (p === "/webhook") {
-        // сек’юрність по секрету Telegram (якщо є)
         if (req.method === "POST") {
           const sec = req.headers.get("x-telegram-bot-api-secret-token");
           if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
@@ -82,7 +85,7 @@ export default {
         return await handleTelegramWebhook(req, env);
       }
 
-      // ---- TG helpers (як і було в зеленому деплої) ----
+      // ---- Telegram helpers ----
       if (p === "/tg/get-webhook") {
         const r = await TG.getWebhook(env.BOT_TOKEN);
         return new Response(await r.text(), { headers:{ "content-type":"application/json" } });
@@ -97,33 +100,14 @@ export default {
               || await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteWebhook`);
         return new Response(await r.text(), { headers:{ "content-type":"application/json" } });
       }
-      if (p === "/tg/install-commands-min") {
-        await TG.setCommands(env.BOT_TOKEN, { type:"default" }, []);
-        if(!env.TELEGRAM_ADMIN_ID) throw new Error("TELEGRAM_ADMIN_ID not set");
-        await TG.setCommands(env.BOT_TOKEN, { type:"chat", chat_id:Number(env.TELEGRAM_ADMIN_ID) }, [
-          {command:"admin",description:"Адмін-меню"},
-          {command:"admin_check",description:"HTML чеклист"},
-          {command:"admin_checklist",description:"Append рядок у чеклист"},
-          {command:"admin_start_mind",description:"Запустити мозок Senti"},
-          {command:"admin_snapshot",description:"Env snapshot → чеклист"},
-        ]);
-        return json({ ok:true });
-      }
-      if (p === "/tg/clear-commands") {
-        await TG.setCommands(env.BOT_TOKEN, { type:"default" }, []);
-        if (env.TELEGRAM_ADMIN_ID) {
-          await TG.setCommands(env.BOT_TOKEN, { type:"chat", chat_id:Number(env.TELEGRAM_ADMIN_ID) }, []);
-        }
-        return json({ ok:true });
-      }
 
-      // ---- CI deploy note → винесено в окремий модуль (автолог/архів current) ----
+      // ---- CI deploy ----
       if (p.startsWith("/ci/deploy-note")) {
         const r = await handleCiDeploy(req, env, url);
         if (r) return r;
       }
 
-      // ---- OAuth Google (залишаємо тут) ----
+      // ---- OAuth Google ----
       if (p === "/auth/start") {
         const u = url.searchParams.get("u");
         const state = btoa(JSON.stringify({ u }));
