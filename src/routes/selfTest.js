@@ -52,7 +52,9 @@ export async function handleSelfTest(req, env, url) {
       (r) => `${r.name}:${r.ok ? "ok" : "fail"}(${r.status})`
     );
     const allOk = Object.values(results).every((r) => r.ok);
-    const line = `${allOk ? "✅" : "❌"} selftest ${new Date().toISOString()} :: ` + parts.join(" | ");
+    const line =
+      `${allOk ? "✅" : "❌"} selftest ${new Date().toISOString()} :: ` +
+      parts.join(" | ");
 
     await appendChecklist(env, line);
     return json({ ok: allOk, results, checklist_line: line });
