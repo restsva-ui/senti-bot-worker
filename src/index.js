@@ -1,10 +1,11 @@
+// src/index.js
 import { TG } from "./lib/tg.js";
 import { getUserTokens, putUserTokens, userListFiles, userSaveUrl } from "./lib/userDrive.js";
 
 import {
   readChecklist, writeChecklist, appendChecklist, checklistHtml,
   saveArchive, listArchives, getArchive, deleteArchive,
-  readStatut, writeStatut, statutHtml
+  readStatut, writeStatut, statutHtml, archiveLink
 } from "./lib/kvChecklist.js";
 import { logHeartbeat, logDeploy } from "./lib/audit.js";
 
@@ -12,6 +13,7 @@ import { logHeartbeat, logDeploy } from "./lib/audit.js";
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 const html = (s)=> new Response(s, {headers:{ "content-type":"text/html; charset=utf-8" }});
 const json = (o, status=200)=> new Response(JSON.stringify(o,null,2), {status, headers:{ "content-type":"application/json" }});
+const abs = (env, pathAndQuery="") => `https://${env.SERVICE_HOST}${pathAndQuery.startsWith("/") ? "" : "/"}${pathAndQuery}`;
 
 // ---------- drive-mode state ----------
 const DRIVE_MODE_KEY = (uid) => `drive_mode:${uid}`;
@@ -76,6 +78,7 @@ export default {
     const url = new URL(req.url);
     const p = url.pathname;
     const needSecret = () => (env.WEBHOOK_SECRET && (url.searchParams.get("s") !== env.WEBHOOK_SECRET));
+    const secretQuery = env.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
 
     try {
       // health
@@ -84,7 +87,7 @@ export default {
 
       // tg helpers
       if (p === "/tg/get-webhook") { const r=await TG.getWebhook(env.BOT_TOKEN); return new Response(await r.text(),{headers:{'content-type':'application/json'}}); }
-      if (p === "/tg/set-webhook") { const target=`https://${env.SERVICE_HOST}/webhook`; const r=await TG.setWebhook(env.BOT_TOKEN,target,env.TG_WEBHOOK_SECRET); return new Response(await r.text(),{headers:{'content-type':'application/json'}}); }
+      if (p === "/tg/set-webhook") { const target=abs(env, "/webhook"); const r=await TG.setWebhook(env.BOT_TOKEN,target,env.TG_WEBHOOK_SECRET); return new Response(await r.text(),{headers:{'content-type':'application/json'}}); }
       if (p === "/tg/del-webhook") { const r=await TG.deleteWebhook?.(env.BOT_TOKEN)||await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteWebhook`); return new Response(await r.text(),{headers:{'content-type':'application/json'}}); }
 
       if (p === "/tg/install-commands-min") { await installCommandsMinimal(env); return json({ok:true}); }
@@ -123,12 +126,14 @@ export default {
         const form = await req.formData();
         const file = form.get("file");
         if (!file) return json({ ok:false, error:"file required" }, 400);
-        const key = await saveArchive(env, file);
-        const urlKey = encodeURIComponent(key);
+
+        // saveArchive повертає { key, name, bytes, url }
+        const { key, name, bytes, url: fileUrl } = await saveArchive(env, file);
         const who = url.searchParams.get("who") || "";
-        const note = `upload: ${(file.name||"file")} (${file.size||"?"} bytes) → /admin/archive/get?key=${urlKey}${env.WEBHOOK_SECRET?`&s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}${who?`&who=${encodeURIComponent(who)}`:""}`;
+        const note = `upload: ${name} (${bytes} bytes) → ${fileUrl}${who?`&who=${encodeURIComponent(who)}`:""}`;
         await appendChecklist(env, note);
-        return Response.redirect(`/admin/checklist/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`, 302);
+
+        return Response.redirect(abs(env, `/admin/checklist/html${secretQuery}`), 302);
       }
 
       // JSON API чеклисту
@@ -149,12 +154,15 @@ export default {
       if (p === "/admin/repo/html") {
         if (needSecret()) return html("<h3>401</h3>");
         const keys = await listArchives(env);
-        const q = env.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
-        const list = keys.map(k => `<li><a href="/admin/archive/get?key=${encodeURIComponent(k)}${q}">${k}</a> — <a href="/admin/archive/delete?key=${encodeURIComponent(k)}${q}" onclick="return confirm('Delete?')">🗑</a></li>`).join("") || "<li>Порожньо</li>";
+        const list = keys.map(k => {
+          const link = archiveLink(env, k); // абсолютний лінк
+          const del  = abs(env, `/admin/archive/delete?key=${encodeURIComponent(k)}${secretQuery ? `&s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : ""}`);
+          return `<li><a href="${link}">${k}</a> — <a href="${del}" onclick="return confirm('Delete?')">🗑</a></li>`;
+        }).join("") || "<li>Порожньо</li>";
         return html(`<!doctype html><meta charset="utf-8"><title>Repo</title>
         <div style="font-family:system-ui;margin:20px;max-width:900px">
           <h2>📚 Архів (Repo)</h2>
-          <p><a href="/admin/checklist/html${q}">⬅ До Checklist</a></p>
+          <p><a href="${abs(env, `/admin/checklist/html${secretQuery}`)}">⬅ До Checklist</a></p>
           <ul>${list}</ul>
         </div>`);
       }
@@ -172,7 +180,7 @@ export default {
         const key = url.searchParams.get("key");
         if (!key) return json({ ok:false, error:"key required" }, 400);
         await deleteArchive(env, key);
-        return Response.redirect(`/admin/repo/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`, 302);
+        return Response.redirect(abs(env, `/admin/repo/html${secretQuery}`), 302);
       }
 
       // -------- STATUT ----------
@@ -208,7 +216,7 @@ export default {
         if (text === BTN_DRIVE) { await safe(async ()=>{
           const ut = await getUserTokens(env, userId);
           if (!ut?.refresh_token) {
-            const authUrl = `https://${env.SERVICE_HOST}/auth/start?u=${userId}`;
+            const authUrl = abs(env, `/auth/start?u=${userId}`);
             await TG.text(chatId, `Дай доступ до свого Google Drive:\n${authUrl}\n\nПісля дозволу повернись у чат і ще раз натисни «${BTN_DRIVE}».`, { token: env.BOT_TOKEN });
             return;
           }
@@ -224,7 +232,7 @@ export default {
 
         if (text === BTN_CHECK) { await safe(async ()=>{
           if (!ADMIN(env, userId)) { await TG.text(chatId, "⛔ Лише для адміна.", { token: env.BOT_TOKEN }); return; }
-          const link = `https://${env.SERVICE_HOST}/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`;
+          const link = abs(env, `/admin/checklist/html${secretQuery}`);
           await TG.text(chatId, `📋 Чеклист (HTML):\n${link}`, { token: env.BOT_TOKEN });
         }); return json({ok:true}); }
 
@@ -242,7 +250,7 @@ export default {
 
         if (text === "/admin_check") { await safe(async ()=>{
           if (!ADMIN(env, userId)) return;
-          const link = `https://${env.SERVICE_HOST}/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}`;
+          const link = abs(env, `/admin/checklist/html${secretQuery}`);
           await TG.text(chatId, `📋 HTML: ${link}`, { token: env.BOT_TOKEN });
         }); return json({ok:true}); }
 
@@ -255,7 +263,7 @@ export default {
 
         if (text.startsWith("/admin_setwebhook")) { await safe(async ()=>{
           if (!ADMIN(env, userId)) return;
-          const target=`https://${env.SERVICE_HOST}/webhook`;
+          const target=abs(env, "/webhook");
           await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
           await TG.text(chatId, `✅ Вебхук → ${target}${env.TG_WEBHOOK_SECRET?" (секрет застосовано)":""}`, { token: env.BOT_TOKEN });
         }); return json({ok:true}); }
@@ -287,7 +295,7 @@ export default {
       if (p === "/auth/start") {
         const u = url.searchParams.get("u");
         const state = btoa(JSON.stringify({ u }));
-        const redirect_uri = `https://${env.SERVICE_HOST}/auth/cb`;
+        const redirect_uri = abs(env, "/auth/cb");
         const auth = new URL("https://accounts.google.com/o/oauth2/v2/auth");
         auth.searchParams.set("client_id", env.GOOGLE_CLIENT_ID);
         auth.searchParams.set("redirect_uri", redirect_uri);
@@ -301,7 +309,7 @@ export default {
       if (p === "/auth/cb") {
         const state = JSON.parse(atob(url.searchParams.get("state")||"e30="));
         const code = url.searchParams.get("code");
-        const redirect_uri = `https://${env.SERVICE_HOST}/auth/cb`;
+        const redirect_uri = abs(env, "/auth/cb");
         const body = new URLSearchParams({ code, client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, redirect_uri, grant_type: "authorization_code" });
         const r = await fetch("https://oauth2.googleapis.com/token",{ method:"POST", headers:{ "Content-Type":"application/x-www-form-urlencoded" }, body });
         const d = await r.json();
