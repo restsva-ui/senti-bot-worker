@@ -71,7 +71,7 @@ export async function handleBrainApi(req, env, url) {
     return json({ ok: true, promoted: key });
   }
 
-  // --- fallback для інших підшляхів ---
+  // --- fallback ---
   if (p.startsWith("/api/brain")) {
     return json({ ok: false, error: "unknown endpoint" }, 404);
   }
