@@ -1,6 +1,5 @@
 // src/routes/selfTest.js
 import { appendChecklist } from "../lib/kvChecklist.js";
-import { abs } from "../utils/url.js";
 
 const json = (o, status = 200) =>
   new Response(JSON.stringify(o, null, 2), {
@@ -8,18 +7,17 @@ const json = (o, status = 200) =>
     headers: { "content-type": "application/json; charset=utf-8" },
   });
 
-// будуємо абсолютні посилання з секретом
-const mkLink = (env, path) => {
-  const base = abs(env, path);
+// Будуємо абсолютні посилання ВІД поточного origin і підклеюємо секрет
+const withSecFrom = (env, baseOrigin, path) => {
+  const u = new URL(path, baseOrigin);
   const s = env.WEBHOOK_SECRET || "";
-  const u = new URL(base);
   if (s) u.searchParams.set("s", s);
   return u.toString();
 };
 
-async function ping(url) {
+async function ping(href) {
   try {
-    const r = await fetch(url, { method: "GET" });
+    const r = await fetch(href, { method: "GET" });
     return { ok: r.ok, status: r.status };
   } catch (err) {
     return { ok: false, status: 0, error: String(err) };
@@ -29,24 +27,28 @@ async function ping(url) {
 export async function handleSelfTest(req, env, url) {
   if (url.pathname !== "/selftest/run" || req.method !== "GET") return null;
 
+  const mk = (path) => withSecFrom(env, url.origin, path);
+
   const targets = {
-    health: mkLink(env, "/health"),
-    webhook_get: mkLink(env, "/webhook"),
-    brain_current: mkLink(env, "/api/brain/current"),
-    brain_list: mkLink(env, "/api/brain/list"),
-    admin_checklist_html: mkLink(env, "/admin/checklist/html"),
-    admin_repo_html: mkLink(env, "/admin/repo/html"),
-    admin_statut_html: mkLink(env, "/admin/statut/html"),
+    health: mk("/health"),
+    webhook_get: mk("/webhook"),
+    brain_current: mk("/api/brain/current"),
+    brain_list: mk("/api/brain/list"),
+    admin_checklist_html: mk("/admin/checklist/html"),
+    admin_repo_html: mk("/admin/repo/html"),
+    admin_statut_html: mk("/admin/statut/html"),
   };
 
   const results = {};
-  for (const [name, link] of Object.entries(targets)) {
-    results[name] = { name, url: link, ...(await ping(link)) };
-  }
+  await Promise.all(
+    Object.entries(targets).map(async ([name, href]) => {
+      results[name] = { name, url: href, ...(await ping(href)) };
+    })
+  );
 
-  const allOk = Object.values(results).every(r => r.ok);
+  const allOk = Object.values(results).every((r) => r.ok);
   const parts = Object.values(results).map(
-    r => `${r.name}:${r.ok ? "ok" : "fail"}(${r.status})`
+    (r) => `${r.name}:${r.ok ? "ok" : "fail"}(${r.status || "ERR"})`
   );
 
   const line =
@@ -55,5 +57,14 @@ export async function handleSelfTest(req, env, url) {
 
   await appendChecklist(env, line);
 
-  return json({ ok: allOk, results, checklist_line: line });
+  const summary = parts.join(" | ");
+
+  return json({
+    ok: allOk,
+    summary,
+    results,
+    origin: url.origin,
+    secured: !!env.WEBHOOK_SECRET,
+    checklist_line: line,
+  });
 }
