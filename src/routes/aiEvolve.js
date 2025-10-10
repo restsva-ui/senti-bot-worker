@@ -1,6 +1,5 @@
 // src/routes/aiEvolve.js
-// Порівняння версій "мозку" + авто-промоут.
-// Усі внутрішні запити формуємо від поточного url.origin і додаємо ?s=WEBHOOK_SECRET.
+// Порівняння версій "мозку" + авто-промоут з декількома fallback-способами.
 
 import { listArchives, appendChecklist } from "../lib/kvChecklist.js";
 
@@ -10,7 +9,7 @@ const json = (o, status = 200) =>
     headers: { "content-type": "application/json; charset=utf-8" },
   });
 
-// Будує абсолютне посилання ВІД baseOrigin і підклеює секрет
+// Абсолютне посилання від baseOrigin + підклеюємо секрет
 const withSecFrom = (env, baseOrigin, path) => {
   const u = new URL(path, baseOrigin);
   const s = env.WEBHOOK_SECRET || "";
@@ -22,10 +21,17 @@ async function safeJson(url, init) {
   try {
     const r = await fetch(url, init);
     const d = await r.json().catch(() => ({}));
-    return { ok: r.ok, status: r.status, data: d };
+    return { ok: r.ok, status: r.status, data: d, url: typeof url === "string" ? url : url.toString() };
   } catch (e) {
-    return { ok: false, status: 0, data: { error: String(e) } };
+    return { ok: false, status: 0, data: { error: String(e) }, url: typeof url === "string" ? url : url.toString() };
   }
+}
+
+async function getCurrentKey(env, origin) {
+  const u = withSecFrom(env, origin, "/api/brain/current");
+  const r = await safeJson(u);
+  // очікуємо { ok:true, current:"<key>" } або { ok:true, key:"<key>" }
+  return r.data?.current || r.data?.key || null;
 }
 
 export async function handleAiEvolve(req, env, url) {
@@ -38,22 +44,16 @@ export async function handleAiEvolve(req, env, url) {
       return json({ ok: false, error: "not_enough_archives", total: items.length }, 400);
     }
     const [current, previous] = [items[0], items[1]]; // від новішого до старішого
-
     const msg = `🧠 evolution: ${previous} > ${current}`;
     await appendChecklist(env, msg);
-
-    return json({
-      ok: true,
-      message: "evolution summary saved",
-      compared: { previous, current },
-    });
+    return json({ ok: true, message: "evolution summary saved", compared: { previous, current } });
   }
 
-  // GET /ai/evolve/auto — selftest → promote (найновіший архів)
+  // GET /ai/evolve/auto — selftest → promote (найновіший не-current архів)
   if (p === "/ai/evolve/auto" && req.method === "GET") {
     const mk = (path) => withSecFrom(env, url.origin, path);
 
-    // 1) selftest з секретом
+    // 1) selftest
     const st = await safeJson(mk("/selftest/run"));
     const stOk = !!st.ok && !!st.data?.ok;
 
@@ -64,56 +64,78 @@ export async function handleAiEvolve(req, env, url) {
       return json({ ok: false, error: "no_archives" }, 400);
     }
 
-    // 3) promote найновішого
-    const key = items[0];
+    // 3) уникнути промоуту того, що вже є current
+    const currentKey = await getCurrentKey(env, url.origin).catch(() => null);
 
-    // Спроба №1: POST JSON { key }
-    const postUrl = mk("/api/brain/promote");
-    const prPost = await safeJson(postUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ key }),
-    });
+    // обираємо перший key, який НЕ дорівнює current
+    let key = items.find((k) => k !== currentKey) || items[0];
 
-    let pr = prPost;
-    let methodUsed = "POST_JSON";
-    let urlUsed = postUrl;
+    // 4) робимо кілька спроб промоуту
+    const tries = [];
 
-    // Фолбек №2: GET ?key=...
-    if (!pr.ok) {
+    // try #1: GET із query (без явного method — хай буде дефолтний)
+    if (key) {
       const getUrl = mk(`/api/brain/promote?key=${encodeURIComponent(key)}`);
-      const prGet = await safeJson(getUrl, { method: "GET" });
-      if (prGet.ok) {
-        pr = prGet;
-        methodUsed = "GET_QUERY";
-        urlUsed = getUrl;
+      const r1 = await safeJson(getUrl);
+      tries.push({ method: "GET_QUERY_DEFAULT", url: r1.url, status: r1.status, ok: r1.ok });
+      if (r1.ok) {
+        const line = `🧠 auto-promote success → ${key} [GET_QUERY ${r1.status}]${stOk ? "" : " (selftest:fail)"}`;
+        await appendChecklist(env, line);
+        return json({ ok: true, selftest_ok: stOk, promoted: r1.data?.promoted || key, status: r1.status, method: "GET_QUERY" });
       }
     }
 
-    const emoji = pr.ok ? "🧠" : "⚠️";
-    const line =
-      `${emoji} auto-promote ${pr.ok ? "success" : "fail"} → ${key} ` +
-      `[${methodUsed} ${pr.status}]` +
-      (stOk ? "" : " (selftest:fail)");
-    await appendChecklist(env, line);
+    // try #2: POST x-www-form-urlencoded
+    {
+      const postFormUrl = mk("/api/brain/promote");
+      const r2 = await safeJson(postFormUrl, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ key }),
+      });
+      tries.push({ method: "POST_FORM", url: r2.url, status: r2.status, ok: r2.ok });
+      if (r2.ok) {
+        const line = `🧠 auto-promote success → ${key} [POST_FORM ${r2.status}]${stOk ? "" : " (selftest:fail)"}`;
+        await appendChecklist(env, line);
+        return json({ ok: true, selftest_ok: stOk, promoted: r2.data?.promoted || key, status: r2.status, method: "POST_FORM" });
+      }
+    }
 
-    return json(
-      {
-        ok: pr.ok,
-        selftest_ok: stOk,
-        promoted: pr.data?.promoted || key,
-        status: pr.status,
-        method: methodUsed,
-        tried: {
-          post_json: { url: postUrl, status: prPost.status, ok: prPost.ok },
-          get_query:
-            methodUsed === "GET_QUERY"
-              ? { url: urlUsed, status: pr.status, ok: true }
-              : { url: mk(`/api/brain/promote?key=${encodeURIComponent(key)}`), status: 0, ok: false },
+    // try #3: POST JSON
+    {
+      const postJsonUrl = mk("/api/brain/promote");
+      const r3 = await safeJson(postJsonUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ key }),
+      });
+      tries.push({ method: "POST_JSON", url: r3.url, status: r3.status, ok: r3.ok });
+      if (r3.ok) {
+        const line = `🧠 auto-promote success → ${key} [POST_JSON ${r3.status}]${stOk ? "" : " (selftest:fail)"}`;
+        await appendChecklist(env, line);
+        return json({ ok: true, selftest_ok: stOk, promoted: r3.data?.promoted || key, status: r3.status, method: "POST_JSON" });
+      }
+
+      // Усі спроби провалилися — лог та відповідь
+      const line =
+        `⚠️ auto-promote fail → ${key} ` +
+        `[${tries.map(t => `${t.method} ${t.status}`).join(" · ")}]` +
+        (stOk ? "" : " (selftest:fail)");
+      await appendChecklist(env, line);
+
+      return json(
+        {
+          ok: false,
+          selftest_ok: stOk,
+          promoted: key,
+          status: r3.status,
+          method: "FAILED",
+          tried: tries,
+          current: currentKey || null,
         },
-      },
-      pr.ok ? 200 : 500
-    );
+        500
+      );
+    }
   }
 
   return null;
