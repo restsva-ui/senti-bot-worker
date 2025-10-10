@@ -1,3 +1,7 @@
+// src/routes/selfTest.js
+// Self-test пробігає ключові внутрішні маршрути з ?s=WEBHOOK_SECRET,
+// логуючи рядок у Checklist.
+
 import { appendChecklist } from "../lib/kvChecklist.js";
 import { abs } from "../utils/url.js";
 
@@ -7,10 +11,10 @@ const json = (o, status = 200) =>
     headers: { "content-type": "application/json; charset=utf-8" },
   });
 
-// формує посилання через abs(env, path), без повтору selftest/run
+// Формує абсолютне посилання через abs(env, path) і додає s=secret
 const mkLink = (env, path) => {
-  const s = env.WEBHOOK_SECRET || "";
   const base = abs(env, path);
+  const s = env.WEBHOOK_SECRET || "";
   return s ? `${base}${base.includes("?") ? "&" : "?"}s=${encodeURIComponent(s)}` : base;
 };
 
@@ -25,6 +29,7 @@ async function ping(url) {
 
 export async function handleSelfTest(req, env, url) {
   const p = url.pathname;
+
   if (p === "/selftest/run" && req.method === "GET") {
     const targets = {
       health: mkLink(env, "/health"),
