@@ -23,8 +23,8 @@ async function safeJson(url, init) {
     const r = await fetch(url, init);
     const d = await r.json().catch(() => ({}));
     return { ok: r.ok, status: r.status, data: d };
-  } catch {
-    return { ok: false, status: 0, data: {} };
+  } catch (e) {
+    return { ok: false, status: 0, data: { error: String(e) } };
   }
 }
 
@@ -66,14 +66,36 @@ export async function handleAiEvolve(req, env, url) {
 
     // 3) promote найновішого
     const key = items[0];
-    const pr = await safeJson(mk(`/api/brain/promote?key=${encodeURIComponent(key)}`));
+
+    // Спроба №1: POST JSON { key }
+    const postUrl = mk("/api/brain/promote");
+    const prPost = await safeJson(postUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ key }),
+    });
+
+    let pr = prPost;
+    let methodUsed = "POST_JSON";
+    let urlUsed = postUrl;
+
+    // Фолбек №2: GET ?key=...
+    if (!pr.ok) {
+      const getUrl = mk(`/api/brain/promote?key=${encodeURIComponent(key)}`);
+      const prGet = await safeJson(getUrl, { method: "GET" });
+      if (prGet.ok) {
+        pr = prGet;
+        methodUsed = "GET_QUERY";
+        urlUsed = getUrl;
+      }
+    }
 
     const emoji = pr.ok ? "🧠" : "⚠️";
-    await appendChecklist(
-      env,
-      `${emoji} auto-promote ${pr.ok ? "success" : "fail"} → ${key}` +
-        (stOk ? "" : " (selftest:fail)")
-    );
+    const line =
+      `${emoji} auto-promote ${pr.ok ? "success" : "fail"} → ${key} ` +
+      `[${methodUsed} ${pr.status}]` +
+      (stOk ? "" : " (selftest:fail)");
+    await appendChecklist(env, line);
 
     return json(
       {
@@ -81,6 +103,14 @@ export async function handleAiEvolve(req, env, url) {
         selftest_ok: stOk,
         promoted: pr.data?.promoted || key,
         status: pr.status,
+        method: methodUsed,
+        tried: {
+          post_json: { url: postUrl, status: prPost.status, ok: prPost.ok },
+          get_query:
+            methodUsed === "GET_QUERY"
+              ? { url: urlUsed, status: pr.status, ok: true }
+              : { url: mk(`/api/brain/promote?key=${encodeURIComponent(key)}`), status: 0, ok: false },
+        },
       },
       pr.ok ? 200 : 500
     );
