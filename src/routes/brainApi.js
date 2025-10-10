@@ -1,59 +1,41 @@
 // src/routes/brainApi.js
-import { readChecklist, getArchive, listArchives } from "../lib/kvChecklist.js";
-import { html, json } from "../utils/respond.js";
+import { listArchives, appendChecklist } from "../lib/kvChecklist.js";
 
-const CURRENT_KEY = "senti_repo_current";
-const HISTORY_KEY = "senti_repo_history";
+const json = (o, status = 200) =>
+  new Response(JSON.stringify(o, null, 2), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
 
-function ensureKv(env) {
-  if (!env.TODO_KV) throw new Error("TODO_KV binding missing");
-  return env.TODO_KV;
-}
+const needSecret = (env, url) =>
+  env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET;
 
-async function getCurrent(env) {
-  return await ensureKv(env).get(CURRENT_KEY);
-}
-
-async function setCurrent(env, key) {
-  await ensureKv(env).put(CURRENT_KEY, String(key || ""));
-}
-
-async function pushHistory(env, key) {
-  const kv = ensureKv(env);
-  const raw = await kv.get(HISTORY_KEY);
-  let arr = [];
-  try { arr = JSON.parse(raw || "[]"); } catch {}
-  if (key && !arr.includes(key)) arr.unshift(key);
-  if (arr.length > 20) arr.length = 20;
-  await kv.put(HISTORY_KEY, JSON.stringify(arr));
-}
+// KV-ключ де зберігаємо “актуальний” зелений архів
+const CUR_KEY = "brain:current";
 
 export async function handleBrainApi(req, env, url) {
   const p = url.pathname;
-  const method = req.method || "GET";
-  const needSecret = () =>
-    env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET;
 
-  if (needSecret()) return json({ ok: false, error: "unauthorized" }, 401);
-
-  // --- GET /api/brain/checklist ---
-  if (p === "/api/brain/checklist" && method === "GET") {
-    const text = await readChecklist(env);
-    return json({ ok: true, text });
+  // GET /api/brain/current  — хто зараз “актуальний”
+  if (p === "/api/brain/current" && req.method === "GET") {
+    const current = await env.CHECKLIST_KV.get(CUR_KEY);
+    return json({ ok: true, current, exists: !!current });
   }
 
-  // --- GET /api/brain/current ---
-  if (p === "/api/brain/current" && method === "GET") {
-    const current = await getCurrent(env);
-    const all = await listArchives(env);
-    const exists = all.includes(current);
-    return json({ ok: true, current, exists, total: all.length });
+  // GET /api/brain/list — перелік архівів (для зручного вибору)
+  if (p === "/api/brain/list" && req.method === "GET") {
+    if (needSecret(env, url)) return json({ ok: false, error: "unauthorized" }, 401);
+    const keys = await listArchives(env);
+    return json({ ok: true, total: keys.length, items: keys });
   }
 
-  // --- POST /api/brain/promote ---
-  if (p === "/api/brain/promote" && method === "POST") {
+  // /api/brain/promote — зробити архів “актуальним”
+  //  • підтримує: POST (body: {key}) і GET (?key=...)
+  if (p === "/api/brain/promote" && (req.method === "POST" || req.method === "GET")) {
+    if (needSecret(env, url)) return json({ ok: false, error: "unauthorized" }, 401);
+
     let key = url.searchParams.get("key");
-    if (!key) {
+    if (req.method === "POST" && !key) {
       try {
         const body = await req.json();
         key = body?.key;
@@ -61,19 +43,10 @@ export async function handleBrainApi(req, env, url) {
     }
     if (!key) return json({ ok: false, error: "key required" }, 400);
 
-    const b64 = await getArchive(env, key);
-    if (!b64) return json({ ok: false, error: "archive not found" }, 404);
-
-    const prev = await getCurrent(env);
-    if (prev && prev !== key) await pushHistory(env, prev);
-    await setCurrent(env, key);
+    await env.CHECKLIST_KV.put(CUR_KEY, key);
+    await appendChecklist(env, `promote: ${key}`);
 
     return json({ ok: true, promoted: key });
-  }
-
-  // --- fallback ---
-  if (p.startsWith("/api/brain")) {
-    return json({ ok: false, error: "unknown endpoint" }, 404);
   }
 
   return null;
