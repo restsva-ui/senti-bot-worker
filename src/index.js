@@ -22,7 +22,8 @@ import { handleHealth }          from "./routes/health.js";
 import { handleBrainState }      from "./routes/brainState.js";
 import { handleCiDeploy }        from "./routes/ciDeploy.js";
 import { handleBrainApi }        from "./routes/brainApi.js";
-import { handleSelfTest }        from "./routes/selfTest.js"; // ⬅ SelfTest
+import { handleSelfTest }        from "./routes/selfTest.js";
+import { handleAiTrain }         from "./routes/aiTrain.js"; // ⬅ ДОДАНО
 
 // ---------- helpers ----------
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
@@ -62,6 +63,8 @@ function home(env) {
   <a class="btn" href="${link("/api/brain/current")}">🧠 Brain: current</a>
   <a class="btn" href="${linkS("/api/brain/list")}">🧠 Brain: list</a>
   <a class="btn" href="${link("/brain/state")}">🧩 Brain state (JSON)</a>
+
+  <a class="btn" href="${linkS("/ai/train/analyze")}">🤖 AI-Train (Analyze)</a> <!-- ⬅ НОВЕ -->
 </div>`;
 }
 
@@ -95,6 +98,12 @@ export default {
       // ---- SelfTest ----
       if (p.startsWith("/selftest")) {
         const r = await handleSelfTest(req, env, url);
+        if (r) return r;
+      }
+
+      // ---- AI-Train ----
+      if (p.startsWith("/ai/train")) {
+        const r = await handleAiTrain(req, env, url);
         if (r) return r;
       }
 
