@@ -25,6 +25,7 @@ import { handleBrainApi }        from "./routes/brainApi.js";
 import { handleSelfTest }        from "./routes/selfTest.js";
 import { handleAiTrain }         from "./routes/aiTrain.js";
 import { handleAiEvolve }        from "./routes/aiEvolve.js"; // ⬅ новий модуль
+import { handleBrainPromote }    from "./routes/brainPromote.js"; // ⬅ ДОДАНО: промоут архіву
 
 // ---------- helpers ----------
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
@@ -218,6 +219,12 @@ export default {
         if (r) return r;
       }
 
+      // ---- Brain Promote (має стояти ПЕРЕД загальним /api/brain) ----
+      if (p.startsWith("/api/brain/promote")) {
+        const r = await handleBrainPromote(req, env, url);
+        if (r) return r;
+      }
+
       // ---- Brain API ----
       if (p.startsWith("/api/brain")) {
         const r = await handleBrainApi(req, env, url);
@@ -249,7 +256,7 @@ export default {
       }
       if (p.startsWith("/admin/repo") || p.startsWith("/admin/archive")) {
         const r = await handleAdminRepo(req, env, url);
-        if (r) return r;
+        if (r) return р;
       }
       if (p.startsWith("/admin/statut")) {
         const r = await handleAdminStatut(req, env, url);
