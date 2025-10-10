@@ -8,16 +8,14 @@ import {
   readStatut, writeStatut, statutHtml
 } from "./lib/kvChecklist.js";
 import { logHeartbeat, logDeploy } from "./lib/audit.js";
-
-// 🧠 підключення мозку Senti (додай файл src/brain/sentiCore.js)
 import { SentiCore } from "./brain/sentiCore.js";
 
 // ---------- utils ----------
+import { abs } from "./utils/url.js"; // ⬅ винесено сюди
+
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 const html = (s)=> new Response(s, {headers:{ "content-type":"text/html; charset=utf-8" }});
 const json = (o, status=200)=> new Response(JSON.stringify(o,null,2), {status, headers:{ "content-type":"application/json" }});
-// абсолютний URL з шляху
-const abs = (env, path) => `https://${env.SERVICE_HOST}${path}`;
 
 // ---------- drive-mode state ----------
 const DRIVE_MODE_KEY = (uid) => `drive_mode:${uid}`;
@@ -69,7 +67,6 @@ async function installCommandsMinimal(env){
     {command:"admin",description:"Адмін-меню"},
     {command:"admin_check",description:"HTML чеклист"},
     {command:"admin_checklist",description:"Append рядок у чеклист"},
-    // нові
     {command:"admin_start_mind",description:"Запустити мозок Senti"},
     {command:"admin_snapshot",description:"Env snapshot → чеклист"},
   ]);
@@ -87,11 +84,9 @@ export default {
     const needSecret = () => (env.WEBHOOK_SECRET && (url.searchParams.get("s") !== env.WEBHOOK_SECRET));
 
     try {
-      // health
       if (p === "/") return html("Senti Worker Active");
       if (p === "/health") return json({ ok:true, service: env.SERVICE_HOST });
 
-      // tg helpers
       if (p === "/tg/get-webhook") { const r=await TG.getWebhook(env.BOT_TOKEN); return new Response(await r.text(),{headers:{'content-type':'application/json'}}); }
       if (p === "/tg/set-webhook") { const target=abs(env,"/webhook"); const r=await TG.setWebhook(env.BOT_TOKEN,target,env.TG_WEBHOOK_SECRET); return new Response(await r.text(),{headers:{'content-type':'application/json'}}); }
       if (p === "/tg/del-webhook") { const r=await TG.deleteWebhook?.(env.BOT_TOKEN)||await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteWebhook`); return new Response(await r.text(),{headers:{'content-type':'application/json'}}); }
@@ -107,7 +102,7 @@ export default {
         return json({ ok:true, line });
       }
 
-      // -------- Checklist HTML + upload ----------
+      // Checklist HTML + upload
       if (p === "/admin/checklist/html") {
         if (needSecret()) return html("<h3>401</h3>");
         if (req.method === "POST") {
@@ -126,7 +121,6 @@ export default {
         return checklistHtml({ text, submitPath: abs(env,"/admin/checklist/html"), secret: env.WEBHOOK_SECRET || "" });
       }
 
-      // файл -> архів -> посилання у чеклист
       if (p === "/admin/checklist/upload" && req.method === "POST") {
         if (needSecret()) return json({ ok:false, error:"unauthorized" }, 401);
         const form = await req.formData();
@@ -140,7 +134,6 @@ export default {
         return Response.redirect(abs(env, `/admin/checklist/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`), 302);
       }
 
-      // JSON API чеклисту
       if (p === "/admin/checklist") {
         if (needSecret()) return json({ ok:false, error:"unauthorized" }, 401);
         if (req.method === "POST") {
@@ -154,7 +147,7 @@ export default {
         return json({ ok:true, text });
       }
 
-      // -------- Архів/Repo UI ----------
+      // Архів/Repo UI
       if (p === "/admin/repo/html") {
         if (needSecret()) return html("<h3>401</h3>");
         const keys = await listArchives(env);
@@ -198,7 +191,7 @@ export default {
         return Response.redirect(abs(env, `/admin/repo/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`), 302);
       }
 
-      // -------- STATUT ----------
+      // STATUT
       if (p === "/admin/statut/html") {
         if (needSecret()) return html("<h3>401</h3>");
         if (req.method === "POST") {
@@ -209,7 +202,7 @@ export default {
         return statutHtml({ text, submitPath: abs(env,"/admin/statut/html"), secret: env.WEBHOOK_SECRET || "" });
       }
 
-      // -------- Brain (адмін REST) ----------
+      // Brain
       if (p === "/admin/brain/boot") {
         if (needSecret()) return json({ ok:false, error:"unauthorized" }, 401);
         const r = await SentiCore.boot(env, "admin");
@@ -226,7 +219,7 @@ export default {
         return json({ ok:true, ...r });
       }
 
-      // ---------- Telegram webhook ----------
+      // Telegram webhook
       if (p === "/webhook" && req.method !== "POST") return json({ ok:true, note:"webhook alive (GET)" });
       if (p === "/webhook" && req.method === "POST") {
         const sec = req.headers.get("x-telegram-bot-api-secret-token");
@@ -327,7 +320,6 @@ export default {
           await TG.text(chatId, `📝 ${line}`, { token: env.BOT_TOKEN });
         }); return json({ok:true}); }
 
-        // Drive-mode media
         try {
           if (await getDriveMode(env, userId)) {
             if (await handleIncomingMedia(env, chatId, userId, msg)) return json({ ok:true });
@@ -372,7 +364,6 @@ export default {
     }
   },
 
-  // ---- CRON (heartbeat кожні 15 хв) ----
   async scheduled(event, env, ctx) {
     await logHeartbeat(env);
   }
