@@ -123,20 +123,13 @@ export default {
         return checklistHtml({ text, submitPath:"/admin/checklist/html", secret: env.WEBHOOK_SECRET || "" });
       }
 
-      // файл -> архів -> посилання у чеклист (робимо дружнім)
+      // файл -> архів -> посилання у чеклист (дружній флоу)
       if (p === "/admin/checklist/upload") {
-        // якщо секрет не збігся — просто назад у UI
         if (needSecret()) return Response.redirect(`/admin/checklist/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`, 302);
-
-        if (req.method !== "POST") {
-          // хтось відкрив GET — повертаємо у чеклист
-          return Response.redirect(`/admin/checklist/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`, 302);
-        }
+        if (req.method !== "POST") return Response.redirect(`/admin/checklist/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`, 302);
 
         const form = await req.formData().catch(()=>null);
         const file = form?.get("file");
-
-        // нічого не вибрано — теж просто редіректимо у UI, помилку підкаже JS
         if (!file || typeof file.arrayBuffer !== "function" || (file.size === 0 && !file.name)) {
           return Response.redirect(`/admin/checklist/html${env.WEBHOOK_SECRET?`?s=${encodeURIComponent(env.WEBHOOK_SECRET)}`:""}`, 302);
         }
