@@ -1,7 +1,8 @@
-// KV-чеклист + HTML UI + архіви + auto "новий день"
+// KV-чеклист + Архіви + Статут + HTML UI
 
 const CHECKLIST_KEY = "senti_checklist.md";
 const ARCHIVE_PREFIX = "senti_archive/";
+const STATUT_KEY = "senti_statut.md";
 
 function ensureKv(env) {
   const kv = env.TODO_KV;
@@ -9,55 +10,34 @@ function ensureKv(env) {
   return kv;
 }
 
-function pad(n){ return String(n).padStart(2,"0"); }
-function nowParts(){
-  const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm = pad(d.getMonth()+1);
-  const dd = pad(d.getDate());
-  const HH = pad(d.getHours());
-  const MM = pad(d.getMinutes());
-  return { date:`${yyyy}-${mm}-${dd}`, time:`${HH}:${MM}`, iso:d.toISOString() };
+function stamp() {
+  const dt = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return {
+    iso: dt.toISOString(),
+    nice: `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}`,
+  };
 }
 
-// ---------- базові оп
+// ===== ЧЕКЛІСТ =====
 export async function readChecklist(env) {
-  const val = await ensureKv(env).get(CHECKLIST_KEY);
-  return val || "# Senti checklist\n";
+  const kv = ensureKv(env);
+  return (await kv.get(CHECKLIST_KEY)) || "# Senti checklist\n";
 }
 export async function writeChecklist(env, text) {
-  await ensureKv(env).put(CHECKLIST_KEY, String(text ?? ""));
+  const kv = ensureKv(env);
+  await kv.put(CHECKLIST_KEY, String(text ?? ""));
   return true;
 }
-
-// вставляє заголовок "## YYYY-MM-DD", якщо його ще нема зверху
-async function ensureTodayHeader(env, textMaybe){
-  const text = textMaybe ?? await readChecklist(env);
-  const { date } = nowParts();
-  const header = `## ${date}`;
-  if (text.includes(`\n${header}\n`) || text.trimEnd().endsWith(header)) return text; // вже є
-  // якщо кінець файлу не закінчується \n — додамо
-  const base = text.endsWith("\n") ? text : text + "\n";
-  return base + `${header}\n`;
-}
-
-export async function newDay(env){
-  const cur = await readChecklist(env);
-  const withHeader = await ensureTodayHeader(env, cur);
-  if (withHeader !== cur) await writeChecklist(env, withHeader);
-  return withHeader;
-}
-
 export async function appendChecklist(env, line) {
   const cur = await readChecklist(env);
-  const prepared = await ensureTodayHeader(env, cur);
-  const { time } = nowParts();
-  const add = `- ${time} — ${String(line ?? "").trim()}\n`;
-  await writeChecklist(env, prepared + add);
+  const { nice } = stamp();
+  const add = `- ${nice} — ${String(line ?? "").trim()}\n`;
+  await writeChecklist(env, cur + add);
   return add;
 }
 
-// ---------- архіви (як було)
+// ===== АРХІВИ =====
 export async function saveArchive(env, file) {
   const kv = ensureKv(env);
   if (!file || typeof file.arrayBuffer !== "function") throw new Error("Invalid file upload");
@@ -69,52 +49,98 @@ export async function saveArchive(env, file) {
   return key;
 }
 export async function listArchives(env) {
-  const { keys } = await ensureKv(env).list({ prefix: ARCHIVE_PREFIX });
-  return keys.map(k => k.name);
+  const kv = ensureKv(env);
+  const { keys } = await kv.list({ prefix: ARCHIVE_PREFIX });
+  return keys.map(k => k.name).sort().reverse();
 }
 export async function getArchive(env, key) {
-  return await ensureKv(env).get(key);
+  const kv = ensureKv(env);
+  return await kv.get(key);
 }
 export async function deleteArchive(env, key) {
-  await ensureKv(env).delete(key);
+  const kv = ensureKv(env);
+  await kv.delete(key);
   return true;
 }
 
-// ---------- HTML UI
-export function checklistHtml({ title = "Senti Checklist", text = "", submitPath = "/admin/checklist/html" } = {}) {
-  const esc = (s) => String(s).replace(/[&<>]/g, (c)=>({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c] || c));
-  const secret = "senti1984"; // підставляється у форми
+// ===== СТАТУТ =====
+export async function readStatut(env) {
+  const kv = ensureKv(env);
+  return (await kv.get(STATUT_KEY)) || "# STATUT\n\n(Опиши тут обов’язкові правила для GPT)\n";
+}
+export async function writeStatut(env, text) {
+  const kv = ensureKv(env);
+  await kv.put(STATUT_KEY, String(text ?? ""));
+  return true;
+}
+
+// ===== HTML =====
+function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+export function checklistHtml({ title="Senti Checklist", text="", submitPath="/admin/checklist/html", secret="" } = {}) {
+  const q = secret ? `?s=${encodeURIComponent(secret)}` : "";
   return new Response(`<!doctype html>
-<meta charset="utf-8">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${title}</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
   body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:20px;line-height:1.45}
-  textarea{width:100%;height:60vh;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace}
   .box{max-width:980px;margin:0 auto}
   .row{display:flex;gap:10px;margin:10px 0;flex-wrap:wrap}
-  button{padding:8px 14px;border-radius:8px;border:1px solid #ccc;background:#fafafa;cursor:pointer}
-  input[type=text]{flex:1;min-width:240px;padding:8px 10px;border-radius:8px;border:1px solid #ccc}
-  .btn{display:inline-flex;align-items:center;gap:8px}
+  input[type=text]{flex:1;min-width:240px;padding:10px;border:1px solid #ccc;border-radius:10px}
+  textarea{width:100%;height:60vh;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace}
+  button{padding:9px 14px;border:1px solid #ccc;border-radius:10px;background:#fafafa;cursor:pointer}
+  .top{display:flex;align-items:center;gap:10px}
+  .pill{padding:6px 10px;border:1px solid #ddd;border-radius:999px;background:#fff}
+  .right{margin-left:auto}
 </style>
 <div class="box">
-  <h2>📋 ${title}</h2>
+  <div class="top">
+    <h2 style="margin:0">📋 ${title}</h2>
+    <a class="pill" href="/admin/statut/html${q}">📌 STATUT</a>
+    <a class="pill" href="/admin/repo/html${q}">📚 Архів</a>
+    <a class="pill right" href="/health">Health</a>
+  </div>
 
-  <form method="POST" action="${submitPath}?s=${secret}">
+  <form method="POST" action="${submitPath+q}">
     <div class="row">
-      <input type="text" name="line" placeholder="Додати рядок у чеклист...">
-      <button class="btn" type="submit">Append</button>
+      <input type="text" name="line" placeholder="Додати рядок у чеклист…">
+      <button type="submit">Append</button>
     </div>
   </form>
 
-  <form method="POST" action="${submitPath}?s=${secret}&mode=newday">
-    <button class="btn" type="submit">🗓 Новий день</button>
+  <form method="POST" action="/admin/checklist/upload${q}" enctype="multipart/form-data">
+    <div class="row">
+      <input type="file" name="file">
+      <button type="submit">Додати файл</button>
+    </div>
   </form>
 
   <h3>Вміст</h3>
-  <form method="POST" action="${submitPath}?s=${secret}&mode=replace">
+  <form method="POST" action="${submitPath+q}&mode=replace">
     <textarea name="full">${esc(text)}</textarea>
-    <div class="row"><button class="btn" type="submit">💾 Зберегти цілком</button></div>
+    <div class="row"><button type="submit">💾 Зберегти цілком</button></div>
   </form>
-</div>`, { headers: { "content-type": "text/html; charset=utf-8" }});
+</div>`, { headers:{ "content-type":"text/html; charset=utf-8" }});
+}
+
+export function statutHtml({ title="STATUT", text="", submitPath="/admin/statut/html", secret="" } = {}) {
+  const q = secret ? `?s=${encodeURIComponent(secret)}` : "";
+  return new Response(`<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:20px}
+  .box{max-width:980px;margin:0 auto}
+  textarea{width:100%;height:70vh;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace}
+  button{padding:9px 14px;border:1px solid #ccc;border-radius:10px;background:#fafafa;cursor:pointer}
+  .pill{padding:6px 10px;border:1px solid #ddd;border-radius:999px;background:#fff}
+</style>
+<div class="box">
+  <h2>📌 ${title}</h2>
+  <div style="margin:10px 0"><a class="pill" href="/admin/checklist/html${q}">⬅ Назад до Checklist</a></div>
+  <form method="POST" action="${submitPath+q}">
+    <textarea name="full">${esc(text)}</textarea>
+    <div style="margin-top:10px"><button type="submit">💾 Зберегти STATUT</button></div>
+  </form>
+</div>`, { headers:{ "content-type":"text/html; charset=utf-8" }});
 }
