@@ -1,9 +1,61 @@
-// src/lib/modelRouter.js
-// Гнучкий роутер моделей із авто-fallback та діагностичними тегами.
+// Гнучкий роутер моделей із авто-fallback, діагностичними тегами та health-моніторингом.
 // Провайдери: Gemini (v1→v1beta), OpenRouter, Cloudflare Workers AI, OpenAI-compatible (free).
 
 const RETRYABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 const isRetryable = (s) => RETRYABLE.has(Number(s || 0));
+
+// ── Health monitor (STATE_KV) ────────────────────────────────────────────────
+const HKEY = (id) => `ai_health:${id}`; // id = provider:model
+const HEALTH_TTL_S = 24 * 60 * 60; // 24h
+const COOLDOWN_MS = 15 * 60 * 1000; // 15 хв після серії помилок
+const MAX_FAIL_STREAK = 3; // 3 підряд -> тимчасово скіпаємо
+const EWMA_ALPHA = 0.2; // згладження латентності (0..1)
+
+function ensureState(env) {
+  if (!env.STATE_KV) throw new Error("STATE_KV binding missing");
+  return env.STATE_KV;
+}
+async function readHealth(env, id) {
+  const raw = await ensureState(env).get(HKEY(id));
+  if (!raw) return { ewmaMs: 0, lastOkTs: 0, lastErrTs: 0, failStreak: 0 };
+  try { return JSON.parse(raw); } catch { return { ewmaMs: 0, lastOkTs: 0, lastErrTs: 0, failStreak: 0 }; }
+}
+async function writeHealth(env, id, h) {
+  await ensureState(env).put(HKEY(id), JSON.stringify(h), { expirationTtl: HEALTH_TTL_S });
+}
+async function updateHealth(env, id, { ok, ms = 0, status = 0 }) {
+  const h = await readHealth(env, id);
+  const now = Date.now();
+  if (ok) {
+    h.ewmaMs = h.ewmaMs ? (EWMA_ALPHA * ms + (1 - EWMA_ALPHA) * h.ewmaMs) : ms;
+    h.lastOkTs = now;
+    h.failStreak = 0;
+  } else {
+    h.lastErrTs = now;
+    h.failStreak = (h.failStreak || 0) + 1;
+    if (ms > 0) h.ewmaMs = h.ewmaMs ? (EWMA_ALPHA * ms + (1 - EWMA_ALPHA) * h.ewmaMs) : ms;
+    h.lastStatus = status || h.lastStatus || 0;
+  }
+  await writeHealth(env, id, h);
+  return h;
+}
+async function shouldSkip(env, id) {
+  const h = await readHealth(env, id);
+  return h.failStreak >= MAX_FAIL_STREAK && (Date.now() - h.lastErrTs) < COOLDOWN_MS;
+}
+export async function getAiHealthSummary(env, orderList = []) {
+  const items = [];
+  for (const entry of orderList) {
+    const [provider, ...rest] = entry.split(":");
+    const model = rest.join(":");
+    const id = `${provider}:${model}`;
+    const h = await readHealth(env, id);
+    const cool = h.failStreak >= MAX_FAIL_STREAK && Date.now() - h.lastErrTs < COOLDOWN_MS;
+    const slow = h.ewmaMs > 2500; // маркер повільності
+    items.push({ id, provider, model, ...h, cool, slow });
+  }
+  return items;
+}
 
 // ---- Утіліти ---------------------------------------------------------------
 
@@ -57,15 +109,9 @@ async function callGemini(env, model, prompt, opts = {}) {
   const user = String(prompt || "");
   const body = {
     contents: [
-      {
-        role: "user",
-        parts: [{ text: system ? `${system}\n\n${user}` : user }],
-      },
+      { role: "user", parts: [{ text: system ? `${system}\n\n${user}` : user }] },
     ],
-    generationConfig: {
-      temperature: opts.temperature ?? 0.4,
-      maxOutputTokens: opts.max_tokens ?? 1024,
-    },
+    generationConfig: { temperature: opts.temperature ?? 0.4, maxOutputTokens: opts.max_tokens ?? 1024 },
   };
 
   const started = Date.now();
@@ -79,30 +125,36 @@ async function callGemini(env, model, prompt, opts = {}) {
       body: JSON.stringify(body),
     });
 
+    const ms = Date.now() - started;
+
     if (res.ok) {
       const parts = res.json?.candidates?.[0]?.content?.parts;
       const text = Array.isArray(parts)
         ? parts.map((p) => p?.text || "").join("")
         : res.json?.candidates?.[0]?.content?.parts?.[0]?.text || "";
       if (text) {
-        return { text, provider: "Gemini", model: mdl, ms: Date.now() - started };
+        await updateHealth(env, `gemini:${mdl}`, { ok: true, ms });
+        return { text, provider: "Gemini", model: mdl, ms };
       }
       lastErr = new Error(`gemini ${mdl} empty`);
+      await updateHealth(env, `gemini:${mdl}`, { ok: false, ms, status: 500 });
       continue;
     }
 
     const status = res.status;
     const st = res.json?.error?.status || "";
+
     // якщо модель не знайдена у v1 — пробуємо v1beta
     if (status === 404 || st === "NOT_FOUND") {
       lastErr = new Error(`gemini ${mdl} ${ver} 404`);
+      await updateHealth(env, `gemini:${mdl}`, { ok: false, ms, status });
       continue;
     }
 
     // інша помилка — зупиняємо
     const err = new Error(`gemini ${mdl} ${status}`);
-    err.status = status;
-    err.payload = res.json;
+    err.status = status; err.payload = res.json;
+    await updateHealth(env, `gemini:${mdl}`, { ok: false, ms, status });
     throw err;
   }
 
@@ -123,7 +175,6 @@ async function callOpenRouter(env, model, prompt, opts = {}) {
     headers: {
       Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
       "Content-Type": "application/json",
-      // Декілька провайдерів вимагають ці заголовки
       "HTTP-Referer": env.SERVICE_HOST || "https://workers.dev",
       "X-Title": "SentiBot",
     },
@@ -138,20 +189,25 @@ async function callOpenRouter(env, model, prompt, opts = {}) {
     }),
   });
 
+  const ms = Date.now() - started;
+
   if (!res.ok) {
     const err = new Error(`openrouter ${mdl} ${res.status}`);
-    err.status = res.status;
-    err.payload = res.json;
+    err.status = res.status; err.payload = res.json;
+    await updateHealth(env, `openrouter:${mdl}`, { ok: false, ms, status: res.status });
     throw err;
   }
 
   const text =
     res.json?.choices?.[0]?.message?.content ??
-    res.json?.choices?.[0]?.text ??
-    "";
-  if (!text) throw new Error(`openrouter ${mdl} empty`);
+    res.json?.choices?.[0]?.text ?? "";
+  if (!text) {
+    await updateHealth(env, `openrouter:${mdl}`, { ok: false, ms, status: 500 });
+    throw new Error(`openrouter ${mdl} empty`);
+  }
 
-  return { text, provider: "OpenRouter", model: mdl, ms: Date.now() - started };
+  await updateHealth(env, `openrouter:${mdl}`, { ok: true, ms });
+  return { text, provider: "OpenRouter", model: mdl, ms };
 }
 
 /**
@@ -169,10 +225,7 @@ async function callCloudflareAI(env, model, prompt, opts = {}) {
 
   const res = await fetchJSON(url, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       messages: [
         ...(opts.system ? [{ role: "system", content: String(opts.system) }] : []),
@@ -183,22 +236,27 @@ async function callCloudflareAI(env, model, prompt, opts = {}) {
     }),
   });
 
+  const ms = Date.now() - started;
+
   if (!res.ok || res.json?.success === false) {
     const status = res.status || 500;
+    await updateHealth(env, `cf:${mdl}`, { ok: false, ms, status });
     const err = new Error(`cf ${mdl} ${status}`);
-    err.status = status;
-    err.payload = res.json;
+    err.status = status; err.payload = res.json;
     throw err;
   }
 
   const text =
     res.json?.result?.response ??
     res.json?.result?.choices?.[0]?.message?.content ??
-    res.json?.result?.text ??
-    "";
-  if (!text) throw new Error(`cf ${mdl} empty`);
+    res.json?.result?.text ?? "";
+  if (!text) {
+    await updateHealth(env, `cf:${mdl}`, { ok: false, ms, status: 500 });
+    throw new Error(`cf ${mdl} empty`);
+  }
 
-  return { text, provider: "Cloudflare AI", model: mdl, ms: Date.now() - started };
+  await updateHealth(env, `cf:${mdl}`, { ok: true, ms });
+  return { text, provider: "Cloudflare AI", model: mdl, ms };
 }
 
 /**
@@ -221,10 +279,7 @@ async function callOpenAICompat(env, model, prompt, opts = {}) {
 
   const res = await fetchJSON(url, {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${key}`,
-      "Content-Type": "application/json",
-    },
+    headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       model: mdl,
       messages: [
@@ -236,20 +291,25 @@ async function callOpenAICompat(env, model, prompt, opts = {}) {
     }),
   });
 
+  const ms = Date.now() - started;
+
   if (!res.ok) {
+    await updateHealth(env, `free:${mdl}`, { ok: false, ms, status: res.status });
     const err = new Error(`openai-compat ${mdl} ${res.status}`);
-    err.status = res.status;
-    err.payload = res.json;
+    err.status = res.status; err.payload = res.json;
     throw err;
   }
 
   const text =
     res.json?.choices?.[0]?.message?.content ??
-    res.json?.choices?.[0]?.text ??
-    "";
-  if (!text) throw new Error(`openai-compat ${mdl} empty`);
+    res.json?.choices?.[0]?.text ?? "";
+  if (!text) {
+    await updateHealth(env, `free:${mdl}`, { ok: false, ms, status: 500 });
+    throw new Error(`openai-compat ${mdl} empty`);
+  }
 
-  return { text, provider: "FreeLLM", model: mdl, ms: Date.now() - started };
+  await updateHealth(env, `free:${mdl}`, { ok: true, ms });
+  return { text, provider: "FreeLLM", model: mdl, ms };
 }
 
 // ---- Публічний API ---------------------------------------------------------
@@ -257,12 +317,6 @@ async function callOpenAICompat(env, model, prompt, opts = {}) {
 /**
  * env.MODEL_ORDER — кома-розділений список з префіксами провайдерів:
  *   "gemini:<id>, cf:<id>, openrouter:<id>, free:<id>"
- * Приклади:
- *   gemini:gemini-2.5-flash
- *   gemini:gemini-2.0-flash,openrouter:deepseek/deepseek-chat
- *   cf:@cf/meta/llama-3.1-8b-instruct,gemini:gemini-2.5-flash
- *   free:gpt-3.5-turbo
- *
  * Повертає рядок відповіді (з діаг-тегом якщо DIAG_TAGS != "off").
  */
 export async function askAnyModel(env, prompt, opts = {}) {
@@ -273,47 +327,51 @@ export async function askAnyModel(env, prompt, opts = {}) {
 
   if (order.length === 0) throw new Error("MODEL_ORDER is empty");
 
-  // прапорець діагностики
   const showTag = String(env.DIAG_TAGS || "").toLowerCase() !== "off";
 
   let lastErr = null;
+
+  // Перше коло: пропускаємо провайдери в cooldown
   for (const entry of order) {
     const [providerRaw, ...rest] = entry.split(":");
     const provider = providerRaw?.trim().toLowerCase();
-    const model = rest.join(":"); // підтримка model з двокрапками
-
+    const model = rest.join(":");
+    const id = `${provider}:${model}`;
     try {
-      let result;
-      if (provider === "gemini") {
-        result = await callGemini(env, model, prompt, opts);
-      } else if (provider === "openrouter") {
-        result = await callOpenRouter(env, model, prompt, opts);
-      } else if (provider === "cf") {
-        result = await callCloudflareAI(env, model, prompt, opts);
-      } else if (provider === "free" || provider === "openai") {
-        result = await callOpenAICompat(env, model, prompt, opts);
-      } else {
-        throw new Error(`Unknown provider: ${provider}`);
-      }
+      if (await shouldSkip(env, id)) continue;
 
-      // додати діаг-тег за потреби
-      return result.text + diagTag({
-        provider: result.provider,
-        model: result.model,
-        ms: result.ms,
-        enabled: showTag,
-      });
+      let result;
+      if (provider === "gemini") result = await callGemini(env, model, prompt, opts);
+      else if (provider === "openrouter") result = await callOpenRouter(env, model, prompt, opts);
+      else if (provider === "cf") result = await callCloudflareAI(env, model, prompt, opts);
+      else if (provider === "free" || provider === "openai") result = await callOpenAICompat(env, model, prompt, opts);
+      else throw new Error(`Unknown provider: ${provider}`);
+
+      return result.text + diagTag({ provider: result.provider, model: result.model, ms: result.ms, enabled: showTag });
     } catch (e) {
       lastErr = e;
-      // Якщо помилка не ретраєбл — просто рухаємось до наступної моделі
-      // (спеціальної логіки тут не потрібно, бо цикл і так продовжується)
-      // За бажанням можна додати console.log:
-      // console.log("askAnyModel error:", e?.status || "", e?.message || e);
-      if (!isRetryable(e.status)) {
-        // no-op: переходимо до наступного entry
-      }
+      if (!isRetryable(e.status)) { /* просто переходимо далі */ }
     }
+  }
+
+  // Друге коло: ігноруємо cooldown, намагаємося будь-що відповісти
+  for (const entry of order) {
+    const [providerRaw, ...rest] = entry.split(":");
+    const provider = providerRaw?.trim().toLowerCase();
+    const model = rest.join(":");
+    try {
+      let result;
+      if (provider === "gemini") result = await callGemini(env, model, prompt, opts);
+      else if (provider === "openrouter") result = await callOpenRouter(env, model, prompt, opts);
+      else if (provider === "cf") result = await callCloudflareAI(env, model, prompt, opts);
+      else if (provider === "free" || provider === "openai") result = await callOpenAICompat(env, model, prompt, opts);
+      else continue;
+
+      return result.text + diagTag({ provider: result.provider, model: result.model, ms: result.ms, enabled: showTag });
+    } catch (e) { lastErr = e; }
   }
 
   throw lastErr || new Error("All models failed");
 }
+
+export { readHealth as _readHealth, updateHealth as _updateHealth };
