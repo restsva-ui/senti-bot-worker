@@ -215,8 +215,8 @@ export default {
         if (r) return r;
       }
 
-      // ---- Brain Promote (точний шлях, перед загальним /api/brain*) ----
-      if (p === "/api/brain/promote") {
+      // ---- Brain Promote (перед загальним /api/brain*) ----
+      if (p.startsWith("/api/brain/promote")) {
         const r = await handleBrainPromote(req, env, url);
         if (r) return r;
       }
