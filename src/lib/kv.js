@@ -76,3 +76,55 @@ export async function kvPut(env, bindingName, key, value, options) {
     return false;
   }
 }
+
+/* ============================================================================
+ * JSON-обгортки (використовуються пам’яттю / ін. модулями)
+ * Працюють безпосередньо з інстансом KV (env.X_KV), а не з назвою binding’у.
+ * ==========================================================================*/
+
+/**
+ * Прочитати JSON з KV.
+ * @param {KVNamespace} kv - binding (напр. env.STATE_KV)
+ * @param {string} key
+ * @param {any} [fallback=null] - значення за замовчуванням у разі помилки/відсутності
+ * @returns {Promise<any>}
+ */
+export async function kvGetJSON(kv, key, fallback = null) {
+  try {
+    if (!kv) throw new Error("KV binding is missing");
+    const val = await kv.get(key);
+    if (!val) return fallback;
+    try {
+      return JSON.parse(val);
+    } catch {
+      return fallback;
+    }
+  } catch (e) {
+    console.error("[kvGetJSON]", key, e?.message || e);
+    return fallback;
+  }
+}
+
+/**
+ * Записати JSON у KV.
+ * @param {KVNamespace} kv - binding (напр. env.STATE_KV)
+ * @param {string} key
+ * @param {any} value - буде серіалізовано в JSON
+ * @param {number} [ttlSeconds] - необов’язковий TTL (секунди)
+ * @returns {Promise<boolean>}
+ */
+export async function kvPutJSON(kv, key, value, ttlSeconds = undefined) {
+  try {
+    if (!kv) throw new Error("KV binding is missing");
+    const str = JSON.stringify(value);
+    if (ttlSeconds) {
+      await kv.put(key, str, { expirationTtl: ttlSeconds });
+    } else {
+      await kv.put(key, str);
+    }
+    return true;
+  } catch (e) {
+    console.error("[kvPutJSON]", key, e?.message || e);
+    return false;
+  }
+}
