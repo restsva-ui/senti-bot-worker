@@ -16,12 +16,12 @@ function safeJSON(x) {
   try { return JSON.parse(x); } catch { return {}; }
 }
 
-// Формат діагностичного тегу
+// Формат діагностичного тегу (безпечний для Telegram Markdown/HTML)
 function tag(provider, model, ms, enabled) {
   if (!enabled) return "";
   const pretty = [provider, model].filter(Boolean).join(" ");
   const t = (typeof ms === "number" && isFinite(ms)) ? ` • ${Math.round(ms)}ms` : "";
-  return `\n\n[via ${pretty}${t}]`;
+  return `\n\n— via ${pretty}${t}`;
 }
 
 // Витяг тексту з відповіді Gemini
@@ -156,7 +156,7 @@ export async function think(env, userText, systemHint = "") {
   const text = String(userText || "").trim();
   if (!text) return "🤖 Дай мені текст або запитання — і я відповім.";
 
-  // 🚀 Примусово вмикаємо діагностичні теги (ігноруємо DIAG_TAGS env)
+  // Завжди показуємо діагностичні теги (щоб Telegram нічого не «з’їв»)
   const showTag = true;
 
   // 1) Gemini (AI Studio key)
