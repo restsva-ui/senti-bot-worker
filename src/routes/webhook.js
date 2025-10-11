@@ -6,6 +6,7 @@ import { getUserTokens } from "../lib/userDrive.js";
 import { abs } from "../utils/url.js";
 import { think } from "../lib/brain.js";
 import { readStatut } from "../lib/kvChecklist.js";
+import { askAnyModel } from "../lib/modelRouter.js"; // ⬅️ додано
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 const json = (data, init = {}) =>
@@ -31,7 +32,7 @@ const BTN_CHECK = "Checklist";
 
 const mainKeyboard = (isAdmin = false) => {
   const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
-  if (isAdmin) rows.push([{ text: BTN_ADMIN }, { text: BTN_CHECK }]);
+  if (isAdmin) rows.push([{ text: BTN_ADMIN }, { text: BTN_CHECK }]]);
   return { keyboard: rows, resize_keyboard: true };
 };
 
@@ -236,13 +237,32 @@ export async function handleTelegramWebhook(req, env) {
         (statut ? `${statut.trim()}\n\n` : "") +
         "Ти — Senti, помічник у Telegram. Відповідай стисло та дружньо. " +
         "Якщо просять зберегти файл — нагадай про Google Drive та розділ Checklist/Repo.";
-      const out = await think(env, text, systemHint); // якщо AI недоступний — впаде в catch
-      await sendMessage(env, chatId, out || "🤔");
+
+      // 1) Перший вибір — маршрутизатор моделей (OpenRouter/CF з авто-fallback)
+      const outPrimary = await askAnyModel(env, text, {
+        system: systemHint,
+        temperature: 0.6,
+        max_tokens: 800,
+      });
+
+      await sendMessage(env, chatId, outPrimary || "🤔");
       return json({ ok: true });
     } catch {
-      // fallback без AI
-      await sendMessage(env, chatId, "Готовий 👋", { reply_markup: mainKeyboard(isAdmin) });
-      return json({ ok: true });
+      // 2) Запасний варіант — локальний "мозок"
+      try {
+        const statut = await readStatut(env).catch(() => "");
+        const systemHint =
+          (statut ? `${statut.trim()}\n\n` : "") +
+          "Ти — Senti, помічник у Telegram. Відповідай стисло та дружньо. " +
+          "Якщо просять зберегти файл — нагадай про Google Drive та розділ Checklist/Repo.";
+        const outFallback = await think(env, text, systemHint);
+        await sendMessage(env, chatId, outFallback || "🤔");
+        return json({ ok: true });
+      } catch {
+        // 3) Якщо взагалі все недоступно — м’який дефолт
+        await sendMessage(env, chatId, "Готовий 👋", { reply_markup: mainKeyboard(isAdmin) });
+        return json({ ok: true });
+      }
     }
   }
 
