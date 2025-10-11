@@ -1,34 +1,65 @@
-// Гнучкий роутер моделей із авто-fallback (Gemini + OpenRouter + Cloudflare Workers AI).
+// src/lib/modelRouter.js
+// Гнучкий роутер моделей із авто-fallback та діагностичними тегами.
+// Провайдери: Gemini (v1→v1beta), OpenRouter, Cloudflare Workers AI.
 
 const RETRYABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 const isRetryable = (s) => RETRYABLE.has(Number(s || 0));
 
+// ---- Утіліти ---------------------------------------------------------------
+
+/** Діагностичний тег наприкінці відповіді */
+function diagTag({ provider, model, ms, enabled }) {
+  if (!enabled) return "";
+  const pretty = [provider, model].filter(Boolean).join(" ");
+  const t = typeof ms === "number" && isFinite(ms) ? ` • ${Math.round(ms)}ms` : "";
+  return `\n\n[via ${pretty}${t}]`;
+}
+
 /** Нормалізація назв моделей Gemini до v1 */
 function normalizeGemini(model) {
   const m = String(model || "").trim();
-  // дозволяємо "gemini-1.5-flash-latest" тощо — зведемо до v1 назв
   return m
-    .replace(/-latest$/i, "")
-    .replace(/^google\/|^gemini\//i, ""); // на випадок сторонніх префіксів
+    .replace(/-latest$/i, "")      // gemini-2.5-flash-latest -> gemini-2.5-flash
+    .replace(/^google\/|^gemini\//i, ""); // google/gemini-... -> gemini-...
 }
 
+/** Безпечний JSON.parse */
+function safeJSON(x) {
+  try { return JSON.parse(x); } catch { return {}; }
+}
+
+/** fetch із таймаутом */
+async function fetchJSON(url, init = {}, timeoutMs = 20000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { ...init, signal: controller.signal });
+    const text = await r.text();
+    const json = safeJSON(text);
+    return { ok: r.ok, status: r.status, json, raw: text, headers: r.headers };
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+// ---- Провайдери ------------------------------------------------------------
+
+/**
+ * Gemini: спочатку v1, при 404/NOT_FOUND автоматично пробує v1beta.
+ * Повертає { text, provider, model, ms }.
+ */
 async function callGemini(env, model, prompt, opts = {}) {
   const apiKey = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY/GOOGLE_API_KEY missing");
 
-  const mdl = normalizeGemini(model || "gemini-1.5-flash");
-  const url = `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(
-    mdl
-  )}:generateContent?key=${apiKey}`;
-
-  // system передаємо як перший префікс у контенті (Gemini v1 не має явного role=system)
-  const sys = opts.system ? String(opts.system) : "";
+  const mdl = normalizeGemini(model || env.GEMINI_MODEL || "gemini-2.5-flash");
+  const system = opts.system ? String(opts.system) : "";
   const user = String(prompt || "");
   const body = {
     contents: [
       {
         role: "user",
-        parts: [{ text: sys ? `${sys}\n\n${user}` : user }],
+        parts: [{ text: system ? `${system}\n\n${user}` : user }],
       },
     ],
     generationConfig: {
@@ -37,37 +68,67 @@ async function callGemini(env, model, prompt, opts = {}) {
     },
   };
 
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await r.json().catch(() => ({}));
+  const started = Date.now();
+  let lastErr = null;
 
-  if (!r.ok) {
-    const err = new Error(`gemini ${mdl} ${r.status}`);
-    err.status = r.status;
-    err.payload = data;
+  for (const ver of ["v1", "v1beta"]) {
+    const url = `https://generativelanguage.googleapis.com/${ver}/models/${encodeURIComponent(mdl)}:generateContent?key=${apiKey}`;
+    const res = await fetchJSON(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (res.ok) {
+      const parts = res.json?.candidates?.[0]?.content?.parts;
+      const text = Array.isArray(parts)
+        ? parts.map((p) => p?.text || "").join("")
+        : res.json?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      if (text) {
+        return { text, provider: "Gemini", model: mdl, ms: Date.now() - started };
+      }
+      lastErr = new Error(`gemini ${mdl} empty`);
+      continue;
+    }
+
+    const status = res.status;
+    const st = res.json?.error?.status || "";
+    // якщо модель не знайдена у v1 — пробуємо v1beta
+    if (status === 404 || st === "NOT_FOUND") {
+      lastErr = new Error(`gemini ${mdl} ${ver} 404`);
+      continue;
+    }
+
+    // інша помилка — зупиняємо
+    const err = new Error(`gemini ${mdl} ${status}`);
+    err.status = status;
+    err.payload = res.json;
     throw err;
   }
-  const out =
-    data?.candidates?.[0]?.content?.parts?.map((p) => p?.text || "").join("") ||
-    data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-    "";
-  return out;
+
+  throw lastErr || new Error(`gemini ${mdl} failed`);
 }
 
+/**
+ * OpenRouter chat completions.
+ * Повертає { text, provider, model, ms }.
+ */
 async function callOpenRouter(env, model, prompt, opts = {}) {
-  const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  if (!env.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY missing");
+  const mdl = model || env.OPENROUTER_MODEL || "deepseek/deepseek-chat";
+  const started = Date.now();
+
+  const res = await fetchJSON("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
       "Content-Type": "application/json",
+      // Декілька провайдерів вимагають ці заголовки
       "HTTP-Referer": env.SERVICE_HOST || "https://workers.dev",
       "X-Title": "SentiBot",
     },
     body: JSON.stringify({
-      model,
+      model: mdl,
       messages: [
         ...(opts.system ? [{ role: "system", content: String(opts.system) }] : []),
         { role: "user", content: String(prompt || "") },
@@ -76,26 +137,40 @@ async function callOpenRouter(env, model, prompt, opts = {}) {
       max_tokens: opts.max_tokens ?? 1024,
     }),
   });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) {
-    const err = new Error(`openrouter ${model} ${r.status}`);
-    err.status = r.status;
-    err.payload = data;
+
+  if (!res.ok) {
+    const err = new Error(`openrouter ${mdl} ${res.status}`);
+    err.status = res.status;
+    err.payload = res.json;
     throw err;
   }
-  return data?.choices?.[0]?.message?.content ?? "";
+
+  const text =
+    res.json?.choices?.[0]?.message?.content ??
+    res.json?.choices?.[0]?.text ??
+    "";
+  if (!text) throw new Error(`openrouter ${mdl} empty`);
+
+  return { text, provider: "OpenRouter", model: mdl, ms: Date.now() - started };
 }
 
+/**
+ * Cloudflare Workers AI.
+ * Повертає { text, provider, model, ms }.
+ */
 async function callCloudflareAI(env, model, prompt, opts = {}) {
-  if (!env.CF_ACCOUNT_ID || !env.CLOUDFLARE_API_TOKEN) throw new Error("CF creds missing");
+  const accountId = env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID;
+  const token = env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN;
+  if (!accountId || !token) throw new Error("CF creds missing");
 
-  const url = `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/ai/run/${encodeURIComponent(
-    model
-  )}`;
-  const r = await fetch(url, {
+  const mdl = model || env.CF_MODEL || "@cf/meta/llama-3.1-8b-instruct";
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${encodeURIComponent(mdl)}`;
+  const started = Date.now();
+
+  const res = await fetchJSON(url, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
+      Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
@@ -107,28 +182,36 @@ async function callCloudflareAI(env, model, prompt, opts = {}) {
       max_tokens: opts.max_tokens ?? 1024,
     }),
   });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok || data.success === false) {
-    const status = r.status || 500;
-    const err = new Error(`cf ${model} ${status}`);
+
+  if (!res.ok || res.json?.success === false) {
+    const status = res.status || 500;
+    const err = new Error(`cf ${mdl} ${status}`);
     err.status = status;
-    err.payload = data;
+    err.payload = res.json;
     throw err;
   }
-  // у CF залежить від моделі:
-  const msg =
-    data?.result?.response ??
-    data?.result?.choices?.[0]?.message?.content ??
-    data?.result?.text ??
+
+  const text =
+    res.json?.result?.response ??
+    res.json?.result?.choices?.[0]?.message?.content ??
+    res.json?.result?.text ??
     "";
-  return msg;
+  if (!text) throw new Error(`cf ${mdl} empty`);
+
+  return { text, provider: "Cloudflare AI", model: mdl, ms: Date.now() - started };
 }
 
+// ---- Публічний API ---------------------------------------------------------
+
 /**
- * env.MODEL_ORDER — кома-розділений список: "gemini:<id>,cf:<id>,openrouter:<id>"
+ * env.MODEL_ORDER — кома-розділений список з префіксами провайдерів:
+ *   "gemini:<id>, cf:<id>, openrouter:<id>"
  * Приклади:
- *   gemini:gemini-1.5-flash,cf:@cf/meta/llama-3-8b-instruct
- *   gemini:gemini-1.5-flash-8b,openrouter:deepseek/deepseek-chat
+ *   gemini:gemini-2.5-flash
+ *   gemini:gemini-2.0-flash,openrouter:deepseek/deepseek-chat
+ *   cf:@cf/meta/llama-3.1-8b-instruct,gemini:gemini-2.5-flash
+ *
+ * Повертає рядок відповіді (з діаг-тегом якщо DIAG_TAGS != "off").
  */
 export async function askAnyModel(env, prompt, opts = {}) {
   const order = String(env.MODEL_ORDER || "")
@@ -138,26 +221,45 @@ export async function askAnyModel(env, prompt, opts = {}) {
 
   if (order.length === 0) throw new Error("MODEL_ORDER is empty");
 
+  // прапорець діагностики
+  const showTag = String(env.DIAG_TAGS || "").toLowerCase() !== "off";
+
   let lastErr = null;
   for (const entry of order) {
-    const [provider, ...rest] = entry.split(":");
-    const model = rest.join(":");
+    const [providerRaw, ...rest] = entry.split(":");
+    const provider = providerRaw?.trim().toLowerCase();
+    const model = rest.join(":"); // підтримка model з двокрапками
 
     try {
-      if (provider === "gemini") return await callGemini(env, model, prompt, opts);
-      if (provider === "openrouter") {
-        if (!env.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY missing");
-        return await callOpenRouter(env, model, prompt, opts);
+      let result;
+      if (provider === "gemini") {
+        result = await callGemini(env, model, prompt, opts);
+      } else if (provider === "openrouter") {
+        result = await callOpenRouter(env, model, prompt, opts);
+      } else if (provider === "cf") {
+        result = await callCloudflareAI(env, model, prompt, opts);
+      } else {
+        throw new Error(`Unknown provider: ${provider}`);
       }
-      if (provider === "cf") return await callCloudflareAI(env, model, prompt, opts);
-      throw new Error(`Unknown provider: ${provider}`);
+
+      // додати діаг-тег за потреби
+      return result.text + diagTag({
+        provider: result.provider,
+        model: result.model,
+        ms: result.ms,
+        enabled: showTag,
+      });
     } catch (e) {
       lastErr = e;
-      // неретрійна — одразу до наступної; ретрійна — теж просто пробуємо іншу модель
+      // Якщо помилка не ретраєбл — просто рухаємось до наступної моделі
+      // (спеціальної логіки тут не потрібно, бо цикл і так продовжується)
+      // За бажанням можна додати console.log:
+      // console.log("askAnyModel error:", e?.status || "", e?.message || e);
       if (!isRetryable(e.status)) {
-        // no-op, рухаємося далі
+        // no-op: переходимо до наступного entry
       }
     }
   }
+
   throw lastErr || new Error("All models failed");
 }
