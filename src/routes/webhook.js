@@ -186,9 +186,11 @@ export async function handleTelegramWebhook(req, env) {
   // /diag — коротка діагностика (тільки для адміна)
   if (text === "/diag" && isAdmin) {
     await safe(async () => {
-      const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
-      const hasCF = !!(env.CF_ACCOUNT_ID && env.CLOUDFLARE_API_TOKEN);
-      const hasOR = !!env.OPENROUTER_API_KEY;
+      const hasGemini   = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
+      const hasCF       = !!(env.CF_ACCOUNT_ID && env.CLOUDFLARE_API_TOKEN);
+      const hasOR       = !!env.OPENROUTER_API_KEY;
+      const hasFreeBase = !!env.FREE_API_BASE_URL;
+      const hasFreeKey  = !!env.FREE_API_KEY;
       const mo = String(env.MODEL_ORDER || "").trim();
 
       const lines = [
@@ -197,6 +199,7 @@ export async function handleTelegramWebhook(req, env) {
         `GEMINI key: ${hasGemini ? "✅" : "❌"}`,
         `Cloudflare (CF_ACCOUNT_ID + CLOUDFLARE_API_TOKEN): ${hasCF ? "✅" : "❌"}`,
         `OpenRouter key: ${hasOR ? "✅" : "❌"}`,
+        `FreeLLM (BASE_URL + KEY): ${hasFreeBase && hasFreeKey ? "✅" : "❌"}`,
       ];
       await sendMessage(env, chatId, lines.join("\n"));
     });
