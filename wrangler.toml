@@ -19,17 +19,17 @@ TG_WEBHOOK_SECRET = "senti1984"
 # ДІАГНОСТИЧНІ ТЕГИ: "on" — показує [via ...], "off" — ховає
 DIAG_TAGS = "on"
 
-# Порядок спроб моделей (fallback зліва направо)
-# Додано резервний провайдер "free:" (будь-який OpenAI-compatible endpoint).
+# --- Порядок fallback-моделей ---
+# fallback зліва направо. Якщо попередня модель не відповіла — переходить далі.
 MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:deepseek/deepseek-chat, free:gpt-3.5-turbo"
 
-# Необов'язкові дефолти для провайдерів (можеш змінити при потребі)
+# --- Дефолтні моделі ---
 GEMINI_MODEL = "gemini-2.5-flash"
 CF_MODEL     = "@cf/meta/llama-3.1-8b-instruct"
 
-# --- OpenAI-compatible (free) провайдер ---
-# Бекенд сумісний з OpenAI API. Якщо ці змінні не задані — провайдер буде пропущено.
-# FREE_API_KEY має бути доданий у Dashboard → Secrets (СЕКРЕТ, не в toml).
+# --- OpenAI-compatible fallback (FreeLLM) ---
+# Якщо інші моделі не працюють — запит іде сюди.
+# ❗FREE_API_KEY додається тільки у Dashboard → Secrets
 FREE_API_BASE_URL = "https://api.deepseek.com"
 FREE_API_MODEL    = "gpt-3.5-turbo"
 FREE_API_PATH     = "/chat/completions"
