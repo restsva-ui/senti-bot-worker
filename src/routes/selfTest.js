@@ -54,7 +54,11 @@ const diagnose = (name, { ok, status }) => {
 export async function handleSelfTest(req, env, url) {
   if (url.pathname !== "/selftest/run" || req.method !== "GET") return null;
 
-  const mk = (path) => withSecFrom(env, url.origin, path);
+  // гарантуємо початковий слеш, щоб URL будувались коректно
+  const mk = (path) => {
+    const safePath = path.startsWith("/") ? path : `/${path}`;
+    return withSecFrom(env, url.origin, safePath);
+  };
 
   const targets = {
     health: mk("/health"),
