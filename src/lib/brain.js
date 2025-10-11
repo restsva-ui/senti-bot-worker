@@ -75,7 +75,7 @@ async function callGemini({ apiKey, model, userText, systemHint }) {
 
     if (res.ok) {
       const out = extractGeminiText(res.json);
-      if (out) return out;
+      if (out) return `${out}\n\n[via Gemini ${mdl}]`;
       lastErr = `empty ${ver}`;
       continue;
     }
@@ -112,7 +112,7 @@ async function callCloudflareAI({ accountId, apiToken, userText, systemHint, mod
   if (!res.ok) throw new Error(`CF AI ${res.status}`);
   const out = extractCFText(res.json);
   if (!out) throw new Error("CF AI empty");
-  return out;
+  return `${out}\n\n[via Cloudflare AI ${model}]`;
 }
 
 // 3) OpenRouter (опційно)
@@ -138,7 +138,7 @@ async function callOpenRouter({ apiKey, userText, systemHint, model = "deepseek/
   if (!res.ok) throw new Error(`OpenRouter ${res.status}`);
   const out = extractORText(res.json);
   if (!out) throw new Error("OpenRouter empty");
-  return out;
+  return `${out}\n\n[via OpenRouter ${model}]`;
 }
 
 // ---- Публічний API ----
