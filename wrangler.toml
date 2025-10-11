@@ -21,18 +21,18 @@ DIAG_TAGS = "on"
 
 # --- Порядок fallback-моделей ---
 # fallback зліва направо. Якщо попередня модель не відповіла — переходить далі.
-MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:deepseek/deepseek-chat, free:gpt-3.5-turbo"
+MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:deepseek/deepseek-chat, free:deepseek-chat"
 
 # --- Дефолтні моделі ---
 GEMINI_MODEL = "gemini-2.5-flash"
 CF_MODEL     = "@cf/meta/llama-3.1-8b-instruct"
 
-# --- OpenAI-compatible fallback (FreeLLM) ---
+# --- OpenAI-compatible fallback (FreeLLM / DeepSeek) ---
 # Якщо інші моделі не працюють — запит іде сюди.
 # ❗FREE_API_KEY додається тільки у Dashboard → Secrets
 FREE_API_BASE_URL = "https://api.deepseek.com"
-FREE_API_MODEL    = "gpt-3.5-turbo"
-FREE_API_PATH     = "/chat/completions"
+FREE_API_MODEL    = "deepseek-chat"
+FREE_API_PATH     = "/v1/chat/completions"
 
 # --- KV bindings ---
 [[kv_namespaces]]
