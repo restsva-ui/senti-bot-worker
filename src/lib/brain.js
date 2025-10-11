@@ -1,4 +1,4 @@
-// Мінімальний "мозок" Senti (стабільна версія):
+// Мінімальний "мозок" Senti (стабільна версія з діагностикою):
 // 1) Gemini (v1, з автопереходом на v1beta)
 // 2) Cloudflare Workers AI (опційно, якщо є ключі)
 // 3) OpenRouter (опційно)
@@ -16,12 +16,18 @@ function safeJSON(x) {
   try { return JSON.parse(x); } catch { return {}; }
 }
 
+// Формат діагностичного тегу
+function tag(provider, model, ms, enabled) {
+  if (!enabled) return "";
+  const pretty = [provider, model].filter(Boolean).join(" ");
+  const t = (typeof ms === "number" && isFinite(ms)) ? ` • ${Math.round(ms)}ms` : "";
+  return `\n\n[via ${pretty}${t}]`;
+}
+
 // Витяг тексту з відповіді Gemini
 function extractGeminiText(j) {
   const parts = j?.candidates?.[0]?.content?.parts;
-  if (Array.isArray(parts)) {
-    return parts.map(p => p?.text || "").join("");
-  }
+  if (Array.isArray(parts)) return parts.map(p => p?.text || "").join("");
   return j?.candidates?.[0]?.content?.parts?.[0]?.text || "";
 }
 
@@ -52,7 +58,7 @@ async function fetchJSON(url, init = {}, timeoutMs = 20000) {
 // ---- Провайдери ----
 
 // 1) Gemini: спробувати v1, потім v1beta
-async function callGemini({ apiKey, model, userText, systemHint }) {
+async function callGemini({ apiKey, model, userText, systemHint, showTag }) {
   const mdl = normGemini(model);
   const body = {
     contents: [
@@ -65,6 +71,8 @@ async function callGemini({ apiKey, model, userText, systemHint }) {
   };
 
   let lastErr;
+  const started = Date.now();
+
   for (const ver of GEMINI_VERSIONS) {
     const url = `https://generativelanguage.googleapis.com/${ver}/models/${encodeURIComponent(mdl)}:generateContent?key=${apiKey}`;
     const res = await fetchJSON(url, {
@@ -75,7 +83,7 @@ async function callGemini({ apiKey, model, userText, systemHint }) {
 
     if (res.ok) {
       const out = extractGeminiText(res.json);
-      if (out) return `${out}\n\n[via Gemini ${mdl}]`;
+      if (out) return `${out}${tag("Gemini", mdl, Date.now() - started, showTag)}`;
       lastErr = `empty ${ver}`;
       continue;
     }
@@ -92,7 +100,7 @@ async function callGemini({ apiKey, model, userText, systemHint }) {
   throw new Error(`Gemini fail: ${lastErr || "unknown"}`);
 }
 // 2) Cloudflare Workers AI (опційно)
-async function callCloudflareAI({ accountId, apiToken, userText, systemHint, model = "@cf/meta/llama-3.1-8b-instruct" }) {
+async function callCloudflareAI({ accountId, apiToken, userText, systemHint, model = "@cf/meta/llama-3.1-8b-instruct", showTag }) {
   if (!accountId || !apiToken) throw new Error("CF AI creds missing");
   const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${encodeURIComponent(model)}`;
   const body = {
@@ -101,6 +109,7 @@ async function callCloudflareAI({ accountId, apiToken, userText, systemHint, mod
       { role: "user", content: userText },
     ],
   };
+  const started = Date.now();
   const res = await fetchJSON(url, {
     method: "POST",
     headers: {
@@ -112,11 +121,11 @@ async function callCloudflareAI({ accountId, apiToken, userText, systemHint, mod
   if (!res.ok) throw new Error(`CF AI ${res.status}`);
   const out = extractCFText(res.json);
   if (!out) throw new Error("CF AI empty");
-  return `${out}\n\n[via Cloudflare AI ${model}]`;
+  return `${out}${tag("Cloudflare AI", model, Date.now() - started, showTag)}`;
 }
 
 // 3) OpenRouter (опційно)
-async function callOpenRouter({ apiKey, userText, systemHint, model = "deepseek/deepseek-chat" }) {
+async function callOpenRouter({ apiKey, userText, systemHint, model = "deepseek/deepseek-chat", showTag }) {
   if (!apiKey) throw new Error("OpenRouter key missing");
   const url = "https://openrouter.ai/api/v1/chat/completions";
   const body = {
@@ -127,6 +136,7 @@ async function callOpenRouter({ apiKey, userText, systemHint, model = "deepseek/
     ],
     temperature: 0.7,
   };
+  const started = Date.now();
   const res = await fetchJSON(url, {
     method: "POST",
     headers: {
@@ -138,13 +148,16 @@ async function callOpenRouter({ apiKey, userText, systemHint, model = "deepseek/
   if (!res.ok) throw new Error(`OpenRouter ${res.status}`);
   const out = extractORText(res.json);
   if (!out) throw new Error("OpenRouter empty");
-  return `${out}\n\n[via OpenRouter ${model}]`;
+  return `${out}${tag("OpenRouter", model, Date.now() - started, showTag)}`;
 }
 
 // ---- Публічний API ----
 export async function think(env, userText, systemHint = "") {
   const text = String(userText || "").trim();
   if (!text) return "🤖 Дай мені текст або запитання — і я відповім.";
+
+  // прапорець діагностики: DIAG_TAGS=off — вимкнути
+  const showTag = String(env.DIAG_TAGS || "").toLowerCase() !== "off";
 
   // 1) Gemini (AI Studio key)
   const GEMINI_KEY = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
@@ -156,6 +169,7 @@ export async function think(env, userText, systemHint = "") {
         model: geminiModel,
         userText: text,
         systemHint,
+        showTag,
       });
       if (out) return out;
     } catch (e) {
@@ -175,6 +189,7 @@ export async function think(env, userText, systemHint = "") {
         userText: text,
         systemHint,
         model: cfModel,
+        showTag,
       });
       if (out) return out;
     } catch (e) {
@@ -191,6 +206,7 @@ export async function think(env, userText, systemHint = "") {
         userText: text,
         systemHint,
         model: orModel,
+        showTag,
       });
       if (out) return out;
     } catch (e) {
