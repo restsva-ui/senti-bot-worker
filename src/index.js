@@ -25,6 +25,8 @@ import { handleAiTrain }         from "./routes/aiTrain.js";
 import { handleAiEvolve }        from "./routes/aiEvolve.js";
 import { handleBrainPromote }    from "./routes/brainPromote.js";
 
+const VERSION = "senti-worker-2025-10-11-13-40";
+
 const html = (s)=> new Response(s, { headers:{ "content-type":"text/html; charset=utf-8" }});
 const json = (o, status=200, h={})=> new Response(JSON.stringify(o, null, 2), {
   status, headers:{ "content-type":"application/json; charset=utf-8", ...h }
@@ -100,7 +102,6 @@ async function runSelfTestFallback(origin, secret) {
   const summary = Object.values(results).map(v => `${v.name}:${v.ok ? "ok" : `fail(${v.status})`}`).join(" | ");
   return { ok: !summary.includes("fail"), summary, results };
 }
-
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
@@ -114,6 +115,11 @@ export default {
     // універсальний OPTIONS preflight
     if (req.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: CORS });
+    }
+
+    // --- version beacon (діагностика): має відповідати 200 завжди ---
+    if (p === "/_version") {
+      return json({ ok:true, version: VERSION, entry: "src/index.js" }, 200, CORS);
     }
 
     try {
