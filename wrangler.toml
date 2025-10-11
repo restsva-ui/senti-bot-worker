@@ -7,6 +7,7 @@ account_id = "2cf6e316af8623546c95c0354bc3aa00"
 [triggers]
 crons = ["*/15 * * * *", "0 * * * *"]
 
+# --- Публічні змінні середовища (НЕ секрети) ---
 [vars]
 SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
 DRIVE_FOLDER_ID = "root"
@@ -14,6 +15,17 @@ TELEGRAM_ADMIN_ID = "784869835"
 DEPLOY_ID = "local-dev"
 WEBHOOK_SECRET = "senti1984"
 TG_WEBHOOK_SECRET = "senti1984"
+
+# ДІАГНОСТИЧНІ ТЕГИ: on — показує [via ...], off — ховає
+DIAG_TAGS = "on"
+
+# Порядок спроб моделей (fallback зліва направо)
+# Можеш змінити порядок або видалити провайдери, яких немає.
+MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:deepseek/deepseek-chat"
+
+# Необов'язкові дефолти для провайдерів (зручно мати у конфігу)
+GEMINI_MODEL = "gemini-2.5-flash"
+CF_MODEL     = "@cf/meta/llama-3.1-8b-instruct"
 
 # --- KV bindings ---
 [[kv_namespaces]]
