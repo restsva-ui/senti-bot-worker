@@ -24,6 +24,33 @@ async function ping(href) {
   }
 }
 
+// короткі підказки по найтиповіших збоях
+const diagnose = (name, { ok, status }) => {
+  if (ok) return "";
+  if (status === 401) return "Невірний або відсутній секрет (?s=...). Перевір WEBHOOK_SECRET.";
+  if (status === 404) {
+    switch (name) {
+      case "health":
+        return "Маршрут /health не обробляється. Перевір if (p === \"/\" || p === \"/health\").";
+      case "webhook_get":
+        return "GET /webhook має відповідати 200. Перевір блок Telegram webhook.";
+      case "brain_current":
+      case "brain_list":
+        return "Маршрути /api/brain/*. Перевір handleBrainApi та порядок if (p.startsWith(\"/api/brain\")) у src/index.js.";
+      case "admin_checklist_html":
+        return "Маршрут /admin/checklist/html. Перевір handleAdminChecklist у src/index.js.";
+      case "admin_repo_html":
+        return "Маршрут /admin/repo/html. Перевір handleAdminRepo і що повертається r, а не змінна з помилкою.";
+      case "admin_statut_html":
+        return "Маршрут /admin/statut/html. Перевір handleAdminStatut.";
+      default:
+        return "404: маршрут не змонтовано або порядок умов у src/index.js не дозволяє до нього дійти.";
+    }
+  }
+  if (status === 0) return "Fetch-помилка (мережа/SSL/таймаут). Спробуй ще раз або перевір доступність воркера.";
+  return `Статус ${status}: перевір логіку у відповідному модулі.`;
+};
+
 export async function handleSelfTest(req, env, url) {
   if (url.pathname !== "/selftest/run" || req.method !== "GET") return null;
 
@@ -42,7 +69,9 @@ export async function handleSelfTest(req, env, url) {
   const results = {};
   await Promise.all(
     Object.entries(targets).map(async ([name, href]) => {
-      results[name] = { name, url: href, ...(await ping(href)) };
+      const pr = await ping(href);
+      const hint = diagnose(name, pr);
+      results[name] = { name, url: href, ...pr, hint };
     })
   );
 
@@ -55,16 +84,24 @@ export async function handleSelfTest(req, env, url) {
     `${allOk ? "✅" : "❌"} selftest ${new Date().toISOString()} :: ` +
     parts.join(" | ");
 
+  // Запис до чеклиста для історії
   await appendChecklist(env, line);
 
-  const summary = parts.join(" | ");
+  // зведені дії, якщо щось впало
+  const next_actions = allOk
+    ? "Все ок ✅"
+    : Object.values(results)
+        .filter((r) => !r.ok && r.hint)
+        .map((r) => `• ${r.name}: ${r.hint}`)
+        .join("\n");
 
   return json({
     ok: allOk,
-    summary,
+    summary: parts.join(" | "),
     results,
     origin: url.origin,
     secured: !!env.WEBHOOK_SECRET,
     checklist_line: line,
+    next_actions,
   });
 }
