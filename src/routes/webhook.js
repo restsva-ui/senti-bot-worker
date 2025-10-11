@@ -6,7 +6,7 @@ import { getUserTokens } from "../lib/userDrive.js";
 import { abs } from "../utils/url.js";
 import { think } from "../lib/brain.js";
 import { readStatut } from "../lib/kvChecklist.js";
-import { askAnyModel } from "../lib/modelRouter.js";
+import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 const json = (data, init = {}) =>
@@ -201,6 +201,19 @@ export async function handleTelegramWebhook(req, env) {
         `OpenRouter key: ${hasOR ? "✅" : "❌"}`,
         `FreeLLM (BASE_URL + KEY): ${hasFreeBase && hasFreeKey ? "✅" : "❌"}`,
       ];
+
+      // Health summary (EWMA, fail streak, cooldown)
+      const entries = mo ? mo.split(",").map(s => s.trim()).filter(Boolean) : [];
+      if (entries.length) {
+        const health = await getAiHealthSummary(env, entries);
+        lines.push("\n— Health:");
+        for (const h of health) {
+          const light = h.cool ? "🟥" : (h.slow ? "🟨" : "🟩");
+          const ms = h.ewmaMs ? `${Math.round(h.ewmaMs)}ms` : "n/a";
+          lines.push(`${light} ${h.provider}:${h.model} — ewma ${ms}, fails ${h.failStreak || 0}`);
+        }
+      }
+
       await sendMessage(env, chatId, lines.join("\n"));
     });
     return json({ ok: true });
@@ -323,7 +336,6 @@ export async function handleTelegramWebhook(req, env) {
       let out = "";
 
       if (modelOrder) {
-        // askAnyModel приймає один промпт -> об’єднуємо системний хінт з текстом
         const merged = `${systemHint}\n\nКористувач: ${text}`;
         out = await askAnyModel(env, merged, { temperature: 0.6, max_tokens: 800 });
       } else {
@@ -334,7 +346,6 @@ export async function handleTelegramWebhook(req, env) {
       await sendMessage(env, chatId, out, { parse_mode: undefined });
       return json({ ok: true });
     } catch (e) {
-      // запасний варіант — м’який дефолт
       await sendMessage(env, chatId, defaultAiReply(), { parse_mode: undefined });
       return json({ ok: true });
     }
