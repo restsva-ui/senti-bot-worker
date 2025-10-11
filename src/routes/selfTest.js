@@ -18,9 +18,17 @@ const withSecFrom = (env, baseOrigin, path) => {
 async function ping(href) {
   try {
     const r = await fetch(href, { method: "GET" });
-    return { ok: r.ok, status: r.status };
+    return { ok: r.ok, status: r.status, response: r };
   } catch (err) {
     return { ok: false, status: 0, error: String(err) };
+  }
+}
+
+async function getJsonSafe(rsp) {
+  try {
+    return await rsp.json();
+  } catch {
+    return null;
   }
 }
 
@@ -36,7 +44,8 @@ const diagnose = (name, { ok, status }) => {
         return "GET /webhook має відповідати 200. Перевір блок Telegram webhook.";
       case "brain_current":
       case "brain_list":
-        return "Маршрути /api/brain/*. Перевір handleBrainApi та порядок if (p.startsWith(\"/api/brain\")) у src/index.js.";
+      case "brain_promote":
+        return "Маршрути /api/brain/*. Перевір handleBrainApi/handleBrainPromote та порядок if (p.startsWith(\"/api/brain\")) у src/index.js.";
       case "admin_checklist_html":
         return "Маршрут /admin/checklist/html. Перевір handleAdminChecklist у src/index.js.";
       case "admin_repo_html":
@@ -54,31 +63,82 @@ const diagnose = (name, { ok, status }) => {
 export async function handleSelfTest(req, env, url) {
   if (url.pathname !== "/selftest/run" || req.method !== "GET") return null;
 
-  // гарантуємо початковий слеш, щоб URL будувались коректно
   const mk = (path) => {
     const safePath = path.startsWith("/") ? path : `/${path}`;
     return withSecFrom(env, url.origin, safePath);
   };
 
-  const targets = {
+  // 1) базові перевірки (health/webhook)
+  const targets0 = {
     health: mk("/health"),
     webhook_get: mk("/webhook"),
-    brain_current: mk("/api/brain/current"),
-    brain_list: mk("/api/brain/list"),
+  };
+
+  const results = {};
+
+  // виконуємо базові
+  for (const [name, href] of Object.entries(targets0)) {
+    const pr = await ping(href);
+    const hint = diagnose(name, pr);
+    results[name] = { name, url: href, ok: pr.ok, status: pr.status, hint };
+  }
+
+  // 2) brain current + витягаємо ключ для dry-promote
+  const brainCurrentHref = mk("/api/brain/current");
+  const prCurrent = await ping(brainCurrentHref);
+  let currentKey = null;
+
+  if (prCurrent.ok && prCurrent.response) {
+    const data = await getJsonSafe(prCurrent.response);
+    currentKey = data?.current || null;
+  }
+  results["brain_current"] = {
+    name: "brain_current",
+    url: brainCurrentHref,
+    ok: prCurrent.ok,
+    status: prCurrent.status,
+    hint: diagnose("brain_current", prCurrent),
+    current: currentKey,
+  };
+
+  // 3) brain list
+  const brainListHref = mk("/api/brain/list");
+  const prList = await ping(brainListHref);
+  results["brain_list"] = {
+    name: "brain_list",
+    url: brainListHref,
+    ok: prList.ok,
+    status: prList.status,
+    hint: diagnose("brain_list", prList),
+  };
+
+  // 4) admin HTML-и
+  const adminTargets = {
     admin_checklist_html: mk("/admin/checklist/html"),
     admin_repo_html: mk("/admin/repo/html"),
     admin_statut_html: mk("/admin/statut/html"),
   };
+  for (const [name, href] of Object.entries(adminTargets)) {
+    const pr = await ping(href);
+    results[name] = { name, url: href, ok: pr.ok, status: pr.status, hint: diagnose(name, pr) };
+  }
 
-  const results = {};
-  await Promise.all(
-    Object.entries(targets).map(async ([name, href]) => {
-      const pr = await ping(href);
-      const hint = diagnose(name, pr);
-      results[name] = { name, url: href, ...pr, hint };
-    })
-  );
+  // 5) dry-run promote (GET із key). Якщо current невідомий — викликаємо без key,
+  //    а промоутер сам підбере current/останній архів.
+  const promoteHref = currentKey
+    ? mk(`/api/brain/promote?key=${encodeURIComponent(currentKey)}`)
+    : mk(`/api/brain/promote`);
 
+  const prPromote = await ping(promoteHref);
+  results["brain_promote"] = {
+    name: "brain_promote",
+    url: promoteHref,
+    ok: prPromote.ok,
+    status: prPromote.status,
+    hint: diagnose("brain_promote", prPromote),
+  };
+
+  // Підсумки
   const allOk = Object.values(results).every((r) => r.ok);
   const parts = Object.values(results).map(
     (r) => `${r.name}:${r.ok ? "ok" : "fail"}(${r.status || "ERR"})`
