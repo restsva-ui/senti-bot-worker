@@ -16,25 +16,26 @@ DEPLOY_ID = "local-dev"
 WEBHOOK_SECRET = "senti1984"
 TG_WEBHOOK_SECRET = "senti1984"
 
-# ДІАГНОСТИЧНІ ТЕГИ: on — показує [via ...], off — ховає
+# ДІАГНОСТИЧНІ ТЕГИ: "on" — показує [via ...], "off" — ховає
 DIAG_TAGS = "on"
 
 # Порядок спроб моделей (fallback зліва направо)
-# Додав резервний провайдер "free:" (OpenAI-compatible).
+# Додано резервний провайдер "free:" (будь-який OpenAI-compatible endpoint).
 MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:deepseek/deepseek-chat, free:gpt-3.5-turbo"
 
-# Необов'язкові дефолти для провайдерів (зручно мати у конфігу)
+# Необов'язкові дефолти для провайдерів (можеш змінити при потребі)
 GEMINI_MODEL = "gemini-2.5-flash"
 CF_MODEL     = "@cf/meta/llama-3.1-8b-instruct"
 
 # --- OpenAI-compatible (free) провайдер ---
-# Бекенд сумісний з OpenAI API. Якщо ці змінні не задані — провайдер буде пропущено без помилок.
-# FREE_API_BASE_URL радше додай у Dashboard → Variables (не секрет).
-# FREE_API_KEY додай у Dashboard → Secrets (СЕКРЕТ, не класти у toml).
+# Бекенд сумісний з OpenAI API. Якщо ці змінні не задані — провайдер буде пропущено.
+# РЕКОМЕНДАЦІЯ: тримай URL у Variables, а KEY у Secrets через Dashboard.
 FREE_API_MODEL = "gpt-3.5-turbo"
 FREE_API_PATH  = "/v1/chat/completions"
-# Приклад (заміни на свій, якщо хочеш задати в toml, але краще через Dashboard):
+# Приклад (додавай у Dashboard → Variables, без фінального слеша):
 # FREE_API_BASE_URL = "https://your-free-endpoint.example.com"
+# А ключ у Dashboard → Secrets:
+# FREE_API_KEY = "xxxxxxxx"
 
 # --- KV bindings ---
 [[kv_namespaces]]
