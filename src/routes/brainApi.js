@@ -1,7 +1,3 @@
-export async function handleBrainApi(req, env, url) {
-  const p = (url.pathname || "/").replace(/\/+$/,"") || "/";
-  // ...далі твій код без змін
-}
 // src/routes/brainApi.js
 import { listArchives, getArchive } from "../lib/kvChecklist.js";
 
@@ -33,7 +29,8 @@ const cors = {
 
 // ── router ────────────────────────────────────────────────────────────────────
 export async function handleBrainApi(req, env, url) {
-  const p = url.pathname;
+  // нормалізація: зрізаємо кінцеві слеші, щоб /api/brain/list/ == /api/brain/list
+  const p = (url.pathname || "/").replace(/\/+$/,"") || "/";
 
   // CORS preflight
   if (req.method === "OPTIONS" && p.startsWith("/api/brain")) {
@@ -56,7 +53,7 @@ export async function handleBrainApi(req, env, url) {
     if (needSecret(env, url)) {
       return json({ ok: false, error: "unauthorized" }, 401, cors.base);
     }
-    const keys = await listArchives(env); // повертає масив
+    const keys = await listArchives(env); // повертає масив рядків
     return json({ ok: true, total: keys.length, items: keys }, 200, cors.base);
   }
 
