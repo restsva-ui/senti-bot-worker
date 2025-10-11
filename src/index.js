@@ -10,6 +10,9 @@ import {
 import { logHeartbeat } from "./lib/audit.js";
 import { abs } from "./utils/url.js";
 
+// http utils (винесено)
+import { html, json, CORS, preflight } from "./utils/http.js";
+
 // routes
 import { handleAdminRepo }       from "./routes/adminRepo.js";
 import { handleAdminChecklist }  from "./routes/adminChecklist.js";
@@ -25,22 +28,10 @@ import { handleAiTrain }         from "./routes/aiTrain.js";
 import { handleAiEvolve }        from "./routes/aiEvolve.js";
 import { handleBrainPromote }    from "./routes/brainPromote.js";
 
-// 🔹 нове: виносимо home в окремий модуль
+// home винесено в окремий модуль
 import { home } from "./ui/home.js";
 
 const VERSION = "senti-worker-2025-10-11-14-05";
-
-const html = (s)=> new Response(s, { headers:{ "content-type":"text/html; charset=utf-8" }});
-const json = (o, status=200, h={})=> new Response(JSON.stringify(o, null, 2), {
-  status, headers:{ "content-type":"application/json; charset=utf-8", ...h }
-});
-
-// CORS preflight headers
-const CORS = {
-  "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET,HEAD,POST,OPTIONS",
-  "access-control-allow-headers": "Content-Type,Authorization,x-telegram-bot-api-secret-token"
-};
 
 // ---------- Локальний SelfTest (без HTTP fetch) ----------
 async function runSelfTestLocalDirect(env) {
@@ -52,7 +43,6 @@ async function runSelfTestLocalDirect(env) {
       const r = await handleHealth(new Request("https://local/health"), env, new URL("https://local/health"));
       results.health = { name:"health", ok: !!r && r.status !== 404, status: r?.status ?? 500 };
     } else {
-      // наш дефолт у router все одно дає 200
       results.health = { name:"health", ok:true, status:200 };
     }
   } catch (e) {
@@ -137,7 +127,7 @@ export default {
 
     // універсальний OPTIONS preflight
     if (req.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: CORS });
+      return preflight();
     }
 
     // --- version beacon ---
