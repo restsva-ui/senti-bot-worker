@@ -29,13 +29,10 @@ CF_MODEL     = "@cf/meta/llama-3.1-8b-instruct"
 
 # --- OpenAI-compatible (free) провайдер ---
 # Бекенд сумісний з OpenAI API. Якщо ці змінні не задані — провайдер буде пропущено.
-# РЕКОМЕНДАЦІЯ: тримай URL у Variables, а KEY у Secrets через Dashboard.
-FREE_API_MODEL = "gpt-3.5-turbo"
-FREE_API_PATH  = "/v1/chat/completions"
-# Приклад (додавай у Dashboard → Variables, без фінального слеша):
-# FREE_API_BASE_URL = "https://your-free-endpoint.example.com"
-# А ключ у Dashboard → Secrets:
-# FREE_API_KEY = "xxxxxxxx"
+# FREE_API_KEY має бути доданий у Dashboard → Secrets (СЕКРЕТ, не в toml).
+FREE_API_BASE_URL = "https://api.deepseek.com"
+FREE_API_MODEL    = "gpt-3.5-turbo"
+FREE_API_PATH     = "/v1/chat/completions"
 
 # --- KV bindings ---
 [[kv_namespaces]]
