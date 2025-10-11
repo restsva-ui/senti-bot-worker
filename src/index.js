@@ -32,15 +32,19 @@ import { handleBrainPromote } from "./routes/brainPromote.js";
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
 
 // ✅ фолбеки /api/brain/*  (в один рядок — сумісність зі старим Wrangler)
-import { fallbackBrainCurrent, fallbackBrainList, fallbackBrainGet } from "./routes/brainFallbacks.js";
+import {
+  fallbackBrainCurrent,
+  fallbackBrainList,
+  fallbackBrainGet,
+} from "./routes/brainFallbacks.js";
 
 // home винесено в окремий модуль
 import { home } from "./ui/home.js";
 
-// ✅ нічні авто-поліпшення
+// ✅ нічні авто-поліпшення (утиліта)
 import { nightlyAutoImprove } from "./lib/autoImprove.js";
 
-const VERSION = "senti-worker-2025-10-11-22-05";
+const VERSION = "senti-worker-2025-10-11-22-40";
 
 export default {
   async fetch(req, env) {
@@ -59,11 +63,7 @@ export default {
 
     // --- version beacon ---
     if (p === "/_version") {
-      return json(
-        { ok: true, version: VERSION, entry: "src/index.js" },
-        200,
-        CORS
-      );
+      return json({ ok: true, version: VERSION, entry: "src/index.js" }, 200, CORS);
     }
 
     try {
@@ -79,8 +79,7 @@ export default {
           {
             ok: true,
             name: "senti-bot-worker",
-            service:
-              env.SERVICE_HOST || "senti-bot-worker.restsva.workers.dev",
+            service: env.SERVICE_HOST || "senti-bot-worker.restsva.workers.dev",
             ts: new Date().toISOString(),
           },
           200,
@@ -107,11 +106,7 @@ export default {
           const r = await handleBrainPromote?.(req, env, url);
           if (r) return r;
         } catch {}
-        return json(
-          { ok: true, promoted: false, note: "promote handler missing" },
-          200,
-          CORS
-        );
+        return json({ ok: true, promoted: false, note: "promote handler missing" }, 200, CORS);
       }
 
       // --- /api/brain/* ---
@@ -170,6 +165,17 @@ export default {
           return json({ ok: false, error: "unauthorized" }, 401, CORS);
         }
         const res = await nightlyAutoImprove(env, { now: new Date(), reason: "manual" });
+        return json({ ok: true, ...res }, 200, CORS);
+      }
+
+      // --- ai/improve HTTP endpoints (без окремого роутера) ---
+      if (p.startsWith("/ai/improve")) {
+        // захист секретом
+        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
+          return json({ ok: false, error: "unauthorized" }, 401, CORS);
+        }
+        // /ai/improve/auto або /ai/improve/run -> запустити нічний агент
+        const res = await nightlyAutoImprove(env, { now: new Date(), reason: "http" });
         return json({ ok: true, ...res }, 200, CORS);
       }
 
@@ -344,7 +350,10 @@ export default {
       const runByCron = event && event.cron === "10 2 * * *";
       const runByHour = hour === targetHour;
 
-      if (String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" && (runByCron || runByHour)) {
+      if (
+        String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" &&
+        (runByCron || runByHour)
+      ) {
         await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
       }
     } catch (e) {
