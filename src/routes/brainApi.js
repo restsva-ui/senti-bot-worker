@@ -1,3 +1,7 @@
+export async function handleBrainApi(req, env, url) {
+  const p = (url.pathname || "/").replace(/\/+$/,"") || "/";
+  // ...далі твій код без змін
+}
 // src/routes/brainApi.js
 import { listArchives, getArchive } from "../lib/kvChecklist.js";
 
