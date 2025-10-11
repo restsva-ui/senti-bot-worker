@@ -1,6 +1,6 @@
 // src/lib/modelRouter.js
 // Гнучкий роутер моделей із авто-fallback та діагностичними тегами.
-// Провайдери: Gemini (v1→v1beta), OpenRouter, Cloudflare Workers AI.
+// Провайдери: Gemini (v1→v1beta), OpenRouter, Cloudflare Workers AI, OpenAI-compatible (free).
 
 const RETRYABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 const isRetryable = (s) => RETRYABLE.has(Number(s || 0));
@@ -201,15 +201,67 @@ async function callCloudflareAI(env, model, prompt, opts = {}) {
   return { text, provider: "Cloudflare AI", model: mdl, ms: Date.now() - started };
 }
 
+/**
+ * OpenAI-compatible endpoint (generic). Useful for free/community proxies or custom gateways.
+ * Requires:
+ *   FREE_API_BASE_URL (e.g. "https://api.openai.com")
+ *   FREE_API_KEY
+ *   FREE_API_PATH (optional, default "/v1/chat/completions")
+ * Returns { text, provider, model, ms }.
+ */
+async function callOpenAICompat(env, model, prompt, opts = {}) {
+  const base = (env.FREE_API_BASE_URL || "").replace(/\/$/, "");
+  const key = env.FREE_API_KEY;
+  const path = env.FREE_API_PATH || "/v1/chat/completions";
+  if (!base || !key) throw new Error("FREE_API_BASE_URL / FREE_API_KEY missing");
+
+  const mdl = model || env.FREE_API_MODEL || "gpt-3.5-turbo";
+  const url = base + path;
+  const started = Date.now();
+
+  const res = await fetchJSON(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${key}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: mdl,
+      messages: [
+        ...(opts.system ? [{ role: "system", content: String(opts.system) }] : []),
+        { role: "user", content: String(prompt || "") },
+      ],
+      temperature: opts.temperature ?? 0.4,
+      max_tokens: opts.max_tokens ?? 1024,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = new Error(`openai-compat ${mdl} ${res.status}`);
+    err.status = res.status;
+    err.payload = res.json;
+    throw err;
+  }
+
+  const text =
+    res.json?.choices?.[0]?.message?.content ??
+    res.json?.choices?.[0]?.text ??
+    "";
+  if (!text) throw new Error(`openai-compat ${mdl} empty`);
+
+  return { text, provider: "FreeLLM", model: mdl, ms: Date.now() - started };
+}
+
 // ---- Публічний API ---------------------------------------------------------
 
 /**
  * env.MODEL_ORDER — кома-розділений список з префіксами провайдерів:
- *   "gemini:<id>, cf:<id>, openrouter:<id>"
+ *   "gemini:<id>, cf:<id>, openrouter:<id>, free:<id>"
  * Приклади:
  *   gemini:gemini-2.5-flash
  *   gemini:gemini-2.0-flash,openrouter:deepseek/deepseek-chat
  *   cf:@cf/meta/llama-3.1-8b-instruct,gemini:gemini-2.5-flash
+ *   free:gpt-3.5-turbo
  *
  * Повертає рядок відповіді (з діаг-тегом якщо DIAG_TAGS != "off").
  */
@@ -238,6 +290,8 @@ export async function askAnyModel(env, prompt, opts = {}) {
         result = await callOpenRouter(env, model, prompt, opts);
       } else if (provider === "cf") {
         result = await callCloudflareAI(env, model, prompt, opts);
+      } else if (provider === "free" || provider === "openai") {
+        result = await callOpenAICompat(env, model, prompt, opts);
       } else {
         throw new Error(`Unknown provider: ${provider}`);
       }
