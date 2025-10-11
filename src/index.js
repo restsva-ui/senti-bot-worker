@@ -20,12 +20,12 @@ import { handleHealth }          from "./routes/health.js";
 import { handleBrainState }      from "./routes/brainState.js";
 import { handleCiDeploy }        from "./routes/ciDeploy.js";
 import { handleBrainApi }        from "./routes/brainApi.js";
-import { handleSelfTest }        from "./routes/selfTest.js";
+// import { handleSelfTest }     from "./routes/selfTest.js"; // тимчасово не використовуємо
 import { handleAiTrain }         from "./routes/aiTrain.js";
 import { handleAiEvolve }        from "./routes/aiEvolve.js";
 import { handleBrainPromote }    from "./routes/brainPromote.js";
 
-const VERSION = "senti-worker-2025-10-11-13-40";
+const VERSION = "senti-worker-2025-10-11-13-55";
 
 const html = (s)=> new Response(s, { headers:{ "content-type":"text/html; charset=utf-8" }});
 const json = (o, status=200, h={})=> new Response(JSON.stringify(o, null, 2), {
@@ -78,8 +78,10 @@ background:color-mix(in oklab,Canvas 96%,CanvasText 6%);border:1px solid color-m
 </script>`;
 }
 
-// ---------- резервний SelfTest runner (на випадок, якщо модуль не підключився) ----------
-async function runSelfTestFallback(origin, secret) {
+// ---------- резервний SelfTest runner з локальними підзапитами ----------
+async function runSelfTestLocal(req, env) {
+  const base = new URL(req.url);
+  const secret = env.WEBHOOK_SECRET || "";
   const qs = secret ? `?s=${encodeURIComponent(secret)}` : "";
   const targets = [
     ["/health", "health"],
@@ -89,19 +91,23 @@ async function runSelfTestFallback(origin, secret) {
     ["/admin/checklist/html", "admin_checklist_html"],
     ["/admin/repo/html", "admin_repo_html"],
     ["/admin/statut/html", "admin_statut_html"],
+    ["/api/brain/promote", "brain_promote"],
   ];
   const results = {};
-  for (const [p, name] of targets) {
+  for (const [path, name] of targets) {
     try {
-      const r = await fetch(origin + p + qs, { method: "GET" });
-      results[name] = { name, url: origin + p + qs, ok: r.ok, status: r.status };
+      // КЛЮЧОВЕ: формуємо URL ВІДНОСНО поточного req.url (у тому ж воркері)
+      const u = new URL(path + qs, base);
+      const r = await fetch(u.toString(), { method:"GET", headers:{ "x-selftest":"1" }});
+      results[name] = { name, url: u.toString(), ok: r.ok, status: r.status };
     } catch (e) {
-      results[name] = { name, url: origin + p + qs, ok: false, status: 0, error: String(e) };
+      results[name] = { name, url: new URL(path + qs, base).toString(), ok:false, status:0, error:String(e) };
     }
   }
   const summary = Object.values(results).map(v => `${v.name}:${v.ok ? "ok" : `fail(${v.status})`}`).join(" | ");
-  return { ok: !summary.includes("fail"), summary, results };
+  return { ok: !summary.includes("fail"), summary, results, origin: `${base.protocol}//${base.host}` };
 }
+
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
@@ -117,7 +123,7 @@ export default {
       return new Response(null, { status: 204, headers: CORS });
     }
 
-    // --- version beacon (діагностика): має відповідати 200 завжди ---
+    // --- version beacon ---
     if (p === "/_version") {
       return json({ ok:true, version: VERSION, entry: "src/index.js" }, 200, CORS);
     }
@@ -135,7 +141,6 @@ export default {
       }
 
       if (p === "/webhook" && method === "GET") {
-        // легкий алів-пінг (HEAD теж потрапить сюди)
         return json({ ok:true, method:"GET", message:"webhook alive" }, 200, CORS);
       }
 
@@ -148,7 +153,7 @@ export default {
         return json({ ok:true, state:"available" }, 200, CORS);
       }
 
-      // --- /api/brain/promote перед загальним /api/brain ---
+      // --- /api/brain/promote перед /api/brain ---
       if (p.startsWith("/api/brain/promote")) {
         try {
           const r = await handleBrainPromote?.(req, env, url);
@@ -163,7 +168,6 @@ export default {
           const r = await handleBrainApi?.(req, env, url);
           if (r) return r;
         } catch {}
-        // дефолти на випадок, якщо модуль нічого не повернув
         if (p === "/api/brain/current" && method === "GET") {
           try {
             const cur = await env.CHECKLIST_KV.get("brain:current");
@@ -192,15 +196,9 @@ export default {
         return json({ ok:false, error:"unknown endpoint" }, 404, CORS);
       }
 
-      // --- selftest ---
+      // --- selftest (власна реалізація без зовнішніх імпортів) ---
       if (p.startsWith("/selftest")) {
-        try {
-          const r = await handleSelfTest?.(req, env, url);
-          if (r) return r;
-        } catch {}
-        // резервний самодіагност
-        const origin = `${url.protocol}//${url.host}`;
-        const res = await runSelfTestFallback(origin, env.WEBHOOK_SECRET);
+        const res = await runSelfTestLocal(req, env);
         return json(res, 200, CORS);
       }
 
@@ -252,7 +250,6 @@ export default {
           const r = await handleTelegramWebhook?.(req, env, url);
           if (r) return r;
         } catch {}
-        // навіть якщо handler впав — повертаємо 200, щоб Telegram не ретраїв нескінченно під час діагностики
         return json({ ok:true, note:"fallback webhook POST" }, 200, CORS);
       }
 
