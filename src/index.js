@@ -198,7 +198,9 @@ function home(env) {
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
-    const p = url.pathname;
+
+    // 🔧 НОРМАЛІЗАЦІЯ ШЛЯХУ: зрізаємо кінцеві слеші
+    const p = (url.pathname || "/").replace(/\/+$/,"") || "/";
 
     try {
       // ---- health ----
