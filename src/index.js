@@ -265,13 +265,19 @@ export default {
 
       // ---- Telegram webhook ----
       if (p === "/webhook") {
+        // Дружня відповідь на GET для self-test та плитки
+        if (req.method === "GET") {
+          return json({ ok: true, method: "GET", message: "webhook alive" });
+        }
         if (req.method === "POST") {
           const sec = req.headers.get("x-telegram-bot-api-secret-token");
           if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
             return json({ ok:false, error:"unauthorized" }, 401);
           }
         }
-        return await handleTelegramWebhook(req, env);
+        // делегуємо реальну логіку (може повернути null, але ми вже дали GET-відповідь вище)
+        const r = await handleTelegramWebhook(req, env, url);
+        if (r) return r;
       }
 
       // ---- Telegram helpers ----
