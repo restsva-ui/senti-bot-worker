@@ -20,12 +20,21 @@ TG_WEBHOOK_SECRET = "senti1984"
 DIAG_TAGS = "on"
 
 # Порядок спроб моделей (fallback зліва направо)
-# Можеш змінити порядок або видалити провайдери, яких немає.
-MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:deepseek/deepseek-chat"
+# Додав резервний провайдер "free:" (OpenAI-compatible).
+MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:deepseek/deepseek-chat, free:gpt-3.5-turbo"
 
 # Необов'язкові дефолти для провайдерів (зручно мати у конфігу)
 GEMINI_MODEL = "gemini-2.5-flash"
 CF_MODEL     = "@cf/meta/llama-3.1-8b-instruct"
+
+# --- OpenAI-compatible (free) провайдер ---
+# Бекенд сумісний з OpenAI API. Якщо ці змінні не задані — провайдер буде пропущено без помилок.
+# FREE_API_BASE_URL радше додай у Dashboard → Variables (не секрет).
+# FREE_API_KEY додай у Dashboard → Secrets (СЕКРЕТ, не класти у toml).
+FREE_API_MODEL = "gpt-3.5-turbo"
+FREE_API_PATH  = "/v1/chat/completions"
+# Приклад (заміни на свій, якщо хочеш задати в toml, але краще через Dashboard):
+# FREE_API_BASE_URL = "https://your-free-endpoint.example.com"
 
 # --- KV bindings ---
 [[kv_namespaces]]
