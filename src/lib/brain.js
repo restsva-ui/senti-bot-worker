@@ -1,28 +1,30 @@
 // src/lib/brain.js
-// "Мозок" Senti: спочатку пробуємо MODEL_ORDER через роутер (Gemini/CF/OpenRouter),
-// далі — прямі фолбеки (Gemini або OpenRouter), і лише тоді — легкий режим.
+// Спершу пробуємо MODEL_ORDER через роутер, далі прямі виклики, і якщо все впало — пояснюємо чому.
 
 import { askAnyModel } from "./modelRouter.js";
 
 const GEMINI_FALLBACK_MODEL = "gemini-1.5-flash-latest";
 
-export async function think(env, userText, systemHint = "") {
+export async function think(env, userText, systemHint = "", opts = {}) {
   const text = String(userText || "").trim();
   if (!text) return "🤖 Дай мені текст або запитання — і я відповім.";
-
   const prompt = systemHint ? `${systemHint}\n\nКористувач: ${text}` : text;
 
-  // ── 1) Якщо задано MODEL_ORDER — пробуємо через роутер
+  // 1) MODEL_ORDER
   if (env.MODEL_ORDER) {
     try {
-      return await askAnyModel(env, prompt, { temperature: 0.4, max_tokens: 1024 });
+      return await askAnyModel(env, prompt, { temperature: 0.4, max_tokens: 1024, ...opts });
     } catch (e) {
-      // переносимо причину у фолбек нижче, але не зупиняємось
-      console.log("Router fail:", e?.status, e?.message);
+      // покажемо зрозуміле пояснення
+      const why = `${e?.message || "router error"}${e?.payload?.errors ? " — " + JSON.stringify(e.payload.errors) : ""}`;
+      return "🧠 Зараз не вдалось відповісти через зовнішню модель.\nПричина: " + why +
+        "\n\nЩо зробити безкоштовно:\n• Увімкни Gemini (GEMINI_API_KEY або GOOGLE_API_KEY)\n" +
+        "• або Cloudflare Workers AI (CF_ACCOUNT_ID + CLOUDFLARE_API_TOKEN).\n" +
+        "• Порядок провайдерів керується MODEL_ORDER (напр.: gemini:gemini-1.5-flash-latest,cf:@cf/meta/llama-3-8b-instruct).";
     }
   }
 
-  // ── 2) Прямий Gemini (якщо є хоча б один ключ)
+  // 2) Прямий Gemini
   const gKey = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
   if (gKey) {
     try {
@@ -38,21 +40,18 @@ export async function think(env, userText, systemHint = "") {
       const j = await r.json();
       const out = j?.candidates?.[0]?.content?.parts?.[0]?.text;
       if (r.ok && out) return out;
-      console.log("Gemini direct fail:", j);
+      return `🧠 Gemini відповів помилкою (${r.status}). ${j?.error?.message || ""}`;
     } catch (e) {
-      console.log("Gemini direct error:", e);
+      return `🧠 Gemini недоступний: ${String(e)}`;
     }
   }
 
-  // ── 3) Прямий OpenRouter як запасний варіант
+  // 3) Прямий OpenRouter
   if (env.OPENROUTER_API_KEY) {
     try {
       const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
-        },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.OPENROUTER_API_KEY}` },
         body: JSON.stringify({
           model: env.OPENROUTER_MODEL || "deepseek/deepseek-chat",
           messages: [{ role: "user", content: prompt }],
@@ -62,18 +61,18 @@ export async function think(env, userText, systemHint = "") {
       const j = await r.json();
       const out = j?.choices?.[0]?.message?.content;
       if (r.ok && out) return out;
-      console.log("OpenRouter direct fail:", j);
+      return `🧠 OpenRouter помилка (${r.status}).`;
     } catch (e) {
-      console.log("OpenRouter direct error:", e);
+      return `🧠 OpenRouter недоступний: ${String(e)}`;
     }
   }
 
-  // ── 4) Легкий режим
+  // 4) Легкий режим
   return (
     "🧠 Поки що я працюю у легкому режимі без зовнішніх моделей.\n" +
     "Безкоштовно увімкнути:\n" +
     "• Додай GEMINI_API_KEY або GOOGLE_API_KEY (AI Studio), або\n" +
-    "• Підключи Cloudflare Workers AI (CF_ACCOUNT_ID + CLOUDFLARE_API_TOKEN) і задай MODEL_ORDER, наприклад:\n" +
-    "  gemini:gemini-1.5-flash-latest,cf:@cf/meta/llama-3-8b-instruct"
+    "• Підключи Cloudflare Workers AI (CF_ACCOUNT_ID + CLOUDFLARE_API_TOKEN)\n" +
+    "  і задай MODEL_ORDER, напр.: gemini:gemini-1.5-flash-latest,cf:@cf/meta/llama-3-8b-instruct"
   );
 }
