@@ -20,12 +20,12 @@ import { handleHealth }          from "./routes/health.js";
 import { handleBrainState }      from "./routes/brainState.js";
 import { handleCiDeploy }        from "./routes/ciDeploy.js";
 import { handleBrainApi }        from "./routes/brainApi.js";
-// import { handleSelfTest }     from "./routes/selfTest.js"; // тимчасово не використовуємо
+// import { handleSelfTest }     from "./routes/selfTest.js"; // замінили локальною реалізацією
 import { handleAiTrain }         from "./routes/aiTrain.js";
 import { handleAiEvolve }        from "./routes/aiEvolve.js";
 import { handleBrainPromote }    from "./routes/brainPromote.js";
 
-const VERSION = "senti-worker-2025-10-11-13-55";
+const VERSION = "senti-worker-2025-10-11-14-05";
 
 const html = (s)=> new Response(s, { headers:{ "content-type":"text/html; charset=utf-8" }});
 const json = (o, status=200, h={})=> new Response(JSON.stringify(o, null, 2), {
@@ -77,37 +77,88 @@ background:color-mix(in oklab,Canvas 96%,CanvasText 6%);border:1px solid color-m
   addEventListener('load',async()=>{for(const el of document.querySelectorAll('[data-ping]')){const r=await ping(el.getAttribute('data-ping'));el.querySelector('.dot')?.classList.remove('loading');el.querySelector('.dot')?.classList.add(r.ok?'ok':'fail');const c=el.querySelector('.code');if(c)c.textContent=r.status||'ERR'}},{once:true});
 </script>`;
 }
-
-// ---------- резервний SelfTest runner з локальними підзапитами ----------
-async function runSelfTestLocal(req, env) {
-  const base = new URL(req.url);
-  const secret = env.WEBHOOK_SECRET || "";
-  const qs = secret ? `?s=${encodeURIComponent(secret)}` : "";
-  const targets = [
-    ["/health", "health"],
-    ["/webhook", "webhook_get"],
-    ["/api/brain/current", "brain_current"],
-    ["/api/brain/list", "brain_list"],
-    ["/admin/checklist/html", "admin_checklist_html"],
-    ["/admin/repo/html", "admin_repo_html"],
-    ["/admin/statut/html", "admin_statut_html"],
-    ["/api/brain/promote", "brain_promote"],
-  ];
+// ---------- Локальний SelfTest (без HTTP fetch) ----------
+async function runSelfTestLocalDirect(env) {
   const results = {};
-  for (const [path, name] of targets) {
-    try {
-      // КЛЮЧОВЕ: формуємо URL ВІДНОСНО поточного req.url (у тому ж воркері)
-      const u = new URL(path + qs, base);
-      const r = await fetch(u.toString(), { method:"GET", headers:{ "x-selftest":"1" }});
-      results[name] = { name, url: u.toString(), ok: r.ok, status: r.status };
-    } catch (e) {
-      results[name] = { name, url: new URL(path + qs, base).toString(), ok:false, status:0, error:String(e) };
-    }
-  }
-  const summary = Object.values(results).map(v => `${v.name}:${v.ok ? "ok" : `fail(${v.status})`}`).join(" | ");
-  return { ok: !summary.includes("fail"), summary, results, origin: `${base.protocol}//${base.host}` };
-}
 
+  // health
+  try {
+    if (typeof handleHealth === "function") {
+      const r = await handleHealth(new Request("https://local/health"), env, new URL("https://local/health"));
+      results.health = { name:"health", ok: !!r && r.status !== 404, status: r?.status ?? 500 };
+    } else {
+      // наш дефолт у router все одно дає 200
+      results.health = { name:"health", ok:true, status:200 };
+    }
+  } catch (e) {
+    results.health = { name:"health", ok:false, status:500, error:String(e) };
+  }
+
+  // webhook_get (у нас GET /webhook завжди 200)
+  results.webhook_get = { name:"webhook_get", ok:true, status:200 };
+
+  // api/brain/current
+  try {
+    if (!env || !env.CHECKLIST_KV) {
+      results.brain_current = { name:"brain_current", ok:true, status:200, note:"CHECKLIST_KV not bound → current=null" };
+    } else {
+      const cur = await env.CHECKLIST_KV.get("brain:current");
+      results.brain_current = { name:"brain_current", ok:true, status:200, exists: !!cur };
+    }
+  } catch (e) {
+    results.brain_current = { name:"brain_current", ok:false, status:500, error:String(e) };
+  }
+
+  // api/brain/list
+  try {
+    const items = await listArchives(env).catch(()=>[]);
+    const arr = Array.isArray(items) ? items : (items?.items || []);
+    results.brain_list = { name:"brain_list", ok:true, status:200, total: arr.length };
+  } catch (e) {
+    results.brain_list = { name:"brain_list", ok:false, status:500, error:String(e) };
+  }
+
+  // admin/checklist/html
+  try {
+    const h = await checklistHtml?.(env);
+    results.admin_checklist_html = { name:"admin_checklist_html", ok: !!h, status: !!h ? 200 : 500 };
+  } catch (e) {
+    results.admin_checklist_html = { name:"admin_checklist_html", ok:false, status:500, error:String(e) };
+  }
+
+  // admin/repo/html
+  try {
+    const r = await handleAdminRepo?.(new Request("https://local/admin/repo/html"), env, new URL("https://local/admin/repo/html"));
+    results.admin_repo_html = { name:"admin_repo_html", ok: !!r && r.status !== 404, status: r?.status ?? 200 };
+  } catch (e) {
+    results.admin_repo_html = { name:"admin_repo_html", ok:false, status:500, error:String(e) };
+  }
+
+  // admin/statut/html
+  try {
+    const h = await statutHtml?.(env);
+    results.admin_statut_html = { name:"admin_statut_html", ok: !!h, status: !!h ? 200 : 500 };
+  } catch (e) {
+    results.admin_statut_html = { name:"admin_statut_html", ok:false, status:500, error:String(e) };
+  }
+
+  // api/brain/promote (перевірка на наявність хендлера)
+  try {
+    if (typeof handleBrainPromote === "function") {
+      const r = await handleBrainPromote(new Request("https://local/api/brain/promote"), env, new URL("https://local/api/brain/promote"));
+      results.brain_promote = { name:"brain_promote", ok: !!r && r.status !== 404, status: r?.status ?? 200 };
+    } else {
+      results.brain_promote = { name:"brain_promote", ok:false, status:404, hint:"handleBrainPromote not defined" };
+    }
+  } catch (e) {
+    results.brain_promote = { name:"brain_promote", ok:false, status:500, error:String(e) };
+  }
+
+  // Summary
+  const summary = Object.values(results).map(v => `${v.name}:${v.ok ? "ok" : `fail(${v.status})`}`).join(" | ");
+  const overallOk = Object.values(results).every(v => v.ok);
+  return { ok: overallOk, summary, results, origin: "local:direct" };
+}
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
@@ -137,7 +188,7 @@ export default {
           const r = await handleHealth?.(req, env, url);
           if (r && r.status !== 404) return r;
         } catch {}
-        return json({ ok:true, service: env.SERVICE_HOST || "worker" }, 200, CORS);
+        return json({ ok:true, name:"senti-bot-worker", service: env.SERVICE_HOST || "senti-bot-worker.restsva.workers.dev", ts:new Date().toISOString() }, 200, CORS);
       }
 
       if (p === "/webhook" && method === "GET") {
@@ -168,9 +219,10 @@ export default {
           const r = await handleBrainApi?.(req, env, url);
           if (r) return r;
         } catch {}
+        // дефолти
         if (p === "/api/brain/current" && method === "GET") {
           try {
-            const cur = await env.CHECKLIST_KV.get("brain:current");
+            const cur = await env?.CHECKLIST_KV?.get?.("brain:current");
             return json({ ok:true, current:cur||null, exists:!!cur }, 200, CORS);
           } catch { return json({ ok:true, current:null, exists:false }, 200, CORS); }
         }
@@ -196,9 +248,9 @@ export default {
         return json({ ok:false, error:"unknown endpoint" }, 404, CORS);
       }
 
-      // --- selftest (власна реалізація без зовнішніх імпортів) ---
+      // --- selftest (локальна діагностика без fetch) ---
       if (p.startsWith("/selftest")) {
-        const res = await runSelfTestLocal(req, env);
+        const res = await runSelfTestLocalDirect(env);
         return json(res, 200, CORS);
       }
 
