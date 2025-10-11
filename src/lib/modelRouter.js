@@ -1,13 +1,12 @@
 // src/lib/modelRouter.js
-// Гнучкий роутер моделей із авто-fallback (Gemini + Cloudflare Workers AI + OpenRouter)
+// Гнучкий роутер моделей із авто-fallback: Gemini + Cloudflare Workers AI + OpenRouter.
 
-const isRetryable = (status) => [408, 409, 425, 429, 500, 502, 503, 504].includes(status);
+const isRetryable = (s) => [408,409,425,429,500,502,503,504].includes(s);
 
 // ── Gemini (Google AI Studio) ────────────────────────────────────────────────
 async function callGemini(env, model, prompt, opts = {}) {
   const apiKey = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY/GOOGLE_API_KEY missing");
-  // простий формат: весь текст у користувацькій ролі
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`;
   const r = await fetch(url, {
     method: "POST",
@@ -21,17 +20,9 @@ async function callGemini(env, model, prompt, opts = {}) {
     }),
   });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) {
-    const err = new Error(`gemini ${model} ${r.status}`);
-    err.status = r.status; err.payload = j;
-    throw err;
-  }
+  if (!r.ok) { const e = new Error(`gemini ${model} ${r.status}`); e.status=r.status; e.payload=j; throw e; }
   const out = j?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-  if (!out) {
-    const err = new Error(`gemini empty`);
-    err.status = 502; err.payload = j;
-    throw err;
-  }
+  if (!out) { const e = new Error("gemini empty"); e.status=502; e.payload=j; throw e; }
   return out;
 }
 
@@ -52,13 +43,9 @@ async function callOpenRouter(env, model, prompt, opts = {}) {
       max_tokens: opts.max_tokens ?? 1024,
     }),
   });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) {
-    const err = new Error(`openrouter ${model} ${r.status}`);
-    err.status = r.status; err.payload = data;
-    throw err;
-  }
-  return data?.choices?.[0]?.message?.content ?? "";
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(`openrouter ${model} ${r.status}`); e.status=r.status; e.payload=j; throw e; }
+  return j?.choices?.[0]?.message?.content ?? "";
 }
 
 // ── Cloudflare Workers AI ────────────────────────────────────────────────────
@@ -76,68 +63,34 @@ async function callCloudflareAI(env, model, prompt, opts = {}) {
       max_tokens: opts.max_tokens ?? 1024,
     }),
   });
-  const data = await r.json().catch(() => ({}));
-  // CF іноді повертає success=false навіть із 200 — страхуємось
-  if (!r.ok || data.success === false) {
-    const status = r.status || 500;
-    const err = new Error(`cf ${model} ${status}`);
-    err.status = status; err.payload = data;
-    throw err;
-  }
-  const msg =
-    data?.result?.response ??
-    data?.result?.choices?.[0]?.message?.content ??
-    "";
-  if (!msg) {
-    const err = new Error(`cf empty`);
-    err.status = 502; err.payload = data;
-    throw err;
-  }
-  return msg;
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.success === false) { const e = new Error(`cf ${model} ${r.status || 500}`); e.status=r.status||500; e.payload=j; throw e; }
+  const out = j?.result?.response ?? j?.result?.choices?.[0]?.message?.content ?? "";
+  if (!out) { const e = new Error("cf empty"); e.status=502; e.payload=j; throw e; }
+  return out;
 }
 
 /**
- * env.MODEL_ORDER — кома-розділений список провайдерів:
- *   "gemini:<modelId>,cf:<modelId>,openrouter:<modelId>"
- * приклади:
- *   gemini:gemini-1.5-flash-latest,cf:@cf/meta/llama-3-8b-instruct,openrouter:deepseek/deepseek-chat
+ * env.MODEL_ORDER — "gemini:<id>,cf:<id>,openrouter:<id>"
+ * приклад: gemini:gemini-1.5-flash-latest,cf:@cf/meta/llama-3-8b-instruct
  */
 export async function askAnyModel(env, prompt, opts = {}) {
   const order = String(env.MODEL_ORDER || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (order.length === 0) throw new Error("MODEL_ORDER is empty");
-
+    .split(",").map(s => s.trim()).filter(Boolean);
+  if (!order.length) throw new Error("MODEL_ORDER is empty");
   let lastErr = null;
+
   for (const entry of order) {
     const [provider, ...rest] = entry.split(":");
-    const model = rest.join(":"); // зберігаємо повний id
-
+    const model = rest.join(":");
     try {
-      if (provider === "gemini") return await callGemini(env, model, prompt, opts);
-
-      if (provider === "cf") {
-        if (!env.CF_ACCOUNT_ID || !env.CLOUDFLARE_API_TOKEN)
-          throw new Error("CF creds missing");
-        return await callCloudflareAI(env, model, prompt, opts);
-      }
-
-      if (provider === "openrouter") {
-        if (!env.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY missing");
-        return await callOpenRouter(env, model, prompt, opts);
-      }
-
-      // невідомий провайдер — не стопоримо цикл
-      const err = new Error(`Unknown provider: ${provider}`);
-      err.status = 400;
-      throw err;
+      if (provider === "gemini")  return await callGemini(env, model, prompt, opts);
+      if (provider === "cf")      return await callCloudflareAI(env, model, prompt, opts);
+      if (provider === "openrouter") return await callOpenRouter(env, model, prompt, opts);
+      const e = new Error(`Unknown provider: ${provider}`); e.status=400; throw e;
     } catch (e) {
       lastErr = e;
-      // неретріємі коди — все одно рухаємось далі до наступної моделі
-      if (!isRetryable(e.status || 0)) {
-        // просто пропускаємо на наступну
-      }
+      if (!isRetryable(e.status || 0)) { /* йдемо далі */ }
     }
   }
   throw lastErr || new Error("All models failed");
