@@ -156,8 +156,8 @@ export async function think(env, userText, systemHint = "") {
   const text = String(userText || "").trim();
   if (!text) return "🤖 Дай мені текст або запитання — і я відповім.";
 
-  // прапорець діагностики: DIAG_TAGS=off — вимкнути
-  const showTag = String(env.DIAG_TAGS || "").toLowerCase() !== "off";
+  // 🚀 Примусово вмикаємо діагностичні теги (ігноруємо DIAG_TAGS env)
+  const showTag = true;
 
   // 1) Gemini (AI Studio key)
   const GEMINI_KEY = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
