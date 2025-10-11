@@ -20,18 +20,19 @@ TG_WEBHOOK_SECRET = "senti1984"
 DIAG_TAGS = "on"
 
 # --- Порядок fallback-моделей ---
-# fallback зліва направо. Якщо попередня модель не відповіла — переходить далі.
-MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:deepseek/deepseek-chat, free:deepseek-chat"
+# Зліва направо: якщо попередня не відповіла — йдемо далі.
+MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:deepseek/deepseek-chat, free:meta-llama/llama-4-scout:free"
 
-# --- Дефолтні моделі ---
+# --- Дефолтні моделі (необов'язково) ---
 GEMINI_MODEL = "gemini-2.5-flash"
 CF_MODEL     = "@cf/meta/llama-3.1-8b-instruct"
 
-# --- OpenAI-compatible fallback (FreeLLM / DeepSeek) ---
-# Якщо інші моделі не працюють — запит іде сюди.
-# ❗FREE_API_KEY додається тільки у Dashboard → Secrets
-FREE_API_BASE_URL = "https://api.deepseek.com"
-FREE_API_MODEL    = "deepseek-chat"
+# --- OpenAI-compatible fallback (через OpenRouter) ---
+# Якщо інші моделі недоступні — запит піде сюди.
+# Обов'язково додай у Dashboard → Secrets:
+#   FREE_API_KEY = <твій OpenRouter API ключ>
+FREE_API_BASE_URL = "https://openrouter.ai/api"
+FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
 FREE_API_PATH     = "/v1/chat/completions"
 
 # --- KV bindings ---
