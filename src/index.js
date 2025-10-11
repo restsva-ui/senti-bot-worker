@@ -25,6 +25,9 @@ import { handleAiTrain }         from "./routes/aiTrain.js";
 import { handleAiEvolve }        from "./routes/aiEvolve.js";
 import { handleBrainPromote }    from "./routes/brainPromote.js";
 
+// 🔹 нове: виносимо home в окремий модуль
+import { home } from "./ui/home.js";
+
 const VERSION = "senti-worker-2025-10-11-14-05";
 
 const html = (s)=> new Response(s, { headers:{ "content-type":"text/html; charset=utf-8" }});
@@ -39,44 +42,6 @@ const CORS = {
   "access-control-allow-headers": "Content-Type,Authorization,x-telegram-bot-api-secret-token"
 };
 
-// ---------- small UI ----------
-function home(env){
-  const s = encodeURIComponent(env.WEBHOOK_SECRET || "");
-  const link  = (path) => abs(env, path);
-  const linkS = (path) => abs(env, `${path}${path.includes("?") ? "&" : "?"}s=${s}`);
-  return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Senti Worker</title>
-<style>:root{color-scheme:light dark}body{margin:16px;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,sans-serif;line-height:1.35}
-.grid{display:grid;gap:10px;grid-template-columns:repeat(2,minmax(0,1fr))}@media(min-width:720px){.grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
-a.btn{position:relative;display:flex;gap:10px;align-items:center;min-height:56px;padding:12px 14px;border-radius:14px;text-decoration:none;color:inherit;
-background:color-mix(in oklab,Canvas 96%,CanvasText 6%);border:1px solid color-mix(in oklab,CanvasText 20%,Canvas 80%)}
-.dot{position:absolute;top:8px;right:8px;width:10px;height:10px;border-radius:50%;background:color-mix(in oklab,CanvasText 35%,Canvas 65%)}
-.dot.loading{animation:pulse 1s infinite}.dot.ok{background:#22c55e}.dot.fail{background:#ef4444}@keyframes pulse{0%,100%{opacity:.55}50%{opacity:1}}
-.code{position:absolute;bottom:8px;right:10px;font:11px ui-monospace,monospace;opacity:.65}
-</style>
-<header><div>⚙️</div><h1>Senti Worker Active</h1></header>
-<p><small>Service: ${env.SERVICE_HOST || ""}</small></p>
-<p>${env.WEBHOOK_SECRET ? "✅ Webhook secret застосовано — внутрішні перевірки будуть авторизовані." : "⚠️ Не задано WEBHOOK_SECRET — деякі перевірки можуть повертати 401/404."}</p>
-<div class="grid">
-  <a class="btn" data-ping="${linkS("/health")}" href="${link("/health")}"><span class="dot loading"></span><span class="code"></span>✅ <b>Health</b></a>
-  <a class="btn" data-ping="${linkS("/webhook")}" href="${link("/webhook")}"><span class="dot loading"></span><span class="code"></span>📡 <b>Webhook</b></a>
-  <a class="btn" data-ping="${linkS("/selftest/run")}" href="${linkS("/selftest/run")}"><span class="dot loading"></span><span class="code"></span>🧪 <b>SelfTest</b></a>
-  <a class="btn" data-ping="${linkS("/admin/checklist/html")}" href="${linkS("/admin/checklist/html")}"><span class="dot loading"></span><span class="code"></span>📋 <b>Checklist</b></a>
-  <a class="btn" data-ping="${linkS("/admin/repo/html")}" href="${linkS("/admin/repo/html")}"><span class="dot loading"></span><span class="code"></span>📚 <b>Repo/Архів</b></a>
-  <a class="btn" data-ping="${linkS("/admin/statut/html")}" href="${linkS("/admin/statut/html")}"><span class="dot loading"></span><span class="code"></span>📜 <b>Statut</b></a>
-  <a class="btn" data-ping="${linkS("/api/brain/current")}" href="${link("/api/brain/current")}"><span class="dot loading"></span><span class="code"></span>🧠 <b>Brain: current</b></a>
-  <a class="btn" data-ping="${linkS("/api/brain/list")}" href="${linkS("/api/brain/list")}"><span class="dot loading"></span><span class="code"></span>🗂️ <b>Brain: list</b></a>
-  <a class="btn" data-ping="${linkS("/brain/state")}" href="${link("/brain/state")}"><span class="dot loading"></span><span class="code"></span>🧩 <b>Brain state</b></a>
-  <a class="btn" href="${linkS("/ai/train/analyze")}">🤖 <b>AI-Train: Analyze</b></a>
-  <a class="btn" href="${linkS("/ai/train/auto")}">⚙️ <b>AI-Train: Auto</b></a>
-  <a class="btn" href="${linkS("/ai/evolve/run")}">🔁 <b>AI-Evolve</b></a>
-  <a class="btn" href="${linkS("/ai/evolve/auto")}">🚀 <b>AI-Evolve Auto</b></a>
-</div>
-<script>
-  async function ping(u){try{const r=await fetch(u);return{ok:r.ok,status:r.status}}catch{return{ok:false,status:0}}}
-  addEventListener('load',async()=>{for(const el of document.querySelectorAll('[data-ping]')){const r=await ping(el.getAttribute('data-ping'));el.querySelector('.dot')?.classList.remove('loading');el.querySelector('.dot')?.classList.add(r.ok?'ok':'fail');const c=el.querySelector('.code');if(c)c.textContent=r.status||'ERR'}},{once:true});
-</script>`;
-}
 // ---------- Локальний SelfTest (без HTTP fetch) ----------
 async function runSelfTestLocalDirect(env) {
   const results = {};
@@ -159,6 +124,7 @@ async function runSelfTestLocalDirect(env) {
   const overallOk = Object.values(results).every(v => v.ok);
   return { ok: overallOk, summary, results, origin: "local:direct" };
 }
+
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
