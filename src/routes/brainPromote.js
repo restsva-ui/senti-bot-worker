@@ -27,7 +27,7 @@ async function resolveKey(req, env, url) {
   if (key) return { key, source: "provided" };
 
   // 2) поінтер “current”
-  const current = await env.CHECKLIST_KV.get(CUR_KEY);
+  const current = await env.CCHECKLIST_KV?.get?.(CUR_KEY) || await env.CHECKLIST_KV.get(CUR_KEY);
   if (current) return { key: current, source: "current" };
 
   // 3) найновіший з історії
@@ -38,7 +38,8 @@ async function resolveKey(req, env, url) {
 }
 
 export async function handleBrainPromote(req, env, url) {
-  if (!url.pathname.startsWith("/api/brain/promote")) return null;
+  const p = (url.pathname || "/").replace(/\/+$/,"");
+  if (!p.startsWith("/api/brain/promote")) return null;
 
   // допускаємо CORS preflight
   if (req.method === "OPTIONS") {
