@@ -1,5 +1,5 @@
 // src/routes/brainApi.js
-import { listArchives, appendChecklist, getArchive } from "../lib/kvChecklist.js";
+import { listArchives, getArchive } from "../lib/kvChecklist.js";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 const json = (o, status = 200, extraHeaders = {}) =>
@@ -47,13 +47,12 @@ export async function handleBrainApi(req, env, url) {
     return json({ ok: true, current, exists: !!current }, 200, cors.base);
   }
 
-  // GET /api/brain/list — перелік архівів (для зручного вибору)
-  // (залишаємо під секретом, як у твоєму варіанті)
+  // GET /api/brain/list — перелік архівів (під секретом)
   if (p === "/api/brain/list" && req.method === "GET") {
     if (needSecret(env, url)) {
       return json({ ok: false, error: "unauthorized" }, 401, cors.base);
     }
-    const keys = await listArchives(env);
+    const keys = await listArchives(env); // повертає масив
     return json({ ok: true, total: keys.length, items: keys }, 200, cors.base);
   }
 
@@ -77,29 +76,6 @@ export async function handleBrainApi(req, env, url) {
         "content-disposition": `attachment; filename="${key.split("/").pop()}"`,
       },
     });
-  }
-
-  // /api/brain/promote — зробити архів “актуальним”
-  //  • підтримує: POST (body: {key}) і GET (?key=...)
-  if (p === "/api/brain/promote" && (req.method === "POST" || req.method === "GET")) {
-    if (needSecret(env, url)) {
-      return json({ ok: false, error: "unauthorized" }, 401, cors.base);
-    }
-
-    let key = url.searchParams.get("key");
-    if (req.method === "POST" && !key) {
-      try {
-        const body = await req.json();
-        key = body?.key;
-      } catch {
-        // ignore
-      }
-    }
-    if (!key) return json({ ok: false, error: "key required" }, 400, cors.base);
-
-    await env.CHECKLIST_KV.put(CUR_KEY, key);
-    await appendChecklist(env, `promote: ${key}`);
-    return json({ ok: true, promoted: key }, 200, cors.base);
   }
 
   // Якщо шлях починається з /api/brain — чіткий 404
