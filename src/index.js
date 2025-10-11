@@ -31,17 +31,13 @@ import { handleBrainPromote } from "./routes/brainPromote.js";
 // ✅ локальний selftest
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
 
-// ✅ фолбеки /api/brain/*
-import {
-  fallbackBrainCurrent,
-  fallbackBrainList,
-  fallbackBrainGet,
-} from "./routes/brainFallbacks.js";
+// ✅ фолбеки /api/brain/*  (в один рядок — сумісність зі старим Wrangler)
+import { fallbackBrainCurrent, fallbackBrainList, fallbackBrainGet } from "./routes/brainFallbacks.js";
 
 // home винесено в окремий модуль
 import { home } from "./ui/home.js";
 
-const VERSION = "senti-worker-2025-10-11-14-20";
+const VERSION = "senti-worker-2025-10-11-14-22";
 
 export default {
   async fetch(req, env) {
