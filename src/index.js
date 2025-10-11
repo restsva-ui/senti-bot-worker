@@ -1,4 +1,6 @@
 // src/index.js
+// export const compatibilityDate = "2024-09-25";
+
 import { TG } from "./lib/tg.js";
 import { putUserTokens } from "./lib/userDrive.js";
 import {
@@ -28,11 +30,11 @@ const json = (o, status=200, h={})=> new Response(JSON.stringify(o, null, 2), {
   status, headers:{ "content-type":"application/json; charset=utf-8", ...h }
 });
 
-// CORS preflight headers (використаємо для OPTIONS)
+// CORS preflight headers
 const CORS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET,HEAD,POST,OPTIONS",
-  "access-control-allow-headers": "Content-Type,Authorization"
+  "access-control-allow-headers": "Content-Type,Authorization,x-telegram-bot-api-secret-token"
 };
 
 // ---------- small UI ----------
@@ -74,6 +76,31 @@ background:color-mix(in oklab,Canvas 96%,CanvasText 6%);border:1px solid color-m
 </script>`;
 }
 
+// ---------- резервний SelfTest runner (на випадок, якщо модуль не підключився) ----------
+async function runSelfTestFallback(origin, secret) {
+  const qs = secret ? `?s=${encodeURIComponent(secret)}` : "";
+  const targets = [
+    ["/health", "health"],
+    ["/webhook", "webhook_get"],
+    ["/api/brain/current", "brain_current"],
+    ["/api/brain/list", "brain_list"],
+    ["/admin/checklist/html", "admin_checklist_html"],
+    ["/admin/repo/html", "admin_repo_html"],
+    ["/admin/statut/html", "admin_statut_html"],
+  ];
+  const results = {};
+  for (const [p, name] of targets) {
+    try {
+      const r = await fetch(origin + p + qs, { method: "GET" });
+      results[name] = { name, url: origin + p + qs, ok: r.ok, status: r.status };
+    } catch (e) {
+      results[name] = { name, url: origin + p + qs, ok: false, status: 0, error: String(e) };
+    }
+  }
+  const summary = Object.values(results).map(v => `${v.name}:${v.ok ? "ok" : `fail(${v.status})`}`).join(" | ");
+  return { ok: !summary.includes("fail"), summary, results };
+}
+
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
@@ -94,8 +121,10 @@ export default {
       if (p === "/") return html(home(env));
 
       if (p === "/health") {
-        const r = await handleHealth?.(req, env, url);
-        if (r && r.status !== 404) return r;
+        try {
+          const r = await handleHealth?.(req, env, url);
+          if (r && r.status !== 404) return r;
+        } catch {}
         return json({ ok:true, service: env.SERVICE_HOST || "worker" }, 200, CORS);
       }
 
@@ -106,27 +135,34 @@ export default {
 
       // --- brain state ---
       if (p === "/brain/state") {
-        const r = await handleBrainState?.(req, env, url);
-        if (r && r.status !== 404) return r;
+        try {
+          const r = await handleBrainState?.(req, env, url);
+          if (r && r.status !== 404) return r;
+        } catch {}
         return json({ ok:true, state:"available" }, 200, CORS);
       }
 
       // --- /api/brain/promote перед загальним /api/brain ---
       if (p.startsWith("/api/brain/promote")) {
-        const r = await handleBrainPromote?.(req, env, url);
-        if (r) return r;
-        return json({ ok:false, error:"promote handler missing" }, 404, CORS);
+        try {
+          const r = await handleBrainPromote?.(req, env, url);
+          if (r) return r;
+        } catch {}
+        return json({ ok:true, promoted:false, note:"promote handler missing" }, 200, CORS);
       }
 
       // --- /api/brain/* ---
       if (p.startsWith("/api/brain")) {
-        const r = await handleBrainApi?.(req, env, url);
-        if (r) return r;
-
+        try {
+          const r = await handleBrainApi?.(req, env, url);
+          if (r) return r;
+        } catch {}
         // дефолти на випадок, якщо модуль нічого не повернув
         if (p === "/api/brain/current" && method === "GET") {
-          const cur = await env.CHECKLIST_KV.get("brain:current");
-          return json({ ok:true, current:cur||null, exists:!!cur }, 200, CORS);
+          try {
+            const cur = await env.CHECKLIST_KV.get("brain:current");
+            return json({ ok:true, current:cur||null, exists:!!cur }, 200, CORS);
+          } catch { return json({ ok:true, current:null, exists:false }, 200, CORS); }
         }
         if (p === "/api/brain/list" && method === "GET") {
           const items = await listArchives(env).catch(()=>[]);
@@ -136,7 +172,7 @@ export default {
         if (p === "/api/brain/get" && method === "GET") {
           const key = url.searchParams.get("key");
           if (!key) return json({ ok:false, error:"key required" }, 400, CORS);
-          const b64 = await getArchive(env, key);
+          const b64 = await getArchive(env, key).catch(()=>null);
           if (!b64) return json({ ok:false, error:"not found" }, 404, CORS);
           const bin = Uint8Array.from(atob(b64), c=>c.charCodeAt(0));
           return new Response(bin, {
@@ -152,46 +188,66 @@ export default {
 
       // --- selftest ---
       if (p.startsWith("/selftest")) {
-        const r = await handleSelfTest?.(req, env, url);
-        if (r) return r;
-        return json({ ok:false, error:"selftest handler not found" }, 404, CORS);
+        try {
+          const r = await handleSelfTest?.(req, env, url);
+          if (r) return r;
+        } catch {}
+        // резервний самодіагност
+        const origin = `${url.protocol}//${url.host}`;
+        const res = await runSelfTestFallback(origin, env.WEBHOOK_SECRET);
+        return json(res, 200, CORS);
       }
 
       // --- ai ---
-      if (p.startsWith("/ai/train"))  { const r = await handleAiTrain?.(req, env, url);  if (r) return r; }
-      if (p.startsWith("/ai/evolve")) { const r = await handleAiEvolve?.(req, env, url); if (r) return r; }
+      if (p.startsWith("/ai/train"))  {
+        try { const r = await handleAiTrain?.(req, env, url); if (r) return r; } catch {}
+      }
+      if (p.startsWith("/ai/evolve")) {
+        try { const r = await handleAiEvolve?.(req, env, url); if (r) return r; } catch {}
+      }
 
       // --- admin (фолбеки замість 404) ---
       if (p.startsWith("/admin/checklist")) {
-        const r = await handleAdminChecklist?.(req, env, url);
-        if (r && r.status !== 404) return r;
+        try {
+          const r = await handleAdminChecklist?.(req, env, url);
+          if (r && r.status !== 404) return r;
+        } catch {}
         return html(await checklistHtml?.(env).catch(()=>"<h3>Checklist</h3>"));
       }
       if (p.startsWith("/admin/repo") || p.startsWith("/admin/archive")) {
-        const r = await handleAdminRepo?.(req, env, url);
-        if (r && r.status !== 404) return r;
+        try {
+          const r = await handleAdminRepo?.(req, env, url);
+          if (r && r.status !== 404) return r;
+        } catch {}
         return html(`<h3>Repo / Архів</h3><p>Fallback UI.</p>`);
       }
       if (p.startsWith("/admin/statut")) {
-        const r = await handleAdminStatut?.(req, env, url);
-        if (r && r.status !== 404) return r;
+        try {
+          const r = await handleAdminStatut?.(req, env, url);
+          if (r && r.status !== 404) return r;
+        } catch {}
         return html(await statutHtml?.(env).catch(()=>"<h3>Statut</h3>"));
       }
       if (p.startsWith("/admin/brain")) {
-        const r = await handleAdminBrain?.(req, env, url);
-        if (r && r.status !== 404) return r;
+        try {
+          const r = await handleAdminBrain?.(req, env, url);
+          if (r && r.status !== 404) return r;
+        } catch {}
         return json({ ok:true, note:"admin brain fallback" }, 200, CORS);
       }
 
       // --- webhook POST ---
       if (p === "/webhook" && req.method === "POST") {
-        const sec = req.headers.get("x-telegram-bot-api-secret-token");
-        if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
-          return json({ ok:false, error:"unauthorized" }, 401, CORS);
-        }
-        const r = await handleTelegramWebhook?.(req, env, url);
-        if (r) return r;
-        return json({ ok:true }, 200, CORS);
+        try {
+          const sec = req.headers.get("x-telegram-bot-api-secret-token");
+          if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
+            return json({ ok:false, error:"unauthorized" }, 401, CORS);
+          }
+          const r = await handleTelegramWebhook?.(req, env, url);
+          if (r) return r;
+        } catch {}
+        // навіть якщо handler впав — повертаємо 200, щоб Telegram не ретраїв нескінченно під час діагностики
+        return json({ ok:true, note:"fallback webhook POST" }, 200, CORS);
       }
 
       // --- tg helpers ---
@@ -212,8 +268,10 @@ export default {
 
       // --- ci deploy ---
       if (p.startsWith("/ci/deploy-note")) {
-        const r = await handleCiDeploy?.(req, env, url);
-        if (r) return r;
+        try {
+          const r = await handleCiDeploy?.(req, env, url);
+          if (r) return r;
+        } catch {}
         return json({ ok:true }, 200, CORS);
       }
 
@@ -260,7 +318,8 @@ export default {
       }
 
       // --- not found ---
-      return json({ ok:false, error:"Not found" }, 404, CORS);
+      try { await appendChecklist(env, `[miss] ${new Date().toISOString()} ${req.method} ${p}${url.search}`); } catch {}
+      return json({ ok:false, error:"Not found", path:p }, 404, CORS);
 
     } catch (e) {
       return json({ ok:false, error:String(e) }, 500, CORS);
