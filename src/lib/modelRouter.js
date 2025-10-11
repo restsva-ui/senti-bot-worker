@@ -1,103 +1,36 @@
-// src/lib/modelRouter.js
-// Гнучкий роутер моделей із авто-fallback (OpenRouter + Cloudflare Workers AI + Gemini)
+// Гнучкий роутер моделей із авто-fallback (Gemini + OpenRouter + Cloudflare Workers AI).
 
-const isRetryable = (status) =>
-  [408, 409, 425, 429, 500, 502, 503, 504].includes(status);
+const RETRYABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+const isRetryable = (s) => RETRYABLE.has(Number(s || 0));
 
-/* ----------------------------- OpenRouter ------------------------------ */
-async function callOpenRouter(env, model, prompt, opts = {}) {
-  const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": env.SERVICE_HOST || "https://workers.dev",
-      "X-Title": "SentiBot",
-    },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: "user", content: prompt }],
-      temperature: opts.temperature ?? 0.4,
-      max_tokens: opts.max_tokens ?? 1024,
-    }),
-  });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) {
-    const err = new Error(
-      `OpenRouter(${model}) HTTP ${r.status}${
-        data?.error ? `: ${data.error?.message || data.error}` : ""
-      }`
-    );
-    err.status = r.status;
-    err.payload = data;
-    throw err;
-  }
-  return data?.choices?.[0]?.message?.content ?? "";
+/** Нормалізація назв моделей Gemini до v1 */
+function normalizeGemini(model) {
+  const m = String(model || "").trim();
+  // дозволяємо "gemini-1.5-flash-latest" тощо — зведемо до v1 назв
+  return m
+    .replace(/-latest$/i, "")
+    .replace(/^google\/|^gemini\//i, ""); // на випадок сторонніх префіксів
 }
 
-/* --------------------------- Cloudflare AI ----------------------------- */
-async function callCloudflareAI(env, model, prompt, opts = {}) {
-  // приклад model: "@cf/meta/llama-3-8b-instruct"
-  const url = `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/ai/run/${encodeURIComponent(
-    model
-  )}`;
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      messages: [{ role: "user", content: prompt }],
-      temperature: opts.temperature ?? 0.4,
-      max_tokens: opts.max_tokens ?? 1024,
-    }),
-  });
-  const data = await r.json().catch(() => ({}));
-  // У Workers AI, коли модель недоступна/неактивна — часто 400 "No route for that URI"
-  if (!r.ok || data.success === false) {
-    const status = r.status || 500;
-    const msg =
-      data?.errors?.[0]?.message ||
-      data?.messages?.[0] ||
-      data?.error ||
-      "Unknown error";
-    const err = new Error(`CloudflareAI(${model}) HTTP ${status}: ${msg}`);
-    err.status = status;
-    err.payload = data;
-    throw err;
-  }
-  // різні моделі повертають різні форми — нормалізуємо
-  return (
-    data?.result?.response ||
-    data?.result?.output_text ||
-    data?.result?.choices?.[0]?.message?.content ||
-    ""
-  );
-}
-
-/* -------------------------------- Gemini ------------------------------- */
-// Підтримуємо і GEMINI_API_KEY, і GOOGLE_API_KEY (AI Studio)
 async function callGemini(env, model, prompt, opts = {}) {
-  const key = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
-  if (!key) throw new Error("Gemini API key missing");
+  const apiKey = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_API_KEY/GOOGLE_API_KEY missing");
 
-  // Дозволяємо кілька поширених назв
-  // "gemini-1.5-flash-latest", "gemini-1.5-flash", "1.5-flash"
-  const norm =
-    model?.trim() ||
-    "gemini-1.5-flash-latest";
+  const mdl = normalizeGemini(model || "gemini-1.5-flash");
+  const url = `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(
+    mdl
+  )}:generateContent?key=${apiKey}`;
 
-  const modelId = norm.includes("gemini")
-    ? norm
-    : `gemini-${norm}`;
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-    modelId
-  )}:generateContent?key=${key}`;
-
+  // system передаємо як перший префікс у контенті (Gemini v1 не має явного role=system)
+  const sys = opts.system ? String(opts.system) : "";
+  const user = String(prompt || "");
   const body = {
-    contents: [{ role: "user", parts: [{ text: String(prompt || "") }] }],
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: sys ? `${sys}\n\n${user}` : user }],
+      },
+    ],
     generationConfig: {
       temperature: opts.temperature ?? 0.4,
       maxOutputTokens: opts.max_tokens ?? 1024,
@@ -109,24 +42,93 @@ async function callGemini(env, model, prompt, opts = {}) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const j = await r.json().catch(() => ({}));
+  const data = await r.json().catch(() => ({}));
+
   if (!r.ok) {
-    const msg =
-      j?.error?.message ||
-      j?.error?.status ||
-      "Gemini request failed";
-    const err = new Error(`Gemini(${modelId}) HTTP ${r.status}: ${msg}`);
+    const err = new Error(`gemini ${mdl} ${r.status}`);
     err.status = r.status;
-    err.payload = j;
+    err.payload = data;
     throw err;
   }
-  return j?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  const out =
+    data?.candidates?.[0]?.content?.parts?.map((p) => p?.text || "").join("") ||
+    data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+    "";
+  return out;
 }
 
-/* ------------------------------- ROUTER -------------------------------- */
+async function callOpenRouter(env, model, prompt, opts = {}) {
+  const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": env.SERVICE_HOST || "https://workers.dev",
+      "X-Title": "SentiBot",
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        ...(opts.system ? [{ role: "system", content: String(opts.system) }] : []),
+        { role: "user", content: String(prompt || "") },
+      ],
+      temperature: opts.temperature ?? 0.4,
+      max_tokens: opts.max_tokens ?? 1024,
+    }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(`openrouter ${model} ${r.status}`);
+    err.status = r.status;
+    err.payload = data;
+    throw err;
+  }
+  return data?.choices?.[0]?.message?.content ?? "";
+}
+
+async function callCloudflareAI(env, model, prompt, opts = {}) {
+  if (!env.CF_ACCOUNT_ID || !env.CLOUDFLARE_API_TOKEN) throw new Error("CF creds missing");
+
+  const url = `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/ai/run/${encodeURIComponent(
+    model
+  )}`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messages: [
+        ...(opts.system ? [{ role: "system", content: String(opts.system) }] : []),
+        { role: "user", content: String(prompt || "") },
+      ],
+      temperature: opts.temperature ?? 0.4,
+      max_tokens: opts.max_tokens ?? 1024,
+    }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok || data.success === false) {
+    const status = r.status || 500;
+    const err = new Error(`cf ${model} ${status}`);
+    err.status = status;
+    err.payload = data;
+    throw err;
+  }
+  // у CF залежить від моделі:
+  const msg =
+    data?.result?.response ??
+    data?.result?.choices?.[0]?.message?.content ??
+    data?.result?.text ??
+    "";
+  return msg;
+}
+
 /**
- * env.MODEL_ORDER — кома-розділений список у форматі:
- *   "gemini:gemini-1.5-flash-latest,cf:@cf/meta/llama-3-8b-instruct,openrouter:deepseek/deepseek-chat"
+ * env.MODEL_ORDER — кома-розділений список: "gemini:<id>,cf:<id>,openrouter:<id>"
+ * Приклади:
+ *   gemini:gemini-1.5-flash,cf:@cf/meta/llama-3-8b-instruct
+ *   gemini:gemini-1.5-flash-8b,openrouter:deepseek/deepseek-chat
  */
 export async function askAnyModel(env, prompt, opts = {}) {
   const order = String(env.MODEL_ORDER || "")
@@ -134,35 +136,28 @@ export async function askAnyModel(env, prompt, opts = {}) {
     .map((s) => s.trim())
     .filter(Boolean);
 
-  if (order.length === 0) {
-    throw new Error("MODEL_ORDER is empty");
-  }
+  if (order.length === 0) throw new Error("MODEL_ORDER is empty");
 
   let lastErr = null;
-
   for (const entry of order) {
     const [provider, ...rest] = entry.split(":");
-    const model = rest.join(":"); // у деяких id є двокрапки
+    const model = rest.join(":");
 
     try {
+      if (provider === "gemini") return await callGemini(env, model, prompt, opts);
       if (provider === "openrouter") {
         if (!env.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY missing");
         return await callOpenRouter(env, model, prompt, opts);
       }
-      if (provider === "cf") {
-        if (!env.CF_ACCOUNT_ID || !env.CLOUDFLARE_API_TOKEN)
-          throw new Error("CF creds missing");
-        return await callCloudflareAI(env, model, prompt, opts);
-      }
-      if (provider === "gemini") {
-        return await callGemini(env, model, prompt, opts);
-      }
+      if (provider === "cf") return await callCloudflareAI(env, model, prompt, opts);
       throw new Error(`Unknown provider: ${provider}`);
     } catch (e) {
       lastErr = e;
-      // продовжуємо на наступну модель; повторні спроби не робимо, щоб не блокувати чат
+      // неретрійна — одразу до наступної; ретрійна — теж просто пробуємо іншу модель
+      if (!isRetryable(e.status)) {
+        // no-op, рухаємося далі
+      }
     }
   }
-
   throw lastErr || new Error("All models failed");
 }
