@@ -37,7 +37,7 @@ import { fallbackBrainCurrent, fallbackBrainList, fallbackBrainGet } from "./rou
 // home винесено в окремий модуль
 import { home } from "./ui/home.js";
 
-const VERSION = "senti-worker-2025-10-11-14-22";
+const VERSION = "senti-worker-2025-10-11-16-52";
 
 export default {
   async fetch(req, env) {
@@ -137,6 +137,25 @@ export default {
       if (p.startsWith("/selftest")) {
         const res = await runSelfTestLocalDirect(env);
         return json(res, 200, CORS);
+      }
+
+      // --- cron evolve (ручний тригер авто-еволюції) ---
+      if (p === "/cron/evolve") {
+        // тільки GET/POST
+        if (req.method !== "GET" && req.method !== "POST") {
+          return json({ ok: false, error: "method not allowed" }, 405, CORS);
+        }
+        // вимога секрету (якщо налаштований)
+        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
+          return json({ ok: false, error: "unauthorized" }, 401, CORS);
+        }
+        // викликаємо локально /ai/evolve/auto
+        const u = new URL(abs(env, "/ai/evolve/auto"));
+        if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
+        const innerReq = new Request(u.toString(), { method: "GET" });
+        const r = await handleAiEvolve?.(innerReq, env, u);
+        if (r) return r;
+        return json({ ok: true, note: "evolve triggered" }, 200, CORS);
       }
 
       // --- ai ---
