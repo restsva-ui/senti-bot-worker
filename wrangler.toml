@@ -3,9 +3,9 @@ main = "src/index.js"
 compatibility_date = "2024-09-25"
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
 
-# --- CRONs: heartbeat кожні 15 хв + автоеволюція щогодини ---
+# --- CRONs: heartbeat кожні 15 хв + автоеволюція щогодини + нічний авто-імпрув о 02:10 UTC ---
 [triggers]
-crons = ["*/15 * * * *", "0 * * * *"]
+crons = ["*/15 * * * *", "0 * * * *", "10 2 * * *"]
 
 # --- Публічні змінні середовища (НЕ секрети) ---
 [vars]
@@ -35,6 +35,10 @@ FREE_API_BASE_URL = "https://openrouter.ai/api"
 FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
 FREE_API_PATH     = "/v1/chat/completions"
 
+# --- Керування нічними авто-поліпшеннями ---
+AUTO_IMPROVE     = "on"   # "off" щоб вимкнути
+NIGHTLY_UTC_HOUR = "2"    # якщо не хочеш окремого крону — можеш покластись на цей час
+
 # --- KV bindings ---
 [[kv_namespaces]]
 binding = "DEDUP_KV"
@@ -59,3 +63,9 @@ id = "470d4f5c164a4a828c569eb9a52a5133"
 [[kv_namespaces]]
 binding = "CHECKLIST_KV"
 id = "497eac980691495ea2a0bc8611892d65"
+
+# ✅ ДОДАЙ АБО ЗАЛИШ СВІЙ LIKES_KV (використовується пам'яттю/нічними імпрувами)
+# Якщо у тебе вже є LIKES_KV — лиш свій id і видали цей блок.
+[[kv_namespaces]]
+binding = "LIKES_KV"
+id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
