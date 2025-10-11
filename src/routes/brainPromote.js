@@ -5,10 +5,17 @@ import { listArchives, appendChecklist } from "../lib/kvChecklist.js";
 
 const CUR_KEY = "brain:current";
 
+// Легкий CORS для прямих відповідей цього роуту
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET,POST,OPTIONS",
+  "access-control-allow-headers": "Content-Type,Authorization"
+};
+
 const json = (o, status = 200) =>
   new Response(JSON.stringify(o, null, 2), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: { "content-type": "application/json; charset=utf-8", ...CORS },
   });
 
 /**
@@ -26,13 +33,15 @@ async function resolveKey(req, env, url) {
 
   if (key) return { key, source: "provided" };
 
-  // 2) поінтер “current”
-  const current = await env.CCHECKLIST_KV?.get?.(CUR_KEY) || await env.CHECKLIST_KV.get(CUR_KEY);
+  // 2) поінтер “current” (✅ виправлено: без помилкового CCHECKLIST_KV)
+  const current = await env?.CHECKLIST_KV?.get?.(CUR_KEY);
   if (current) return { key: current, source: "current" };
 
   // 3) найновіший з історії
-  const keys = await listArchives(env); // масив ключів
-  if (keys.length > 0) return { key: keys[0], source: "latest" };
+  const keys = await listArchives(env); // очікуємо масив рядків
+  if (Array.isArray(keys) && keys.length > 0) {
+    return { key: keys[0], source: "latest" };
+  }
 
   return { key: null, source: "none" };
 }
@@ -43,7 +52,7 @@ export async function handleBrainPromote(req, env, url) {
 
   // допускаємо CORS preflight
   if (req.method === "OPTIONS") {
-    return new Response(null, { status: 204 });
+    return new Response(null, { status: 204, headers: CORS });
   }
 
   if (req.method !== "GET" && req.method !== "POST") {
@@ -56,7 +65,9 @@ export async function handleBrainPromote(req, env, url) {
   }
 
   const { key, source } = await resolveKey(req, env, url);
-  if (!key) return json({ ok: false, error: "missing key and nothing to promote" }, 400);
+  if (!key) {
+    return json({ ok: false, error: "missing key and nothing to promote" }, 400);
+  }
 
   // встановлюємо “пойнтер” на поточний архів
   await env.CHECKLIST_KV.put(CUR_KEY, key);
