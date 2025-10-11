@@ -33,6 +33,16 @@ function parseAiCommand(text = "") {
   return (m[1] || "").trim(); // може бути ""
 }
 
+// Анти-порожній фолбек + утиліта перевірки
+function defaultAiReply() {
+  return (
+    "🤖 Я можу відповідати на питання, допомагати з кодом, " +
+    "зберігати файли на Google Drive (кнопка «Google Drive») " +
+    "та керувати чеклистом/репозиторієм. Спробуй запит на тему, яка цікавить!"
+  );
+}
+const isBlank = (s) => !s || !String(s).trim();
+
 const BTN_DRIVE = "Google Drive";
 const BTN_SENTI = "Senti";
 const BTN_ADMIN = "Admin";
@@ -124,6 +134,7 @@ async function handleIncomingMedia(env, chatId, userId, msg) {
   await sendMessage(env, chatId, `✅ Збережено на твоєму диску: ${saved?.name || att.name}`);
   return true;
 }
+
 // ── головний обробник вебхуку ────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
   // захист секретом Telegram webhook
@@ -225,8 +236,8 @@ export async function handleTelegramWebhook(req, env) {
         reply = `🧠 Помилка AI: ${String(e?.message || e)}`;
       }
 
-      // важливо: без Markdown — щоб Telegram нічого не відрізав
-      await sendMessage(env, chatId, reply || "🤔", { parse_mode: undefined });
+      if (isBlank(reply)) reply = defaultAiReply(); // анти-порожній фолбек
+      await sendMessage(env, chatId, reply, { parse_mode: undefined });
     });
     return json({ ok: true });
   }
@@ -316,11 +327,12 @@ export async function handleTelegramWebhook(req, env) {
         out = await think(env, text, systemHint);
       }
 
-      await sendMessage(env, chatId, out || "🤔", { parse_mode: undefined });
+      if (isBlank(out)) out = defaultAiReply(); // анти-порожній фолбек
+      await sendMessage(env, chatId, out, { parse_mode: undefined });
       return json({ ok: true });
     } catch (e) {
       // запасний варіант — м’який дефолт
-      await sendMessage(env, chatId, `🧠 Зараз не вдалось відповісти через зовнішню модель.\nПричина: ${String(e?.message || e)}`);
+      await sendMessage(env, chatId, defaultAiReply(), { parse_mode: undefined });
       return json({ ok: true });
     }
   }
