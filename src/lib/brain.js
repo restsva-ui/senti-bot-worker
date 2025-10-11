@@ -7,7 +7,7 @@
 
 import { askAnyModel } from "../lib/modelRouter.js";
 
-const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1/models";
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
 async function tryGeminiDirect(env, text, systemHint, opts = {}) {
