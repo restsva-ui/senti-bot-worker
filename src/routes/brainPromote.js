@@ -1,7 +1,9 @@
 // src/routes/brainPromote.js
-// Промоут (активація) архіву мозку: зберігає key як current у KV
+// Промоут (активація) архіву: зберігає назву ZIP у CHECKLIST_KV як "brain:current".
 
-import { saveArchive, appendChecklist, getArchive, listArchives } from "../lib/kvChecklist.js";
+import { listArchives, appendChecklist } from "../lib/kvChecklist.js";
+
+const CUR_KEY = "brain:current";
 
 const json = (o, status = 200) =>
   new Response(JSON.stringify(o, null, 2), {
@@ -10,9 +12,10 @@ const json = (o, status = 200) =>
   });
 
 /**
- * Дістає key з query, form-data або JSON. Якщо не передали:
- * 1) пробує взяти current з KV;
- * 2) якщо і там порожньо — бере найсвіжіший з listArchives().
+ * Визначає key з query/form/json.
+ * Якщо не передали — беремо:
+ *   1) з CUR_KEY у CHECKLIST_KV (поточний поінтер)
+ *   2) або найновіший з listArchives()
  */
 async function resolveKey(req, env, url) {
   // 1) прямі способи
@@ -23,36 +26,34 @@ async function resolveKey(req, env, url) {
 
   if (key) return { key, source: "provided" };
 
-  // 2) поточний
-  const cur = await getArchive(env, "current");
-  if (cur) return { key: cur, source: "current" };
+  // 2) поінтер “current”
+  const current = await env.CHECKLIST_KV.get(CUR_KEY);
+  if (current) return { key: current, source: "current" };
 
   // 3) найновіший з історії
-  const { items = [] } = await listArchives(env);
-  if (items.length > 0) return { key: items[0], source: "latest" };
+  const keys = await listArchives(env); // масив ключів
+  if (keys.length > 0) return { key: keys[0], source: "latest" };
 
   return { key: null, source: "none" };
 }
 
 export async function handleBrainPromote(req, env, url) {
-  const p = url.pathname;
-  if (!p.startsWith("/api/brain/promote")) return null;
-
-  // Дозволяємо GET/POST, інші методи — 405
+  if (url.pathname !== "/api/brain/promote") return null;
   if (req.method !== "GET" && req.method !== "POST") {
     return json({ ok: false, error: "method not allowed" }, 405);
   }
 
-  const { key, source } = await resolveKey(req, env, url);
-
-  if (!key) {
-    return json({ ok: false, error: "missing key and nothing to promote" }, 400);
+  // опціонально: вимагаємо секрет
+  if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
+    return json({ ok:false, error:"unauthorized" }, 401);
   }
 
-  // Зберігаємо як поточний архів
-  await saveArchive(env, "current", key);
-  const note = `✅ promote (${source}) → ${key}`;
-  await appendChecklist(env, note);
+  const { key, source } = await resolveKey(req, env, url);
+  if (!key) return json({ ok: false, error: "missing key and nothing to promote" }, 400);
+
+  // встановлюємо “пойнтер” на поточний архів
+  await env.CHECKLIST_KV.put(CUR_KEY, key);
+  await appendChecklist(env, `✅ promote (${source}) → ${key}`);
 
   return json({ ok: true, promoted: key, source });
 }
