@@ -1,7 +1,6 @@
 // src/routes/brainApi.js
 import { listArchives, getArchive } from "../lib/kvChecklist.js";
 
-// ── helpers ───────────────────────────────────────────────────────────────────
 const json = (o, status = 200, extraHeaders = {}) =>
   new Response(JSON.stringify(o, null, 2), {
     status,
@@ -22,55 +21,41 @@ const cors = {
     "access-control-allow-methods": "GET,POST,OPTIONS",
     "access-control-allow-headers": "Content-Type,Authorization",
   },
-  preflight() {
-    return new Response(null, { status: 204, headers: this.base });
-  },
+  preflight() { return new Response(null, { status: 204, headers: this.base }); },
 };
 
-// ── router ────────────────────────────────────────────────────────────────────
 export async function handleBrainApi(req, env, url) {
-  // нормалізація: зрізаємо кінцеві слеші, щоб /api/brain/list/ == /api/brain/list
   const p = (url.pathname || "/").replace(/\/+$/,"") || "/";
 
-  // CORS preflight
   if (req.method === "OPTIONS" && p.startsWith("/api/brain")) {
     return cors.preflight();
   }
 
-  // GET /api/brain/ping — простий ping
   if (p === "/api/brain/ping" && req.method === "GET") {
     return json({ ok: true }, 200, cors.base);
   }
 
-  // GET /api/brain/current — хто зараз “актуальний”
   if (p === "/api/brain/current" && req.method === "GET") {
     const current = await env.CHECKLIST_KV.get(CUR_KEY);
     return json({ ok: true, current, exists: !!current }, 200, cors.base);
   }
 
-  // GET /api/brain/list — перелік архівів (під секретом)
   if (p === "/api/brain/list" && req.method === "GET") {
-    if (needSecret(env, url)) {
-      return json({ ok: false, error: "unauthorized" }, 401, cors.base);
-    }
-    const keys = await listArchives(env); // повертає масив рядків
+    if (needSecret(env, url)) return json({ ok:false, error:"unauthorized" }, 401, cors.base);
+    const keys = await listArchives(env);
     return json({ ok: true, total: keys.length, items: keys }, 200, cors.base);
   }
 
-  // GET /api/brain/get?key=...&s=... — віддати ZIP (бінарно)
   if (p === "/api/brain/get" && req.method === "GET") {
-    if (needSecret(env, url)) {
-      return json({ ok: false, error: "unauthorized" }, 401, cors.base);
-    }
+    if (needSecret(env, url)) return json({ ok:false, error:"unauthorized" }, 401, cors.base);
     const key = url.searchParams.get("key");
-    if (!key) return json({ ok: false, error: "key required" }, 400, cors.base);
+    if (!key) return json({ ok:false, error:"key required" }, 400, cors.base);
 
     const b64 = await getArchive(env, key);
-    if (!b64) return json({ ok: false, error: "not found" }, 404, cors.base);
+    if (!b64) return json({ ok:false, error:"not found" }, 404, cors.base);
 
     const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
     return new Response(bin, {
-      status: 200,
       headers: {
         ...cors.base,
         "content-type": "application/zip",
@@ -79,10 +64,8 @@ export async function handleBrainApi(req, env, url) {
     });
   }
 
-  // Якщо шлях починається з /api/brain — чіткий 404
   if (p.startsWith("/api/brain")) {
     return json({ ok: false, error: "unknown endpoint" }, 404, cors.base);
   }
-
-  return null; // не наш маршрут
+  return null;
 }
