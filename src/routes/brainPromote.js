@@ -38,7 +38,13 @@ async function resolveKey(req, env, url) {
 }
 
 export async function handleBrainPromote(req, env, url) {
-  if (url.pathname !== "/api/brain/promote") return null;
+  if (!url.pathname.startsWith("/api/brain/promote")) return null;
+
+  // допускаємо CORS preflight
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204 });
+  }
+
   if (req.method !== "GET" && req.method !== "POST") {
     return json({ ok: false, error: "method not allowed" }, 405);
   }
