@@ -28,6 +28,13 @@ const json = (o, status=200, h={})=> new Response(JSON.stringify(o, null, 2), {
   status, headers:{ "content-type":"application/json; charset=utf-8", ...h }
 });
 
+// CORS preflight headers (використаємо для OPTIONS)
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET,HEAD,POST,OPTIONS",
+  "access-control-allow-headers": "Content-Type,Authorization"
+};
+
 // ---------- small UI ----------
 function home(env){
   const s = encodeURIComponent(env.WEBHOOK_SECRET || "");
@@ -70,9 +77,17 @@ background:color-mix(in oklab,Canvas 96%,CanvasText 6%);border:1px solid color-m
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
-    // нормалізація шляху (прибираємо кінцеві слеші) і підміна для всіх handle*
+    // нормалізація шляху
     const p = (url.pathname || "/").replace(/\/+$/,"") || "/";
     url.pathname = p;
+
+    // трактуємо HEAD як GET для читальних ендпойнтів
+    const method = req.method === "HEAD" ? "GET" : req.method;
+
+    // універсальний OPTIONS preflight
+    if (req.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS });
+    }
 
     try {
       // --- root / health / webhook (гарантовано без 404) ---
@@ -80,73 +95,73 @@ export default {
 
       if (p === "/health") {
         const r = await handleHealth?.(req, env, url);
-        // якщо модуль раптом повернув 404 або null — даємо 200
         if (r && r.status !== 404) return r;
-        return json({ ok:true, service: env.SERVICE_HOST || "worker" });
+        return json({ ok:true, service: env.SERVICE_HOST || "worker" }, 200, CORS);
       }
 
-      if (p === "/webhook" && req.method === "GET") {
-        // легкий алів-пінг
-        return json({ ok:true, method:"GET", message:"webhook alive" });
+      if (p === "/webhook" && method === "GET") {
+        // легкий алів-пінг (HEAD теж потрапить сюди)
+        return json({ ok:true, method:"GET", message:"webhook alive" }, 200, CORS);
       }
 
       // --- brain state ---
       if (p === "/brain/state") {
         const r = await handleBrainState?.(req, env, url);
         if (r && r.status !== 404) return r;
-        return json({ ok:true, state:"available" });
+        return json({ ok:true, state:"available" }, 200, CORS);
       }
 
       // --- /api/brain/promote перед загальним /api/brain ---
       if (p.startsWith("/api/brain/promote")) {
         const r = await handleBrainPromote?.(req, env, url);
-        if (r) return r; // тут очікуємо 200/401/400 від модуля
-        return json({ ok:false, error:"promote handler missing" }, 404);
+        if (r) return r;
+        return json({ ok:false, error:"promote handler missing" }, 404, CORS);
       }
 
       // --- /api/brain/* ---
       if (p.startsWith("/api/brain")) {
         const r = await handleBrainApi?.(req, env, url);
-        if (r) return r; // модуль уже віддає 200/401/404 як треба
+        if (r) return r;
 
         // дефолти на випадок, якщо модуль нічого не повернув
-        if (p === "/api/brain/current" && req.method === "GET") {
+        if (p === "/api/brain/current" && method === "GET") {
           const cur = await env.CHECKLIST_KV.get("brain:current");
-          return json({ ok:true, current:cur||null, exists:!!cur });
+          return json({ ok:true, current:cur||null, exists:!!cur }, 200, CORS);
         }
-        if (p === "/api/brain/list" && req.method === "GET") {
+        if (p === "/api/brain/list" && method === "GET") {
           const items = await listArchives(env).catch(()=>[]);
           const arr = Array.isArray(items) ? items : (items?.items || []);
-          return json({ ok:true, total:arr.length, items:arr });
+          return json({ ok:true, total:arr.length, items:arr }, 200, CORS);
         }
-        if (p === "/api/brain/get" && req.method === "GET") {
+        if (p === "/api/brain/get" && method === "GET") {
           const key = url.searchParams.get("key");
-          if (!key) return json({ ok:false, error:"key required" }, 400);
+          if (!key) return json({ ok:false, error:"key required" }, 400, CORS);
           const b64 = await getArchive(env, key);
-          if (!b64) return json({ ok:false, error:"not found" }, 404);
+          if (!b64) return json({ ok:false, error:"not found" }, 404, CORS);
           const bin = Uint8Array.from(atob(b64), c=>c.charCodeAt(0));
           return new Response(bin, {
             headers:{
+              ...CORS,
               "content-type":"application/zip",
               "content-disposition":`attachment; filename="${key.split("/").pop()}"`
             }
           });
         }
-        return json({ ok:false, error:"unknown endpoint" }, 404);
+        return json({ ok:false, error:"unknown endpoint" }, 404, CORS);
       }
 
       // --- selftest ---
       if (p.startsWith("/selftest")) {
         const r = await handleSelfTest?.(req, env, url);
         if (r) return r;
-        return json({ ok:false, error:"selftest handler not found" }, 404);
+        return json({ ok:false, error:"selftest handler not found" }, 404, CORS);
       }
 
       // --- ai ---
       if (p.startsWith("/ai/train"))  { const r = await handleAiTrain?.(req, env, url);  if (r) return r; }
       if (p.startsWith("/ai/evolve")) { const r = await handleAiEvolve?.(req, env, url); if (r) return r; }
 
-      // --- admin (даємо дружні фолбеки замість 404) ---
+      // --- admin (фолбеки замість 404) ---
       if (p.startsWith("/admin/checklist")) {
         const r = await handleAdminChecklist?.(req, env, url);
         if (r && r.status !== 404) return r;
@@ -165,18 +180,18 @@ export default {
       if (p.startsWith("/admin/brain")) {
         const r = await handleAdminBrain?.(req, env, url);
         if (r && r.status !== 404) return r;
-        return json({ ok:true, note:"admin brain fallback" });
+        return json({ ok:true, note:"admin brain fallback" }, 200, CORS);
       }
 
       // --- webhook POST ---
       if (p === "/webhook" && req.method === "POST") {
         const sec = req.headers.get("x-telegram-bot-api-secret-token");
         if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
-          return json({ ok:false, error:"unauthorized" }, 401);
+          return json({ ok:false, error:"unauthorized" }, 401, CORS);
         }
         const r = await handleTelegramWebhook?.(req, env, url);
         if (r) return r;
-        return json({ ok:true });
+        return json({ ok:true }, 200, CORS);
       }
 
       // --- tg helpers ---
@@ -199,7 +214,7 @@ export default {
       if (p.startsWith("/ci/deploy-note")) {
         const r = await handleCiDeploy?.(req, env, url);
         if (r) return r;
-        return json({ ok:true });
+        return json({ ok:true }, 200, CORS);
       }
 
       // --- oauth ---
@@ -245,10 +260,10 @@ export default {
       }
 
       // --- not found ---
-      return json({ ok:false, error:"Not found" }, 404);
+      return json({ ok:false, error:"Not found" }, 404, CORS);
 
     } catch (e) {
-      return json({ ok:false, error:String(e) }, 500);
+      return json({ ok:false, error:String(e) }, 500, CORS);
     }
   },
 
