@@ -32,7 +32,7 @@ const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 const html = (s)=> new Response(s, { headers:{ "content-type":"text/html; charset=utf-8" }});
 const json = (o, status=200)=> new Response(JSON.stringify(o, null, 2), { status, headers:{ "content-type":"application/json" }});
 
-// ⬇️ Дозволяємо selftest/внутрішні запити з секретом
+// (залишаємо на майбутнє)
 const needSecret = (env, url) => {
   const path = url.pathname || "";
   if (path.startsWith("/selftest")) return false;
@@ -265,7 +265,7 @@ export default {
 
       // ---- Telegram webhook ----
       if (p === "/webhook") {
-        // Дружня відповідь на GET для self-test та плитки
+        // Легка відповідь на GET (для selftest і плитки)
         if (req.method === "GET") {
           return json({ ok: true, method: "GET", message: "webhook alive" });
         }
@@ -275,7 +275,6 @@ export default {
             return json({ ok:false, error:"unauthorized" }, 401);
           }
         }
-        // делегуємо реальну логіку (може повернути null, але ми вже дали GET-відповідь вище)
         const r = await handleTelegramWebhook(req, env, url);
         if (r) return r;
       }
@@ -345,6 +344,12 @@ export default {
         return html(`<h3>✅ Готово</h3><p>Тепер повернись у Telegram і натисни <b>Google Drive</b> ще раз.</p>`);
       }
 
+      // ---- fallback health (перед 404) ----
+      if (p === "/health") {
+        const r = await handleHealth?.(req, env, url);
+        if (r) return r;
+      }
+
       // ---- not found ----
       return json({ ok:false, error:"Not found" }, 404);
 
@@ -360,15 +365,12 @@ export default {
     // Щогодинний автозапуск AI-Evolve Auto (кроном "0 * * * *")
     try {
       if (event && event.cron === "0 * * * *") {
-        // використовуємо реальний origin сервісу
         const u = new URL(abs(env, "/ai/evolve/auto"));
         if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
-
         const req = new Request(u.toString(), { method: "GET" });
         await handleAiEvolve(req, env, u);
       }
     } catch (e) {
-      // Запис у чеклист, щоб було видно збій автозапуску
       await appendChecklist(env, `[${new Date().toISOString()}] evolve_auto:error ${String(e)}`);
     }
   }
