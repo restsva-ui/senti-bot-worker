@@ -6,7 +6,7 @@ import { getUserTokens } from "../lib/userDrive.js";
 import { abs } from "../utils/url.js";
 import { think } from "../lib/brain.js";
 import { readStatut } from "../lib/kvChecklist.js";
-import { askAnyModel } from "../lib/modelRouter.js"; // ⬅️ додано
+import { askAnyModel } from "../lib/modelRouter.js";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 const json = (data, init = {}) =>
@@ -143,7 +143,8 @@ export async function handleTelegramWebhook(req, env) {
     update.channel_post ||
     update.callback_query?.message;
 
-  const textRaw = update.message?.text || update.edited_message?.text || update.callback_query?.data || "";
+  const textRaw =
+    update.message?.text || update.edited_message?.text || update.callback_query?.data || "";
   const text = (textRaw || "").trim();
   if (!msg) return json({ ok: true });
 
@@ -160,6 +161,55 @@ export async function handleTelegramWebhook(req, env) {
     await safe(async () => {
       await setDriveMode(env, userId, false);
       await sendMessage(env, chatId, "Привіт! Я Senti 🤖", { reply_markup: mainKeyboard(isAdmin) });
+    });
+    return json({ ok: true });
+  }
+
+  // /diag — коротка діагностика (тільки для адміна)
+  if (text === "/diag" && isAdmin) {
+    await safe(async () => {
+      const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
+      const hasCF = !!(env.CF_ACCOUNT_ID && env.CLOUDFLARE_API_TOKEN);
+      const hasOR = !!env.OPENROUTER_API_KEY;
+      const mo = String(env.MODEL_ORDER || "").trim();
+
+      const lines = [
+        "🧪 Діагностика AI",
+        `MODEL_ORDER: ${mo || "(порожньо)"}`,
+        `GEMINI key: ${hasGemini ? "✅" : "❌"}`,
+        `Cloudflare (CF_ACCOUNT_ID + CLOUDFLARE_API_TOKEN): ${hasCF ? "✅" : "❌"}`,
+        `OpenRouter key: ${hasOR ? "✅" : "❌"}`,
+      ];
+      await sendMessage(env, chatId, lines.join("\n"));
+    });
+    return json({ ok: true });
+  }
+
+  // /ai <запит> — тест відповіді через модель/резерв
+  if (text.startsWith("/ai")) {
+    await safe(async () => {
+      const q = text.replace(/^\/ai\s*/i, "").trim() || "ping";
+      const statut = await readStatut(env).catch(() => "");
+      const systemHint =
+        (statut ? `${statut.trim()}\n\n` : "") +
+        "Ти — Senti, помічник у Telegram. Відповідай стисло та дружньо.";
+      let reply = "";
+
+      const modelOrder = String(env.MODEL_ORDER || "").trim();
+
+      try {
+        if (modelOrder) {
+          // askAnyModel приймає один промпт — додаємо системний хінт до тексту
+          const merged = `${systemHint}\n\nКористувач: ${q}`;
+          reply = await askAnyModel(env, merged, { temperature: 0.6, max_tokens: 800 });
+        } else {
+          reply = await think(env, q, systemHint);
+        }
+      } catch (e) {
+        reply = `🧠 Помилка AI: ${String(e?.message || e)}`;
+      }
+
+      await sendMessage(env, chatId, reply || "🤔");
     });
     return json({ ok: true });
   }
@@ -238,31 +288,23 @@ export async function handleTelegramWebhook(req, env) {
         "Ти — Senti, помічник у Telegram. Відповідай стисло та дружньо. " +
         "Якщо просять зберегти файл — нагадай про Google Drive та розділ Checklist/Repo.";
 
-      // 1) Перший вибір — маршрутизатор моделей (OpenRouter/CF з авто-fallback)
-      const outPrimary = await askAnyModel(env, text, {
-        system: systemHint,
-        temperature: 0.6,
-        max_tokens: 800,
-      });
+      const modelOrder = String(env.MODEL_ORDER || "").trim();
+      let out = "";
 
-      await sendMessage(env, chatId, outPrimary || "🤔");
-      return json({ ok: true });
-    } catch {
-      // 2) Запасний варіант — локальний "мозок"
-      try {
-        const statut = await readStatut(env).catch(() => "");
-        const systemHint =
-          (statut ? `${statut.trim()}\n\n` : "") +
-          "Ти — Senti, помічник у Telegram. Відповідай стисло та дружньо. " +
-          "Якщо просять зберегти файл — нагадай про Google Drive та розділ Checklist/Repo.";
-        const outFallback = await think(env, text, systemHint);
-        await sendMessage(env, chatId, outFallback || "🤔");
-        return json({ ok: true });
-      } catch {
-        // 3) Якщо взагалі все недоступно — м’який дефолт
-        await sendMessage(env, chatId, "Готовий 👋", { reply_markup: mainKeyboard(isAdmin) });
-        return json({ ok: true });
+      if (modelOrder) {
+        // askAnyModel приймає один промпт -> об’єднуємо системний хінт з текстом
+        const merged = `${systemHint}\n\nКористувач: ${text}`;
+        out = await askAnyModel(env, merged, { temperature: 0.6, max_tokens: 800 });
+      } else {
+        out = await think(env, text, systemHint);
       }
+
+      await sendMessage(env, chatId, out || "🤔");
+      return json({ ok: true });
+    } catch (e) {
+      // запасний варіант — м’який дефолт
+      await sendMessage(env, chatId, `🧠 Зараз не вдалось відповісти через зовнішню модель.\nПричина: ${String(e?.message || e)}`);
+      return json({ ok: true });
     }
   }
 
