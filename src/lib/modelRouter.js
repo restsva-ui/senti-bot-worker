@@ -1,31 +1,27 @@
 // src/lib/modelRouter.js
 // Гнучкий роутер моделей з авто-fallback:
-// 1) Gemini (GOOGLE_API_KEY) — безкоштовний/пільговий тариф
-// 2) Cloudflare Workers AI — безкоштовно з лімітами
-// 3) OpenRouter — резерв
-//
-// Керування порядком через env.MODEL_ORDER, наприклад:
-//   gemini:gemini-1.5-flash-latest,cf:@cf/meta/llama-3.1-8b-instruct,openrouter:deepseek/deepseek-chat
+// 1) Gemini (GOOGLE_API_KEY або GEMINI_API_KEY)
+// 2) Cloudflare Workers AI
+// 3) OpenRouter
 
 const RETRYABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 const isRetryable = (s) => RETRYABLE.has(Number(s));
 
 function pick(obj, path, dflt = "") {
-  try {
-    return path.split(".").reduce((o, k) => (o ? o[k] : undefined), obj) ?? dflt;
-  } catch {
-    return dflt;
-  }
+  try { return path.split(".").reduce((o, k) => (o ? o[k] : undefined), obj) ?? dflt; }
+  catch { return dflt; }
 }
 
 /* ---------------- Gemini ---------------- */
 async function callGemini(env, model, prompt, opts = {}) {
-  if (!env.GOOGLE_API_KEY) {
-    const e = new Error("GOOGLE_API_KEY missing");
+  const GEM_KEY = env.GOOGLE_API_KEY || env.GEMINI_API_KEY; // ← читаємо обидві назви
+  if (!GEM_KEY) {
+    const e = new Error("GOOGLE_API_KEY/GEMINI_API_KEY missing");
     e.status = 0;
     throw e;
   }
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${env.GOOGLE_API_KEY}`;
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${GEM_KEY}`;
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
     generationConfig: {
@@ -44,7 +40,6 @@ async function callGemini(env, model, prompt, opts = {}) {
     err.status = r.status; err.payload = data;
     throw err;
   }
-  // candidates[0].content.parts[0].text
   return (
     pick(data, "candidates.0.content.parts.0.text") ||
     pick(data, "candidates.0.content.parts.0.inlineData") ||
@@ -104,7 +99,6 @@ async function callCloudflareAI(env, model, prompt, opts = {}) {
     }),
   });
   const data = await r.json().catch(() => ({}));
-  // CF на 400 повертає { success:false, errors:[{message:...}] }
   if (!r.ok || data.success === false) {
     const status = r.status || 500;
     const err = new Error(`cf ${model} ${status}: ${pick(data, "errors.0.message", "bad request")}`);
@@ -121,14 +115,14 @@ async function callCloudflareAI(env, model, prompt, opts = {}) {
 /* ---------------- Router ---------------- */
 /**
  * env.MODEL_ORDER: "gemini:<id>,cf:<id>,openrouter:<id>"
- * Якщо не задано — використовуємо безпечний дефолт із безкоштовних:
+ * Дефолт — лише безкоштовні/доступні варіанти:
  *   gemini:gemini-1.5-flash-latest,
- *   cf:@cf/meta/llama-3.1-8b-instruct,
+ *   cf:@cf/meta/llama-3-8b-instruct,     // ← БЕЗ ".1"
  *   openrouter:deepseek/deepseek-chat
  */
 export async function askAnyModel(env, prompt, opts = {}) {
   const fallbackOrder =
-    "gemini:gemini-1.5-flash-latest,cf:@cf/meta/llama-3.1-8b-instruct,openrouter:deepseek/deepseek-chat";
+    "gemini:gemini-1.5-flash-latest,cf:@cf/meta/llama-3-8b-instruct,openrouter:deepseek/deepseek-chat";
 
   const order = String(env.MODEL_ORDER || fallbackOrder)
     .split(",")
@@ -139,7 +133,7 @@ export async function askAnyModel(env, prompt, opts = {}) {
 
   for (const entry of order) {
     const [provider, ...rest] = entry.split(":");
-    const model = rest.join(":"); // у id можуть бути двокрапки/слеші
+    const model = rest.join(":");
 
     try {
       if (provider === "gemini") return await callGemini(env, model, prompt, opts);
@@ -148,9 +142,8 @@ export async function askAnyModel(env, prompt, opts = {}) {
       throw new Error(`Unknown provider: ${provider}`);
     } catch (e) {
       lastErr = e;
-      // ідемо далі по списку; окремі ретраї не робимо
       if (!isRetryable(e.status || 0)) {
-        // неретрійна — все одно пробуємо наступну
+        // не зупиняємось — пробуємо наступну модель
       }
     }
   }
