@@ -29,7 +29,7 @@ CF_MODEL     = "@cf/meta/llama-3.1-8b-instruct"
 
 # --- OpenAI-compatible fallback (через OpenRouter) ---
 # Якщо інші моделі недоступні — запит піде сюди.
-# Обов'язково додай у Dashboard → Secrets:
+# ДОДАЙ у Dashboard → Secrets:
 #   FREE_API_KEY = <твій OpenRouter API ключ>
 FREE_API_BASE_URL = "https://openrouter.ai/api"
 FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
@@ -37,7 +37,7 @@ FREE_API_PATH     = "/v1/chat/completions"
 
 # --- Керування нічними авто-поліпшеннями ---
 AUTO_IMPROVE     = "on"   # "off" щоб вимкнути
-NIGHTLY_UTC_HOUR = "2"    # якщо не хочеш окремого крону — можеш покластись на цей час
+NIGHTLY_UTC_HOUR = "2"
 
 # --- KV bindings ---
 [[kv_namespaces]]
@@ -64,8 +64,7 @@ id = "470d4f5c164a4a828c569eb9a52a5133"
 binding = "CHECKLIST_KV"
 id = "497eac980691495ea2a0bc8611892d65"
 
-# ✅ ДОДАЙ АБО ЗАЛИШ СВІЙ LIKES_KV (використовується пам'яттю/нічними імпрувами)
-# Якщо у тебе вже є LIKES_KV — лиш свій id і видали цей блок.
+# Пам'ять/лайки/нічні імпруви
 [[kv_namespaces]]
 binding = "LIKES_KV"
-id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+id = "f7d480c281ad47d2bdf270fadf4de021"
