@@ -25,6 +25,14 @@ async function sendMessage(env, chatId, text, extra = {}) {
   await r.text().catch(() => {});
 }
 
+// Безпечний парсер команди /ai (підтримує /ai, /ai@Bot, з/без аргументів, у т.ч. через переніс рядка)
+function parseAiCommand(text = "") {
+  const s = String(text).trim();
+  const m = s.match(/^\/ai(?:@[\w_]+)?(?:\s+([\s\S]+))?$/i);
+  if (!m) return null;
+  return (m[1] || "").trim(); // може бути ""
+}
+
 const BTN_DRIVE = "Google Drive";
 const BTN_SENTI = "Senti";
 const BTN_ADMIN = "Admin";
@@ -116,7 +124,6 @@ async function handleIncomingMedia(env, chatId, userId, msg) {
   await sendMessage(env, chatId, `✅ Збережено на твоєму диску: ${saved?.name || att.name}`);
   return true;
 }
-
 // ── головний обробник вебхуку ────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
   // захист секретом Telegram webhook
@@ -185,21 +192,30 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /ai <запит> — тест відповіді через модель/резерв
-  if (text.startsWith("/ai")) {
+  // /ai (надійний парсинг: /ai, /ai@Bot, з/без аргументів)
+  const aiArg = parseAiCommand(textRaw);
+  if (aiArg !== null) {
     await safe(async () => {
-      const q = text.replace(/^\/ai\s*/i, "").trim() || "ping";
+      const q = aiArg || "";
+      if (!q) {
+        await sendMessage(
+          env,
+          chatId,
+          "✍️ Надішли запит після команди /ai. Приклад:\n/ai Скільки буде 2+2?",
+          { parse_mode: undefined }
+        );
+        return;
+      }
+
       const statut = await readStatut(env).catch(() => "");
       const systemHint =
         (statut ? `${statut.trim()}\n\n` : "") +
         "Ти — Senti, помічник у Telegram. Відповідай стисло та дружньо.";
-      let reply = "";
 
       const modelOrder = String(env.MODEL_ORDER || "").trim();
-
+      let reply = "";
       try {
         if (modelOrder) {
-          // askAnyModel приймає один промпт — додаємо системний хінт до тексту
           const merged = `${systemHint}\n\nКористувач: ${q}`;
           reply = await askAnyModel(env, merged, { temperature: 0.6, max_tokens: 800 });
         } else {
@@ -209,7 +225,8 @@ export async function handleTelegramWebhook(req, env) {
         reply = `🧠 Помилка AI: ${String(e?.message || e)}`;
       }
 
-      await sendMessage(env, chatId, reply || "🤔");
+      // важливо: без Markdown — щоб Telegram нічого не відрізав
+      await sendMessage(env, chatId, reply || "🤔", { parse_mode: undefined });
     });
     return json({ ok: true });
   }
@@ -299,7 +316,7 @@ export async function handleTelegramWebhook(req, env) {
         out = await think(env, text, systemHint);
       }
 
-      await sendMessage(env, chatId, out || "🤔");
+      await sendMessage(env, chatId, out || "🤔", { parse_mode: undefined });
       return json({ ok: true });
     } catch (e) {
       // запасний варіант — м’який дефолт
