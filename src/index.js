@@ -37,7 +37,10 @@ import { fallbackBrainCurrent, fallbackBrainList, fallbackBrainGet } from "./rou
 // home винесено в окремий модуль
 import { home } from "./ui/home.js";
 
-const VERSION = "senti-worker-2025-10-11-16-52";
+// ✅ нічні авто-поліпшення
+import { nightlyAutoImprove } from "./lib/autoImprove.js";
+
+const VERSION = "senti-worker-2025-10-11-22-05";
 
 export default {
   async fetch(req, env) {
@@ -156,6 +159,18 @@ export default {
         const r = await handleAiEvolve?.(innerReq, env, u);
         if (r) return r;
         return json({ ok: true, note: "evolve triggered" }, 200, CORS);
+      }
+
+      // --- cron auto-improve (ручний тригер нічних авто-поліпшень) ---
+      if (p === "/cron/auto-improve") {
+        if (req.method !== "GET" && req.method !== "POST") {
+          return json({ ok: false, error: "method not allowed" }, 405, CORS);
+        }
+        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
+          return json({ ok: false, error: "unauthorized" }, 401, CORS);
+        }
+        const res = await nightlyAutoImprove(env, { now: new Date(), reason: "manual" });
+        return json({ ok: true, ...res }, 200, CORS);
       }
 
       // --- ai ---
@@ -306,6 +321,8 @@ export default {
 
   async scheduled(event, env) {
     await logHeartbeat(env);
+
+    // 1) Годинний evolve (як було)
     try {
       if (event && event.cron === "0 * * * *") {
         const u = new URL(abs(env, "/ai/evolve/auto"));
@@ -317,6 +334,23 @@ export default {
       await appendChecklist(
         env,
         `[${new Date().toISOString()}] evolve_auto:error ${String(e)}`
+      );
+    }
+
+    // 2) Нічні авто-поліпшення (нове)
+    try {
+      const hour = new Date().getUTCHours();
+      const targetHour = Number(env.NIGHTLY_UTC_HOUR ?? 2); // дефолт 02:00 UTC
+      const runByCron = event && event.cron === "10 2 * * *";
+      const runByHour = hour === targetHour;
+
+      if (String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" && (runByCron || runByHour)) {
+        await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
+      }
+    } catch (e) {
+      await appendChecklist(
+        env,
+        `[${new Date().toISOString()}] auto_improve:error ${String(e)}`
       );
     }
   },
