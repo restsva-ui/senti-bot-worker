@@ -39,6 +39,10 @@ FREE_API_PATH     = "/v1/chat/completions"
 AUTO_IMPROVE     = "on"   # "off" щоб вимкнути
 NIGHTLY_UTC_HOUR = "2"
 
+# --- Self-Regulation (ввімк/вимк та сила тюнінгу) ---
+SELF_REGULATE       = "on"   # "off" щоб вимкнути само-налаштування
+SELF_TUNING_FACTOR  = "0.3"  # 0..1 – наскільки агресивно змінюємо правила
+
 # --- KV bindings ---
 [[kv_namespaces]]
 binding = "DEDUP_KV"
