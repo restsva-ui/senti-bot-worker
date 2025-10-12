@@ -27,7 +27,8 @@ import { handleBrainApi } from "./routes/brainApi.js";
 import { handleAiTrain } from "./routes/aiTrain.js";
 import { handleAiEvolve } from "./routes/aiEvolve.js";
 import { handleBrainPromote } from "./routes/brainPromote.js";
-import { handleAdminEnergy } from "./routes/adminEnergy.js"; // ← ДОДАНО
+import { handleAdminEnergy } from "./routes/adminEnergy.js"; // energy UI/API
+import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js"; // ← ДОДАНО
 
 // ✅ локальний selftest
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
@@ -199,7 +200,17 @@ export default {
         } catch {}
       }
 
-      // admin
+      // --- ADMIN ---
+      // 1) Комбінована сторінка: Checklist + Energy (ifrаme)
+      if (p.startsWith("/admin/checklist/with-energy")) { // ← ДОДАНО
+        try {
+          const r = await handleAdminChecklistWithEnergy?.(req, env, url);
+          if (r && r.status !== 404) return r;
+        } catch {}
+        return html("<h3>Checklist + Energy</h3><p>Fallback UI.</p>");
+      }
+
+      // 2) Звичайний Checklist
       if (p.startsWith("/admin/checklist")) {
         try {
           const r = await handleAdminChecklist?.(req, env, url);
@@ -207,6 +218,8 @@ export default {
         } catch {}
         return html(await checklistHtml?.(env).catch(() => "<h3>Checklist</h3>"));
       }
+
+      // 3) Repo / Архів
       if (p.startsWith("/admin/repo") || p.startsWith("/admin/archive")) {
         try {
           const r = await handleAdminRepo?.(req, env, url);
@@ -214,6 +227,8 @@ export default {
         } catch {}
         return html(`<h3>Repo / Архів</h3><p>Fallback UI.</p>`);
       }
+
+      // 4) Статут
       if (p.startsWith("/admin/statut")) {
         try {
           const r = await handleAdminStatut?.(req, env, url);
@@ -221,6 +236,8 @@ export default {
         } catch {}
         return html(await statutHtml?.(env).catch(() => "<h3>Statut</h3>"));
       }
+
+      // 5) Brain
       if (p.startsWith("/admin/brain")) {
         try {
           const r = await handleAdminBrain?.(req, env, url);
@@ -228,7 +245,9 @@ export default {
         } catch {}
         return json({ ok: true, note: "admin brain fallback" }, 200, CORS);
       }
-      if (p.startsWith("/admin/energy")) { // ← ДОДАНО
+
+      // 6) Energy
+      if (p.startsWith("/admin/energy")) {
         try {
           const r = await handleAdminEnergy?.(req, env, url);
           if (r && r.status !== 404) return r;
