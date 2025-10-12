@@ -82,9 +82,24 @@ ${transcript}
 
   // просимо модель (із вашим fallback)
   const raw = await askAnyModel(env, prompt, { system: sys, temperature: 0.2, max_tokens: 800 });
-  // якщо відповідь містить діаг-тег "[via ...]" — акуратно відріжемо
-  const pure = String(raw).replace(/\n?\[via [^\]]+\]\s*$/i, "");
-  const parsed = safeJSON(pure);
+
+  // --- Робастне очищення перед JSON.parse ---
+  // 1) прибираємо код-блоки ```json / ```
+  // 2) відрізаємо діаг-хвіст типу "[via Gemini ...]"
+  // 3) беремо підрядок між першою "{" і останньою "}"
+  let clean = String(raw)
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .replace(/\n+\[via[\s\S]*$/i, "")
+    .trim();
+
+  const first = clean.indexOf("{");
+  const last  = clean.lastIndexOf("}");
+  if (first !== -1 && last !== -1 && last > first) {
+    clean = clean.slice(first, last + 1);
+  }
+
+  const parsed = safeJSON(clean);
   if (!parsed || typeof parsed !== "object") {
     return { chatId, error: "model-json-parse" };
   }
