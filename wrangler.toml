@@ -3,7 +3,7 @@ main = "src/index.js"
 compatibility_date = "2024-09-25"
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
 
-# --- CRONs: heartbeat кожні 15 хв + автоеволюція щогодини + нічний авто-імпрув о 02:10 UTC ---
+# --- CRONs: heartbeat кожні 15 хв + автоеволюція щогодини + нічний авто-імпрув о 02:10 за локальним часом (23:10 UTC) ---
 [triggers]
 crons = ["*/15 * * * *", "0 * * * *", "10 2 * * *"]
 
@@ -13,8 +13,14 @@ SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
 DRIVE_FOLDER_ID = "root"
 TELEGRAM_ADMIN_ID = "784869835"
 DEPLOY_ID = "local-dev"
+
+# Секрет для власних HTTP-ендпойнтів (передається як ?s=...)
 WEBHOOK_SECRET = "senti1984"
+# Секрет перевірки Telegram webhook
 TG_WEBHOOK_SECRET = "senti1984"
+
+# Локальна таймзона для UI (чекліст, логи тощо)
+TIMEZONE = "Europe/Kyiv"
 
 # ДІАГНОСТИЧНІ ТЕГИ: "on" — показує [via ...], "off" — ховає
 DIAG_TAGS = "on"
@@ -28,16 +34,15 @@ GEMINI_MODEL = "gemini-2.5-flash"
 CF_MODEL     = "@cf/meta/llama-3.1-8b-instruct"
 
 # --- OpenAI-compatible fallback (через OpenRouter) ---
-# Якщо інші моделі недоступні — запит піде сюди.
-# ДОДАЙ у Dashboard → Secrets:
-#   FREE_API_KEY = <твій OpenRouter API ключ>
+# ВАЖЛИВО: сам ключ додай як secret: wrangler secret put FREE_API_KEY
 FREE_API_BASE_URL = "https://openrouter.ai/api"
 FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
 FREE_API_PATH     = "/v1/chat/completions"
 
 # --- Керування нічними авто-поліпшеннями ---
 AUTO_IMPROVE     = "on"   # "off" щоб вимкнути
-NIGHTLY_UTC_HOUR = "2"
+# 23 UTC ~= 02 за Києвом (UTC+3)
+NIGHTLY_UTC_HOUR = "23"
 
 # --- Self-Regulation (ввімк/вимк та сила тюнінгу) ---
 SELF_REGULATE       = "on"   # "off" щоб вимкнути само-налаштування
