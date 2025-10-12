@@ -1,8 +1,12 @@
-// Мінімальний "мозок" Senti (стабільна версія з діагностикою):
+// Мінімальний "мозок" Senti (стабільна версія з діагностикою + пам'яттю):
 // 1) Gemini (v1, з автопереходом на v1beta)
 // 2) Cloudflare Workers AI (опційно, якщо є ключі)
 // 3) OpenRouter (опційно)
-// Якщо ключів немає — м'який фолбек повідомлення.
+// 4) OpenAI-compatible (FREE_API_*), якщо все інше недоступне
+// Якщо ключів немає — м'який фолбек-повідомлення.
+
+// ---- Імпорти (коротка пам'ять) ----
+import { getShortContext } from "./memoryShort.js";
 
 // ---- Константи та утиліти ----
 const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
@@ -41,6 +45,11 @@ function extractORText(j) {
   return j?.choices?.[0]?.message?.content || j?.choices?.[0]?.text || "";
 }
 
+// Очікуваний формат для OpenAI-compatible
+function extractOAICText(j) {
+  return j?.choices?.[0]?.message?.content || j?.choices?.[0]?.text || "";
+}
+
 // fetch з таймаутом
 async function fetchJSON(url, init = {}, timeoutMs = 20000) {
   const controller = new AbortController();
@@ -52,6 +61,24 @@ async function fetchJSON(url, init = {}, timeoutMs = 20000) {
     return { ok: r.ok, status: r.status, json, raw: text };
   } finally {
     clearTimeout(id);
+  }
+}
+
+// --- Формування короткого контексту з пам'яті для підмішування в system ---
+async function buildMemoryPrefix(env, chatId, limit = 6) {
+  try {
+    if (!chatId) return "";
+    const items = await getShortContext(env, chatId, limit);
+    if (!Array.isArray(items) || !items.length) return "";
+    const lines = items.map(m => {
+      const who = m.role === "bot" ? "Senti" : "Користувач";
+      // урізаємо небезпечні/надто довгі рядки для безпеки
+      const txt = String(m.text || "").slice(0, 400);
+      return `• ${who}: ${txt}`;
+    });
+    return lines.length ? `Останній контекст чату:\n${lines.join("\n")}\n\n` : "";
+  } catch {
+    return "";
   }
 }
 
@@ -99,6 +126,7 @@ async function callGemini({ apiKey, model, userText, systemHint, showTag }) {
   }
   throw new Error(`Gemini fail: ${lastErr || "unknown"}`);
 }
+
 // 2) Cloudflare Workers AI (опційно)
 async function callCloudflareAI({ accountId, apiToken, userText, systemHint, model = "@cf/meta/llama-3.1-8b-instruct", showTag }) {
   if (!accountId || !apiToken) throw new Error("CF AI creds missing");
@@ -142,6 +170,9 @@ async function callOpenRouter({ apiKey, userText, systemHint, model = "deepseek/
     headers: {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${apiKey}`,
+      // необов'язково, але деякі провайдери люблять їх бачити
+      "HTTP-Referer": (typeof location !== "undefined" && location.origin) || "https://workers.dev",
+      "X-Title": "SentiBot",
     },
     body: JSON.stringify(body),
   });
@@ -151,13 +182,58 @@ async function callOpenRouter({ apiKey, userText, systemHint, model = "deepseek/
   return `${out}${tag("OpenRouter", model, Date.now() - started, showTag)}`;
 }
 
+// 4) OpenAI-compatible (FREE_API_*), опційно
+async function callOpenAICompat({ baseUrl, apiKey, model = "gpt-3.5-turbo", userText, systemHint, path = "/v1/chat/completions", showTag }) {
+  if (!baseUrl || !apiKey) throw new Error("FREE_API_BASE_URL / FREE_API_KEY missing");
+  const url = `${String(baseUrl).replace(/\/$/, "")}${path}`;
+  const body = {
+    model,
+    messages: [
+      ...(systemHint ? [{ role: "system", content: systemHint }] : []),
+      { role: "user", content: userText },
+    ],
+    temperature: 0.7,
+    max_tokens: 1024,
+  };
+  const started = Date.now();
+  const res = await fetchJSON(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`OpenAI-compat ${res.status}`);
+  const out = extractOAICText(res.json);
+  if (!out) throw new Error("OpenAI-compat empty");
+  return `${out}${tag("FreeLLM", model, Date.now() - started, showTag)}`;
+}
+
 // ---- Публічний API ----
-export async function think(env, userText, systemHint = "") {
+/**
+ * think(env, userText, systemHint = "", extra = {})
+ * extra.chatId — якщо передати, буде підтягнутий короткий контекст з пам'яті
+ */
+export async function think(env, userText, systemHint = "", extra = {}) {
   const text = String(userText || "").trim();
   if (!text) return "🤖 Дай мені текст або запитання — і я відповім.";
 
-  // Завжди показуємо діагностичні теги (щоб Telegram нічого не «з’їв»)
-  const showTag = true;
+  // Керування діагностичним тегом через змінну середовища
+  const showTag = String(env.DIAG_TAGS || "").toLowerCase() !== "off";
+
+  // Підмішати стиснутий контекст з пам'яті (якщо chatId відомий)
+  let memoryPrefix = "";
+  try {
+    const chatId = extra?.chatId || env.__CHAT_ID; // другий варіант — якщо прокидаєш у env
+    // limit можна змінювати змінною SHORT_CONTEXT_LIMIT (дефолт 6)
+    const limit = Math.max(0, Number(env.SHORT_CONTEXT_LIMIT || 6)) || 6;
+    memoryPrefix = await buildMemoryPrefix(env, chatId, limit);
+  } catch {
+    // тихо ігноруємо
+  }
+
+  const mergedSystem = (memoryPrefix ? memoryPrefix : "") + (systemHint || "");
 
   // 1) Gemini (AI Studio key)
   const GEMINI_KEY = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
@@ -168,7 +244,7 @@ export async function think(env, userText, systemHint = "") {
         apiKey: GEMINI_KEY,
         model: geminiModel,
         userText: text,
-        systemHint,
+        systemHint: mergedSystem,
         showTag,
       });
       if (out) return out;
@@ -187,7 +263,7 @@ export async function think(env, userText, systemHint = "") {
         accountId: CF_ACCOUNT_ID,
         apiToken: CF_TOKEN,
         userText: text,
-        systemHint,
+        systemHint: mergedSystem,
         model: cfModel,
         showTag,
       });
@@ -204,7 +280,7 @@ export async function think(env, userText, systemHint = "") {
       const out = await callOpenRouter({
         apiKey: env.OPENROUTER_API_KEY,
         userText: text,
-        systemHint,
+        systemHint: mergedSystem,
         model: orModel,
         showTag,
       });
@@ -214,9 +290,30 @@ export async function think(env, userText, systemHint = "") {
     }
   }
 
-  // 4) Софт-фолбек
+  // 4) OpenAI-compatible (free/community)
+  if (env.FREE_API_BASE_URL && env.FREE_API_KEY) {
+    try {
+      const freeModel = env.FREE_API_MODEL || "gpt-3.5-turbo";
+      const freePath  = env.FREE_API_PATH  || "/v1/chat/completions";
+      const out = await callOpenAICompat({
+        baseUrl: env.FREE_API_BASE_URL,
+        apiKey: env.FREE_API_KEY,
+        model: freeModel,
+        path: freePath,
+        userText: text,
+        systemHint: mergedSystem,
+        showTag,
+      });
+      if (out) return out;
+    } catch (e) {
+      console.log("OpenAI-compat error:", e?.message || e);
+    }
+  }
+
+  // 5) Софт-фолбек
   return (
     "🧠 Поки що я працюю у легкому режимі без зовнішніх моделей.\n" +
-    "Додай GEMINI_API_KEY/GOOGLE_API_KEY, або CLOUDFLARE_API_TOKEN + CF_ACCOUNT_ID, або OPENROUTER_API_KEY — і відповіді стануть «розумнішими»."
+    "Додай GEMINI_API_KEY/GOOGLE_API_KEY, або CLOUDFLARE_API_TOKEN + CF_ACCOUNT_ID, " +
+    "або OPENROUTER_API_KEY, або FREE_API_BASE_URL + FREE_API_KEY — і відповіді стануть «розумнішими»."
   );
 }
