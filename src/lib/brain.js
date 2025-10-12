@@ -6,7 +6,7 @@
 // Якщо ключів немає — м'який фолбек-повідомлення.
 
 // ---- Імпорти (коротка пам'ять) ----
-import { getShortContext } from "./memoryShort.js";
+import { getShortContext } from "./memory.js";
 
 // ---- Константи та утиліти ----
 const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
