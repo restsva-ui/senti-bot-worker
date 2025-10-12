@@ -3,11 +3,7 @@
 
 const CHECKLIST_KEY = "service:checklist";
 const STATUT_KEY = "service:statut";
-
-// Старі архіви (текст чекліста)
 const ARCHIVE_PREFIX = "archive:checklist:";
-// Нові архіви (ZIP з «мозком»)
-const REPO_PREFIX = "senti_archive/";
 
 // --- small helpers -----------------------------------------------------------
 function fmtNow() { return new Date().toISOString(); }
@@ -60,49 +56,26 @@ export async function writeStatut(env, html) {
   return await safePut(env.CHECKLIST_KV, STATUT_KEY, String(html || ""));
 }
 
-// --- archive (text & repo zips) ---------------------------------------------
+// --- archive (optional) ------------------------------------------------------
 export async function listArchives(env) {
   if (!env?.CHECKLIST_KV || !env.CHECKLIST_KV.list) return [];
   try {
-    const [a, b] = await Promise.all([
-      env.CHECKLIST_KV.list({ prefix: REPO_PREFIX }).catch(() => ({ keys: [] })),
-      env.CHECKLIST_KV.list({ prefix: ARCHIVE_PREFIX }).catch(() => ({ keys: [] })),
-    ]);
-    const names = []
-      .concat((a.keys || []).map(k => k.name))
-      .concat((b.keys || []).map(k => k.name));
-    // від нового до старого за ім'ям (ISO-мітки збережені у ключах)
-    return names.sort().reverse();
+    const { keys } = await env.CHECKLIST_KV.list({ prefix: ARCHIVE_PREFIX });
+    return keys?.map(k => k.name)?.sort()?.reverse() || [];
   } catch (e) {
     console.error("[kvChecklist.listArchives]", e?.message || e);
     return [];
   }
 }
-
 export async function getArchive(env, key) {
   if (!env?.CHECKLIST_KV) return "";
-  return await safeGet(env.CHECKLIST_KV, String(key || ""), "");
+  const full = key?.startsWith(ARCHIVE_PREFIX) ? key : ARCHIVE_PREFIX + String(key || "");
+  return await safeGet(env.CHECKLIST_KV, full, "");
 }
-
-/**
- * saveArchive:
- * 1) Якщо передано (key, bodyBase64) — зберігаємо ZIP «мозку» в REPO_PREFIX.
- * 2) Інакше — робимо текстовий snapshot чекліста під ARCHIVE_PREFIX + timestamp.
- */
-export async function saveArchive(env, keyOrNote = "manual", bodyBase64) {
+export async function saveArchive(env, note = "manual") {
   if (!env?.CHECKLIST_KV) return false;
-
-  // режим ZIP
-  if (bodyBase64) {
-    const key = String(keyOrNote || "").startsWith(REPO_PREFIX)
-      ? String(keyOrNote)
-      : `${REPO_PREFIX}${String(keyOrNote || "")}`;
-    return await safePut(env.CHECKLIST_KV, key, String(bodyBase64));
-  }
-
-  // режим текстового snapshot
-  const stamp = fmtNow().replace(/[:.]/g, "-");
-  const key = `${ARCHIVE_PREFIX}${stamp}__${String(keyOrNote)}`;
+  const stamp = fmtNow().replace(/[:.]/g, "-"); // safe for key
+  const key = `${ARCHIVE_PREFIX}${stamp}__${note}`;
   const body = await readChecklist(env);
   return await safePut(env.CHECKLIST_KV, key, body);
 }
@@ -110,7 +83,9 @@ export async function saveArchive(env, keyOrNote = "manual", bodyBase64) {
 // --- HTML views --------------------------------------------------------------
 export async function statutHtml(env) {
   const body = await readStatut(env);
+  // захист секретом (якщо заданий) — щоб зручно повернутись назад
   const sec = env?.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
+  const checklistHref = `/admin/checklist${sec}`;
   return `<!doctype html>
 <html lang="uk">
 <head>
@@ -132,11 +107,11 @@ export async function statutHtml(env) {
 <div class="wrap">
   <h1>📜 Statut</h1>
   <div class="card">
-    <form method="post" action="/admin/statut?save=1">
+    <form method="post" action="/admin/statut">
       <textarea name="text" placeholder="HTML...">${body || ""}</textarea>
       <div class="row">
         <input type="submit" value="Зберегти"/>
-        <a href="/admin/checklist/html${sec}">➡️ до Checklist</a>
+        <a href="${checklistHref}">➡️ до Checklist</a>
       </div>
     </form>
   </div>
@@ -148,12 +123,12 @@ export async function statutHtml(env) {
 export async function checklistHtml(env) {
   const body = await readChecklist(env);
   const empty = !String(body).trim();
-  const last200 = (body || "").split(/\n/).slice(-200).join("\n"); // show last 200 lines
+  const last200 = (body || "").split(/\n/).slice(-200).join("\n"); // show last 200 lines, light enough
 
   // 🔒 якщо є секрет — додаємо його до захищених лінків/тригерів
   const sec = env?.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
   const repoHref = `/admin/repo/html${sec}`;
-  const statutHref = `/admin/statut/html${sec}`;
+  const statutHref = `/admin/statut${sec}`;   // <— ФІКС: без /html
   const improveAction = `/ai/improve${sec}`;
 
   return `<!doctype html>
