@@ -1,7 +1,7 @@
 // Telegram webhook з інтеграцією "мозку" та перевірками доступу/режиму диска.
 // Додаємо Статут як системний підказник для AI на кожну текстову взаємодію.
 // ⬆️ ДОПОВНЕНО: Self-Tune — підтягувамо інсайти зі STATE_KV і додаємо rules/tone.
-// ⬆️ НОВЕ: Енергомодель (getEnergy/spendEnergy) + "low-mode" при низькій енергії.
+// ⬆️ ДОПОВНЕНО: Energy — ліміт витрат на текст/медіа з авто-відновленням.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -9,7 +9,6 @@ import { abs } from "../utils/url.js";
 import { think } from "../lib/brain.js";
 import { readStatut } from "../lib/kvChecklist.js";
 import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
-import { getEnergy, spendEnergy } from "../lib/energy.js"; // ← додано
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 const json = (data, init = {}) =>
@@ -49,11 +48,10 @@ const BTN_DRIVE = "Google Drive";
 const BTN_SENTI = "Senti";
 const BTN_ADMIN = "Admin";
 const BTN_CHECK = "Checklist";
-const BTN_ENERGY = "Energy"; // ← додано
 
 const mainKeyboard = (isAdmin = false) => {
   const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
-  if (isAdmin) rows.push([{ text: BTN_ADMIN }, { text: BTN_CHECK }, { text: BTN_ENERGY }]); // ← додано
+  if (isAdmin) rows.push([{ text: BTN_ADMIN }, { text: BTN_CHECK }]);
   return { keyboard: rows, resize_keyboard: true };
 };
 
@@ -74,6 +72,62 @@ async function setDriveMode(env, userId, on) {
 }
 async function getDriveMode(env, userId) {
   return (await ensureState(env).get(DRIVE_MODE_KEY(userId))) === "1";
+}
+
+// ── Energy subsystem ──────────────────────────────────────────────────────────
+const ENERGY_KEY = (uid) => `energy:${uid}`;
+function energyCfg(env) {
+  return {
+    max: Number(env.ENERGY_MAX ?? 100),
+    recoverPerMin: Number(env.ENERGY_RECOVER_PER_MIN ?? 1),
+    costText: Number(env.ENERGY_COST_TEXT ?? 1),
+    costImage: Number(env.ENERGY_COST_IMAGE ?? 5),
+    low: Number(env.ENERGY_LOW_THRESHOLD ?? 10),
+  };
+}
+
+async function getEnergy(env, userId) {
+  const cfg = energyCfg(env);
+  const raw = await ensureState(env).get(ENERGY_KEY(userId));
+  const now = Math.floor(Date.now() / 1000);
+  if (!raw) {
+    const obj = { v: cfg.max, t: now };
+    await ensureState(env).put(ENERGY_KEY(userId), JSON.stringify(obj));
+    return obj.v;
+  }
+  let obj;
+  try { obj = JSON.parse(raw); } catch { obj = { v: cfg.max, t: now }; }
+  const minutes = Math.floor((now - (obj.t || now)) / 60);
+  if (minutes > 0 && obj.v < cfg.max) {
+    obj.v = Math.min(cfg.max, obj.v + minutes * cfg.recoverPerMin);
+    obj.t = now;
+    await ensureState(env).put(ENERGY_KEY(userId), JSON.stringify(obj));
+  }
+  return obj.v;
+}
+
+async function setEnergy(env, userId, v) {
+  const now = Math.floor(Date.now() / 1000);
+  await ensureState(env).put(ENERGY_KEY(userId), JSON.stringify({ v, t: now }));
+  return v;
+}
+
+async function spendEnergy(env, userId, cost) {
+  const cfg = energyCfg(env);
+  const cur = await getEnergy(env, userId);
+  if (cur < cost) return { ok: false, cur, need: cost, cfg };
+  const left = Math.max(0, cur - cost);
+  await setEnergy(env, userId, left);
+  return { ok: true, cur: left, cfg };
+}
+
+function energyLinks(env, userId) {
+  const s = env.WEBHOOK_SECRET || "";
+  const qs = `s=${encodeURIComponent(s)}&u=${encodeURIComponent(String(userId || ""))}`;
+  return {
+    energy: abs(env, `/admin/energy/html?${qs}`),
+    checklist: abs(env, `/admin/checklist/html?${qs}`),
+  };
 }
 
 // ── Self-Tune: підтягування інсайтів зі STATE_KV ─────────────────────────────
@@ -105,18 +159,8 @@ async function loadSelfTune(env, chatId) {
   }
 }
 
-// ── Енергомодель: формуємо доповнення до системного хінта при low-mode ──────
-function lowModeHint(energy, cfg) {
-  return (
-    `\n\n[Energy]\n` +
-    `• Енергія користувача низька (${energy}/${cfg.MAX}). ` +
-    `Відповідай максимально коротко: 2–3 речення, без зайвої води, ` +
-    `пріоритезуй дієві інструкції та один конкретний наступний крок.`
-  );
-}
-
-// Збір системного підказника (Статут + Self-Tune + базова інструкція + (опц.) Energy)
-async function buildSystemHint(env, chatId, extra = "", energyBlock = "") {
+// Збір системного підказника (Статут + Self-Tune + базова інструкція)
+async function buildSystemHint(env, chatId, extra = "") {
   const statut = await readStatut(env).catch(() => "");
   const selfTune = chatId ? await loadSelfTune(env, chatId) : null;
 
@@ -125,7 +169,7 @@ async function buildSystemHint(env, chatId, extra = "", energyBlock = "") {
     "Ти — Senti, помічник у Telegram. Відповідай стисло та дружньо. " +
     "Якщо просять зберегти файл — нагадай про Google Drive та розділ Checklist/Repo.";
 
-  return base + (selfTune || "") + energyBlock + (extra ? `\n\n${extra}` : "");
+  return base + (selfTune || "") + (extra ? `\n\n${extra}` : "");
 }
 
 // ── медіа ─────────────────────────────────────────────────────────────────────
@@ -175,11 +219,19 @@ async function handleIncomingMedia(env, chatId, userId, msg) {
   const att = detectAttachment(msg);
   if (!att) return false;
 
-  // списуємо енергію за медіа
-  let energyInfo = null;
-  try {
-    energyInfo = await spendEnergy(env, userId, "image");
-  } catch {}
+  // energy check for media
+  const { costImage } = energyCfg(env);
+  const spend = await spendEnergy(env, userId, costImage);
+  if (!spend.ok) {
+    const links = energyLinks(env, userId);
+    await sendMessage(
+      env,
+      chatId,
+      `🔋 Недостатньо енергії для збереження медіа (потрібно ${costImage}).\n` +
+      `Відновлюйся автоматично, або керуй тут:\n• Energy: ${links.energy}\n• Checklist: ${links.checklist}`
+    );
+    return true;
+  }
 
   const ut = await getUserTokens(env, userId);
   if (!ut?.refresh_token) {
@@ -193,12 +245,7 @@ async function handleIncomingMedia(env, chatId, userId, msg) {
   }
   const url = await tgFileUrl(env, att.file_id);
   const saved = await driveSaveFromUrl(env, userId, url, att.name);
-
-  const suffix =
-    energyInfo && energyInfo.energy !== undefined
-      ? `\n⚡ Енергія: ${energyInfo.energy}/${energyInfo.cfg?.MAX ?? "?"}`
-      : "";
-  await sendMessage(env, chatId, `✅ Збережено на твоєму диску: ${saved?.name || att.name}${suffix}`);
+  await sendMessage(env, chatId, `✅ Збережено на твоєму диску: ${saved?.name || att.name}`);
   return true;
 }
 
@@ -260,12 +307,6 @@ export async function handleTelegramWebhook(req, env) {
       const hasFreeKey  = !!env.FREE_API_KEY;
       const mo = String(env.MODEL_ORDER || "").trim();
 
-      let energyLine = "";
-      try {
-        const eNow = await getEnergy(env, userId);
-        energyLine = `\n⚡ Енергія: ${eNow}/${Number(env.ENERGY_MAX || 100)}`;
-      } catch {}
-
       const lines = [
         "🧪 Діагностика AI",
         `MODEL_ORDER: ${mo || "(порожньо)"}`,
@@ -273,7 +314,6 @@ export async function handleTelegramWebhook(req, env) {
         `Cloudflare (CF_ACCOUNT_ID + CLOUDFLARE_API_TOKEN): ${hasCF ? "✅" : "❌"}`,
         `OpenRouter key: ${hasOR ? "✅" : "❌"}`,
         `FreeLLM (BASE_URL + KEY): ${hasFreeBase && hasFreeKey ? "✅" : "❌"}`,
-        energyLine,
       ];
 
       // Health summary (EWMA, fail streak, cooldown)
@@ -293,27 +333,6 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /energy — швидкий доступ до панелі енергії
-  if (text === "/energy" || text === BTN_ENERGY) { // ← додано
-    await safe(async () => {
-      const s = encodeURIComponent(env.WEBHOOK_SECRET || "");
-      const u = encodeURIComponent(userId);
-      const panel = abs(env, `/admin/energy/html?s=${s}&u=${u}`);
-      const combo = abs(env, `/admin/checklist/with-energy/html?s=${s}&u=${u}`);
-      let snapshot = "";
-      try {
-        const cur = await getEnergy(env, userId);
-        snapshot = `\nПоточна енергія: ${cur}/${Number(env.ENERGY_MAX || 100)}`;
-      } catch {}
-      await sendMessage(
-        env,
-        chatId,
-        `⚡ Energy панель:\n${panel}\n\n🧩 Checklist+Energy:\n${combo}${snapshot}`
-      );
-    });
-    return json({ ok: true });
-  }
-
   // /ai (надійний парсинг: /ai, /ai@Bot, з/без аргументів)
   const aiArg = parseAiCommand(textRaw);
   if (aiArg !== null) {
@@ -329,16 +348,23 @@ export async function handleTelegramWebhook(req, env) {
         return;
       }
 
-      // списання енергії за текстову подію
-      let energyBlock = "";
-      try {
-        const { energy, lowMode, cfg } = await spendEnergy(env, userId, "text");
-        if (lowMode) energyBlock = lowModeHint(energy, cfg);
-      } catch {}
+      // енергія для тексту
+      const { costText, low } = energyCfg(env);
+      const spent = await spendEnergy(env, userId, costText);
+      if (!spent.ok) {
+        const links = energyLinks(env, userId);
+        await sendMessage(
+          env,
+          chatId,
+          `🔋 Не вистачає енергії (потрібно ${costText}).\n` +
+          `Вона відновлюється автоматично.\n` +
+          `Керування:\n• Energy: ${links.energy}\n• Checklist: ${links.checklist}`
+        );
+        return;
+      }
 
-      // ⬇️ Self-Tune + Статут + (опц.) Energy як системний хінт
-      const systemHint = await buildSystemHint(env, chatId, "", energyBlock);
-
+      // ⬇️ Self-Tune + Статут як системний хінт
+      const systemHint = await buildSystemHint(env, chatId);
       const modelOrder = String(env.MODEL_ORDER || "").trim();
       let reply = "";
       try {
@@ -352,7 +378,12 @@ export async function handleTelegramWebhook(req, env) {
         reply = `🧠 Помилка AI: ${String(e?.message || e)}`;
       }
 
-      if (isBlank(reply)) reply = defaultAiReply(); // анти-порожній фолбек
+      if (isBlank(reply)) reply = defaultAiReply();
+      // low-mode підказка
+      if (spent.cur <= low) {
+        const links = energyLinks(env, userId);
+        reply += `\n\n⚠️ Низький рівень енергії (${spent.cur}). Відновиться автоматично. Керування: ${links.energy}`;
+      }
       await sendMessage(env, chatId, reply, { parse_mode: undefined });
     });
     return json({ ok: true });
@@ -402,21 +433,18 @@ export async function handleTelegramWebhook(req, env) {
 
   if ((text === "Admin" || text === "/admin") && isAdmin) {
     await safe(async () => {
-      const s = encodeURIComponent(env.WEBHOOK_SECRET || "");
-      const cl = abs(env, `/admin/checklist/html?s=${s}`);
-      const repo = abs(env, `/admin/repo/html?s=${s}`);
-      const energy = abs(env, `/admin/energy/html?s=${s}&u=${encodeURIComponent(userId)}`);
-      const combo  = abs(env, `/admin/checklist/with-energy/html?s=${s}&u=${encodeURIComponent(userId)}`);
+      const cl = abs(env, `/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET || "")}`);
+      const repo = abs(env, `/admin/repo/html?s=${encodeURIComponent(env.WEBHOOK_SECRET || "")}`);
       await sendMessage(
         env,
         chatId,
-        `🛠 Адмін-меню\n\n• Чеклист: ${cl}\n• Repo: ${repo}\n• Energy: ${energy}\n• Checklist+Energy: ${combo}\n• Вебхук GET: ${abs(env, "/webhook")}`
+        `🛠 Адмін-меню\n\n• Чеклист: ${cl}\n• Repo: ${repo}\n• Вебхук GET: ${abs(env, "/webhook")}`
       );
     });
     return json({ ok: true });
   }
 
-  // Якщо увімкнено режим диска — перехоплюємо та зберігаємо медіа (і списуємо енергію)
+  // Якщо увімкнено режим диска — перехоплюємо та зберігаємо медіа (зі списанням енергії)
   try {
     if (await getDriveMode(env, userId)) {
       if (await handleIncomingMedia(env, chatId, userId, msg)) return json({ ok: true });
@@ -426,17 +454,24 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Якщо це не команда і не медіа — відповідаємо AI з підвантаженням Статуту + Self-Tune + (опц.) Energy
+  // Якщо це не команда і не медіа — відповідаємо AI з підвантаженням Статуту + Self-Tune
   if (text && !text.startsWith("/")) {
     try {
-      // списання енергії за текстову подію
-      let energyBlock = "";
-      try {
-        const { energy, lowMode, cfg } = await spendEnergy(env, userId, "text");
-        if (lowMode) energyBlock = lowModeHint(energy, cfg);
-      } catch {}
+      // списання енергії для звичайного тексту
+      const { costText, low } = energyCfg(env);
+      const spent = await spendEnergy(env, userId, costText);
+      if (!spent.ok) {
+        const links = energyLinks(env, userId);
+        await sendMessage(
+          env,
+          chatId,
+          `🔋 Не вистачає енергії (потрібно ${costText}). Відновлення авто.\n` +
+          `Energy: ${links.energy}`
+        );
+        return json({ ok: true });
+      }
 
-      const systemHint = await buildSystemHint(env, chatId, "", energyBlock);
+      const systemHint = await buildSystemHint(env, chatId);
       const modelOrder = String(env.MODEL_ORDER || "").trim();
       let out = "";
 
@@ -447,7 +482,11 @@ export async function handleTelegramWebhook(req, env) {
         out = await think(env, text, systemHint);
       }
 
-      if (isBlank(out)) out = defaultAiReply(); // анти-порожній фолбек
+      if (isBlank(out)) out = defaultAiReply();
+      if (spent.cur <= low) {
+        const links = energyLinks(env, userId);
+        out += `\n\n⚠️ Низький рівень енергії (${spent.cur}). Керування: ${links.energy}`;
+      }
       await sendMessage(env, chatId, out, { parse_mode: undefined });
       return json({ ok: true });
     } catch (e) {
@@ -457,6 +496,6 @@ export async function handleTelegramWebhook(req, env) {
   }
 
   // дефолт
-  await sendMessage(env, chatId, "Готовий 👋", { reply_markup: mainKeyboard(isAdmin) });
+  await sendMessage(env, chatId, "Чіназес 👋", { reply_markup: mainKeyboard(isAdmin) });
   return json({ ok: true });
 }
