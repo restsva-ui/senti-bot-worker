@@ -44,7 +44,10 @@ import { home } from "./ui/home.js";
 // ✅ нічні авто-поліпшення (утиліта)
 import { nightlyAutoImprove } from "./lib/autoImprove.js";
 
-const VERSION = "senti-worker-2025-10-11-22-40";
+// ✅ self-regulation (оновлення правил поведінки на базі інсайтів)
+import { runSelfRegulation } from "./lib/selfRegulate.js";
+
+const VERSION = "senti-worker-2025-10-12-00-59";
 
 export default {
   async fetch(req, env) {
@@ -165,6 +168,10 @@ export default {
           return json({ ok: false, error: "unauthorized" }, 401, CORS);
         }
         const res = await nightlyAutoImprove(env, { now: new Date(), reason: "manual" });
+        // self-regulation (якщо дозволено)
+        if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
+          await runSelfRegulation(env, res?.insights || null).catch(() => {});
+        }
         return json({ ok: true, ...res }, 200, CORS);
       }
 
@@ -176,6 +183,18 @@ export default {
         }
         // /ai/improve/auto або /ai/improve/run -> запустити нічний агент
         const res = await nightlyAutoImprove(env, { now: new Date(), reason: "http" });
+        if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
+          await runSelfRegulation(env, res?.insights || null).catch(() => {});
+        }
+        return json({ ok: true, ...res }, 200, CORS);
+      }
+
+      // --- on-demand self-regulation без аналізу (просто перерахунок правил) ---
+      if (p === "/ai/self-regulate") {
+        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
+          return json({ ok: false, error: "unauthorized" }, 401, CORS);
+        }
+        const res = await runSelfRegulation(env, null);
         return json({ ok: true, ...res }, 200, CORS);
       }
 
@@ -218,7 +237,7 @@ export default {
       if (p.startsWith("/admin/brain")) {
         try {
           const r = await handleAdminBrain?.(req, env, url);
-          if (r && r.status !== 404) return r;
+          if (r && р.status !== 404) return r;
         } catch {}
         return json({ ok: true, note: "admin brain fallback" }, 200, CORS);
       }
@@ -343,7 +362,7 @@ export default {
       );
     }
 
-    // 2) Нічні авто-поліпшення (нове)
+    // 2) Нічні авто-поліпшення (нове) + self-regulation
     try {
       const hour = new Date().getUTCHours();
       const targetHour = Number(env.NIGHTLY_UTC_HOUR ?? 2); // дефолт 02:00 UTC
@@ -354,7 +373,10 @@ export default {
         String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" &&
         (runByCron || runByHour)
       ) {
-        await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
+        const res = await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
+        if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
+          await runSelfRegulation(env, res?.insights || null).catch(() => {});
+        }
       }
     } catch (e) {
       await appendChecklist(
