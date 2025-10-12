@@ -3,9 +3,10 @@
 // зберігає інсайти у STATE_KV і (опційно) пише нотатку у CHECKLIST_KV.
 
 import { askAnyModel } from "../lib/modelRouter.js";
+import { appendChecklist as appendToChecklist } from "../lib/kvChecklist.js";
 
 const INSIGHT_TTL = 60 * 60 * 24 * 14; // 14 днів
-const MEM_PREFIX = "u:";               // з memory.js: keyFor(chatId) -> u:<chatId>:mem
+const MEM_PREFIX  = "u:";              // з memory.js: keyFor(chatId) -> u:<chatId>:mem
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data, null, 2), {
@@ -98,10 +99,24 @@ async function putInsight(env, key, val) {
   await kvPutJSON(env.STATE_KV, key, val, INSIGHT_TTL);
 }
 
-async function appendChecklist(env, text) {
-  if (!env.CHECKLIST_KV) return;
-  const key = `nightly:${todayUTC()}:${Date.now()}`;
-  await env.CHECKLIST_KV.put(key, text);
+// пишемо у видимий "service:checklist" через загальну утиліту
+async function logChecklist(env, text) {
+  try { await appendToChecklist(env, text); } catch {}
+}
+
+// підрахунок доступних чатів (ключі u:<chatId>:mem)
+async function countChats(env) {
+  if (!env.LIKES_KV) return 0;
+  let cursor, cnt = 0;
+  do {
+    const page = await env.LIKES_KV.list({ prefix: MEM_PREFIX, cursor });
+    for (const k of page.keys || []) {
+      if (k.name.endsWith(":mem")) cnt++;
+    }
+    cursor = page.cursor;
+    if (page.list_complete) break;
+  } while (cursor);
+  return cnt;
 }
 
 /**
@@ -119,7 +134,7 @@ export async function runNightlyImprove(env, limitPerRun = 50) {
     const page = await listUserKeys(env.LIKES_KV, cursor);
     cursor = page.cursor;
     for (const k of page.keys || []) {
-      // чекаємо лише ключі пам'яті з постфиксом ":mem"
+      // беремо лише ключі пам'яті з постфиксом ":mem"
       if (!k.name.endsWith(":mem")) continue;
 
       // chatId між 'u:' та ':mem'
@@ -130,9 +145,9 @@ export async function runNightlyImprove(env, limitPerRun = 50) {
       const state = await kvGetJSON(env.LIKES_KV, k.name, null);
       const insight = await analyzeOneUser(env, chatId, state);
       if (insight) {
-        const dailyKey = `insight:${insight.date}:${chatId}`;
+        const dailyKey  = `insight:${insight.date}:${chatId}`;
         const latestKey = `insight:latest:${chatId}`;
-        await putInsight(env, dailyKey, insight);
+        await putInsight(env, dailyKey,  insight);
         await putInsight(env, latestKey, insight);
         added.push(latestKey);
       }
@@ -143,30 +158,52 @@ export async function runNightlyImprove(env, limitPerRun = 50) {
     if (page.list_complete) break;
   }
 
-  // глобальна зведена нота (для відладки/аудиту)
-  await appendChecklist(
+  // глобальна зведена нота (видима у чеклисті)
+  await logChecklist(
     env,
-    `[nightly] ${todayUTC()} insights: ${added.length}, scanned: ${processed}`
+    `🌙 nightly @ ${new Date().toISOString()} — insights:${added.length}, scanned:${processed}`
   );
 
   return { ok: true, scanned: processed, insights: added.length };
 }
 
-/** HTTP-роути: /ai/improve/auto, /ai/improve/run */
+// простий guard секрету
+function ensureSecret(env, url) {
+  if (!env.WEBHOOK_SECRET) return true;
+  return url.searchParams.get("s") === env.WEBHOOK_SECRET;
+}
+
+/** HTTP-роути: /ai/improve (POST), /ai/improve/auto, /ai/improve/run */
 export async function handleAiImprove(req, env, url) {
   const path = (url.pathname || "").toLowerCase();
 
-  // захист секретом, якщо встановлений
-  if (env.WEBHOOK_SECRET) {
-    const s = url.searchParams.get("s");
-    if (s !== env.WEBHOOK_SECRET) {
-      return json({ ok: false, error: "unauthorized" }, 401);
+  if (!path.startsWith("/ai/improve")) return null;
+  if (!ensureSecret(env, url)) return json({ ok: false, error: "unauthorized" }, 401);
+
+  // Підказка для GET /ai/improve
+  if (path === "/ai/improve" && req.method === "GET") {
+    const chats = await countChats(env);
+    return json({ ok: true, hint: "POST here to trigger night agent", chats });
+  }
+
+  // Кнопка з чеклиста надсилає POST /ai/improve
+  if (path === "/ai/improve" && req.method === "POST") {
+    const total = await countChats(env);
+    await logChecklist(env, `🌙 night-agent: start (chats:${total})`);
+    try {
+      const res = await runNightlyImprove(env, 80);
+      await logChecklist(env, `🌙 night-agent: done ok=${res.ok} insights=${res.insights} scanned=${res.scanned}`);
+      return json({ ok: true, ...res });
+    } catch (e) {
+      await logChecklist(env, `🌙 night-agent: fail ${String(e?.message || e)}`);
+      return json({ ok: false, error: String(e?.message || e) }, 500);
     }
   }
 
-  if (path === "/ai/improve/auto" || path === "/ai/improve/run") {
+  // Сумісні маршрути
+  if ((path === "/ai/improve/run" || path === "/ai/improve/auto") && (req.method === "GET" || req.method === "POST")) {
     const res = await runNightlyImprove(env, 80);
-    return json(res, 200);
+    return json(res, res.ok ? 200 : 500);
   }
 
   return json({ ok: false, error: "not found" }, 404);
