@@ -54,6 +54,13 @@ NIGHTLY_UTC_HOUR = "23"
 SELF_REGULATE       = "on"   # "off" щоб вимкнути само-налаштування
 SELF_TUNING_FACTOR  = "0.3"  # 0..1 – наскільки агресивно змінюємо правила
 
+# --- Energy model (НЕ секрети; читаються з ENV у runtime) ---
+ENERGY_MAX = 100
+ENERGY_RECOVER_PER_MIN = 1
+ENERGY_COST_TEXT = 1
+ENERGY_COST_IMAGE = 5
+ENERGY_LOW_THRESHOLD = 10
+
 # --- KV bindings ---
 [[kv_namespaces]]
 binding = "DEDUP_KV"
