@@ -1,8 +1,12 @@
 // src/lib/kvChecklist.js
 
-// Ключі у KV
+// ---- Ключі та префікси у KV -----------------------------------------------
 const CHECKLIST_KEY = "checklist:text";
 const STATUT_KEY = "statut:text";
+
+// Архів (простий key-value у тому ж CHECKLIST_KV)
+const REPO_PREFIX = "repo:";        // repo:<name>
+const REPO_CONTENT_PREFIX = REPO_PREFIX; // сумісність назв
 
 // ---------- Безпечні обгортки над KV ----------
 async function kvGetSafe(kv, key, fallback = "") {
@@ -14,13 +18,70 @@ async function kvGetSafe(kv, key, fallback = "") {
   }
 }
 
-async function kvPutSafe(kv, key, value) {
+async function kvPutSafe(kv, key, value, options) {
   try {
-    await kv.put(key, value);
+    await kv.put(key, value, options);
     return true;
   } catch {
     return false;
   }
+}
+
+async function kvListSafe(kv, prefix) {
+  try {
+    const out = await kv.list({ prefix });
+    return Array.isArray(out?.keys) ? out.keys : [];
+  } catch {
+    return [];
+  }
+}
+
+// ---------- Сумісні мінімальні API (іншими файлами) ----------
+export async function readChecklist(env) {
+  const kv = env?.CHECKLIST_KV;
+  if (!kv) return "";
+  return await kvGetSafe(kv, CHECKLIST_KEY, "");
+}
+
+export async function readStatut(env) {
+  const kv = env?.CHECKLIST_KV;
+  if (!kv) return "";
+  return await kvGetSafe(kv, STATUT_KEY, "");
+}
+
+/**
+ * Зберегти файл у архіві (Repo).
+ * @param {object} env
+ * @param {string} name - логічне ім'я (без prefix)
+ * @param {string|Uint8Array} content
+ * @returns {Promise<boolean>}
+ */
+export async function saveArchive(env, name, content) {
+  const kv = env?.CHECKLIST_KV;
+  if (!kv) return false;
+  const key = REPO_CONTENT_PREFIX + String(name || "").trim();
+  if (!key || key === REPO_PREFIX) return false;
+  return await kvPutSafe(kv, key, content);
+}
+
+/** Отримати файл з архіву */
+export async function getArchive(env, name) {
+  const kv = env?.CHECKLIST_KV;
+  if (!kv) return null;
+  const key = REPO_CONTENT_PREFIX + String(name || "").trim();
+  try {
+    return await kv.get(key);
+  } catch {
+    return null;
+  }
+}
+
+/** Перелік ключів архіву (без префікса) */
+export async function listArchives(env) {
+  const kv = env?.CHECKLIST_KV;
+  if (!kv) return [];
+  const keys = await kvListSafe(kv, REPO_PREFIX);
+  return keys.map(k => k.name.replace(REPO_PREFIX, ""));
 }
 
 // ---------- Публічне: додати рядок у чекліст ----------
@@ -39,10 +100,7 @@ export async function appendChecklist(env, line) {
 
 // ---------- Публічне: HTML чекліста (View + Raw) ----------
 export async function checklistHtml(env) {
-  const kv = env?.CHECKLIST_KV;
-  const raw = kv ? await kvGetSafe(kv, CHECKLIST_KEY, "") : "";
-
-  // Підготовка структурованих елементів для «красивого» режиму
+  const raw = await readChecklist(env);
   const lines = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   const items = lines.map(parseLine).reverse(); // нові зверху
 
@@ -198,11 +256,7 @@ render(allItems);
 
 // ---------- Публічне: HTML статуту (простий редактор) ----------
 export async function statutHtml(env) {
-  const kv = env?.CHECKLIST_KV;
-  const current = kv
-    ? await kvGetSafe(kv, STATUT_KEY, "Статут ще не задано.")
-    : "KV binding CHECKLIST_KV is missing.";
-
+  const current = await readStatut(env);
   const page = `
 <!doctype html>
 <meta charset="utf-8" />
@@ -249,7 +303,6 @@ function detectTags(msg = "") {
   const s = msg.toLowerCase();
   const chips = [];
 
-  // Типові події
   if (s.includes("heartbeat")) chips.push({ kind:"ok", text:"heartbeat" });
   if (s.includes("refreshcheck")) chips.push({ kind:"info", text:"refresh" });
   if (s.includes("deploy")) chips.push({ kind:"note", text:"deploy" });
@@ -257,18 +310,14 @@ function detectTags(msg = "") {
   if (s.includes("cron @")) chips.push({ kind:"info", text:"cron" });
   if (s.includes("miss")) chips.push({ kind:"miss", text:"miss" });
 
-  // Нічні агенти / еволюція / тренування
   if (s.includes("auto_improve")) chips.push({ kind:"info", text:"auto-improve" });
   if (s.includes("evolve")) chips.push({ kind:"info", text:"evolve" });
   if (s.includes("train")) chips.push({ kind:"info", text:"train" });
 
-  // Стани
   if (s.includes("error") || s.includes("fail")) chips.push({ kind:"err", text:"error" });
   if (s.includes("warn")) chips.push({ kind:"warn", text:"warn" });
   if (/\bok\b$|\bok\b/.test(s)) chips.push({ kind:"ok", text:"ok" });
 
-  // За замовчуванням
   if (!chips.length) chips.push({ kind:"note", text:"note" });
-
   return chips;
 }
