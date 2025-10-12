@@ -1,7 +1,8 @@
 // src/routes/aiImprove.js
 // Нічний агент: читає коротку пам'ять LIKES_KV, робить стислий аналіз,
 // зберігає інсайти у STATE_KV і пише нотатки у CHECKLIST_KV.
-// Додано debug-ендпойнти для перевірки KV/часу + seed та аналіз одного ключа.
+// Додано debug-ендпойнти для перевірки KV/часу + seed та аналіз одного ключа
+// + bindings/checklist/insight debug.
 
 import { askAnyModel } from "../lib/modelRouter.js";
 import { appendChecklist as appendToChecklist } from "../lib/kvChecklist.js";
@@ -186,9 +187,12 @@ function ensureSecret(env, url) {
  * - /ai/improve/run|auto (GET/POST)   — те саме
  * - /ai/improve/test-one?key=...      — аналіз 1 ключа u:<id>:mem
  * - /debug/time                       — поточний час
+ * - /debug/bindings                   — показати наявні KV-біндінги
+ * - /debug/checklist/ping?msg=...     — записати рядок у чекліст
  * - /debug/likes/scan                 — показати кількість ключів та приклади
  * - /debug/likes/get?key=...          — прочитати конкретний ключ
  * - /debug/likes/seed?chat=<id>       — створити тестову памʼять
+ * - /debug/insight/get?chat=<id>      — прочитати insight:latest:<id> зі STATE_KV
  */
 export async function handleAiImprove(req, env, url) {
   const path = (url.pathname || "").toLowerCase();
@@ -209,6 +213,28 @@ export async function handleAiImprove(req, env, url) {
       timestamp: Date.now(),
       tz_offset_min: -now.getTimezoneOffset(),
     });
+  }
+
+  if (path === "/debug/bindings" && req.method === "GET") {
+    const bind = (x) => !!x;
+    return json({
+      ok: true,
+      has: {
+        CHECKLIST_KV: bind(env.CHECKLIST_KV),
+        DEDUP_KV: bind(env.DEDUP_KV),
+        LIKES_KV: bind(env.LIKES_KV),
+        OAUTH_KV: bind(env.OAUTH_KV),
+        STATE_KV: bind(env.STATE_KV),
+        TODO_KV: bind(env.TODO_KV),
+        USER_OAUTH_KV: bind(env.USER_OAUTH_KV),
+      }
+    });
+  }
+
+  if (path === "/debug/checklist/ping" && (req.method === "GET" || req.method === "POST")) {
+    const msg = url.searchParams.get("msg") || "ping";
+    await logChecklist(env, `🧪 checklist ping: ${msg} @ ${new Date().toISOString()}`);
+    return json({ ok:true, written:true, msg });
   }
 
   if (path === "/debug/likes/scan" && req.method === "GET") {
@@ -248,6 +274,16 @@ export async function handleAiImprove(req, env, url) {
     };
     await env.LIKES_KV.put(key, JSON.stringify(demo));
     return json({ ok:true, seeded: key });
+  }
+
+  if (path === "/debug/insight/get" && req.method === "GET") {
+    if (!env.STATE_KV) return json({ ok:false, error:"STATE_KV missing" }, 500);
+    const chat = url.searchParams.get("chat");
+    if (!chat) return json({ ok:false, error:"pass ?chat=<chatId>" }, 400);
+    const key = `insight:latest:${chat}`;
+    const raw = await env.STATE_KV.get(key);
+    let parsed = null; try { parsed = raw ? JSON.parse(raw) : null; } catch {}
+    return json({ ok:true, key, exists: !!raw, raw, parsed });
   }
 
   // ----- IMPROVE -----
