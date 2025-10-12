@@ -1,5 +1,6 @@
 // Telegram webhook з інтеграцією "мозку" та перевірками доступу/режиму диска.
 // Додаємо Статут як системний підказник для AI на кожну текстову взаємодію.
+// ⬆️ ДОПОВНЕНО: Self-Tune — підтягувамо інсайти зі STATE_KV і додаємо rules/tone.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -21,11 +22,10 @@ async function sendMessage(env, chatId, text, extra = {}) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true, ...extra }),
   });
-  // не валимо запит, якщо Telegram повернув помилку
-  await r.text().catch(() => {});
+  await r.text().catch(() => {}); // не валимо весь хендлер, якщо TG вернув помилку
 }
 
-// Безпечний парсер команди /ai (підтримує /ai, /ai@Bot, з/без аргументів, у т.ч. через переніс рядка)
+// Безпечний парсер команди /ai (підтримує /ai, /ai@Bot, з/без аргументів)
 function parseAiCommand(text = "") {
   const s = String(text).trim();
   const m = s.match(/^\/ai(?:@[\w_]+)?(?:\s+([\s\S]+))?$/i);
@@ -71,6 +71,48 @@ async function setDriveMode(env, userId, on) {
 }
 async function getDriveMode(env, userId) {
   return (await ensureState(env).get(DRIVE_MODE_KEY(userId))) === "1";
+}
+
+// ── Self-Tune: підтягування інсайтів зі STATE_KV ─────────────────────────────
+async function loadSelfTune(env, chatId) {
+  try {
+    if (!env.STATE_KV) return null;
+    const key = `insight:latest:${chatId}`;
+    const raw = await env.STATE_KV.get(key);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    const rules = Array.isArray(obj?.analysis?.rules) ? obj.analysis.rules : [];
+    const tone  = obj?.analysis?.tone ? String(obj.analysis.tone).trim() : "";
+
+    if (!rules.length && !tone) return null;
+
+    // Будуємо короткий блок політик для системного хінта
+    const lines = [];
+    if (tone) lines.push(`• Тон розмови користувача: ${tone}.`);
+    if (rules.length) {
+      lines.push("• Дотримуйся правил:");
+      for (const r of rules.slice(0, 5)) {
+        lines.push(`  - ${String(r).trim()}`);
+      }
+    }
+    const text = lines.join("\n");
+    return text ? `\n\n[Self-Tune]\n${text}\n` : null;
+  } catch {
+    return null;
+  }
+}
+
+// Збір системного підказника (Статут + Self-Tune + базова інструкція)
+async function buildSystemHint(env, chatId, extra = "") {
+  const statut = await readStatut(env).catch(() => "");
+  const selfTune = chatId ? await loadSelfTune(env, chatId) : null;
+
+  const base =
+    (statut ? `${statut.trim()}\n\n` : "") +
+    "Ти — Senti, помічник у Telegram. Відповідай стисло та дружньо. " +
+    "Якщо просять зберегти файл — нагадай про Google Drive та розділ Checklist/Repo.";
+
+  return base + (selfTune || "") + (extra ? `\n\n${extra}` : "");
 }
 
 // ── медіа ─────────────────────────────────────────────────────────────────────
@@ -234,10 +276,8 @@ export async function handleTelegramWebhook(req, env) {
         return;
       }
 
-      const statut = await readStatut(env).catch(() => "");
-      const systemHint =
-        (statut ? `${statut.trim()}\n\n` : "") +
-        "Ти — Senti, помічник у Telegram. Відповідай стисло та дружньо.";
+      // ⬇️ Self-Tune + Статут як системний хінт
+      const systemHint = await buildSystemHint(env, chatId);
 
       const modelOrder = String(env.MODEL_ORDER || "").trim();
       let reply = "";
@@ -323,15 +363,10 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Якщо це не команда і не медіа — відповідаємо AI з підвантаженням Статуту
+  // Якщо це не команда і не медіа — відповідаємо AI з підвантаженням Статуту + Self-Tune
   if (text && !text.startsWith("/")) {
     try {
-      const statut = await readStatut(env).catch(() => "");
-      const systemHint =
-        (statut ? `${statut.trim()}\n\n` : "") +
-        "Ти — Senti, помічник у Telegram. Відповідай стисло та дружньо. " +
-        "Якщо просять зберегти файл — нагадай про Google Drive та розділ Checklist/Repo.";
-
+      const systemHint = await buildSystemHint(env, chatId);
       const modelOrder = String(env.MODEL_ORDER || "").trim();
       let out = "";
 
