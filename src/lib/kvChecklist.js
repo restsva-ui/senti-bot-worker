@@ -83,9 +83,10 @@ export async function saveArchive(env, note = "manual") {
 // --- HTML views --------------------------------------------------------------
 export async function statutHtml(env) {
   const body = await readStatut(env);
-  // захист секретом (якщо заданий) — щоб зручно повернутись назад
+  // секрет у лінку назад до Checklist
   const sec = env?.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
   const checklistHref = `/admin/checklist${sec}`;
+
   return `<!doctype html>
 <html lang="uk">
 <head>
@@ -107,7 +108,7 @@ export async function statutHtml(env) {
 <div class="wrap">
   <h1>📜 Statut</h1>
   <div class="card">
-    <form method="post" action="/admin/statut">
+    <form method="post" action="/admin/statut?save=1">
       <textarea name="text" placeholder="HTML...">${body || ""}</textarea>
       <div class="row">
         <input type="submit" value="Зберегти"/>
@@ -123,13 +124,20 @@ export async function statutHtml(env) {
 export async function checklistHtml(env) {
   const body = await readChecklist(env);
   const empty = !String(body).trim();
-  const last200 = (body || "").split(/\n/).slice(-200).join("\n"); // show last 200 lines, light enough
 
-  // 🔒 якщо є секрет — додаємо його до захищених лінків/тригерів
+  // останні 200 рядків (UTC raw)
+  const lines = (body || "").split(/\n/);
+  const last200 = lines.slice(-200);
+  const raw = last200.join("\n");
+
+  // 🔒 секрет у захищених лінках/тригері
   const sec = env?.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
   const repoHref = `/admin/repo/html${sec}`;
-  const statutHref = `/admin/statut${sec}`;   // <— ФІКС: без /html
+  const statutHref = `/admin/statut${sec}`; // правильний шлях (без /html)
   const improveAction = `/ai/improve${sec}`;
+
+  // ескейп для <pre>
+  const esc = (s)=>s.replace(/[&<>]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
 
   return `<!doctype html>
 <html lang="uk">
@@ -137,19 +145,23 @@ export async function checklistHtml(env) {
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Checklist</title>
-<meta http-equiv="refresh" content="15"> <!-- auto refresh every 15s -->
+<meta http-equiv="refresh" content="15">
 <style>
   body{font:14px/1.4 -apple-system,system-ui,Segoe UI,Roboto,Ubuntu,sans-serif;padding:16px;background:#0b0b0b;color:#e6e6e6}
   a{color:#7dd3fc}
   .wrap{max-width:900px;margin:0 auto}
   .card{background:#111;border:1px solid #222;border-radius:12px;padding:12px}
   h1{margin:0 0 12px;font-size:18px}
-  textarea{width:100%;min-height:300px;background:#0d0d0d;color:#eaeaea;border:1px solid #2a2a2a;border-radius:10px;padding:10px}
+  textarea{width:100%;min-height:260px;background:#0d0d0d;color:#eaeaea;border:1px solid #2a2a2a;border-radius:10px;padding:10px}
   input[type=text]{width:100%;background:#0d0d0d;color:#eaeaea;border:1px solid #2a2a2a;border-radius:10px;padding:10px}
-  .row{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
+  .row{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap;align-items:center}
   button,input[type=submit]{background:#1f2937;border:1px solid #334155;color:#e5e7eb;border-radius:10px;padding:8px 12px}
   .muted{opacity:.7}
   .danger{background:#3a1f1f;border-color:#5b2b2b}
+  .viewer{max-height:340px;overflow:auto;white-space:pre; background:#0d0d0d;border:1px solid #2a2a2a;border-radius:10px;padding:10px}
+  .controls{display:flex;gap:10px;align-items:center;margin:8px 0}
+  details>summary{cursor:pointer;opacity:.9}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:999px;background:#22c55e;margin-left:6px}
 </style>
 </head>
 <body>
@@ -168,17 +180,31 @@ export async function checklistHtml(env) {
            </form>`
         : `<span class="muted">🌙 Для ручного запуску нічного агента задай WEBHOOK_SECRET у ENV</span>`
     }
-    <span class="muted">оновлюється кожні 15с</span>
+    <span class="muted">оновлюється кожні 15с<span class="dot" title="alive"></span></span>
   </div>
 
   <div class="card">
+    <div class="controls">
+      <strong>Останні записи (локальний час)</strong>
+      <label style="display:flex;gap:6px;align-items:center">
+        <input type="checkbox" id="newestFirst">
+        <span>Нові зверху</span>
+      </label>
+    </div>
+    <pre id="viewer" class="viewer">${esc(raw)}</pre>
+  </div>
+
+  <div class="card" style="margin-top:10px">
     ${empty ? '<div class="muted">(поки немає записів)</div>' : ''}
-    <form method="post" action="/admin/checklist?replace=1">
-      <textarea name="text" placeholder="повний текст">${last200}</textarea>
-      <div class="row">
-        <input type="submit" value="Зберегти"/>
-      </div>
-    </form>
+    <details>
+      <summary>✏️ Редагувати сирий текст (UTC)</summary>
+      <form method="post" action="/admin/checklist?replace=1">
+        <textarea name="text" placeholder="повний текст">${raw}</textarea>
+        <div class="row">
+          <input type="submit" value="Зберегти"/>
+        </div>
+      </form>
+    </details>
   </div>
 
   <div class="card" style="margin-top:10px">
@@ -190,6 +216,46 @@ export async function checklistHtml(env) {
     </form>
   </div>
 </div>
+
+<script>
+(function(){
+  const viewer = document.getElementById('viewer');
+  const newestFirst = document.getElementById('newestFirst');
+
+  // Вміст у viewer зараз — RAW (UTC). Потрібно відобразити у локальному часі.
+  function toLocal(s){
+    // Знаходимо ISO-мітки часу з Z і конвертуємо в локаль.
+    return s.replace(/\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z/g, (m)=>{
+      const d = new Date(m);
+      return isNaN(d) ? m : d.toLocaleString();
+    });
+  }
+
+  // Зберігаємо оригінал (UTC), щоб при перемиканні порядку не було “подвійних” конвертацій.
+  const RAW = viewer.textContent;
+
+  function render(){
+    const lines = RAW.split(/\\n/);
+    const ordered = newestFirst.checked ? lines.slice().reverse() : lines;
+    let out = ordered.join("\\n");
+    out = toLocal(out);
+    viewer.textContent = out;
+
+    // автопрокрутка: якщо нові знизу — вниз; якщо зверху — вгору
+    if (newestFirst.checked) {
+      viewer.scrollTop = 0;
+    } else {
+      viewer.scrollTop = viewer.scrollHeight;
+    }
+  }
+
+  // первинний рендер
+  render();
+
+  // перемикач порядку
+  newestFirst.addEventListener('change', render);
+})();
+</script>
 </body>
 </html>`;
 }
