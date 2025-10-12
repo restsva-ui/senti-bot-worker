@@ -1,45 +1,39 @@
 // src/routes/adminStatut.js
+// Сторінка редагування Статуту (HTML) + збереження.
+
 import { readStatut, writeStatut, statutHtml } from "../lib/kvChecklist.js";
-import { abs } from "../utils/url.js";
+import { html, json, CORS } from "../utils/http.js";
+
+/** Підтримуємо обидва URL на випадок старих лінків */
+function isStatutViewPath(p) {
+  return p === "/admin/statut" || p === "/admin/statut/html";
+}
 
 export async function handleAdminStatut(req, env, url) {
-  const p = url.pathname;
-  const needSecret = () =>
-    env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET;
+  const p = (url.pathname || "").replace(/\/+$/, "");
 
-  const html = (s) =>
-    new Response(s, { headers: { "content-type": "text/html; charset=utf-8" } });
-  const json = (o, status = 200) =>
-    new Response(JSON.stringify(o, null, 2), {
-      status,
-      headers: { "content-type": "application/json" },
-    });
-
-  // HTML UI
-  if (p === "/admin/statut/html") {
-    if (needSecret()) return html("<h3>401</h3>");
-    if (req.method === "POST") {
-      const form = await req.formData();
-      await writeStatut(env, String(form.get("full") ?? ""));
-    }
-    const text = await readStatut(env);
-    return statutHtml({
-      text,
-      submitPath: abs(env, "/admin/statut/html"),
-      secret: env.WEBHOOK_SECRET || "",
-    });
+  // GET -> показати HTML-редактор статуту
+  if (isStatutViewPath(p) && req.method === "GET") {
+    return html(await statutHtml(env));
   }
 
-  // JSON API (опціонально)
-  if (p === "/admin/statut") {
-    if (needSecret()) return json({ ok: false, error: "unauthorized" }, 401);
-    if (req.method === "POST") {
-      const body = await req.json().catch(() => ({}));
-      await writeStatut(env, String(body.text ?? ""));
-      return json({ ok: true });
+  // POST -> зберегти статут
+  if (p === "/admin/statut" && req.method === "POST") {
+    // Приймаємо і form-urlencoded, і JSON
+    const ct = (req.headers.get("content-type") || "").toLowerCase();
+    let body = {};
+    if (ct.includes("application/json")) {
+      body = await req.json().catch(() => ({}));
+    } else if (ct.includes("application/x-www-form-urlencoded")) {
+      const f = await req.formData();
+      body = { text: String(f.get("text") || "") };
+    } else {
+      // спробуємо як JSON на всякий
+      body = await req.json().catch(() => ({}));
     }
-    const text = await readStatut(env);
-    return json({ ok: true, text });
+
+    await writeStatut(env, body.text || "");
+    return json({ ok: true, saved: true }, 200, CORS);
   }
 
   return null; // не наш маршрут
