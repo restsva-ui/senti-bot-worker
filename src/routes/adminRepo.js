@@ -19,8 +19,23 @@ function ensureSecret(env, url) {
 
 // встановлення поточного “мозку”
 async function setCurrent(env, key, source = "auto") {
-  await env.CHECKLIST_KV.put("brain:current", key);
-  await appendChecklist(env, `✅ promote (${source}) → ${key}`);
+  try {
+    await env.CHECKLIST_KV.put("brain:current", key);
+    await appendChecklist(env, `✅ promote (${source}) → ${key}`);
+  } catch (e) {
+    console.error("[repo.setCurrent]", e?.message || e);
+  }
+}
+
+// безпечне base64 (chunked) для великих файлів
+function bytesToBase64(u8) {
+  const CHUNK = 0x8000; // 32k
+  let res = "";
+  for (let i = 0; i < u8.length; i += CHUNK) {
+    const chunk = u8.subarray(i, i + CHUNK);
+    res += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(res);
 }
 
 // компактний html (мобільний-френдлі)
@@ -35,6 +50,7 @@ function pageShell({ title, body }) {
   h1{ font-size:18px; margin:0 0 12px }
   .row{ display:flex; gap:8px; align-items:center; justify-content:space-between; padding:10px; border:1px solid color-mix(in oklab, CanvasText 18%, Canvas 82%); border-radius:12px; margin:8px 0 }
   .name{ word-break: break-all; flex:1; }
+  .mark{ color:#22c55e; font-weight:600; margin-left:6px }
   .btn{ padding:8px 12px; border-radius:10px; text-decoration:none; border:1px solid color-mix(in oklab, CanvasText 20%, Canvas 80%); background: color-mix(in oklab, Canvas 96%, CanvasText 6%); color:inherit }
   .actions{ display:flex; gap:6px; }
   form.upl{ display:grid; gap:8px; grid-template-columns: 1fr auto; align-items:center; padding:12px; border:1px dashed color-mix(in oklab, CanvasText 20%, Canvas 80%); border-radius:12px; margin:14px 0 }
@@ -50,14 +66,14 @@ async function htmlList(env, url) {
   const cur = await env.CHECKLIST_KV.get("brain:current").catch(() => null);
 
   const rows = items.map((k) => {
-    const mark = k === cur ? " • current" : "";
+    const isCur = k === cur;
     const ap = new URL("/admin/repo/auto-promote", url.origin);
-    ap.searchParams.set("s", env.WEBHOOK_SECRET || "");
+    if (env.WEBHOOK_SECRET) ap.searchParams.set("s", env.WEBHOOK_SECRET);
     ap.searchParams.set("key", k);
 
     return `
     <div class="row">
-      <div class="name">${k}${mark}</div>
+      <div class="name">${k}${isCur ? '<span class="mark">● current</span>' : ""}</div>
       <div class="actions">
         <a class="btn" href="${ap.toString()}">Auto-promote</a>
       </div>
@@ -65,7 +81,7 @@ async function htmlList(env, url) {
   }).join("") || `<p class="note">Немає архівів.</p>`;
 
   const autoLatest = new URL("/admin/repo/auto-promote", url.origin);
-  autoLatest.searchParams.set("s", env.WEBHOOK_SECRET || "");
+  if (env.WEBHOOK_SECRET) autoLatest.searchParams.set("s", env.WEBHOOK_SECRET);
 
   const body = `
   <h1>Repo / Архіви</h1>
@@ -88,55 +104,62 @@ async function htmlList(env, url) {
 }
 
 export async function handleAdminRepo(req, env, url) {
-  const p = (url.pathname || "").replace(/\/+$/,"");
+  const p = (url.pathname || "").replace(/\/+$/, "");
 
   if (!p.startsWith("/admin/repo")) return null;
 
   // простий захист секретом
   if (!ensureSecret(env, url)) {
-    return json({ ok:false, error:"unauthorized" }, 401);
+    return json({ ok: false, error: "unauthorized" }, 401);
   }
 
   // GET /admin/repo/html — головна сторінка
   if (p === "/admin/repo/html" && req.method === "GET") {
-    return new Response(await htmlList(env, url), {
-      headers: { "content-type": "text/html; charset=utf-8" },
-    });
+    try {
+      return new Response(await htmlList(env, url), {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    } catch (e) {
+      console.error("[repo.html]", e?.message || e);
+      return json({ ok: false, error: String(e) }, 500);
+    }
   }
 
-  // POST /admin/repo/upload — завантаження архіву
+  // POST /admin/repo/upload — завантаження архіву (ZIP)
   if (p === "/admin/repo/upload" && req.method === "POST") {
     try {
       const form = await req.formData();
       const f = form.get("file");
       if (!f || !f.name || !f.arrayBuffer) {
-        return json({ ok:false, error:"file missing" }, 400);
+        return json({ ok: false, error: "file missing" }, 400);
       }
 
       const buf = new Uint8Array(await f.arrayBuffer());
-      // ключ формуємо як: senti_archive/YYYY-MM-DD__<filename>
-      const datePart = new Date().toISOString().slice(0,10);
+      const b64 = bytesToBase64(buf);
+
+      // ключ: senti_archive/YYYY-MM-DD__<filename>
+      const datePart = new Date().toISOString().slice(0, 10);
       const key = `senti_archive/${datePart}__${f.name}`;
 
-      // зберігаємо
-      await saveArchive(env, key, btoa(String.fromCharCode(...buf)));
+      // зберігаємо ZIP (base64 string)
+      await saveArchive(env, key, b64);
       await appendChecklist(env, `📦 upload success → ${key}`);
 
       // selftest (локально, без fetch)
-      const st = await runSelfTestLocalDirect(env).catch(()=>({ ok:false }));
+      const st = await runSelfTestLocalDirect(env).catch(() => ({ ok: false }));
       if (st?.ok) {
         await setCurrent(env, key, "upload");
-        return json({ ok:true, uploaded:key, auto_promoted:true, selftest:true });
+        return json({ ok: true, uploaded: key, auto_promoted: true, selftest: true });
       } else {
         await appendChecklist(env, `⚠️ upload done, but selftest failed → ${key}`);
-        // віддаємо HTML назад (зручніше з телефона)
         return new Response(await htmlList(env, url), {
           headers: { "content-type": "text/html; charset=utf-8" },
         });
       }
     } catch (e) {
+      console.error("[repo.upload]", e?.message || e);
       await appendChecklist(env, `❌ upload error: ${String(e)}`);
-      return json({ ok:false, error:String(e) }, 500);
+      return json({ ok: false, error: String(e) }, 500);
     }
   }
 
@@ -147,19 +170,20 @@ export async function handleAdminRepo(req, env, url) {
       // якщо key не передали — беремо найновіший
       const items = await listArchives(env);
       const chosen = key || items[0];
-      if (!chosen) return json({ ok:false, error:"no archives" }, 400);
+      if (!chosen) return json({ ok: false, error: "no archives" }, 400);
 
-      const st = await runSelfTestLocalDirect(env).catch(()=>({ ok:false }));
+      const st = await runSelfTestLocalDirect(env).catch(() => ({ ok: false }));
       if (!st?.ok) {
         await appendChecklist(env, `⚠️ auto-promote skipped (selftest fail) → ${chosen}`);
-        return json({ ok:false, error:"selftest failed", key:chosen }, 409);
+        return json({ ok: false, error: "selftest failed", key: chosen }, 409);
       }
 
       await setCurrent(env, chosen, key ? "button" : "latest");
-      return json({ ok:true, promoted: chosen, by: key ? "button" : "latest" });
+      return json({ ok: true, promoted: chosen, by: key ? "button" : "latest" });
     } catch (e) {
+      console.error("[repo.auto-promote]", e?.message || e);
       await appendChecklist(env, `❌ auto-promote error: ${String(e)}`);
-      return json({ ok:false, error:String(e) }, 500);
+      return json({ ok: false, error: String(e) }, 500);
     }
   }
 
