@@ -15,7 +15,9 @@ const KEY_AUTOLOG = "autolog:enabled"; // "1" | "0"
 function _boolToStr(b) { return b ? "1" : "0"; }
 function _strToBool(s) { return s === "1"; }
 
-// ---- Автологування у STATE_KV
+// ---------------------------------------------------------------------------
+// Автологування у STATE_KV
+// ---------------------------------------------------------------------------
 
 /**
  * Прочитати статус автологування з STATE_KV.
@@ -50,9 +52,11 @@ export async function setAutolog(env, enabled) {
   }
 }
 
-// ---- Додатково: універсальні гетери/сетери (можуть згодитись далі)
+// ---------------------------------------------------------------------------
+// Універсальні гетери/сетери (рядкові значення)
+// ---------------------------------------------------------------------------
 
-/** Безпечне читання з довільного KV binding’у */
+/** Безпечне читання з довільного KV binding’у (повертає string|null) */
 export async function kvGet(env, bindingName, key) {
   try {
     const kv = env?.[bindingName];
@@ -64,7 +68,7 @@ export async function kvGet(env, bindingName, key) {
   }
 }
 
-/** Безпечний запис у довільний KV binding */
+/** Безпечний запис у довільний KV binding (string value) */
 export async function kvPut(env, bindingName, key, value, options) {
   try {
     const kv = env?.[bindingName];
@@ -77,25 +81,22 @@ export async function kvPut(env, bindingName, key, value, options) {
   }
 }
 
-/* ============================================================================
- * JSON-обгортки (використовуються пам’яттю / ін. модулями)
- * Працюють безпосередньо з інстансом KV (env.X_KV), а не з назвою binding’у.
- * ==========================================================================*/
+// ---------------------------------------------------------------------------
+// JSON-обгортки (використовуються пам'яттю/нічними імпрувами)
+// Працюють безпосередньо з інстансом KV (наприклад, env.LIKES_KV)
+// ---------------------------------------------------------------------------
 
 /**
- * Прочитати JSON з KV.
- * @param {KVNamespace} kv - binding (напр. env.STATE_KV)
- * @param {string} key
- * @param {any} [fallback=null] - значення за замовчуванням у разі помилки/відсутності
- * @returns {Promise<any>}
+ * kvGetJSON(kv, key, fallback?)
+ * Прочитати JSON з KV. Якщо ключа немає або JSON зіпсовано — повертає fallback.
  */
 export async function kvGetJSON(kv, key, fallback = null) {
   try {
-    if (!kv) throw new Error("KV binding is missing");
-    const val = await kv.get(key);
-    if (!val) return fallback;
+    if (!kv) throw new Error("KV binding instance is missing");
+    const v = await kv.get(key);
+    if (!v) return fallback;
     try {
-      return JSON.parse(val);
+      return JSON.parse(v);
     } catch {
       return fallback;
     }
@@ -106,22 +107,18 @@ export async function kvGetJSON(kv, key, fallback = null) {
 }
 
 /**
- * Записати JSON у KV.
- * @param {KVNamespace} kv - binding (напр. env.STATE_KV)
- * @param {string} key
- * @param {any} value - буде серіалізовано в JSON
- * @param {number} [ttlSeconds] - необов’язковий TTL (секунди)
- * @returns {Promise<boolean>}
+ * kvPutJSON(kv, key, obj, ttlSeconds?)
+ * Записати об'єкт у KV як JSON. Повертає true/false.
+ * ttlSeconds (number) — необов'язковий, задає expirationTtl.
  */
-export async function kvPutJSON(kv, key, value, ttlSeconds = undefined) {
+export async function kvPutJSON(kv, key, obj, ttlSeconds) {
   try {
-    if (!kv) throw new Error("KV binding is missing");
-    const str = JSON.stringify(value);
-    if (ttlSeconds) {
-      await kv.put(key, str, { expirationTtl: ttlSeconds });
-    } else {
-      await kv.put(key, str);
-    }
+    if (!kv) throw new Error("KV binding instance is missing");
+    const options =
+      typeof ttlSeconds === "number" && isFinite(ttlSeconds)
+        ? { expirationTtl: ttlSeconds }
+        : undefined;
+    await kv.put(key, JSON.stringify(obj), options);
     return true;
   } catch (e) {
     console.error("[kvPutJSON]", key, e?.message || e);
