@@ -49,10 +49,11 @@ const BTN_DRIVE = "Google Drive";
 const BTN_SENTI = "Senti";
 const BTN_ADMIN = "Admin";
 const BTN_CHECK = "Checklist";
+const BTN_ENERGY = "Energy"; // ← додано
 
 const mainKeyboard = (isAdmin = false) => {
   const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
-  if (isAdmin) rows.push([{ text: BTN_ADMIN }, { text: BTN_CHECK }]);
+  if (isAdmin) rows.push([{ text: BTN_ADMIN }, { text: BTN_CHECK }, { text: BTN_ENERGY }]); // ← додано
   return { keyboard: rows, resize_keyboard: true };
 };
 
@@ -292,6 +293,27 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
+  // /energy — швидкий доступ до панелі енергії
+  if (text === "/energy" || text === BTN_ENERGY) { // ← додано
+    await safe(async () => {
+      const s = encodeURIComponent(env.WEBHOOK_SECRET || "");
+      const u = encodeURIComponent(userId);
+      const panel = abs(env, `/admin/energy/html?s=${s}&u=${u}`);
+      const combo = abs(env, `/admin/checklist/with-energy/html?s=${s}&u=${u}`);
+      let snapshot = "";
+      try {
+        const cur = await getEnergy(env, userId);
+        snapshot = `\nПоточна енергія: ${cur}/${Number(env.ENERGY_MAX || 100)}`;
+      } catch {}
+      await sendMessage(
+        env,
+        chatId,
+        `⚡ Energy панель:\n${panel}\n\n🧩 Checklist+Energy:\n${combo}${snapshot}`
+      );
+    });
+    return json({ ok: true });
+  }
+
   // /ai (надійний парсинг: /ai, /ai@Bot, з/без аргументів)
   const aiArg = parseAiCommand(textRaw);
   if (aiArg !== null) {
@@ -380,12 +402,15 @@ export async function handleTelegramWebhook(req, env) {
 
   if ((text === "Admin" || text === "/admin") && isAdmin) {
     await safe(async () => {
-      const cl = abs(env, `/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET || "")}`);
-      const repo = abs(env, `/admin/repo/html?s=${encodeURIComponent(env.WEBHOOK_SECRET || "")}`);
+      const s = encodeURIComponent(env.WEBHOOK_SECRET || "");
+      const cl = abs(env, `/admin/checklist/html?s=${s}`);
+      const repo = abs(env, `/admin/repo/html?s=${s}`);
+      const energy = abs(env, `/admin/energy/html?s=${s}&u=${encodeURIComponent(userId)}`);
+      const combo  = abs(env, `/admin/checklist/with-energy/html?s=${s}&u=${encodeURIComponent(userId)}`);
       await sendMessage(
         env,
         chatId,
-        `🛠 Адмін-меню\n\n• Чеклист: ${cl}\n• Repo: ${repo}\n• Вебхук GET: ${abs(env, "/webhook")}`
+        `🛠 Адмін-меню\n\n• Чеклист: ${cl}\n• Repo: ${repo}\n• Energy: ${energy}\n• Checklist+Energy: ${combo}\n• Вебхук GET: ${abs(env, "/webhook")}`
       );
     });
     return json({ ok: true });
