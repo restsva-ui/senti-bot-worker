@@ -11,7 +11,7 @@ import {
 import { logHeartbeat } from "./lib/audit.js";
 import { abs } from "./utils/url.js";
 
-// http utils (винесено)
+// http utils
 import { html, json, CORS, preflight } from "./utils/http.js";
 
 // routes
@@ -31,46 +31,46 @@ import { handleBrainPromote } from "./routes/brainPromote.js";
 // ✅ локальний selftest
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
 
-// ✅ фолбеки /api/brain/*  (в один рядок — сумісність зі старим Wrangler)
+// ✅ фолбеки /api/brain/*
 import {
   fallbackBrainCurrent,
   fallbackBrainList,
   fallbackBrainGet,
 } from "./routes/brainFallbacks.js";
 
-// home винесено в окремий модуль
+// home
 import { home } from "./ui/home.js";
 
-// ✅ нічні авто-поліпшення (утиліта)
+// ✅ нічні авто-поліпшення (CRON-варіант)
 import { nightlyAutoImprove } from "./lib/autoImprove.js";
 
-// ✅ self-regulation (оновлення правил поведінки на базі інсайтів)
+// ✅ self-regulation
 import { runSelfRegulation } from "./lib/selfRegulate.js";
 
-const VERSION = "senti-worker-2025-10-12-00-59";
+// ✅ HTTP-роутер нічного агента + debug (/ai/improve*, /debug/*)
+import { handleAiImprove } from "./routes/aiImprove.js";
+
+const VERSION = "senti-worker-2025-10-12-00-59+aiimprove-router";
 
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
-    // нормалізація шляху
     const p = (url.pathname || "/").replace(/\/+$/, "") || "/";
     url.pathname = p;
 
-    // трактуємо HEAD як GET для читальних ендпойнтів
     const method = req.method === "HEAD" ? "GET" : req.method;
 
-    // універсальний OPTIONS preflight
     if (req.method === "OPTIONS") {
       return preflight();
     }
 
-    // --- version beacon ---
+    // version beacon
     if (p === "/_version") {
       return json({ ok: true, version: VERSION, entry: "src/index.js" }, 200, CORS);
     }
 
     try {
-      // --- root / health / webhook (гарантовано без 404) ---
+      // root / health / webhook
       if (p === "/") return html(home(env));
 
       if (p === "/health") {
@@ -94,7 +94,7 @@ export default {
         return json({ ok: true, method: "GET", message: "webhook alive" }, 200, CORS);
       }
 
-      // --- brain state ---
+      // brain state
       if (p === "/brain/state") {
         try {
           const r = await handleBrainState?.(req, env, url);
@@ -103,7 +103,7 @@ export default {
         return json({ ok: true, state: "available" }, 200, CORS);
       }
 
-      // --- /api/brain/promote перед /api/brain ---
+      // /api/brain/promote
       if (p.startsWith("/api/brain/promote")) {
         try {
           const r = await handleBrainPromote?.(req, env, url);
@@ -112,14 +112,12 @@ export default {
         return json({ ok: true, promoted: false, note: "promote handler missing" }, 200, CORS);
       }
 
-      // --- /api/brain/* ---
+      // /api/brain/*
       if (p.startsWith("/api/brain")) {
         try {
           const r = await handleBrainApi?.(req, env, url);
           if (r) return r;
         } catch {}
-
-        // ⬇️ чисті фолбеки з окремого модуля
         if (p === "/api/brain/current" && method === "GET") {
           return await fallbackBrainCurrent(env);
         }
@@ -130,27 +128,23 @@ export default {
           const key = url.searchParams.get("key");
           return await fallbackBrainGet(env, key);
         }
-
         return json({ ok: false, error: "unknown endpoint" }, 404, CORS);
       }
 
-      // --- selftest (локальна діагностика без fetch) ---
+      // selftest
       if (p.startsWith("/selftest")) {
         const res = await runSelfTestLocalDirect(env);
         return json(res, 200, CORS);
       }
 
-      // --- cron evolve (ручний тригер авто-еволюції) ---
+      // cron evolve (manual trigger)
       if (p === "/cron/evolve") {
-        // тільки GET/POST
         if (req.method !== "GET" && req.method !== "POST") {
           return json({ ok: false, error: "method not allowed" }, 405, CORS);
         }
-        // вимога секрету (якщо налаштований)
         if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
           return json({ ok: false, error: "unauthorized" }, 401, CORS);
         }
-        // викликаємо локально /ai/evolve/auto
         const u = new URL(abs(env, "/ai/evolve/auto"));
         if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
         const innerReq = new Request(u.toString(), { method: "GET" });
@@ -159,7 +153,7 @@ export default {
         return json({ ok: true, note: "evolve triggered" }, 200, CORS);
       }
 
-      // --- cron auto-improve (ручний тригер нічних авто-поліпшень) ---
+      // cron auto-improve (CRON path keeps lib variant)
       if (p === "/cron/auto-improve") {
         if (req.method !== "GET" && req.method !== "POST") {
           return json({ ok: false, error: "method not allowed" }, 405, CORS);
@@ -168,28 +162,20 @@ export default {
           return json({ ok: false, error: "unauthorized" }, 401, CORS);
         }
         const res = await nightlyAutoImprove(env, { now: new Date(), reason: "manual" });
-        // self-regulation (якщо дозволено)
         if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
           await runSelfRegulation(env, res?.insights || null).catch(() => {});
         }
         return json({ ok: true, ...res }, 200, CORS);
       }
 
-      // --- ai/improve HTTP endpoints (без окремого роутера) ---
-      if (p.startsWith("/ai/improve")) {
-        // захист секретом
-        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
-          return json({ ok: false, error: "unauthorized" }, 401, CORS);
-        }
-        // /ai/improve/auto або /ai/improve/run -> запустити нічний агент
-        const res = await nightlyAutoImprove(env, { now: new Date(), reason: "http" });
-        if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
-          await runSelfRegulation(env, res?.insights || null).catch(() => {});
-        }
-        return json({ ok: true, ...res }, 200, CORS);
+      // ✅ /ai/improve* та ✅ /debug/* — віддаємо у routes/aiImprove.js
+      if (p.startsWith("/ai/improve") || p.startsWith("/debug/")) {
+        const r = await handleAiImprove?.(req, env, url);
+        if (r) return r;
+        return json({ ok: false, error: "aiImprove router missing" }, 500, CORS);
       }
 
-      // --- on-demand self-regulation без аналізу (просто перерахунок правил) ---
+      // on-demand self-regulation (без аналізу)
       if (p === "/ai/self-regulate") {
         if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
           return json({ ok: false, error: "unauthorized" }, 401, CORS);
@@ -198,7 +184,7 @@ export default {
         return json({ ok: true, ...res }, 200, CORS);
       }
 
-      // --- ai ---
+      // ai train/evolve
       if (p.startsWith("/ai/train")) {
         try {
           const r = await handleAiTrain?.(req, env, url);
@@ -212,7 +198,7 @@ export default {
         } catch {}
       }
 
-      // --- admin (фолбеки замість 404) ---
+      // admin
       if (p.startsWith("/admin/checklist")) {
         try {
           const r = await handleAdminChecklist?.(req, env, url);
@@ -237,12 +223,12 @@ export default {
       if (p.startsWith("/admin/brain")) {
         try {
           const r = await handleAdminBrain?.(req, env, url);
-          if (r && р.status !== 404) return r;
+          if (r && r.status !== 404) return r; // ← виправлено (було кириличне 'р')
         } catch {}
         return json({ ok: true, note: "admin brain fallback" }, 200, CORS);
       }
 
-      // --- webhook POST ---
+      // webhook POST
       if (p === "/webhook" && req.method === "POST") {
         try {
           const sec = req.headers.get("x-telegram-bot-api-secret-token");
@@ -255,7 +241,7 @@ export default {
         return json({ ok: true, note: "fallback webhook POST" }, 200, CORS);
       }
 
-      // --- tg helpers ---
+      // tg helpers
       if (p === "/tg/get-webhook") {
         const r = await TG.getWebhook(env.BOT_TOKEN);
         return new Response(await r.text(), {
@@ -278,7 +264,7 @@ export default {
         });
       }
 
-      // --- ci deploy ---
+      // ci deploy
       if (p.startsWith("/ci/deploy-note")) {
         try {
           const r = await handleCiDeploy?.(req, env, url);
@@ -287,7 +273,7 @@ export default {
         return json({ ok: true }, 200, CORS);
       }
 
-      // --- oauth ---
+      // oauth
       if (p === "/auth/start") {
         const u = url.searchParams.get("u");
         const state = btoa(JSON.stringify({ u }));
@@ -331,7 +317,7 @@ export default {
         );
       }
 
-      // --- not found ---
+      // not found
       try {
         await appendChecklist(
           env,
@@ -347,7 +333,7 @@ export default {
   async scheduled(event, env) {
     await logHeartbeat(env);
 
-    // 1) Годинний evolve (як було)
+    // 1) Годинний evolve
     try {
       if (event && event.cron === "0 * * * *") {
         const u = new URL(abs(env, "/ai/evolve/auto"));
@@ -362,7 +348,7 @@ export default {
       );
     }
 
-    // 2) Нічні авто-поліпшення (нове) + self-regulation
+    // 2) Нічні авто-поліпшення + self-regulation
     try {
       const hour = new Date().getUTCHours();
       const targetHour = Number(env.NIGHTLY_UTC_HOUR ?? 2); // дефолт 02:00 UTC
