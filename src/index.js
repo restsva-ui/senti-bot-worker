@@ -27,6 +27,7 @@ import { handleBrainApi } from "./routes/brainApi.js";
 import { handleAiTrain } from "./routes/aiTrain.js";
 import { handleAiEvolve } from "./routes/aiEvolve.js";
 import { handleBrainPromote } from "./routes/brainPromote.js";
+import { handleAdminEnergy } from "./routes/adminEnergy.js"; // ← ДОДАНО
 
 // ✅ локальний selftest
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
@@ -226,6 +227,13 @@ export default {
           if (r && r.status !== 404) return r; // ← виправлено (було кириличне 'р')
         } catch {}
         return json({ ok: true, note: "admin brain fallback" }, 200, CORS);
+      }
+      if (p.startsWith("/admin/energy")) { // ← ДОДАНО
+        try {
+          const r = await handleAdminEnergy?.(req, env, url);
+          if (r && r.status !== 404) return r;
+        } catch {}
+        return json({ ok: true, note: "admin energy fallback" }, 200, CORS);
       }
 
       // webhook POST
