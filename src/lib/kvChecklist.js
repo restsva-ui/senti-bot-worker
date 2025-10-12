@@ -67,11 +67,13 @@ export async function listArchives(env) {
     return [];
   }
 }
+
 export async function getArchive(env, key) {
   if (!env?.CHECKLIST_KV) return "";
   const full = key?.startsWith(ARCHIVE_PREFIX) ? key : ARCHIVE_PREFIX + String(key || "");
   return await safeGet(env.CHECKLIST_KV, full, "");
 }
+
 export async function saveArchive(env, note = "manual") {
   if (!env?.CHECKLIST_KV) return false;
   const stamp = fmtNow().replace(/[:.]/g, "-"); // safe for key
@@ -121,6 +123,13 @@ export async function checklistHtml(env) {
   const body = await readChecklist(env);
   const empty = !String(body).trim();
   const last20 = (body || "").split(/\n/).slice(-200).join("\n"); // show last 200 lines, light enough
+
+  // 🔒 якщо є секрет — додаємо його до захищених лінків/тригерів
+  const sec = env?.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
+  const repoHref = `/admin/repo/html${sec}`;
+  const statutHref = `/admin/statut${sec}`;
+  const improveAction = `/ai/improve${sec}`;
+
   return `<!doctype html>
 <html lang="uk">
 <head>
@@ -139,19 +148,28 @@ export async function checklistHtml(env) {
   .row{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
   button,input[type=submit]{background:#1f2937;border:1px solid #334155;color:#e5e7eb;border-radius:10px;padding:8px 12px}
   .muted{opacity:.7}
+  .danger{background:#3a1f1f;border-color:#5b2b2b}
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>📝 Checklist</h1>
   <div class="row">
-    <a href="/admin/repo/html">📁 Відкрити Repo</a>
-    <a href="/admin/statut">📜 Статут</a>
+    <a href="${repoHref}">📁 Відкрити Repo</a>
+    <a href="${statutHref}">📜 Статут</a>
     <form method="post" action="/admin/checklist?archive=1">
       <button title="Зберегти знімок у архів">💾 Зберегти архів</button>
     </form>
+    ${
+      env?.WEBHOOK_SECRET
+        ? `<form method="post" action="${improveAction}">
+             <button class="danger" title="Запустити нічний агент прямо зараз">🌙 Запустити нічного агента</button>
+           </form>`
+        : `<span class="muted">🌙 Для ручного запуску нічного агента задай WEBHOOK_SECRET у ENV</span>`
+    }
     <span class="muted">оновлюється кожні 15с</span>
   </div>
+
   <div class="card">
     ${empty ? '<div class="muted">(поки немає записів)</div>' : ''}
     <form method="post" action="/admin/checklist?replace=1">
@@ -161,6 +179,7 @@ export async function checklistHtml(env) {
       </div>
     </form>
   </div>
+
   <div class="card" style="margin-top:10px">
     <form method="post" action="/admin/checklist?append=1">
       <input type="text" name="line" placeholder="новий рядок…"/>
