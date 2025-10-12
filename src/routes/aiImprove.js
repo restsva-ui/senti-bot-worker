@@ -1,6 +1,7 @@
 // src/routes/aiImprove.js
 // Нічний агент: читає коротку пам'ять LIKES_KV, робить стислий аналіз,
-// зберігає інсайти у STATE_KV і (опційно) пише нотатку у CHECKLIST_KV.
+// зберігає інсайти у STATE_KV і пише нотатки у CHECKLIST_KV.
+// Додано debug-ендпойнти для перевірки KV та часу.
 
 import { askAnyModel } from "../lib/modelRouter.js";
 import { appendChecklist as appendToChecklist } from "../lib/kvChecklist.js";
@@ -173,12 +174,56 @@ function ensureSecret(env, url) {
   return url.searchParams.get("s") === env.WEBHOOK_SECRET;
 }
 
-/** HTTP-роути: /ai/improve (POST), /ai/improve/auto, /ai/improve/run */
+/** HTTP-роути: /ai/improve (POST), /ai/improve/auto, /ai/improve/run, а також debug */
 export async function handleAiImprove(req, env, url) {
   const path = (url.pathname || "").toLowerCase();
 
-  if (!path.startsWith("/ai/improve")) return null;
+  // обробляємо тільки наші префікси
+  if (!path.startsWith("/ai/improve") && !path.startsWith("/debug/")) return null;
+
+  // захист секретом
   if (!ensureSecret(env, url)) return json({ ok: false, error: "unauthorized" }, 401);
+
+  // ---------- DEBUG ----------
+  if (path === "/debug/time" && req.method === "GET") {
+    const now = new Date();
+    return json({
+      ok: true,
+      now_utc_iso: now.toISOString(),
+      now_local: now.toString(),
+      timestamp: Date.now()
+    });
+  }
+
+  if (path === "/debug/likes/scan" && req.method === "GET") {
+    if (!env.LIKES_KV) return json({ ok:false, error:"LIKES_KV missing" }, 500);
+    let cursor, total=0, memKeys=0;
+    const samples = [];
+    do {
+      const page = await env.LIKES_KV.list({ prefix: MEM_PREFIX, cursor });
+      for (const k of page.keys || []) {
+        total++;
+        if (k.name.endsWith(":mem")) {
+          memKeys++;
+          if (samples.length < 10) samples.push(k.name);
+        }
+      }
+      cursor = page.cursor;
+      if (page.list_complete) break;
+    } while (cursor);
+    return json({ ok:true, totalKeys: total, memKeys, samples });
+  }
+
+  if (path === "/debug/likes/get" && req.method === "GET") {
+    if (!env.LIKES_KV) return json({ ok:false, error:"LIKES_KV missing" }, 500);
+    const key = url.searchParams.get("key");
+    if (!key) return json({ ok:false, error:"pass ?key=u:<chatId>:mem" }, 400);
+    const raw = await env.LIKES_KV.get(key);
+    let parsed = null;
+    try { parsed = raw ? JSON.parse(raw) : null; } catch {}
+    return json({ ok:true, key, raw, parsed });
+  }
+  // -------- END DEBUG --------
 
   // Підказка для GET /ai/improve
   if (path === "/ai/improve" && req.method === "GET") {
@@ -206,5 +251,5 @@ export async function handleAiImprove(req, env, url) {
     return json(res, res.ok ? 200 : 500);
   }
 
-  return json({ ok: false, error: "not found" }, 404);
+  return json({ ok: false, error: "not found", path }, 404);
 }
