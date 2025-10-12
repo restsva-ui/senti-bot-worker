@@ -83,10 +83,8 @@ export async function saveArchive(env, note = "manual") {
 // --- HTML views --------------------------------------------------------------
 export async function statutHtml(env) {
   const body = await readStatut(env);
-  // секрет у лінку назад до Checklist
   const sec = env?.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
   const checklistHref = `/admin/checklist${sec}`;
-
   return `<!doctype html>
 <html lang="uk">
 <head>
@@ -125,18 +123,15 @@ export async function checklistHtml(env) {
   const body = await readChecklist(env);
   const empty = !String(body).trim();
 
-  // останні 200 рядків (UTC raw)
   const lines = (body || "").split(/\n/);
-  const last200 = lines.slice(-200);
+  const last200 = lines.slice(-200); // сирі рядки (UTC)
   const raw = last200.join("\n");
 
-  // 🔒 секрет у захищених лінках/тригері
   const sec = env?.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
   const repoHref = `/admin/repo/html${sec}`;
-  const statutHref = `/admin/statut${sec}`; // правильний шлях (без /html)
+  const statutHref = `/admin/statut${sec}`;
   const improveAction = `/ai/improve${sec}`;
 
-  // ескейп для <pre>
   const esc = (s)=>s.replace(/[&<>]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
 
   return `<!doctype html>
@@ -158,8 +153,12 @@ export async function checklistHtml(env) {
   button,input[type=submit]{background:#1f2937;border:1px solid #334155;color:#e5e7eb;border-radius:10px;padding:8px 12px}
   .muted{opacity:.7}
   .danger{background:#3a1f1f;border-color:#5b2b2b}
-  .viewer{max-height:340px;overflow:auto;white-space:pre; background:#0d0d0d;border:1px solid #2a2a2a;border-radius:10px;padding:10px}
-  .controls{display:flex;gap:10px;align-items:center;margin:8px 0}
+  .viewer{max-height:340px;overflow:auto;
+          white-space:pre-wrap;      /* переносимо рядки */
+          overflow-wrap:anywhere;    /* довгі токени теж ламаємо */
+          font-family: ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+          background:#0d0d0d;border:1px solid #2a2a2a;border-radius:10px;padding:10px}
+  .controls{display:flex;gap:10px;align-items:center;justify-content:space-between;margin:8px 0}
   details>summary{cursor:pointer;opacity:.9}
   .dot{display:inline-block;width:8px;height:8px;border-radius:999px;background:#22c55e;margin-left:6px}
 </style>
@@ -187,11 +186,12 @@ export async function checklistHtml(env) {
     <div class="controls">
       <strong>Останні записи (локальний час)</strong>
       <label style="display:flex;gap:6px;align-items:center">
-        <input type="checkbox" id="newestFirst">
+        <input type="checkbox" id="newestFirst" checked>
         <span>Нові зверху</span>
       </label>
     </div>
     <pre id="viewer" class="viewer">${esc(raw)}</pre>
+    <div class="muted" id="tzNote" style="margin-top:6px"></div>
   </div>
 
   <div class="card" style="margin-top:10px">
@@ -221,38 +221,40 @@ export async function checklistHtml(env) {
 (function(){
   const viewer = document.getElementById('viewer');
   const newestFirst = document.getElementById('newestFirst');
+  const tzNote = document.getElementById('tzNote');
 
-  // Вміст у viewer зараз — RAW (UTC). Потрібно відобразити у локальному часі.
-  function toLocal(s){
-    // Знаходимо ISO-мітки часу з Z і конвертуємо в локаль.
+  const RAW = viewer.textContent;
+
+  const fmt = new Intl.DateTimeFormat(navigator.language || 'uk-UA', {
+    dateStyle: 'short',
+    timeStyle: 'medium'
+  });
+  const tzOffsetMin = -new Date().getTimezoneOffset(); // хвилини схід +, захід -
+  const tzSign = tzOffsetMin >= 0 ? '+' : '-';
+  const tzAbs = Math.abs(tzOffsetMin);
+  const tzStr = 'GMT' + tzSign + String(Math.floor(tzAbs/60)).padStart(2,'0') + ':' + String(tzAbs%60).padStart(2,'0');
+  tzNote.textContent = 'Показано у локальному часі (' + Intl.DateTimeFormat().resolvedOptions().timeZone + ', ' + tzStr + ').';
+
+  function toLocalPretty(s){
     return s.replace(/\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z/g, (m)=>{
       const d = new Date(m);
-      return isNaN(d) ? m : d.toLocaleString();
+      return isNaN(d) ? m : fmt.format(d);
     });
   }
-
-  // Зберігаємо оригінал (UTC), щоб при перемиканні порядку не було “подвійних” конвертацій.
-  const RAW = viewer.textContent;
 
   function render(){
     const lines = RAW.split(/\\n/);
     const ordered = newestFirst.checked ? lines.slice().reverse() : lines;
     let out = ordered.join("\\n");
-    out = toLocal(out);
+    out = toLocalPretty(out);
     viewer.textContent = out;
 
-    // автопрокрутка: якщо нові знизу — вниз; якщо зверху — вгору
-    if (newestFirst.checked) {
-      viewer.scrollTop = 0;
-    } else {
-      viewer.scrollTop = viewer.scrollHeight;
-    }
+    // автопрокрутка: останні — одразу у видимій зоні
+    if (newestFirst.checked) viewer.scrollTop = 0;
+    else viewer.scrollTop = viewer.scrollHeight;
   }
 
-  // первинний рендер
   render();
-
-  // перемикач порядку
   newestFirst.addEventListener('change', render);
 })();
 </script>
