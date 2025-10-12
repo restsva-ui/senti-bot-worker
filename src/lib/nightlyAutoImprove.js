@@ -27,7 +27,7 @@ function normalizeQuotes(s = "") {
   return s
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/[\u2018\u2019]/g, "'")
-    .replace(/\r/g, "")
+    .replace(/\r/g, "\n")
     .replace(/\t/g, " ");
 }
 function cutBalancedJson(s = "") {
@@ -74,6 +74,31 @@ function removeTrailingCommas(s = "") {
   return s.replace(/,\s*([}\]])/g, "$1");
 }
 
+// головний “реаніматор” рядків: замінює сирі переноси усередині лапок на \n
+function escapeNewlinesInsideStrings(s = "") {
+  let out = "";
+  let inStr = false;
+  let strCh = '"';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (ch === "\\" && i + 1 < s.length) {
+        out += ch + s[i + 1];
+        i++;
+        continue;
+      }
+      if (ch === "\n") { out += "\\n"; continue; }
+      if (ch === "\r") { out += "\\n"; continue; }
+      if (ch === strCh) { inStr = false; }
+      out += ch;
+    } else {
+      if (ch === '"' || ch === "'") { inStr = true; strCh = ch; }
+      out += ch;
+    }
+  }
+  return out;
+}
+
 function tryParseJSONPossiblyBroken(outText) {
   // 1) прибираємо кодові блоки, лапки, службові теги і т.п.
   let clean = stripCodeFences(outText);
@@ -84,18 +109,21 @@ function tryParseJSONPossiblyBroken(outText) {
   let jsonChunk = cutBalancedJson(clean);
   if (!jsonChunk) jsonChunk = clean.trim();
 
-  // 3) перша спроба
-  try {
-    return { ok: true, value: JSON.parse(jsonChunk) };
-  } catch {}
+  // 3) спроби парсингу
+  const attempts = [
+    (x) => x,
+    removeTrailingCommas,
+    escapeNewlinesInsideStrings,
+    (x) => escapeNewlinesInsideStrings(removeTrailingCommas(x)),
+  ];
 
-  // 4) друга спроба — прибрати висячі коми
-  try {
-    const fixed = removeTrailingCommas(jsonChunk);
-    return { ok: true, value: JSON.parse(fixed), _clean: fixed };
-  } catch (e2) {
-    return { ok: false, error: String(e2?.message || e2), _raw: outText, _clean: jsonChunk };
+  for (const fix of attempts) {
+    try {
+      const prepared = fix(jsonChunk);
+      return { ok: true, value: JSON.parse(prepared) };
+    } catch {}
   }
+  return { ok: false, _raw: outText, _clean: jsonChunk, error: "json-parse-failed" };
 }
 
 // Безпечний JSON.parse
