@@ -1,4 +1,3 @@
-// src/routes/aiImprove.js
 // Нічний агент: читає коротку пам'ять LIKES_KV, робить стислий аналіз,
 // зберігає інсайти у STATE_KV і пише нотатки у CHECKLIST_KV.
 // Додано debug-ендпойнти для перевірки KV/часу + seed та аналіз одного ключа
@@ -59,6 +58,65 @@ function previewFromInsight(insight) {
   return [sum, rules].filter(Boolean).join(" | ");
 }
 
+// ---------- JSON стабілізатор для аналізу ----------
+function stripCodeFences(s = "") {
+  return String(s)
+    .replace(/^\s*```(?:json)?/i, "")
+    .replace(/```$/i, "")
+    .trim();
+}
+function normalizeQuotes(s = "") {
+  return s
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/\r/g, "")
+    .replace(/\t/g, " ");
+}
+function cutBalancedJson(s = "") {
+  const text = String(s);
+  const start = text.indexOf("{");
+  if (start === -1) return null;
+
+  let i = start, depth = 0, inStr = false, strCh = '"';
+  while (i < text.length) {
+    const ch = text[i];
+    if (inStr) {
+      if (ch === "\\" && i + 1 < text.length) { i += 2; continue; }
+      if (ch === strCh) inStr = false;
+    } else {
+      if (ch === '"' || ch === "'") { inStr = true; strCh = ch; }
+      else if (ch === "{") { depth++; }
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) return text.slice(start, i + 1);
+      }
+    }
+    i++;
+  }
+  return null;
+}
+function removeTrailingCommas(s = "") {
+  return s.replace(/,\s*([}\]])/g, "$1");
+}
+function tryParseJSONPossiblyBroken(outText) {
+  let clean = stripCodeFences(outText);
+  clean = clean.replace(/\n+\[via[^\]]*\]\s*$/i, "");
+  clean = normalizeQuotes(clean);
+  let jsonChunk = cutBalancedJson(clean);
+  if (!jsonChunk) jsonChunk = clean.trim();
+
+  try {
+    return { ok: true, value: JSON.parse(jsonChunk) };
+  } catch {}
+  try {
+    const fixed = removeTrailingCommas(jsonChunk);
+    return { ok: true, value: JSON.parse(fixed), _clean: fixed };
+  } catch (e2) {
+    return { ok: false, error: String(e2?.message || e2), _raw: outText, _clean: jsonChunk };
+  }
+}
+
+// ---------- core ----------
 async function analyzeOneUser(env, chatId, state) {
   const messages = (state?.messages || []).slice(-20);
   if (messages.length === 0) return null;
@@ -77,21 +135,10 @@ async function analyzeOneUser(env, chatId, state) {
       max_tokens: 600,
     });
 
-    // ---- robust clean → JSON ----
-    let clean = out
-      .replace(/```json/gi, "")
-      .replace(/```/g, "")
-      .replace(/\n+\[via[\s\S]*$/i, "")
-      .trim();
+    const parsed = tryParseJSONPossiblyBroken(String(out));
+    if (!parsed.ok) throw new Error(parsed.error || "bad-json");
 
-    // вирізаємо чистий JSON між першою { і останньою }
-    const first = clean.indexOf("{");
-    const last  = clean.lastIndexOf("}");
-    if (first !== -1 && last !== -1 && last > first) {
-      clean = clean.slice(first, last + 1);
-    }
-
-    analysis = JSON.parse(clean);
+    analysis = parsed.value;
   } catch (e) {
     analysis = {
       summary: "Не вдалося розпарсити JSON аналізу.",
@@ -185,7 +232,6 @@ export async function runNightlyImprove(env, limitPerRun = 50) {
         await putInsight(env, latestKey, insight);
         added.push(latestKey);
 
-        // лог короткого прев’ю інсайту
         const preview = previewFromInsight(insight);
         await logChecklist(env, `🧠 insight ${chatId} → ${preview || "оновлено"}`);
       }
@@ -238,28 +284,18 @@ export async function handleAiImprove(req, env, url) {
   if (path === "/debug/time" && req.method === "GET") {
     const now = new Date();
 
-    // обираємо часову зону: ?tz=... або з ENV, інакше UTC
     const tz = url.searchParams.get("tz") || env.TIMEZONE || "UTC";
-
-    // людський локальний рядок у вибраній TZ
     const localHuman = new Intl.DateTimeFormat("uk-UA", {
       timeZone: tz,
       dateStyle: "short",
       timeStyle: "medium",
     }).format(now);
 
-    // оцінюємо офсет від UTC у хвилинах (приблизно, але стабільно)
     const utcMs = now.getTime();
     const tzMs = new Date(now.toLocaleString("en-US", { timeZone: tz })).getTime();
     const offsetMin = Math.round((tzMs - utcMs) / 60000);
 
-    return json({
-      ok: true,
-      utc_iso: now.toISOString(),
-      tz,
-      local_human: localHuman,
-      offset_min: offsetMin, // для Europe/Kyiv ≈ 180 у літній період
-    });
+    return json({ ok: true, utc_iso: now.toISOString(), tz, local_human: localHuman, offset_min: offsetMin });
   }
 
   if (path === "/debug/bindings" && req.method === "GET") {
