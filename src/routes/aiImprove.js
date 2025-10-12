@@ -206,12 +206,28 @@ export async function handleAiImprove(req, env, url) {
   // ----- DEBUG -----
   if (path === "/debug/time" && req.method === "GET") {
     const now = new Date();
+
+    // обираємо часову зону: ?tz=... або з ENV, інакше UTC
+    const tz = url.searchParams.get("tz") || env.TIMEZONE || "UTC";
+
+    // людський локальний рядок у вибраній TZ
+    const localHuman = new Intl.DateTimeFormat("uk-UA", {
+      timeZone: tz,
+      dateStyle: "short",
+      timeStyle: "medium",
+    }).format(now);
+
+    // оцінюємо офсет від UTC у хвилинах (приблизно, але стабільно)
+    const utcMs = now.getTime();
+    const tzMs = new Date(now.toLocaleString("en-US", { timeZone: tz })).getTime();
+    const offsetMin = Math.round((tzMs - utcMs) / 60000);
+
     return json({
       ok: true,
-      now_utc_iso: now.toISOString(),
-      now_local: now.toString(),
-      timestamp: Date.now(),
-      tz_offset_min: -now.getTimezoneOffset(),
+      utc_iso: now.toISOString(),
+      tz,
+      local_human: localHuman,
+      offset_min: offsetMin, // для Europe/Kyiv ≈ 180 у літній період
     });
   }
 
