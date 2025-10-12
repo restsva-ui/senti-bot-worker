@@ -51,6 +51,14 @@ function buildSystemHint() {
   );
 }
 
+function previewFromInsight(insight) {
+  const sum = (insight?.analysis?.summary || "").replace(/\s+/g, " ").slice(0, 120);
+  const rules = Array.isArray(insight?.analysis?.rules)
+    ? insight.analysis.rules.slice(0, 2).join("; ")
+    : "";
+  return [sum, rules].filter(Boolean).join(" | ");
+}
+
 async function analyzeOneUser(env, chatId, state) {
   const messages = (state?.messages || []).slice(-20);
   if (messages.length === 0) return null;
@@ -141,6 +149,10 @@ async function runForKey(env, key) {
   await putInsight(env, dailyKey,  insight);
   await putInsight(env, latestKey, insight);
 
+  // лог короткого прев’ю інсайту
+  const preview = previewFromInsight(insight);
+  await logChecklist(env, `🧠 insight ${chatId} → ${preview || "оновлено"}`);
+
   await logChecklist(env, `🌙 nightly(one) ${chatId} → saved daily+latest`);
   return { ok:true, dailyKey, latestKey };
 }
@@ -172,6 +184,10 @@ export async function runNightlyImprove(env, limitPerRun = 50) {
         await putInsight(env, dailyKey,  insight);
         await putInsight(env, latestKey, insight);
         added.push(latestKey);
+
+        // лог короткого прев’ю інсайту
+        const preview = previewFromInsight(insight);
+        await logChecklist(env, `🧠 insight ${chatId} → ${preview || "оновлено"}`);
       }
 
       processed++;
