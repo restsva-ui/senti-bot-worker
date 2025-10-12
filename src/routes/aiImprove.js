@@ -193,6 +193,7 @@ function ensureSecret(env, url) {
  * - /debug/likes/get?key=...          — прочитати конкретний ключ
  * - /debug/likes/seed?chat=<id>       — створити тестову памʼять
  * - /debug/insight/get?chat=<id>      — прочитати insight:latest:<id> зі STATE_KV
+ * - /debug/brain/state[?chat=<id>]    — огляд стану інсайтів у STATE_KV
  */
 export async function handleAiImprove(req, env, url) {
   const path = (url.pathname || "").toLowerCase();
@@ -300,6 +301,30 @@ export async function handleAiImprove(req, env, url) {
     const raw = await env.STATE_KV.get(key);
     let parsed = null; try { parsed = raw ? JSON.parse(raw) : null; } catch {}
     return json({ ok:true, key, exists: !!raw, raw, parsed });
+  }
+
+  // NEW: огляд стану інсайтів у STATE_KV
+  if (path === "/debug/brain/state" && req.method === "GET") {
+    if (!env.STATE_KV) return json({ ok:false, error:"STATE_KV missing" }, 500);
+
+    const chat = url.searchParams.get("chat");
+    if (chat) {
+      const key = `insight:latest:${chat}`;
+      const raw = await env.STATE_KV.get(key);
+      let parsed = null; try { parsed = raw ? JSON.parse(raw) : null; } catch {}
+      return json({ ok:true, mode:"single", key, exists: !!raw, raw, parsed });
+    }
+
+    const keys = [];
+    let cursor;
+    do {
+      const page = await env.STATE_KV.list({ prefix: "insight:", cursor });
+      for (const k of page.keys || []) keys.push(k.name);
+      cursor = page.cursor;
+      if (page.list_complete) break;
+    } while (cursor);
+
+    return json({ ok:true, mode:"list", total: keys.length, samples: keys.slice(0, 30) });
   }
 
   // ----- IMPROVE -----
