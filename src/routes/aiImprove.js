@@ -68,7 +68,21 @@ async function analyzeOneUser(env, chatId, state) {
       temperature: 0.2,
       max_tokens: 600,
     });
-    const clean = out.replace(/\n+\[via[\s\S]*$/i, "").trim();
+
+    // ---- robust clean → JSON ----
+    let clean = out
+      .replace(/```json/gi, "")
+      .replace(/```/g, "")
+      .replace(/\n+\[via[\s\S]*$/i, "")
+      .trim();
+
+    // вирізаємо чистий JSON між першою { і останньою }
+    const first = clean.indexOf("{");
+    const last  = clean.lastIndexOf("}");
+    if (first !== -1 && last !== -1 && last > first) {
+      clean = clean.slice(first, last + 1);
+    }
+
     analysis = JSON.parse(clean);
   } catch (e) {
     analysis = {
