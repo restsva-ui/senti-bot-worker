@@ -34,3 +34,6 @@ export function formatUsdRate(rate) {
   if (!rate) return "Не вдалося отримати курс 😕";
   return `💵 Курс USD → UAH: <b>${rate.toFixed(2)}₴</b>\n<i>джерело: НБУ або exchangerate.host</i>`;
 }
+
+// alias for backward compatibility
+export const formatRate = formatUsdRate;
