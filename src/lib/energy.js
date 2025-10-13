@@ -1,78 +1,62 @@
-// src/lib/energy.js
-// Проста енергетична модель для користувачів (KV: STATE_KV).
+// [2/3] src/lib/energy.js
+// Просте сховище стану енергії + логування подій.
+import { logEnergyEvent } from "./energyLog.js";
 
-const K = { PREFIX: "energy:user:" };
-const nowSec = () => Math.floor(Date.now() / 1000);
+const ensureState = (env) => {
+  if (!env.STATE_KV) throw new Error("STATE_KV binding missing");
+  return env.STATE_KV;
+};
 
-function cfg(env) {
-  const num = (v, d) => {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : d;
-  };
-  return {
-    MAX: num(env.ENERGY_MAX, 100),                 // максимум енергії
-    RECOVER_PER_MIN: num(env.ENERGY_RECOVER_PER_MIN, 1), // відновлення/хв
-    COST_TEXT: num(env.ENERGY_COST_TEXT, 1),       // ціна текстової події
-    COST_IMAGE: num(env.ENERGY_COST_IMAGE, 5),     // ціна обробки зображення
-    LOW_THRESHOLD: num(env.ENERGY_LOW_THRESHOLD, 10),    // поріг "low mode"
-  };
-}
+const K = (u) => `energy:${u}`;
+const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 
-async function kvGetJSON(kv, key) {
-  try {
-    const raw = await kv.get(key);
-    return raw ? JSON.parse(raw) : null;
-  } catch { return null; }
-}
+const ENV = (env) => ({
+  max: Number(env.ENERGY_MAX ?? 100),
+  recoverPerMin: Number(env.ENERGY_RECOVER_PER_MIN ?? 1),
+  costText: Number(env.ENERGY_COST_TEXT ?? 1),
+  costImage: Number(env.ENERGY_COST_IMAGE ?? 5),
+  low: Number(env.ENERGY_LOW_THRESHOLD ?? 10),
+});
 
-async function kvPutJSON(kv, key, val) {
-  try {
-    await kv.put(key, JSON.stringify(val), { expirationTtl: 60 * 60 * 24 * 7 }); // 7 днів
-  } catch {}
-}
-
-function recoverEnergy(prev, now, perMin, max) {
-  if (!prev?.updatedAt) return prev?.value ?? max;
-  const dtMin = Math.max(0, Math.floor((now - prev.updatedAt) / 60));
-  return Math.min(max, (prev.value ?? max) + dtMin * perMin);
-}
-
-/** Отримати поточну енергію (з авто-відновленням) */
 export async function getEnergy(env, userId) {
-  if (!env.STATE_KV) throw new Error("STATE_KV binding missing");
-  const key = `${K.PREFIX}${userId}`;
-  const c = cfg(env);
-  const now = nowSec();
-  const prev = await kvGetJSON(env.STATE_KV, key);
-  const val = recoverEnergy(prev, now, c.RECOVER_PER_MIN, c.MAX);
-  const cur = { value: val, updatedAt: now };
-  await kvPutJSON(env.STATE_KV, key, cur);
-  return cur.value;
+  const kv = ensureState(env);
+  const raw = await kv.get(K(userId));
+  const cfg = ENV(env);
+  if (!raw) {
+    const rec = { v: cfg.max, ts: Date.now() };
+    await kv.put(K(userId), JSON.stringify(rec));
+    return { energy: cfg.max, ...cfg };
+  }
+  const rec = JSON.parse(raw);
+  // пасивне відновлення
+  const mins = Math.floor((Date.now() - (rec.ts || 0)) / 60000);
+  if (mins > 0 && cfg.recoverPerMin > 0) {
+    const add = mins * cfg.recoverPerMin;
+    const v2 = clamp((rec.v ?? cfg.max) + add, 0, cfg.max);
+    if (v2 !== rec.v) {
+      await kv.put(K(userId), JSON.stringify({ v: v2, ts: Date.now() }));
+      await logEnergyEvent(env, userId, { delta: (v2 - (rec.v ?? 0)), kind: "recover", meta: { mins } });
+      return { energy: v2, ...cfg };
+    }
+  }
+  return { energy: rec.v ?? cfg.max, ...cfg };
 }
 
-/** Списати енергію за подію ("text" | "image") і повернути стан */
-export async function spendEnergy(env, userId, kind = "text") {
-  if (!env.STATE_KV) throw new Error("STATE_KV binding missing");
-  const key = `${K.PREFIX}${userId}`;
-  const c = cfg(env);
-  const now = nowSec();
-  const prev = await kvGetJSON(env.STATE_KV, key);
-  let val = recoverEnergy(prev, now, c.RECOVER_PER_MIN, c.MAX);
-  const cost = kind === "image" ? c.COST_IMAGE : c.COST_TEXT;
-  val = Math.max(0, val - cost);
-  const cur = { value: val, updatedAt: now };
-  await kvPutJSON(env.STATE_KV, key, cur);
-  const lowMode = val <= c.LOW_THRESHOLD;
-  return { energy: val, lowMode, cfg: c };
-}
-
-/** Скинути енергію до MAX (адмін/сервісне) */
 export async function resetEnergy(env, userId) {
-  if (!env.STATE_KV) throw new Error("STATE_KV binding missing");
-  const key = `${K.PREFIX}${userId}`;
-  const c = cfg(env);
-  const now = nowSec();
-  const cur = { value: c.MAX, updatedAt: now };
-  await kvPutJSON(env.STATE_KV, key, cur);
-  return cur.value;
+  const kv = ensureState(env);
+  const cfg = ENV(env);
+  const rec = { v: cfg.max, ts: Date.now() };
+  await kv.put(K(userId), JSON.stringify(rec));
+  await logEnergyEvent(env, userId, { delta: cfg.max, kind: "reset" });
+  return { energy: cfg.max, ...cfg };
+}
+
+export async function spendEnergy(env, userId, amount, kind = "spend") {
+  const kv = ensureState(env);
+  const cfg = ENV(env);
+  const cur = await getEnergy(env, userId);
+  const v2 = clamp(cur.energy - amount, 0, cfg.max);
+  await kv.put(K(userId), JSON.stringify({ v: v2, ts: Date.now() }));
+  await logEnergyEvent(env, userId, { delta: -amount, kind });
+  return { energy: v2, ...cfg };
 }
