@@ -3,6 +3,7 @@
 // ⬆️ ДОПОВНЕНО: Self-Tune — підтягувамо інсайти зі STATE_KV і додаємо rules/tone.
 // ⬆️ ДОПОВНЕНО: Energy — ліміт витрат на текст/медіа з авто-відновленням.
 // ⬆️ ДОПОВНЕНО: Dialog Memory — коротка історія спілкування у DIALOG_KV з TTL.
+// ⬆️ ДОПОВНЕНО: /mem show|reset — керування короткою пам’яттю без витрат енергії.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -33,6 +34,23 @@ function parseAiCommand(text = "") {
   const m = s.match(/^\/ai(?:@[\w_]+)?(?:\s+([\s\S]+))?$/i);
   if (!m) return null;
   return (m[1] || "").trim(); // може бути ""
+}
+
+// Парсер /mem
+function parseMemCommand(text = "") {
+  const s = String(text).trim();
+  const m = s.match(/^\/mem(?:@[\w_]+)?(?:\s+([\s\S]+))?$/i);
+  if (!m) return null;
+  const arg = (m[1] || "").trim();
+  if (!arg) return { cmd: "help" };
+  const parts = arg.split(/\s+/);
+  const sub = parts[0].toLowerCase();
+  if (sub === "show") {
+    const n = Math.min(50, Math.max(1, Number(parts[1] || 10)));
+    return { cmd: "show", n };
+  }
+  if (sub === "reset") return { cmd: "reset" };
+  return { cmd: "help" };
 }
 
 // Анти-порожній фолбек + утиліта перевірки
@@ -397,6 +415,39 @@ export async function handleTelegramWebhook(req, env) {
       }
 
       await sendMessage(env, chatId, lines.join("\n"));
+    });
+    return json({ ok: true });
+  }
+
+  // /mem — керування пам’яттю (без витрат енергії)
+  const memCmd = parseMemCommand(textRaw);
+  if (memCmd) {
+    await safe(async () => {
+      if (memCmd.cmd === "show") {
+        const arr = await readDialog(env, userId);
+        if (!arr.length) {
+          await sendMessage(env, chatId, "🧠 Пам’ять порожня.");
+          return;
+        }
+        const last = arr.slice(-memCmd.n);
+        const lines = ["🧠 Останні записи:"];
+        for (const it of last) {
+          const who = it.r === "user" ? "Користувач" : "Senti";
+          lines.push(`${who}: ${it.c}`);
+        }
+        await sendMessage(env, chatId, lines.join("\n"));
+        return;
+      }
+      if (memCmd.cmd === "reset") {
+        await writeDialog(env, userId, []);
+        await sendMessage(env, chatId, "🧽 Пам’ять чату очищено.");
+        return;
+      }
+      await sendMessage(
+        env,
+        chatId,
+        "Команди /mem:\n• /mem show [N] — показати останні N (дефолт 10)\n• /mem reset — очистити пам’ять"
+      );
     });
     return json({ ok: true });
   }
