@@ -28,6 +28,7 @@ async function sendMessage(env, chatId, text, extra = {}) {
   await r.text().catch(() => {});
 }
 
+// /ai parser
 function parseAiCommand(text = "") {
   const s = String(text).trim();
   const m = s.match(/^\/ai(?:@[\w_]+)?(?:\s+([\s\S]+))?$/i);
@@ -35,12 +36,9 @@ function parseAiCommand(text = "") {
   return (m[1] || "").trim();
 }
 
-function defaultAiReply() {
-  return (
-    "🤖 Я можу відповідати на питання, допомагати з кодом, " +
-    "зберігати файли на Google Drive (кнопка «Google Drive») " +
-    "та керувати чеклистом/репозиторієм. Спробуй запит на тему, яка цікавить!"
-  );
+// Локалізований дефолт-допис
+function defaultAiReply(lang = "uk") {
+  return TR.default_help?.[lang] || TR.default_help.en;
 }
 const isBlank = (s) => !s || !String(s).trim();
 
@@ -55,23 +53,32 @@ const mainKeyboard = (isAdmin = false) => {
   return { keyboard: rows, resize_keyboard: true };
 };
 
-const inlineOpenDrive = () => ({
-  inline_keyboard: [[{ text: "Відкрити Диск", url: "https://drive.google.com/drive/my-drive" }]],
+const inlineOpenDrive = (lang = "uk") => ({
+  inline_keyboard: [[{ text: TR.open_drive_btn?.[lang] || TR.open_drive_btn.en, url: "https://drive.google.com/drive/my-drive" }]],
 });
 
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 
 // ── Multilang (uk/ru/de/en/fr) ────────────────────────────────────────────────
 const SUP_LANGS = ["uk", "ru", "de", "en", "fr"];
-const LANG_KEY = (uid) => `lang:${uid}`;
+
+// зберігаємо мову на рівні ЧАТУ (щоб не плутатись між чатами/групами)
+const LANG_KEY = (chatId) => `lang:${chatId}`;
 
 const TR = {
   hello: {
     uk: "Привіт! Я Senti 🤖 Готовий допомогти.",
     ru: "Привет! Я Senti 🤖 Готов помочь.",
     de: "Hi! Ich bin Senti 🤖 — bereit zu helfen.",
-    en: "Hey! I’m Senti 🤖—ready to help.",
+    en: "Hey! I’m Senti 🤖 — ready to help.",
     fr: "Salut ! Je suis Senti 🤖, prêt à aider."
+  },
+  default_help: {
+    uk: "🤖 Я можу відповісти на питання, допомогти з кодом, зберігати файли на Google Drive (кнопка «Google Drive») і працювати з Checklist/Repo. Спробуй будь-який запит!",
+    ru: "🤖 Я могу отвечать на вопросы, помогать с кодом, сохранять файлы в Google Drive («Google Drive») и работать с Checklist/Repo. Напиши любой запрос!",
+    de: "🤖 Ich kann Fragen beantworten, bei Code helfen, Dateien in Google Drive speichern („Google Drive“) und mit Checklist/Repo arbeiten. Frag einfach!",
+    en: "🤖 I can answer questions, help with code, save files to Google Drive (“Google Drive”), and work with the Checklist/Repo. Ask me anything!",
+    fr: "🤖 Je peux répondre aux questions, aider avec le code, enregistrer des fichiers sur Google Drive (« Google Drive ») et gérer le Checklist/Repo. Pose ta question !"
   },
   ai_usage: {
     uk: "✍️ Напиши запит після команди /ai. Напр.:\n/ai Скільки буде 2+2?",
@@ -141,6 +148,20 @@ const TR = {
     en: (cl, repo, hook) => `🛠 Admin menu\n\n• Checklist: ${cl}\n• Repo: ${repo}\n• Webhook GET: ${hook}`,
     fr: (cl, repo, hook) => `🛠 Menu admin\n\n• Checklist : ${cl}\n• Repo : ${repo}\n• Webhook GET : ${hook}`
   },
+  open_drive_caption: {
+    uk: "Відкрити свій Диск:",
+    ru: "Открыть свой Диск:",
+    de: "Dein Drive öffnen:",
+    en: "Open your Drive:",
+    fr: "Ouvre ton Drive :"
+  },
+  open_drive_btn: {
+    uk: "Відкрити Диск",
+    ru: "Открыть Диск",
+    de: "Drive öffnen",
+    en: "Open Drive",
+    fr: "Ouvrir Drive"
+  },
   generic_error: {
     uk: (e) => `❌ Помилка: ${e}`,
     ru: (e) => `❌ Ошибка: ${e}`,
@@ -162,13 +183,11 @@ function normTgLang(code = "") {
 function detectLangFromText(s = "", fallback = "en") {
   const t = String(s).toLowerCase();
 
-  // quick heuristics by characters
   if (/[їєґі]/i.test(t)) return "uk";
   if (/[ёыэъ]/i.test(t)) return "ru";
   if (/[äöüß]/i.test(t)) return "de";
   if (/[àâçéèêëîïôûùüÿœæ]/i.test(t)) return "fr";
 
-  // stopwords vote
   const votes = { uk: 0, ru: 0, de: 0, en: 0, fr: 0 };
   const bump = (lang, count = 1) => (votes[lang] += count);
 
@@ -183,19 +202,21 @@ function detectLangFromText(s = "", fallback = "en") {
   return best;
 }
 
-async function getUserLang(env, userId, tgCode, lastText = "") {
+async function getChatLang(env, chatId, tgCode, lastText = "") {
   const kv = ensureState(env);
-  const key = LANG_KEY(userId);
+  const key = LANG_KEY(chatId);
   const saved = await kv.get(key);
   let lang = saved || normTgLang(tgCode);
 
-  // if user actually writes in another language — switch
   if (lastText && lastText.length >= 3) {
     const detected = detectLangFromText(lastText, lang);
     if (SUP_LANGS.includes(detected) && detected !== lang) {
       lang = detected;
       await kv.put(key, lang, { expirationTtl: 60 * 60 * 24 * 90 }); // 90d
     }
+  }
+  if (!saved) {
+    await kv.put(key, lang, { expirationTtl: 60 * 60 * 24 * 90 });
   }
   return SUP_LANGS.includes(lang) ? lang : "en";
 }
@@ -343,7 +364,7 @@ async function buildSystemHint(env, chatId, userId, lang, extra = "") {
   const style =
     `Always reply in ${langName(lang)}.\n` +
     "Use a casual, friendly conversational tone (not formal), short sentences, and be concise.\n" +
-    "Use emojis sparingly (only when it feels natural).";
+    "Avoid re-greeting if the chat is ongoing. Use emojis sparingly (only when it feels natural).";
 
   const base =
     (statut ? `${statut.trim()}\n\n` : "") +
@@ -448,8 +469,8 @@ export async function handleTelegramWebhook(req, env) {
   const userId = msg.from?.id;
   const isAdmin = ADMIN(env, userId);
 
-  // resolve language (from KV -> TG -> detect by text), update if user speaks another
-  const lang = await getUserLang(env, userId, msg.from?.language_code, text);
+  // Визначаємо/оновлюємо мову ДЛЯ ЧАТУ
+  const lang = await getChatLang(env, chatId, msg.from?.language_code, text);
 
   const safe = async (fn) => {
     try { await fn(); } catch (e) { await sendMessage(env, chatId, tr(lang, "generic_error", String(e))); }
@@ -464,7 +485,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /diag — only admin (left in Ukrainian for you)
+  // /diag — тільки для адміна (залишаю укр, як службову)
   if (text === "/diag" && isAdmin) {
     await safe(async () => {
       const hasGemini   = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
@@ -504,7 +525,7 @@ export async function handleTelegramWebhook(req, env) {
     await safe(async () => {
       const q = aiArg || "";
       if (!q) {
-        await sendMessage(env, chatId, tr(lang, "ai_usage"));
+        await sendMessage(env, chatId, TR.ai_usage?.[lang] || TR.ai_usage.en);
         return;
       }
 
@@ -530,7 +551,7 @@ export async function handleTelegramWebhook(req, env) {
         reply = `🧠 AI error: ${String(e?.message || e)}`;
       }
 
-      if (isBlank(reply)) reply = defaultAiReply();
+      if (isBlank(reply)) reply = defaultAiReply(lang);
 
       await pushDialog(env, userId, "user", q);
       await pushDialog(env, userId, "assistant", reply);
@@ -555,7 +576,7 @@ export async function handleTelegramWebhook(req, env) {
       }
       await setDriveMode(env, userId, true);
       await sendMessage(env, chatId, tr(lang, "drive_on"), { reply_markup: mainKeyboard(isAdmin) });
-      await sendMessage(env, chatId, "Open your Drive:", { reply_markup: inlineOpenDrive() });
+      await sendMessage(env, chatId, TR.open_drive_caption?.[lang] || TR.open_drive_caption.en, { reply_markup: inlineOpenDrive(lang) });
     });
     return json({ ok: true });
   }
@@ -618,7 +639,7 @@ export async function handleTelegramWebhook(req, env) {
         out = await think(env, text, systemHint);
       }
 
-      if (isBlank(out)) out = defaultAiReply();
+      if (isBlank(out)) out = defaultAiReply(lang);
 
       await pushDialog(env, userId, "user", text);
       await pushDialog(env, userId, "assistant", out);
@@ -630,7 +651,7 @@ export async function handleTelegramWebhook(req, env) {
       await sendMessage(env, chatId, out);
       return json({ ok: true });
     } catch (e) {
-      await sendMessage(env, chatId, defaultAiReply());
+      await sendMessage(env, chatId, defaultAiReply(lang));
       return json({ ok: true });
     }
   }
