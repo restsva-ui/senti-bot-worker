@@ -52,7 +52,7 @@ const BTN_CHECK = "Checklist";
 
 const mainKeyboard = (isAdmin = false) => {
   const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
-  if (isAdmin) rows.push([{ text: BTN_ADMIN }, { text: BTN_CHECK }]]);
+  if (isAdmin) rows.push([{ text: BTN_ADMIN }, { text: BTN_CHECK }]);
   return { keyboard: rows, resize_keyboard: true };
 };
 
