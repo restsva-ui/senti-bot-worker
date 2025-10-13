@@ -1,11 +1,13 @@
 // src/lib/apis/weather.js
-// Weather with primary provider wttr.in and fallback Open-Meteo (no API keys).
+// Primary: wttr.in → Fallback: Open-Meteo (без ключів)
+
+function arrow(url) { return ` <a href="${url}">↗︎</a>`; }
 
 async function wttr(city) {
   const url = `https://wttr.in/${encodeURIComponent(city)}?format=j1`;
   const res = await fetch(url, {
     headers: { "user-agent": "senti-bot/1.0 (+cf-worker)" },
-    cf: { cacheEverything: true, cacheTtl: 60 * 15 } // 15 min
+    cf: { cacheEverything: true, cacheTtl: 60 * 15 }, // 15 хв
   });
   if (!res.ok) throw new Error(`wttr HTTP ${res.status}`);
   const data = await res.json();
@@ -19,11 +21,11 @@ async function wttr(city) {
     feelsLikeC: Number(c.FeelsLikeC),
     windKph: Number(c.windspeedKmph),
     humidity: Number(c.humidity),
-    desc: (c.weatherDesc?.[0]?.value || "").trim()
+    desc: (c.weatherDesc?.[0]?.value || "").trim(),
   };
 }
 
-// Simple geocoding via Open-Meteo
+// Геокодер Open-Meteo
 async function geocode(query) {
   const url = `https://geocoding-api.open-meteo.com/v1/search?count=1&name=${encodeURIComponent(query)}`;
   const res = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 60 * 60 } });
@@ -36,7 +38,9 @@ async function geocode(query) {
 
 async function openMeteo(city) {
   const g = await geocode(city);
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${g.lat}&longitude=${g.lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m`;
+  const url =
+    `https://api.open-meteo.com/v1/forecast?latitude=${g.lat}&longitude=${g.lon}` +
+    `&current=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m`;
   const res = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 60 * 15 } });
   if (!res.ok) throw new Error(`open-meteo HTTP ${res.status}`);
   const data = await res.json();
@@ -49,15 +53,34 @@ async function openMeteo(city) {
     feelsLikeC: Number(c.apparent_temperature),
     windKph: Number(c.wind_speed_10m),
     humidity: Number(c.relative_humidity_2m),
-    desc: "Current weather"
+    desc: "Current weather",
   };
 }
 
 export async function weatherByCity(city = "Kyiv") {
-  try {
-    return await wttr(city);
-  } catch (e) {
-    console.warn("[weather] wttr failed, fallback to Open-Meteo:", e.message);
-  }
+  try { return await wttr(city); }
+  catch (e) { console.warn("[weather] wttr failed, fallback:", e.message); }
   return await openMeteo(city);
+}
+
+// ── сумісний форматер для webhook.js ──
+export function formatWeather(w, lang = "uk") {
+  if (!w) return "";
+  const L = {
+    en: { now: "now", temp: "Temperature", feels: "feels like", wind: "Wind", hum: "Humidity", src: "source" },
+    uk: { now: "зараз", temp: "Температура", feels: "відчувається як", wind: "Вітер", hum: "Вологість", src: "джерело" },
+    ru: { now: "сейчас", temp: "Температура", feels: "ощущается как", wind: "Ветер", hum: "Влажность", src: "источник" },
+    de: { now: "jetzt", temp: "Temperatur", feels: "gefühlt", wind: "Wind", hum: "Luftfeuchtigkeit", src: "Quelle" },
+    fr: { now: "maintenant", temp: "Température", feels: "ressenti", wind: "Vent", hum: "Humidité", src: "source" },
+  }[lang] || L?.en;
+  const srcUrl = w.provider === "wttr.in" ? "https://wttr.in/" : "https://open-meteo.com/";
+  const lines = [
+    `🌤️ <b>${w.city}</b> — ${L.now}`,
+    w.desc ? `• ${w.desc}` : "",
+    `• ${L.temp}: <b>${w.tempC}°C</b> (${L.feels} ${w.feelsLikeC}°C)`,
+    `• ${L.wind}: ${w.windKph} km/h`,
+    `• ${L.hum}: ${w.humidity}%`,
+    `\n<i>${L.src}:</i> ${w.provider}${arrow(srcUrl)}`,
+  ];
+  return lines.filter(Boolean).join("\n");
 }
