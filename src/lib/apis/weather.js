@@ -61,16 +61,3 @@ export async function weatherByCity(city = "Kyiv") {
   }
   return await openMeteo(city);
 }
-
-export function formatWeather(w) {
-  if (!w) return "Не вдалося отримати погоду зараз 😕";
-  const lines = [
-    `🏙️ <b>${w.city}</b>`,
-    `🌡️ Температура: <b>${w.tempC}°C</b> (відчувається як ${w.feelsLikeC}°C)`,
-    `💨 Вітер: ${w.windKph} км/год`,
-    `💧 Вологість: ${w.humidity}%`,
-  ];
-  if (w.desc) lines.push(`☁️ ${w.desc}`);
-  lines.push(`<i>джерело: ${w.provider}</i>`);
-  return lines.join("\n");
-}
