@@ -65,7 +65,7 @@ export async function fetchTopNews(env = {}) {
   return await rssTop();
 }
 
-// ── Сумісний форматер для webhook.js ──
+// ── форматер, який потребує твій webhook ──
 export function formatNewsList(items = []) {
   if (!items?.length) return "";
   const list = items.slice(0, 8).map(n => `• <a href="${n.link}">${n.title}</a>`).join("\n");
