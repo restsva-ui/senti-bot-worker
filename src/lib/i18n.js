@@ -1,7 +1,7 @@
 // src/lib/i18n.js
 // Multilang helper: language storage + texts + robust detection
 
-const SUP_LANGS = ["uk", "ru", "de", "en", "fr"];
+export const SUP_LANGS = ["uk", "ru", "de", "en", "fr"];
 const LANG_KEY = (uid) => `lang:${uid}`;
 
 const ensureState = (env) => {
@@ -30,24 +30,24 @@ function scoreVotes(text = "") {
     fr: /[àâçéèêëîïôûùüÿœæ]/i.test(t),
   };
 
-  // stopwords (short list but high-signal). weights tuned.
+  // stopwords (короткі, але сигналні). ваги підібрані практично
   const votes = { uk: 0, ru: 0, de: 0, en: 0, fr: 0 };
   const bump = (k, n = 1) => (votes[k] += n);
 
   // uk
-  if (/\b(як|що|це|та|але|тут|привіт|дякую)\b/.test(t)) bump("uk", 2);
+  if (/\b(як|що|це|та|але|тут|привіт|дякую|будь ласка|прошу)\b/.test(t)) bump("uk", 2);
 
-  // ru (додали "как", "этот", "привет", "помоги", "я")
-  if (/\b(как|что|это|этот|ну|привет|помоги|я)\b/.test(t)) bump("ru", 2);
+  // ru
+  if (/\b(как|что|это|этот|ну|привет|помоги|пожалуйста|я)\b/.test(t)) bump("ru", 2);
 
   // de
-  if (/\b(der|die|das|und|ist|nicht|ich|heute)\b/.test(t)) bump("de", 2);
+  if (/\b(der|die|das|und|ist|nicht|ich|heute|bitte|danke)\b/.test(t)) bump("de", 2);
 
   // en
-  if (/\b(the|and|is|are|you|i|what|how)\b/.test(t)) bump("en", 2);
+  if (/\b(the|and|is|are|you|i|what|how|please|thanks)\b/.test(t)) bump("en", 2);
 
   // fr
-  if (/\b(le|la|les|et|est|pas|je|tu|aujourd'hui)\b/.test(t)) bump("fr", 2);
+  if (/\b(le|la|les|et|est|pas|je|tu|aujourd'hui|s'il vous plaît|merci)\b/.test(t)) bump("fr", 2);
 
   // tiny bias to latin-only text -> en
   if (/^[\x00-\x7F\s.,!?:'"()\-]+$/.test(t)) bump("en", 1);
@@ -59,7 +59,7 @@ function scoreVotes(text = "") {
   }
 
   // strong signal wins regardless of votes
-  const strongLang = Object.entries(strong).find(([,v]) => v)?.[0] || null;
+  const strongLang = Object.entries(strong).find(([, v]) => v)?.[0] || null;
   return {
     lang: strongLang || best,
     score: strongLang ? 99 : max,   // 99 = force switch
@@ -67,7 +67,7 @@ function scoreVotes(text = "") {
   };
 }
 
-function containsDontUnderstand(text="") {
+function containsDontUnderstand(text = "") {
   const t = text.toLowerCase();
   return (
     /не понимаю|не розумію|i don't understand|je ne comprends pas|ich verstehe (es|das) nicht/.test(t)
@@ -111,6 +111,7 @@ export async function getUserLang(env, userId, tgCode, lastText = "") {
 
 // ---- translations -----------------------------------------------------------
 export const TR = {
+  // дружнє, коротке вітання після /start
   hello: {
     uk: "Привіт! Я Senti 🤖 Готовий допомогти.",
     ru: "Привет! Я Senti 🤖 Готов помочь.",
@@ -118,6 +119,8 @@ export const TR = {
     en: "Hey! I’m Senti 🤖—ready to help.",
     fr: "Salut ! Je suis Senti 🤖, prêt à aider.",
   },
+
+  // підказка для /ai (коли пустий запит)
   ai_usage: {
     uk: "✍️ Напиши запит після команди /ai. Напр.:\n/ai Скільки буде 2+2?",
     ru: "✍️ Напиши запрос после команды /ai. Например:\n/ai Сколько будет 2+2?",
@@ -125,6 +128,8 @@ export const TR = {
     en: "✍️ Type your question after /ai. E.g.:\n/ai What’s 2+2?",
     fr: "✍️ Écris ta question après /ai. Par ex. :\n/ai 2+2 = ?",
   },
+
+  // енергія: не вистачає
   energy_not_enough: {
     uk: (need, links) =>
       `🔋 Не вистачає енергії (потрібно ${need}). Вона відновлюється автоматично.\nКерування:\n• Energy: ${links.energy}\n• Checklist: ${links.checklist}`,
@@ -137,6 +142,8 @@ export const TR = {
     fr: (need, links) =>
       `🔋 Pas assez d’énergie (il faut ${need}). Elle se recharge automatiquement.\nGérer :\n• Energy : ${links.energy}\n• Checklist : ${links.checklist}`,
   },
+
+  // енергія: низький рівень
   energy_low_hint: {
     uk: (cur, link) => `⚠️ Низький рівень енергії (${cur}). Відновиться автоматично. Керування: ${link}`,
     ru: (cur, link) => `⚠️ Низкий уровень энергии (${cur}). Восстановится автоматически. Управление: ${link}`,
@@ -144,6 +151,8 @@ export const TR = {
     en: (cur, link) => `⚠️ Low energy (${cur}). It will refill automatically. Manage: ${link}`,
     fr: (cur, link) => `⚠️ Énergie faible (${cur}). Recharge automatique. Gérer : ${link}`,
   },
+
+  // Drive авторизація (єдина текстова підказка; самі статуси "on/off" ми не показуємо)
   drive_auth: {
     uk: (url) => `Щоб зберігати у свій Google Drive — дозволь доступ:\n${url}\n\nПотім натисни «📁 Drive» ще раз.`,
     ru: (url) => `Чтобы сохранять в свой Google Drive — дай доступ:\n${url}\n\nПотом нажми «📁 Drive» ещё раз.`,
@@ -151,8 +160,12 @@ export const TR = {
     en: (url) => `To save to your Google Drive, grant access first:\n${url}\n\nThen tap “📁 Drive” again.`,
     fr: (url) => `Pour enregistrer sur ton Google Drive, accorde d’abord l’accès :\n${url}\n\nPuis appuie encore sur « 📁 Drive ».`,
   },
-  drive_on: { uk: "", ru: "", de: "", en: "", fr: "" }, // більше не показуємо текст
-  drive_off: { uk: "", ru: "", de: "", en: "", fr: "" }, // теж порожньо
+
+  // ці ключі лишаємо пустими — у UI нічого не виводимо
+  drive_on:  { uk: "", ru: "", de: "", en: "", fr: "" },
+  drive_off: { uk: "", ru: "", de: "", en: "", fr: "" },
+
+  // підтвердження збереження файлу на Drive
   saved_to_drive: {
     uk: (name) => `✅ Збережено на твоєму диску: ${name}`,
     ru: (name) => `✅ Сохранено на твоём диске: ${name}`,
@@ -160,6 +173,8 @@ export const TR = {
     en: (name) => `✅ Saved to your Drive: ${name}`,
     fr: (name) => `✅ Enregistré sur ton Drive : ${name}`,
   },
+
+  // посилання на Checklist (використовується в адмін-меню)
   checklist_link: {
     uk: (link) => `📋 Чеклист (HTML):\n${link}`,
     ru: (link) => `📋 Чеклист (HTML):\n${link}`,
@@ -167,13 +182,17 @@ export const TR = {
     en: (link) => `📋 Checklist (HTML):\n${link}`,
     fr: (link) => `📋 Checklist (HTML) :\n${link}`,
   },
+
+  // текстове адмін-меню (про всяк випадок — якщо потрібно поряд з інлайном)
   admin_menu: {
     uk: (cl, repo, hook) => `🛠 Адмін-меню\n\n• Чеклист: ${cl}\n• Repo: ${repo}\n• Вебхук GET: ${hook}`,
-    ru: (cl, repo, hook) => `🛠 Админ-меню\n\n• Чеклист: ${cl}\n• Repo: ${repo}\n• Вебхук GET: ${hook}`,
+    ru: (cl, repo, hook) => `🛠 Админ-меню\n\n• Чеклист: ${cl}\n• Repo: ${repo}\n• Webhook GET: ${hook}`,
     de: (cl, repo, hook) => `🛠 Admin-Menü\n\n• Checkliste: ${cl}\n• Repo: ${repo}\n• Webhook GET: ${hook}`,
     en: (cl, repo, hook) => `🛠 Admin menu\n\n• Checklist: ${cl}\n• Repo: ${repo}\n• Webhook GET: ${hook}`,
     fr: (cl, repo, hook) => `🛠 Menu admin\n\n• Checklist : ${cl}\n• Repo : ${repo}\n• Webhook GET : ${hook}`,
   },
+
+  // довідка по /tone
   tone_help: {
     uk: () => `Налаштування тону:\n/tone auto — авто\n/tone friendly|casual|playful|concise|professional|formal|empathetic|neutral`,
     ru: () => `Настройка тона:\n/tone auto — авто\n/tone friendly|casual|playful|concise|professional|formal|empathetic|neutral`,
@@ -181,6 +200,8 @@ export const TR = {
     en: () => `Tone settings:\n/tone auto\n/tone friendly|casual|playful|concise|professional|formal|empathetic|neutral`,
     fr: () => `Réglage du ton :\n/tone auto\n/tone friendly|casual|playful|concise|professional|formal|empathetic|neutral`,
   },
+
+  // підтвердження встановлення /tone
   tone_set_ok: {
     uk: (v) => `✅ Тон встановлено: ${v}`,
     ru: (v) => `✅ Тон установлен: ${v}`,
@@ -188,6 +209,8 @@ export const TR = {
     en: (v) => `✅ Tone set: ${v}`,
     fr: (v) => `✅ Ton défini : ${v}`,
   },
+
+  // показати поточний /tone
   tone_current: {
     uk: (mode, value, last) => `Тон: режим=${mode}, значення=${value || "—"}, авто останній=${last || "—"}`,
     ru: (mode, value, last) => `Тон: режим=${mode}, значение=${value || "—"}, авто последний=${last || "—"}`,
@@ -195,6 +218,8 @@ export const TR = {
     en: (mode, value, last) => `Tone: mode=${mode}, value=${value || "—"}, auto last=${last || "—"}`,
     fr: (mode, value, last) => `Ton : mode=${mode}, valeur=${value || "—"}, auto dernier=${last || "—"}`,
   },
+
+  // загальна помилка
   generic_error: {
     uk: (e) => `❌ Помилка: ${e}`,
     ru: (e) => `❌ Ошибка: ${e}`,
