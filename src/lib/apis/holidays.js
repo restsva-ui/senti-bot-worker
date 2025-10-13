@@ -12,6 +12,6 @@ export async function getHolidays(country = "UA", year = new Date().getFullYear(
     return [];
   }
 }
-// compatibility export
+// залишаємо форматер для зворотної сумісності
 export const formatHolidays = (items=[], cc="UA", y=(new Date().getFullYear())) =>
   items.length ? `🎉 <b>Свята ${cc} у ${y}</b>\n`+items.slice(0,10).map(h=>`• ${h.date} — ${h.name}`).join("\n") : "—";
