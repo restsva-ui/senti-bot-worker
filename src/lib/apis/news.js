@@ -1,5 +1,5 @@
 // src/lib/apis/news.js
-// News via newsdata.io (якщо є ключ) + RSS-фолбек (без ключів)
+// News via newsdata.io (якщо є ключ) + RSS фолбек (без ключів)
 
 function arrow(url){ return ` <a href="${url}">↗︎</a>`; }
 
@@ -15,7 +15,7 @@ async function newsdataIO(key) {
   })).filter(x => x.title && x.link);
 }
 
-// RSS через jina.ai proxy (без CORS)
+// RSS через proxy (без CORS)
 async function fetchRSS(url) {
   const r = await fetch(`https://r.jina.ai/http://` + url, { cf: { cacheEverything: true, cacheTtl: 60 * 5 } });
   if (!r.ok) throw new Error("RSS fetch failed");
@@ -65,8 +65,9 @@ export async function fetchTopNews(env = {}) {
   return await rssTop();
 }
 
-// ── сумісний форматер для webhook.js ──
+// ── Сумісний форматер для webhook.js ──
 export function formatNewsList(items = []) {
   if (!items?.length) return "";
-  return items.slice(0, 8).map(n => `• <a href="${n.link}">${n.title}</a>`).join("\n") + arrow(items[0].link);
+  const list = items.slice(0, 8).map(n => `• <a href="${n.link}">${n.title}</a>`).join("\n");
+  return list + arrow(items[0].link);
 }
