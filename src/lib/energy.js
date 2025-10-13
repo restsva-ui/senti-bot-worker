@@ -1,6 +1,4 @@
 // src/lib/energy.js
-// Просте сховище стану енергії + логування подій.
-
 import { logEnergyEvent } from "./energyLog.js";
 import { abs } from "../utils/url.js";
 
@@ -20,10 +18,10 @@ const ENV = (env) => ({
   low: Number(env.ENERGY_LOW_THRESHOLD ?? 10),
 });
 
-/** Публічний alias для конфігу — очікується вебхуком */
+// ✅ конфігурація
 export const energyCfg = (env) => ENV(env);
 
-/** Допоміжні посилання в адмінку енергії/чекліста */
+// ✅ посилання для сторінок
 export function energyLinks(env, userId) {
   const s = env.WEBHOOK_SECRET || "";
   const qs = `s=${encodeURIComponent(s)}&u=${encodeURIComponent(String(userId || ""))}`;
@@ -33,7 +31,7 @@ export function energyLinks(env, userId) {
   };
 }
 
-/** Поточне значення енергії (з пасивним відновленням) */
+// ✅ поточна енергія з пасивним відновленням
 export async function getEnergy(env, userId) {
   const kv = ensureState(env);
   const raw = await kv.get(K(userId));
@@ -48,7 +46,6 @@ export async function getEnergy(env, userId) {
   let rec;
   try { rec = JSON.parse(raw); } catch { rec = { v: cfg.max, ts: Date.now() }; }
 
-  // пасивне відновлення
   const mins = Math.floor((Date.now() - (rec.ts || 0)) / 60000);
   if (mins > 0 && cfg.recoverPerMin > 0) {
     const add = mins * cfg.recoverPerMin;
@@ -63,7 +60,7 @@ export async function getEnergy(env, userId) {
   return { energy: rec.v ?? cfg.max, ...cfg };
 }
 
-/** Скидання енергії до максимуму */
+// ✅ скидання
 export async function resetEnergy(env, userId) {
   const kv = ensureState(env);
   const cfg = ENV(env);
@@ -73,15 +70,10 @@ export async function resetEnergy(env, userId) {
   return { energy: cfg.max, ...cfg };
 }
 
-/**
- * Списання енергії з перевіркою — контракт, який очікує вебхук:
- *  - якщо не вистачає: { ok:false, cur, need, cfg }
- *  - якщо успіх:       { ok:true,  cur:<залишок>, cfg }
- */
+// ✅ списання (контракт вебхука)
 export async function spendEnergy(env, userId, amount, kind = "spend") {
   const kv = ensureState(env);
   const cfg = ENV(env);
-
   const curInfo = await getEnergy(env, userId);
   const cur = curInfo.energy;
 
@@ -92,6 +84,5 @@ export async function spendEnergy(env, userId, amount, kind = "spend") {
   const v2 = clamp(cur - amount, 0, cfg.max);
   await kv.put(K(userId), JSON.stringify({ v: v2, ts: Date.now() }));
   await logEnergyEvent(env, userId, { delta: -amount, kind });
-
   return { ok: true, cur: v2, cfg };
 }
