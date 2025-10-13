@@ -2,6 +2,7 @@
 // Додаємо Статут як системний підказник для AI на кожну текстову взаємодію.
 // ⬆️ ДОПОВНЕНО: Self-Tune — підтягувамо інсайти зі STATE_KV і додаємо rules/tone.
 // ⬆️ ДОПОВНЕНО: Energy — ліміт витрат на текст/медіа з авто-відновленням.
+// ⬆️ ДОПОВНЕНО: Dialog Memory — коротка історія спілкування у DIALOG_KV з TTL.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -51,7 +52,7 @@ const BTN_CHECK = "Checklist";
 
 const mainKeyboard = (isAdmin = false) => {
   const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
-  if (isAdmin) rows.push([{ text: BTN_ADMIN }, { text: BTN_CHECK }]);
+  if (isAdmin) rows.push([{ text: BTN_ADMIN }, { text: BTN_CHECK }]]);
   return { keyboard: rows, resize_keyboard: true };
 };
 
@@ -130,6 +131,70 @@ function energyLinks(env, userId) {
   };
 }
 
+// ── Dialog Memory (DIALOG_KV) ────────────────────────────────────────────────
+// Зберігаємо останні ходи діалогу користувача з ботом.
+// Обмеження: maxTurns та maxBytes запобігають розростанню.
+// TTL: 14 днів неактивності — запис зникне автоматично.
+const DIALOG_KEY = (uid) => `dlg:${uid}`;
+const DLG_CFG = {
+  maxTurns: 12,          // скільки повідомлень тримати (user+assistant разом)
+  maxBytes: 8_000,       // максимальний розмір JSON-рядка
+  ttlSec: 14 * 24 * 3600 // 14 днів
+};
+function ensureDialog(env) {
+  return env.DIALOG_KV || null;
+}
+async function readDialog(env, userId) {
+  const kv = ensureDialog(env);
+  if (!kv) return [];
+  try {
+    const raw = await kv.get(DIALOG_KEY(userId));
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+function trimDialog(arr) {
+  let out = Array.isArray(arr) ? arr.slice(-DLG_CFG.maxTurns) : [];
+  // якщо перевищили байти — жорсткіше ріжемо з початку
+  let s = new TextEncoder().encode(JSON.stringify(out)).length;
+  while (out.length > 4 && s > DLG_CFG.maxBytes) {
+    out = out.slice(2); // відсікаємо найстарші 2 записи
+    s = new TextEncoder().encode(JSON.stringify(out)).length;
+  }
+  return out;
+}
+async function writeDialog(env, userId, arr) {
+  const kv = ensureDialog(env);
+  if (!kv) return false;
+  const val = JSON.stringify(trimDialog(arr));
+  try {
+    await kv.put(DIALOG_KEY(userId), val, { expirationTtl: DLG_CFG.ttlSec });
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function pushDialog(env, userId, role, content) {
+  const now = Date.now();
+  const arr = await readDialog(env, userId);
+  arr.push({ r: role, c: String(content || "").slice(0, 1500), t: now });
+  return await writeDialog(env, userId, arr);
+}
+async function buildDialogHint(env, userId) {
+  const turns = await readDialog(env, userId);
+  if (!turns.length) return "";
+  // Формуємо короткий readable-хінт
+  const lines = ["[Context: попередній діалог (останні повідомлення)]"];
+  for (const it of turns.slice(-DLG_CFG.maxTurns)) {
+    const who = it.r === "user" ? "Користувач" : "Senti";
+    lines.push(`${who}: ${it.c}`);
+  }
+  return lines.join("\n");
+}
+
 // ── Self-Tune: підтягування інсайтів зі STATE_KV ─────────────────────────────
 async function loadSelfTune(env, chatId) {
   try {
@@ -159,17 +224,19 @@ async function loadSelfTune(env, chatId) {
   }
 }
 
-// Збір системного підказника (Статут + Self-Tune + базова інструкція)
-async function buildSystemHint(env, chatId, extra = "") {
+// Збір системного підказника (Статут + Self-Tune + базова інструкція + Діалог)
+async function buildSystemHint(env, chatId, userId, extra = "") {
   const statut = await readStatut(env).catch(() => "");
   const selfTune = chatId ? await loadSelfTune(env, chatId) : null;
+  const dialogCtx = userId ? await buildDialogHint(env, userId) : "";
 
   const base =
     (statut ? `${statut.trim()}\n\n` : "") +
     "Ти — Senti, помічник у Telegram. Відповідай стисло та дружньо. " +
     "Якщо просять зберегти файл — нагадай про Google Drive та розділ Checklist/Repo.";
 
-  return base + (selfTune || "") + (extra ? `\n\n${extra}` : "");
+  const parts = [base, selfTune || "", dialogCtx || "", extra || ""].filter(Boolean);
+  return parts.join("\n\n");
 }
 
 // ── медіа ─────────────────────────────────────────────────────────────────────
@@ -293,6 +360,7 @@ export async function handleTelegramWebhook(req, env) {
     await safe(async () => {
       await setDriveMode(env, userId, false);
       await sendMessage(env, chatId, "Привіт! Я Senti 🤖", { reply_markup: mainKeyboard(isAdmin) });
+      // нульовий запис діалогу не створюємо — з’явиться після першого повідомлення
     });
     return json({ ok: true });
   }
@@ -363,8 +431,8 @@ export async function handleTelegramWebhook(req, env) {
         return;
       }
 
-      // ⬇️ Self-Tune + Статут як системний хінт
-      const systemHint = await buildSystemHint(env, chatId);
+      // ⬇️ Self-Tune + Статут + Контекст діалогу як системний хінт
+      const systemHint = await buildSystemHint(env, chatId, userId);
       const modelOrder = String(env.MODEL_ORDER || "").trim();
       let reply = "";
       try {
@@ -379,6 +447,10 @@ export async function handleTelegramWebhook(req, env) {
       }
 
       if (isBlank(reply)) reply = defaultAiReply();
+      // Зберігаємо діалог
+      await pushDialog(env, userId, "user", q);
+      await pushDialog(env, userId, "assistant", reply);
+
       // low-mode підказка
       if (spent.cur <= low) {
         const links = energyLinks(env, userId);
@@ -454,7 +526,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Якщо це не команда і не медіа — відповідаємо AI з підвантаженням Статуту + Self-Tune
+  // Якщо це не команда і не медіа — відповідаємо AI з підвантаженням Статуту + Self-Tune + Діалогу
   if (text && !text.startsWith("/")) {
     try {
       // списання енергії для звичайного тексту
@@ -471,7 +543,7 @@ export async function handleTelegramWebhook(req, env) {
         return json({ ok: true });
       }
 
-      const systemHint = await buildSystemHint(env, chatId);
+      const systemHint = await buildSystemHint(env, chatId, userId);
       const modelOrder = String(env.MODEL_ORDER || "").trim();
       let out = "";
 
@@ -483,6 +555,11 @@ export async function handleTelegramWebhook(req, env) {
       }
 
       if (isBlank(out)) out = defaultAiReply();
+
+      // зберігаємо діалог
+      await pushDialog(env, userId, "user", text);
+      await pushDialog(env, userId, "assistant", out);
+
       if (spent.cur <= low) {
         const links = energyLinks(env, userId);
         out += `\n\n⚠️ Низький рівень енергії (${spent.cur}). Керування: ${links.energy}`;
