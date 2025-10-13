@@ -1,11 +1,32 @@
-// Wikimedia summary API (короткий опис сторінки українською)
-export async function wikiSummary(title, lang = "uk") {
-  const url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`;
-  const r = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 3600 }});
-  if (!r.ok) throw new Error("wiki fail");
-  const j = await r.json();
-  return { title: j.title, extract: j.extract, url: j.content_urls?.desktop?.page };
+// src/lib/apis/wiki.js
+// Simple Wikipedia summary (uk) via REST API (no keys).
+
+export async function wikiSummary(query, lang = "uk") {
+  const title = encodeURIComponent(query.trim().replace(/\s+/g, "_"));
+  const url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${title}`;
+  try {
+    const res = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 60 * 60 } });
+    if (!res.ok) throw new Error(`wiki HTTP ${res.status}`);
+    const data = await res.json();
+    const text = data?.extract || "";
+    const page = data?.content_urls?.desktop?.page || `https://${lang}.wikipedia.org/wiki/${title}`;
+    return {
+      title: data?.title || query,
+      extract: text,
+      url: page
+    };
+  } catch (e) {
+    console.error("[wiki] error:", e.message);
+    return null;
+  }
 }
-export function formatSummary(x){
-  return x?.extract ? `${x.title}\n${x.extract}\n\n${x.url}` : "Не знайшов короткий опис.";
+
+export function formatWiki(w) {
+  if (!w) return "Не вдалося отримати статтю Вікіпедії 😕";
+  const excerpt = w.extract?.length > 700 ? w.extract.slice(0, 700) + "…" : w.extract;
+  return `📚 <b>${escapeHtml(w.title)}</b>\n${escapeHtml(excerpt)}\n<a href="${w.url}">Читати більше</a>`;
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
