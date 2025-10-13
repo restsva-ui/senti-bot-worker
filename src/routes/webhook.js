@@ -1,4 +1,3 @@
-// src/routes/webhook.js
 // Telegram webhook: тонкий клей над модулями (i18n / tone / energy / brain / statut).
 // Клавіатура: Drive, Senti, (Admin — лише адміну). Checklist винесено в Admin-меню.
 
@@ -13,7 +12,7 @@ import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
 import { getTone, setTone, toneHint } from "../lib/tone.js";
 // i18n
 import { getUserLang, tr } from "../lib/i18n.js";
-// energy (читаємо конфіг через getEnergy; списуємо через spendEnergy)
+// energy
 import { getEnergy, spendEnergy } from "../lib/energy.js";
 
 // ───────────── helpers ─────────────
@@ -194,9 +193,10 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
   if (!att) return false;
 
-  const { costImage } = await getEnergy(env, userId);
-  const curBefore = await getEnergy(env, userId);
-  if (curBefore.energy < costImage) {
+  // дістали конфіг і поточну енергію одним викликом
+  const info = await getEnergy(env, userId);
+  const { costImage } = info;
+  if (info.energy < costImage) {
     const links = energyLinks(env, userId);
     await sendMessage(env, chatId, tr(lang, "energy_not_enough", costImage, links));
     return true;
@@ -319,9 +319,9 @@ export async function handleTelegramWebhook(req, env) {
       const q = aiArg || "";
       if (!q) { await sendMessage(env, chatId, tr(lang, "ai_usage")); return; }
 
-      const { costText, low } = await getEnergy(env, userId);
-      const curBefore = await getEnergy(env, userId);
-      if (curBefore.energy < costText) {
+      const info = await getEnergy(env, userId);
+      const { costText, low, energy } = info;
+      if (energy < costText) {
         const links = energyLinks(env, userId);
         await sendMessage(env, chatId, tr(lang, "energy_not_enough", costText, links));
         return;
@@ -416,9 +416,9 @@ export async function handleTelegramWebhook(req, env) {
   // Regular text -> AI
   if (text && !text.startsWith("/")) {
     try {
-      const { costText, low } = await getEnergy(env, userId);
-      const curBefore = await getEnergy(env, userId);
-      if (curBefore.energy < costText) {
+      const info = await getEnergy(env, userId);
+      const { costText, low, energy } = info;
+      if (energy < costText) {
         const links = energyLinks(env, userId);
         await sendMessage(env, chatId, tr(lang, "energy_not_enough", costText, links));
         return json({ ok: true });
