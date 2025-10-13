@@ -1,39 +1,11 @@
-// Легкий парсер RSS без залежностей (тільки <item><title><link><pubDate>)
-const FEEDS = {
-  ua: [
-    "https://www.pravda.com.ua/rss/view_news/",
-    "https://suspilne.media/rss/all.xml",
-    "https://nv.ua/ukr/rss/all.xml"
-  ],
-  ru: ["https://www.bbc.com/russian/index.xml"],
-  en: ["https://feeds.bbci.co.uk/news/rss.xml"]
-};
-
-function parseItems(xml, limit = 5) {
-  const items = [];
-  const reItem = /<item>([\s\S]*?)<\/item>/g;
-  let m; 
-  while ((m = reItem.exec(xml)) && items.length < limit) {
-    const block = m[1];
-    const get = (tag) => {
-      const mm = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i").exec(block);
-      return mm ? mm[1].replace(/<!\[CDATA\[|\]\]>/g, "").trim() : "";
-    };
-    items.push({ title: get("title"), link: get("link"), date: get("pubDate") });
-  }
-  return items;
+export async function fetchTopNews() {
+  const r = await fetch("https://newsdata.io/api/1/news?country=ua&language=uk&apikey=pub_41646b22dc471a25fa66e2ed37ff6cda265b");
+  const j = await r.json().catch(() => null);
+  const list = j?.results?.slice(0, 5) || [];
+  return list.map(a => ({ title: a.title, link: a.link }));
 }
 
-export async function fetchNews(lang = "uk", limit = 5) {
-  const group = FEEDS[lang === "uk" ? "ua" : lang] || FEEDS.ua;
-  const first = group[0];
-  const r = await fetch(first, { cf: { cacheEverything: true, cacheTtl: 180 }});
-  if (!r.ok) throw new Error("rss fail");
-  const xml = await r.text();
-  return parseItems(xml, limit);
-}
-
-export function formatNewsList(arr) {
-  if (!arr?.length) return "Новини недоступні.";
-  return arr.map(x => `• ${x.title}\n${x.link}`).join("\n\n");
+export function formatNewsList(list) {
+  if (!list?.length) return "❌ Новини недоступні.";
+  return "🗞️ Топ-новини України:\n" + list.map(n => `• [${n.title}](${n.link})`).join("\n");
 }
