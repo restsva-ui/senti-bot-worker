@@ -22,12 +22,12 @@ export async function wikiSummary(query, lang = "uk") {
   }
 }
 
-// ── Сумісний форматер для webhook.js ──
+// ── форматер, який потребує твій webhook ──
 export function formatWiki(w) {
   if (!w) return "";
   const excerpt = w.extract && w.extract.length > 700 ? w.extract.slice(0, 700) + "…" : (w.extract || "");
   return `📚 <b>${w.title}</b>\n${excerpt}${arrow(w.url)}`;
 }
 
-// збережемо і попередній alias, якщо десь використовувався
+// alias на випадок старих імпортів
 export const formatSummary = formatWiki;
