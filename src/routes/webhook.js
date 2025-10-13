@@ -14,6 +14,9 @@ import { getTone, setTone, toneHint } from "../lib/tone.js";
 import { getUserLang, tr } from "../lib/i18n.js";
 // energy
 import { getEnergy, spendEnergy } from "../lib/energy.js";
+// intent NLU + router (NEW)
+import { detectIntent } from "../lib/nlu.js";
+import { runIntent } from "../lib/intentRouter.js";
 
 // ───────────── helpers ─────────────
 const json = (data, init = {}) =>
@@ -413,7 +416,23 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Regular text -> AI
+  // ── INTENT-FIRST: маршрутизація в зовнішні API без слеш-команд (NEW) ──
+  if (text && !text.startsWith("/")) {
+    const intent = detectIntent(text, lang);
+    if (intent.type !== "none") {
+      try {
+        const reply = await runIntent(intent);
+        if (reply && reply.trim()) {
+          await sendMessage(env, chatId, reply);
+          return json({ ok: true, intent: intent.type });
+        }
+      } catch (e) {
+        // якщо API впало — м'яко відпадаємо в LLM нижче
+      }
+    }
+  }
+
+  // Regular text -> AI (fallback)
   if (text && !text.startsWith("/")) {
     try {
       const info = await getEnergy(env, userId);
