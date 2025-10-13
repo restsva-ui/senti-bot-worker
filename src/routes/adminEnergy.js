@@ -1,135 +1,121 @@
-// src/routes/adminEnergy.js
-// Адмін-інтерфейс для перегляду та скидання енергії користувача.
-// Авторизація: ?s=<WEBHOOK_SECRET>
-// Параметри: ?u=<telegram_user_id>
-// HTML:  GET /admin/energy/html?s=...&u=...
-// JSON:  GET /admin/energy?s=...&u=...
-// Reset: POST /admin/energy/reset (body: u, s)
+// [3/3] src/routes/adminEnergy.js
+import { html, json } from "../utils/http.js";
+import { getEnergy, resetEnergy, spendEnergy } from "../lib/energy.js";
+import { getEnergyLogs, getEnergyStats } from "../lib/energyLog.js";
 
-import { getEnergy, resetEnergy } from "../lib/energy.js";
+const okAuth = (env, url) =>
+  !env.WEBHOOK_SECRET || url.searchParams.get("s") === env.WEBHOOK_SECRET;
 
-const CTYPE_HTML = { headers: { "content-type": "text/html; charset=utf-8" } };
-const CTYPE_JSON = { headers: { "content-type": "application/json; charset=utf-8" } };
-
-const json = (data, init = {}) =>
-  new Response(JSON.stringify(data, null, 2), { ...CTYPE_JSON, ...init });
-
-function unauthorized() {
-  return json({ ok: false, error: "unauthorized" }, { status: 401 });
-}
-
-function notFound() {
-  return json({ ok: false, error: "not_found" }, { status: 404 });
-}
-
-function requireSecret(env, url) {
-  const s = url.searchParams.get("s") || "";
-  const expected = String(env.WEBHOOK_SECRET || "");
-  return s && expected && s === expected;
-}
-
-function pickUserId(env, url) {
-  // якщо не передали ?u, беремо TELEGRAM_ADMIN_ID
-  const u = url.searchParams.get("u") || env.TELEGRAM_ADMIN_ID || "";
-  return String(u || "").trim();
-}
-
-function htmlPage({ s, u, energy, max, low, recoverPerMin }) {
-  const linkSelf = (path, extra = "") =>
-    `${path}?s=${encodeURIComponent(s)}${u ? `&u=${encodeURIComponent(u)}` : ""}${extra}`;
-  return `<!doctype html>
-<html lang="uk">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Admin • Energy</title>
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 16px; }
-    .card { max-width: 720px; margin: 0 auto; padding: 16px; border: 1px solid #ddd; border-radius: 12px; }
-    h1 { font-size: 18px; margin: 0 0 12px; }
-    .kv { display: grid; grid-template-columns: 180px 1fr; gap: 8px; margin: 12px 0; }
-    .kv div { padding: 6px 8px; background: #fafafa; border-radius: 8px; }
-    .actions { display: flex; gap: 8px; margin-top: 12px; }
-    button, a.btn {
-      display:inline-block; padding:10px 14px; border-radius: 10px; text-decoration:none;
-      background:#111; color:white; border:0; cursor:pointer;
-    }
-    a.btn.secondary, button.secondary { background:#777; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>⚡ Energy (user: ${u || "—"})</h1>
-    <div class="kv">
-      <div>Поточна енергія</div><div><b>${energy}</b> / ${max}</div>
-      <div>Поріг low-mode</div><div>${low}</div>
-      <div>Відновлення/хв</div><div>${recoverPerMin}</div>
-    </div>
-
-    <form method="post" action="/admin/energy/reset" class="actions">
-      <input type="hidden" name="u" value="${u}"/>
-      <input type="hidden" name="s" value="${s}"/>
-      <button type="submit">Скинути до MAX</button>
-      <a class="btn secondary" href="${linkSelf("/admin/energy/html", "&_="+Date.now())}">Оновити</a>
-    </form>
-
-    <div style="margin-top:14px">
-      <a class="btn secondary" href="/admin/checklist/html?s=${encodeURIComponent(s)}">← Повернутись до Checklist</a>
-    </div>
-  </div>
-</body>
-</html>`;
-}
+const uid = (env, url) =>
+  url.searchParams.get("u") || String(env.TELEGRAM_ADMIN_ID || "");
 
 export async function handleAdminEnergy(req, env, url) {
-  try {
-    if (!requireSecret(env, url)) return unauthorized();
+  if (!okAuth(env, url)) return json({ ok: false, error: "unauthorized" }, 401);
 
-    const p = url.pathname;
+  const u = uid(env, url);
+  const p = url.pathname;
 
-    // JSON: поточний стан
-    if (p === "/admin/energy" && req.method === "GET") {
-      const u = pickUserId(env, url);
-      if (!u) return json({ ok: false, error: "user_id_required" }, { status: 400 });
-      const energy = await getEnergy(env, u);
-      const max = Number(env.ENERGY_MAX || 100);
-      const low = Number(env.ENERGY_LOW_THRESHOLD || 10);
-      const recoverPerMin = Number(env.ENERGY_RECOVER_PER_MIN || 1);
-      return json({ ok: true, userId: u, energy, max, low, recoverPerMin });
-    }
-
-    // HTML: перегляд
-    if (p === "/admin/energy/html" && req.method === "GET") {
-      const u = pickUserId(env, url);
-      const energy = await getEnergy(env, u);
-      const max = Number(env.ENERGY_MAX || 100);
-      const low = Number(env.ENERGY_LOW_THRESHOLD || 10);
-      const recoverPerMin = Number(env.ENERGY_RECOVER_PER_MIN || 1);
-      return new Response(
-        htmlPage({ s: url.searchParams.get("s") || "", u, energy, max, low, recoverPerMin }),
-        CTYPE_HTML
-      );
-    }
-
-    // POST reset
-    if (p === "/admin/energy/reset" && req.method === "POST") {
-      let u = "";
-      const ct = req.headers.get("content-type") || "";
-      if (ct.includes("application/x-www-form-urlencoded")) {
-        const f = await req.formData();
-        u = String(f.get("u") || "").trim();
-      } else if (ct.includes("application/json")) {
-        const b = await req.json().catch(() => ({}));
-        u = String(b.u || "").trim();
-      }
-      if (!u) u = env.TELEGRAM_ADMIN_ID || "";
-      if (!u) return json({ ok: false, error: "user_id_required" }, { status: 400 });
-      const val = await resetEnergy(env, u);
-      return json({ ok: true, userId: u, energy: val });
-    }
-
-    return notFound();
-  } catch (e) {
-    return json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+  // JSON API ---------------------------------------------------
+  if (p === "/admin/energy" && req.method === "GET") {
+    const st = await getEnergy(env, u);
+    return json({ ok: true, userId: u, energy: st.energy, max: st.max, low: st.low, recoverPerMin: st.recoverPerMin });
   }
+
+  if (p === "/admin/energy/reset" && req.method === "POST") {
+    const st = await resetEnergy(env, u);
+    return json({ ok: true, userId: u, energy: st.energy });
+  }
+
+  // витрата (адмін/тест)
+  if (p === "/admin/energy/spend" && req.method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    const amount = Number(body.amount ?? 1);
+    const kind = String(body.kind ?? "spend");
+    const st = await spendEnergy(env, u, amount, kind);
+    return json({ ok: true, userId: u, energy: st.energy });
+  }
+
+  if (p === "/admin/energy/logs" && req.method === "GET") {
+    const limit = Number(url.searchParams.get("limit") || 100);
+    const logs = await getEnergyLogs(env, u, { limit });
+    return json({ ok: true, userId: u, logs });
+  }
+
+  if (p === "/admin/energy/stats" && req.method === "GET") {
+    const days = Number(url.searchParams.get("days") || 7);
+    const stats = await getEnergyStats(env, u, { days });
+    return json({ ok: true, userId: u, days, stats });
+  }
+
+  // HTML панель ------------------------------------------------
+  if (p === "/admin/energy/html") {
+    const s = new URL(env.SERVICE_HOST ? `https://${env.SERVICE_HOST}` : url.origin);
+    s.pathname = "/admin/energy";
+    s.searchParams.set("u", u);
+    s.searchParams.set("s", env.WEBHOOK_SECRET || "");
+
+    const resetUrl = new URL(s); resetUrl.pathname = "/admin/energy/reset";
+    const logsUrl  = new URL(s); logsUrl.pathname  = "/admin/energy/logs";
+    const statsUrl = new URL(s); statsUrl.pathname = "/admin/energy/stats";
+
+    const st = await getEnergy(env, u);
+
+    return html(`
+<!doctype html><meta charset="utf-8"/>
+<title>Energy (user: ${u})</title>
+<style>
+  body{background:#0b0b0b;color:#e7e7e7;font:14px/1.5 system-ui,sans-serif;margin:0;padding:18px}
+  .card{background:#121212;border-radius:16px;max-width:720px;padding:20px;margin:auto;box-shadow:0 0 0 1px #222}
+  h2{margin:0 0 16px} .row{display:flex;gap:12px;margin:10px 0}
+  .pill{flex:1;background:#1a1a1a;border-radius:12px;padding:14px 16px}
+  .val{float:right;color:#9aa0a6}
+  .btn{padding:12px 16px;border-radius:12px;border:none;background:white;color:black;cursor:pointer}
+  .btn.gray{background:#3a3a3a;color:#e7e7e7}
+  .sub{margin-top:12px}
+  pre{white-space:pre-wrap;background:#0f0f10;padding:12px;border-radius:12px;max-height:360px;overflow:auto}
+</style>
+<div class="card">
+  <h2>⚡ Energy (user: ${u})</h2>
+  <div class="row"><div class="pill">Поточна енергія <span class="val">${st.energy} / ${st.max}</span></div></div>
+  <div class="row"><div class="pill">Поріг low-mode <span class="val">${st.low}</span></div></div>
+  <div class="row"><div class="pill">Відновлення/хв <span class="val">${st.recoverPerMin}</span></div></div>
+  <div class="row">
+    <button class="btn" onclick="reset()">Скинути до MAX</button>
+    <button class="btn gray" onclick="refresh()">Оновити</button>
+  </div>
+  <div class="row sub">
+    <button class="btn gray" onclick="loadLogs()">Показати логи</button>
+    <button class="btn gray" onclick="loadStats()">Показати статистику (7 днів)</button>
+  </div>
+  <pre id="out"></pre>
+  <div class="row sub">
+    <a class="btn gray" href="/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET||"")}" style="text-decoration:none;display:inline-block">← Повернутись до Checklist</a>
+  </div>
+</div>
+<script>
+  const S = "${encodeURIComponent(env.WEBHOOK_SECRET || "")}";
+  const U = "${encodeURIComponent(u)}";
+  async function refresh(){
+    const r = await fetch(\`${s.pathname}?s=\${S}&u=\${U}\`);
+    document.getElementById('out').textContent = await r.text();
+    location.reload();
+  }
+  async function reset(){
+    const r = await fetch("${resetUrl.pathname}?s="+S+"&u="+U, {method:"POST"});
+    document.getElementById('out').textContent = await r.text();
+    location.reload();
+  }
+  async function loadLogs(){
+    const r = await fetch("${logsUrl.pathname}?s="+S+"&u="+U+"&limit=50");
+    document.getElementById('out').textContent = await r.text();
+  }
+  async function loadStats(){
+    const r = await fetch("${statsUrl.pathname}?s="+S+"&u="+U+"&days=7");
+    document.getElementById('out').textContent = await r.text();
+  }
+</script>
+    `);
+  }
+
+  return json({ ok: false, error: "not found" }, 404);
 }
