@@ -1,6 +1,5 @@
 // src/lib/apis/news.js
 // News via newsdata.io (if key provided) with fallback to RSS (no key).
-// All output formatted for Telegram HTML parse_mode.
 
 async function newsdataIO(key) {
   const url = `https://newsdata.io/api/1/latest?apikey=${encodeURIComponent(key)}&country=ua&language=uk`;
@@ -19,7 +18,6 @@ async function fetchRSS(url) {
   const r = await fetch(`https://r.jina.ai/http://` + url, { cf: { cacheEverything: true, cacheTtl: 60 * 5 } });
   if (!r.ok) throw new Error("RSS fetch failed");
   const text = await r.text();
-  // very naive extraction of <item><title> and <link>
   const items = [];
   const re = /<item>([\s\S]*?)<\/item>/g;
   let m;
@@ -27,7 +25,7 @@ async function fetchRSS(url) {
     const chunk = m[1];
     const t = (chunk.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/) || chunk.match(/<title>(.*?)<\/title>/))?.[1];
     const l = (chunk.match(/<link>(.*?)<\/link>/))?.[1];
-    if (t && l) items.push({ title: t.replace(/&amp;/g, "&").trim(), link: l.trim() });
+    if (t && l) items.push({ title: t.replace(/&amp;/g,"&").trim(), link: l.trim() });
     if (items.length >= 8) break;
   }
   return items;
@@ -63,14 +61,4 @@ export async function fetchTopNews(env = {}) {
     }
   }
   return await rssTop();
-}
-
-export function formatNewsList(list) {
-  if (!list?.length) return "Не вдалося отримати новини 😕";
-  const lines = list.map(n => `• <a href="${n.link}">${escapeHtml(n.title)}</a>`);
-  return "🗞️ <b>Топ-новини України</b>:\n" + lines.join("\n");
-}
-
-function escapeHtml(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
