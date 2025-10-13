@@ -27,6 +27,9 @@ export function formatWiki(w) {
   return `📚 <b>${escapeHtml(w.title)}</b>\n${escapeHtml(excerpt)}\n<a href="${w.url}">Читати більше</a>`;
 }
 
+// alias for backward compatibility
+export const formatSummary = formatWiki;
+
 function escapeHtml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
