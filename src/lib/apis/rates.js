@@ -1,9 +1,9 @@
 // src/lib/apis/rates.js
-// Exchange rate USD→UAH via NBU primary + exchangerate.host fallback.
+// USD→UAH via NBU with exchangerate.host fallback.
 
 async function nbuRate() {
   const url = "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json";
-  const res = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 60 * 30 } }); // 30 min
+  const res = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 60 * 30 } });
   if (!res.ok) throw new Error(`NBU HTTP ${res.status}`);
   const data = await res.json();
   const usd = Array.isArray(data) ? data.find(x => x?.cc === "USD") : null;
@@ -29,11 +29,6 @@ export async function getUsdUahRate() {
     return await erHost("USD", "UAH");
   }
 }
-
-export function formatUsdRate(rate) {
-  if (!rate) return "Не вдалося отримати курс 😕";
-  return `💵 Курс USD → UAH: <b>${rate.toFixed(2)}₴</b>\n<i>джерело: НБУ або exchangerate.host</i>`;
-}
-
-// alias for backward compatibility
-export const formatRate = formatUsdRate;
+// compatibility helpers
+export const formatRate = (r) => `💸 <b>USD → UAH:</b> ${Number(r||0).toFixed(2)}₴`;
+export const formatUsdRate = formatRate;
