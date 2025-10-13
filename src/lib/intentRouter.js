@@ -1,9 +1,10 @@
 // src/lib/intentRouter.js
-// Very small intent router demo. Plug your NLU here if needed.
+// Compatibility layer: expose runIntent used by webhook, plus a text-based handleIntent.
+
 import { weatherByCity, formatWeather } from "./apis/weather.js";
 import { getUsdUahRate, formatUsdRate } from "./apis/rates.js";
 import { fetchTopNews, formatNewsList } from "./apis/news.js";
-import { getHolidays } from "./apis/holidays.js";
+import { getHolidays, formatHolidays } from "./apis/holidays.js";
 import { wikiSummary, formatWiki } from "./apis/wiki.js";
 
 export async function handleIntent(text, env = {}) {
@@ -34,10 +35,7 @@ export async function handleIntent(text, env = {}) {
     const year = yearMatch ? Number(yearMatch[0]) : new Date().getFullYear();
     const country = /україн|ukrain|ua/i.test(t) ? "UA" : "UA";
     const items = await getHolidays(country, year);
-    const head = `🎉 <b>Державні свята ${country} у ${year}</b>`;
-    const body = items.slice(0, 10).map(h => `• ${h.date} — ${h.name}`).join("\n");
-    const textRes = items.length ? `${head}\n${body}` : "Не вдалося отримати свята 😕";
-    return { mode: "HTML", text: textRes };
+    return { mode: "HTML", text: formatHolidays(items, country, year) };
   }
 
   // Wikipedia
@@ -47,5 +45,13 @@ export async function handleIntent(text, env = {}) {
     return { mode: "HTML", text: formatWiki(w) };
   }
 
-  return null; // let higher layer decide e.g. LLM fallback
+  return null;
+}
+
+// Backward-compat wrapper: existing code passes an `intent` object.
+// We try to recover a text query from it and reuse handleIntent.
+export async function runIntent(intent = {}, env = {}) {
+  const t = intent?.query || intent?.text || intent?.raw || intent?.original || "";
+  const out = await handleIntent(t, env);
+  return out?.text || "";
 }
