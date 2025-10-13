@@ -1,12 +1,6 @@
 // src/routes/webhook.js
-// Telegram webhook: мінімальна "клейова" логіка навколо вже винесених модулів.
-// Використовує:
-//  • i18n (мова/тексти)         — ../lib/i18n.js
-//  • tone (тон/режим)           — ../lib/tone.js
-//  • energy (ліміти/події)      — ../lib/energy.js
-//  • modelRouter / brain        — роутинг по LLM
-//  • kvChecklist (Статут)       — HTML статут у KV
-//  • dialog memory (легкий TTL) — локально в цьому файлі
+// Telegram webhook: тонкий клей над модулями (i18n / tone / energy / brain / statut).
+// Клавіатура: Drive, Senti, (Admin — лише адміну). Checklist винесено в Admin-меню.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -19,10 +13,10 @@ import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
 import { getTone, setTone, toneHint } from "../lib/tone.js";
 // i18n
 import { getUserLang, tr } from "../lib/i18n.js";
-// energy (ВАЖЛИВО: більше не імпортуємо energyCfg/energyLinks)
+// energy (читаємо конфіг через getEnergy; списуємо через spendEnergy)
 import { getEnergy, spendEnergy } from "../lib/energy.js";
 
-// ───────────────────────────────── helpers ───────────────────────────────────
+// ───────────── helpers ─────────────
 const json = (data, init = {}) =>
   new Response(JSON.stringify(data, null, 2), {
     headers: { "content-type": "application/json; charset=utf-8" },
@@ -46,25 +40,22 @@ function parseAiCommand(text = "") {
 }
 const isBlank = (s) => !s || !String(s).trim();
 
-// КОРОТКІ КНОПКИ З ЕМОДЗІ (Варіант 1)
 const BTN_DRIVE = "📁 Drive";
 const BTN_SENTI = "🧠 Senti";
 const BTN_ADMIN = "🔧 Admin";
-const BTN_CHECK = "📋 Checklist";
 
 const mainKeyboard = (isAdmin = false) => {
   const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
-  if (isAdmin) rows.push([{ text: BTN_ADMIN }, { text: BTN_CHECK }]);
+  if (isAdmin) rows.push([{ text: BTN_ADMIN }]); // без Checklist
   return { keyboard: rows, resize_keyboard: true };
 };
 
+// інлайн-кнопка на Drive
 const inlineOpenDrive = () => ({
   inline_keyboard: [[{ text: "Google Drive", url: "https://drive.google.com/drive/my-drive" }]],
 });
 
-const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
-
-// Локальні посилання керування енергією (щоб не тягнути з модуля)
+// локальні посилання керування енергією
 function energyLinks(env, userId) {
   const s = env.WEBHOOK_SECRET || "";
   const qs = `s=${encodeURIComponent(s)}&u=${encodeURIComponent(String(userId || ""))}`;
@@ -74,7 +65,9 @@ function energyLinks(env, userId) {
   };
 }
 
-// ───────────────────────────── STATE_KV: drive mode ──────────────────────────
+const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
+
+// ───────────── STATE_KV: drive mode ─────────────
 const DRIVE_MODE_KEY = (uid) => `drive_mode:${uid}`;
 function ensureState(env) {
   if (!env.STATE_KV) throw new Error("STATE_KV binding missing");
@@ -87,7 +80,7 @@ async function getDriveMode(env, userId) {
   return (await ensureState(env).get(DRIVE_MODE_KEY(userId))) === "1";
 }
 
-// ───────────────────────────── Dialog memory (DIALOG_KV) ─────────────────────
+// ───────────── Dialog memory (легкий) ─────────────
 const DIALOG_KEY = (uid) => `dlg:${uid}`;
 const DLG_CFG = { maxTurns: 12, maxBytes: 8_000, ttlSec: 14 * 24 * 3600 };
 function ensureDialog(env) { return env.DIALOG_KV || null; }
@@ -124,7 +117,7 @@ async function buildDialogHint(env, userId) {
   return lines.join("\n");
 }
 
-// ─────────────────────────── Self-Tune (STATE_KV) ────────────────────────────
+// ───────────── Self-Tune (опційно) ─────────────
 async function loadSelfTune(env, chatId) {
   try {
     if (!env.STATE_KV) return null;
@@ -149,7 +142,7 @@ async function loadSelfTune(env, chatId) {
   }
 }
 
-// ───────────────────────── System hint builder ───────────────────────────────
+// ───────────── System hint ─────────────
 function langName(l) {
   return { uk: "Ukrainian", ru: "Russian", de: "German", en: "English (US)", fr: "French" }[l] || "English (US)";
 }
@@ -171,7 +164,7 @@ async function buildSystemHint(env, chatId, userId, lang, extra = "") {
   return parts.join("\n\n");
 }
 
-// ───────────────────────────── media helpers ─────────────────────────────────
+// ───────────── Media helpers ─────────────
 function pickPhoto(msg) {
   const a = msg.photo;
   if (!Array.isArray(a) || !a.length) return null;
@@ -180,32 +173,16 @@ function pickPhoto(msg) {
 }
 function detectAttachment(msg) {
   if (!msg) return null;
-  if (msg.document) {
-    const d = msg.document;
-    return { type: "document", file_id: d.file_id, name: d.file_name || `doc_${d.file_unique_id}` };
-  }
-  if (msg.video) {
-    const v = msg.video;
-    return { type: "video", file_id: v.file_id, name: v.file_name || `video_${v.file_unique_id}.mp4` };
-  }
-  if (msg.audio) {
-    const a = msg.audio;
-    return { type: "audio", file_id: a.file_id, name: a.file_name || `audio_${a.file_unique_id}.mp3` };
-  }
-  if (msg.voice) {
-    const v = msg.voice;
-    return { type: "voice", file_id: v.file_id, name: `voice_${v.file_unique_id}.ogg` };
-  }
-  if (msg.video_note) {
-    const v = msg.video_note;
-    return { type: "video_note", file_id: v.file_id, name: `videonote_${v.file_unique_id}.mp4` };
-  }
+  if (msg.document)  { const d = msg.document;  return { type: "document",  file_id: d.file_id, name: d.file_name || `doc_${d.file_unique_id}` }; }
+  if (msg.video)     { const v = msg.video;     return { type: "video",     file_id: v.file_id, name: v.file_name || `video_${v.file_unique_id}.mp4` }; }
+  if (msg.audio)     { const a = msg.audio;     return { type: "audio",     file_id: a.file_id, name: a.file_name || `audio_${a.file_unique_id}.mp3` }; }
+  if (msg.voice)     { const v = msg.voice;     return { type: "voice",     file_id: v.file_id, name: `voice_${v.file_unique_id}.ogg` }; }
+  if (msg.video_note){ const v = msg.video_note;return { type: "video_note", file_id: v.file_id, name: `videonote_${v.file_unique_id}.mp4` }; }
   return pickPhoto(msg);
 }
 async function tgFileUrl(env, file_id) {
   const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
+    method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ file_id }),
   });
   const d = await r.json().catch(() => ({}));
@@ -217,22 +194,14 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
   if (!att) return false;
 
-  // беремо costImage із конфігурації через getEnergy (експорт з energy.js)
   const { costImage } = await getEnergy(env, userId);
-  const spent = await spendEnergy(env, userId, costImage, "media");
-  if (spent.energy + costImage < costImage) {
-    // захист від дивних станів; але основна перевірка нижче за аналогією з текстом
+  const curBefore = await getEnergy(env, userId);
+  if (curBefore.energy < costImage) {
+    const links = energyLinks(env, userId);
+    await sendMessage(env, chatId, tr(lang, "energy_not_enough", costImage, links));
+    return true;
   }
-  if (spent.energy + costImage < costImage) return true;
-
-  if (spent.energy + costImage === spent.energy) { /* no-op */ }
-
-  if (spent.energy + costImage < costImage) return true;
-
-  // якщо бракує (у нашій моделі spendEnergy вже списує; для м’якого UX краще перевіряти до списання,
-  // але щоб не плодити ще один метод — читаємо поточний рівень до списання вище)
-  // Простіше: перед списанням — дивимось залишок:
-  // (цей блок залишено спрощеним, бо ми виконуємо окремо перевірки в текстових гілках)
+  await spendEnergy(env, userId, costImage, "media");
 
   const ut = await getUserTokens(env, userId);
   if (!ut?.refresh_token) {
@@ -246,7 +215,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   return true;
 }
 
-// ─────────────────────────────── main handler ────────────────────────────────
+// ───────────── main handler ─────────────
 export async function handleTelegramWebhook(req, env) {
   // webhook auth
   if (req.method === "POST") {
@@ -276,14 +245,14 @@ export async function handleTelegramWebhook(req, env) {
   const userId = msg.from?.id;
   const isAdmin = ADMIN(env, userId);
 
-  // мова: з KV → TG → детект за текстом (модуль i18n.js сам запам’ятовує перехід)
+  // мова користувача
   const lang = await getUserLang(env, userId, msg.from?.language_code, text);
 
   const safe = async (fn) => {
     try { await fn(); } catch (e) { await sendMessage(env, chatId, tr(lang, "generic_error", String(e))); }
   };
 
-  // /start
+  // /start — тільки дружнє вітання + клавіатура
   if (text === "/start") {
     await safe(async () => {
       await setDriveMode(env, userId, false);
@@ -292,21 +261,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /help — коротка довідка + повертаємо клавіатуру
-  if (text === "/help") {
-    const lines = [
-      "Команди:",
-      "• /start — показати клавіатуру",
-      "• /ai <запит> — швидко спитати AI",
-      "• /tone — налаштувати тон (auto/friendly/casual/…)",
-      "• /help — ця підказка",
-      isAdmin ? "• /diag — діагностика (адмін)" : null,
-    ].filter(Boolean);
-    await sendMessage(env, chatId, lines.join("\n"), { reply_markup: mainKeyboard(isAdmin) });
-    return json({ ok: true });
-  }
-
-  // /tone — ручне керування тоном (модуль tone.js)
+  // /tone
   if (text.startsWith("/tone")) {
     await safe(async () => {
       const arg = text.replace(/^\/tone(?:@[\w_]+)?/i, "").trim();
@@ -316,10 +271,7 @@ export async function handleTelegramWebhook(req, env) {
         await sendMessage(env, chatId, tr(lang, "tone_help"));
         return;
       }
-      if (/^(help|\?)$/i.test(arg)) {
-        await sendMessage(env, chatId, tr(lang, "tone_help"));
-        return;
-      }
+      if (/^(help|\?)$/i.test(arg)) { await sendMessage(env, chatId, tr(lang, "tone_help")); return; }
       const ok = await setTone(env, chatId, arg);
       await sendMessage(env, chatId, ok ? tr(lang, "tone_set_ok", arg) : tr(lang, "generic_error", "bad tone value"));
     });
@@ -355,7 +307,7 @@ export async function handleTelegramWebhook(req, env) {
           lines.push(`${light} ${h.provider}:${h.model} — ewma ${ms}, fails ${h.failStreak || 0}`);
         }
       }
-      await sendMessage(env, chatId, lines.join("\n"));
+      await sendMessage(env, chatId, lines.join("\n"), { reply_markup: mainKeyboard(isAdmin) });
     });
     return json({ ok: true });
   }
@@ -367,9 +319,7 @@ export async function handleTelegramWebhook(req, env) {
       const q = aiArg || "";
       if (!q) { await sendMessage(env, chatId, tr(lang, "ai_usage")); return; }
 
-      // отримуємо конфіг з getEnergy (не списуючи)
       const { costText, low } = await getEnergy(env, userId);
-      // перевірка й списання
       const curBefore = await getEnergy(env, userId);
       if (curBefore.energy < costText) {
         const links = energyLinks(env, userId);
@@ -406,7 +356,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Google Drive
+  // Drive — тільки кнопка, без текстів
   if (text === BTN_DRIVE) {
     await safe(async () => {
       const ut = await getUserTokens(env, userId);
@@ -416,40 +366,39 @@ export async function handleTelegramWebhook(req, env) {
         return;
       }
       await setDriveMode(env, userId, true);
-      await sendMessage(env, chatId, tr(lang, "drive_on"), { reply_markup: mainKeyboard(isAdmin) });
-      await sendMessage(env, chatId, "Open your Drive:", { reply_markup: inlineOpenDrive() });
+      // мінімальне "порожнє" повідомлення + інлайн-кнопка
+      await sendMessage(env, chatId, "\u2060", { reply_markup: inlineOpenDrive() });
     });
     return json({ ok: true });
   }
 
-  // Senti (drive off)
+  // Senti — тихе вимкнення режиму диска
   if (text === BTN_SENTI) {
-    await safe(async () => {
-      await setDriveMode(env, userId, false);
-      await sendMessage(env, chatId, tr(lang, "drive_off"), { reply_markup: mainKeyboard(isAdmin) });
-    });
+    await safe(async () => { await setDriveMode(env, userId, false); });
     return json({ ok: true });
   }
 
-  // Admin links
-  if (text === BTN_CHECK && isAdmin) {
-    await safe(async () => {
-      const link = abs(env, `/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET || "")}`);
-      await sendMessage(env, chatId, tr(lang, "checklist_link", link));
-    });
-    return json({ ok: true });
-  }
+  // Admin — інлайн-меню з посиланнями (і повертаємо клавіатуру)
+  const sendAdminMenu = async () => {
+    const sec = encodeURIComponent(env.WEBHOOK_SECRET || "");
+    const cl = abs(env, `/admin/checklist/html?s=${sec}`);
+    const repo = abs(env, `/admin/repo/html?s=${sec}`);
+    const hook = abs(env, "/webhook");
+
+    const inline = {
+      inline_keyboard: [
+        [{ text: "📋 Checklist", url: cl }],
+        [{ text: "📁 Repo", url: repo }],
+        [{ text: "🌐 Webhook GET", url: hook }],
+      ],
+    };
+    await sendMessage(env, chatId, "\u2060", { reply_markup: inline });
+  };
+
   if ((text === BTN_ADMIN || text === "/admin") && isAdmin) {
     await safe(async () => {
-      const cl = abs(env, `/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET || "")}`);
-      const repo = abs(env, `/admin/repo/html?s=${encodeURIComponent(env.WEBHOOK_SECRET || "")}`);
-      // ПОВЕРТАЄМО КЛАВІАТУРУ РАЗОМ ІЗ МЕНЮ
-      await sendMessage(
-        env,
-        chatId,
-        tr(lang, "admin_menu", cl, repo, abs(env, "/webhook")),
-        { reply_markup: mainKeyboard(isAdmin) }
-      );
+      await sendAdminMenu();
+      await sendMessage(env, chatId, "\u2060", { reply_markup: mainKeyboard(isAdmin) });
     });
     return json({ ok: true });
   }
@@ -504,7 +453,7 @@ export async function handleTelegramWebhook(req, env) {
     }
   }
 
-  // default — лаконічне вітання на мові користувача
+  // default — коротке вітання + клавіатура
   await sendMessage(env, chatId, tr(lang, "hello"), { reply_markup: mainKeyboard(isAdmin) });
   return json({ ok: true });
 }
