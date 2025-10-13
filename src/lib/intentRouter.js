@@ -1,5 +1,5 @@
 // src/lib/intentRouter.js
-// Визначення наміру з тексту + виклик відповідного API
+// Визначення наміру з природної мови + виклик відповідного API
 
 import { weatherByCity, formatWeather } from "./apis/weather.js";
 import { getUsdUahRate, formatRate } from "./apis/rates.js";
@@ -7,49 +7,77 @@ import { fetchTopNews, formatNewsList } from "./apis/news.js";
 import { getHolidays, formatHolidays } from "./apis/holidays.js";
 import { wikiSummary, formatSummary } from "./apis/wiki.js";
 
-// ───────── intents: detect ─────────
-export function detectIntent(text, lang = "uk") {
-  const t = String(text || "").trim();
-  const low = t.toLowerCase();
+// ───────── detectIntent ─────────
+// Повертає { type, ...payload } або { type: "none" }
+export function detectIntent(text = "", lang = "uk") {
+  const s = String(text || "").toLowerCase().trim();
 
-  // WEATHER
-  // укр/рус/англ короткі патерни + "погода в Києві"/"weather in Berlin"
-  if (/(погода|погоди|погоду|weather)\s*(в|у|in)?\s*/i.test(t)) {
-    const m = low.match(/(?:в|у|in)\s+([a-zа-яіїєґ\-\s]+)/i);
-    const city = m ? m[1].trim().replace(/[.,!?]+$/, "") : null;
-    return { type: "weather", city: city || null, lang };
-  }
+  // швидкі нормалізації
+  const clear = s
+    .replace(/[.,!?()'"`«»]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
-  // RATES: USD→UAH
+  const has = (re) => re.test(clear);
+
+  // 1) КУРС ВАЛЮТИ: USD → UAH (укр-формулювання)
+  // приклади: "курс долара", "який курс usd", "usd uah", "скільки гривень за долар"
   if (
-    /(курс|rate).*(долара|usd|долар|dollar)/i.test(t) ||
-    /(usd).*(uah)/i.test(low)
+    has(/\bкурс\b.*\b(usd|долар|долара|доларів|бакс)\b/) ||
+    has(/\b(usd|\$)\s*(to|→|в|у)\s*(uah|грн|гривн[яії])\b/) ||
+    has(/\bскільки\s+(гривень|грн)\s+за\s+(долар|usd|\$)\b/)
   ) {
     return { type: "rates", from: "USD", to: "UAH", lang };
   }
 
-  // NEWS
-  if (/(новини|новостей|news)/i.test(t)) {
+  // 2) ПОГОДА: "погода в києві / львів", "температура у харкові"
+  // базово: шукаємо слово "погода" і місто після "в/у"
+  if (has(/\bпогода\b/)) {
+    // дуже простий граббер міста після "в|у"
+    const m = clear.match(/\b(?:в|у)\s+([a-zа-яіїєґ\- ]{2,})$/i);
+    const city = m ? capitalizeCity(m[1]) : "Kyiv";
+    return { type: "weather", city: city, lang };
+  }
+
+  // 3) НОВИНИ: "головні новини", "новини україни за сьогодні", "топ новини"
+  if (
+    has(/\b(новини|топ новини|головні новини|новини дня)\b/) ||
+    has(/\bновини\b.*\b(сьогодні|за сьогодні)\b/)
+  ) {
     return { type: "news", country: "ua", lang };
   }
 
-  // HOLIDAYS
-  if (/(свята|праздники|holidays)/i.test(t)) {
-    const y = (low.match(/20\d{2}/) || [])[0];
-    const year = y ? Number(y) : undefined;
-    return { type: "holidays", country: "UA", year, lang };
+  // 4) СВЯТА: "державні свята 2025", "офіційні свята в україні"
+  const mYear = clear.match(/\b(20\d{2})\b/);
+  if (
+    has(/\b(державні|офіційні)\s+свята\b/) ||
+    has(/\bсвята\b.*\bв\s+україн[іи]\b/)
+  ) {
+    return { type: "holidays", country: "UA", year: mYear ? +mYear[1] : 2025, lang };
   }
 
-  // WIKI (хто такий/what is …)
-  const mw = low.match(/^(хто такий|хто така|кто такой|кто такая|who is|what is)\s+(.+)$/i);
-  if (mw) {
-    return { type: "wiki", title: mw[2].trim(), lang };
+  // 5) ВІКІ: "хто такий шевченко", "що таке блокчейн"
+  const who = clear.match(/\bхто\s+такий\s+(.+?)$/i);
+  if (who && who[1]) {
+    return { type: "wiki", title: who[1].trim(), lang };
+  }
+  const what = clear.match(/\bщо\s+таке\s+(.+?)$/i);
+  if (what && what[1]) {
+    return { type: "wiki", title: what[1].trim(), lang };
   }
 
-  return null;
+  return { type: "none" };
 }
 
-// ───────── intents: run ─────────
+function capitalizeCity(x = "") {
+  return x
+    .split(" ")
+    .map((p) => (p ? p[0].toUpperCase() + p.slice(1) : ""))
+    .join(" ")
+    .trim();
+}
+
+// ───────── runIntent ─────────
 export async function runIntent(intent) {
   switch (intent.type) {
     case "weather": {
@@ -58,16 +86,23 @@ export async function runIntent(intent) {
       return formatWeather(data);
     }
     case "rates": {
-      // Поки що підтримуємо USD→UAH (як і в твоєму rates.js)
-      const x = await getUsdUahRate();
-      return formatRate(x);
+      // Поки що підтримуємо головний кейс USD → UAH
+      if (intent.from === "USD" && (!intent.to || intent.to === "UAH")) {
+        const rate = await getUsdUahRate();
+        return formatRate(rate);
+      }
+      // Фолбек: все одно покажемо USD→UAH
+      const rate = await getUsdUahRate();
+      return formatRate(rate);
     }
     case "news": {
-      const items = await fetchTopNews(intent.country, "general");
-      return formatNewsList(items).slice(0, 1500); // TG safe size
+      // Україна за замовчуванням
+      const items = await fetchTopNews(intent.country || "ua", "general");
+      // Markdown-список
+      return formatNewsList(items).slice(0, 1500);
     }
     case "holidays": {
-      const items = await getHolidays(intent.country, intent.year);
+      const items = await getHolidays(intent.country || "UA", intent.year || 2025);
       return formatHolidays(items);
     }
     case "wiki": {
