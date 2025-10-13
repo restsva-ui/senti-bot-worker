@@ -7,7 +7,7 @@ async function wttr(city) {
   const url = `https://wttr.in/${encodeURIComponent(city)}?format=j1`;
   const res = await fetch(url, {
     headers: { "user-agent": "senti-bot/1.0 (+cf-worker)" },
-    cf: { cacheEverything: true, cacheTtl: 60 * 15 }, // 15 хв
+    cf: { cacheEverything: true, cacheTtl: 60 * 15 },
   });
   if (!res.ok) throw new Error(`wttr HTTP ${res.status}`);
   const data = await res.json();
@@ -25,7 +25,7 @@ async function wttr(city) {
   };
 }
 
-// Геокодер Open-Meteo
+// Геокодер Open-Meteо
 async function geocode(query) {
   const url = `https://geocoding-api.open-meteo.com/v1/search?count=1&name=${encodeURIComponent(query)}`;
   const res = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 60 * 60 } });
@@ -63,16 +63,17 @@ export async function weatherByCity(city = "Kyiv") {
   return await openMeteo(city);
 }
 
-// ── сумісний форматер для webhook.js ──
+// ── Сумісний форматер для webhook.js ──
 export function formatWeather(w, lang = "uk") {
   if (!w) return "";
-  const L = {
+  const map = {
     en: { now: "now", temp: "Temperature", feels: "feels like", wind: "Wind", hum: "Humidity", src: "source" },
     uk: { now: "зараз", temp: "Температура", feels: "відчувається як", wind: "Вітер", hum: "Вологість", src: "джерело" },
     ru: { now: "сейчас", temp: "Температура", feels: "ощущается как", wind: "Ветер", hum: "Влажность", src: "источник" },
     de: { now: "jetzt", temp: "Temperatur", feels: "gefühlt", wind: "Wind", hum: "Luftfeuchtigkeit", src: "Quelle" },
     fr: { now: "maintenant", temp: "Température", feels: "ressenti", wind: "Vent", hum: "Humidité", src: "source" },
-  }[lang] || L?.en;
+  };
+  const L = map[lang] || map.en;
   const srcUrl = w.provider === "wttr.in" ? "https://wttr.in/" : "https://open-meteo.com/";
   const lines = [
     `🌤️ <b>${w.city}</b> — ${L.now}`,
