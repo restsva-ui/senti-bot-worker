@@ -1,5 +1,7 @@
 // src/lib/apis/news.js
-// News via newsdata.io (if key provided) with fallback to RSS (no key).
+// News via newsdata.io (якщо є ключ) + RSS-фолбек (без ключів)
+
+function arrow(url){ return ` <a href="${url}">↗︎</a>`; }
 
 async function newsdataIO(key) {
   const url = `https://newsdata.io/api/1/latest?apikey=${encodeURIComponent(key)}&country=ua&language=uk`;
@@ -13,7 +15,7 @@ async function newsdataIO(key) {
   })).filter(x => x.title && x.link);
 }
 
-// Fallback via RSS using jina.ai proxy (no CORS/keys)
+// RSS через jina.ai proxy (без CORS)
 async function fetchRSS(url) {
   const r = await fetch(`https://r.jina.ai/http://` + url, { cf: { cacheEverything: true, cacheTtl: 60 * 5 } });
   if (!r.ok) throw new Error("RSS fetch failed");
@@ -35,7 +37,7 @@ async function rssTop() {
   const feeds = [
     "www.pravda.com.ua/rss/view_pubs/",
     "www.epravda.com.ua/rss/all/",
-    "telegraf.com.ua/feed/"
+    "telegraf.com.ua/feed/",
   ];
   const results = [];
   for (const f of feeds) {
@@ -61,4 +63,10 @@ export async function fetchTopNews(env = {}) {
     }
   }
   return await rssTop();
+}
+
+// ── сумісний форматер для webhook.js ──
+export function formatNewsList(items = []) {
+  if (!items?.length) return "";
+  return items.slice(0, 8).map(n => `• <a href="${n.link}">${n.title}</a>`).join("\n") + arrow(items[0].link);
 }
