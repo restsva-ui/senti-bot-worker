@@ -25,7 +25,6 @@ async function wttr(city) {
   };
 }
 
-// Геокодер Open-Meteо
 async function geocode(query) {
   const url = `https://geocoding-api.open-meteo.com/v1/search?count=1&name=${encodeURIComponent(query)}`;
   const res = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 60 * 60 } });
@@ -63,7 +62,7 @@ export async function weatherByCity(city = "Kyiv") {
   return await openMeteo(city);
 }
 
-// ── Сумісний форматер для webhook.js ──
+// ── форматер, який потребує твій webhook ──
 export function formatWeather(w, lang = "uk") {
   if (!w) return "";
   const map = {
