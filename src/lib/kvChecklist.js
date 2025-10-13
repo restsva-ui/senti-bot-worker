@@ -127,15 +127,23 @@ export async function checklistHtml(env) {
   const last200 = lines.slice(-200); // сирі рядки (UTC)
   const raw = last200.join("\n");
 
+  // посилання з урахуванням секрету
   const sec = env?.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
   const repoHref = `/admin/repo/html${sec}`;
   const statutHref = `/admin/statut${sec}`;
   const improveAction = `/ai/improve${sec}`;
 
+  // ⚡ кнопка Energy (HTML-сторінка) для ADMIN_ID
+  const params = [];
+  if (env?.WEBHOOK_SECRET) params.push(`s=${encodeURIComponent(env.WEBHOOK_SECRET)}`);
+  const adminId = encodeURIComponent(env?.TELEGRAM_ADMIN_ID || "");
+  params.push(`u=${adminId}`);
+  const energyHref = `/admin/energy/html?${params.join("&")}`;
+
   const esc = (s)=>s.replace(/[&<>]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
 
   return `<!doctype html>
-<html lang="uk">
+<html lang="ук">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -169,13 +177,14 @@ export async function checklistHtml(env) {
   <div class="row">
     <a href="${repoHref}">📁 Відкрити Repo</a>
     <a href="${statutHref}">📜 Статут</a>
+    <a href="${energyHref}">⚡ Відкрити Energy</a>
     <form method="post" action="/admin/checklist?archive=1">
       <button title="Зберегти знімок у архів">💾 Зберегти архів</button>
     </form>
     ${
       env?.WEBHOOK_SECRET
         ? `<form method="post" action="${improveAction}">
-             <button class="danger" title="Запустити нічний агент прямо зараз">🌙 Запустити нічного агента</button>
+             <button class="danger" title="Запустити нічного агента прямо зараз">🌙 Запустити нічного агента</button>
            </form>`
         : `<span class="muted">🌙 Для ручного запуску нічного агента задай WEBHOOK_SECRET у ENV</span>`
     }
