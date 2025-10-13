@@ -1,12 +1,10 @@
-// Nager.Date — державні свята
-export async function publicHolidays(year, country = "UA") {
-  const url = `https://date.nager.at/api/v3/PublicHolidays/${year}/${country}`;
-  const r = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 86400 }});
-  if (!r.ok) throw new Error("holidays fail");
-  return await r.json(); // [{date, localName, name},...]
+export async function getHolidays() {
+  const r = await fetch("https://date.nager.at/api/v3/PublicHolidays/2025/UA");
+  const j = await r.json().catch(() => null);
+  return (j || []).slice(0, 5).map(h => ({ date: h.date, name: h.localName }));
 }
-export function formatHolidaysShort(list, limit = 8) {
-  return (list || []).slice(0, limit)
-    .map(x => `• ${x.date} — ${x.localName || x.name}`)
-    .join("\n");
+
+export function formatHolidays(list) {
+  if (!list?.length) return "❌ Дані про свята відсутні.";
+  return "🎉 Найближчі державні свята в Україні:\n" + list.map(h => `• ${h.date} — ${h.name}`).join("\n");
 }
