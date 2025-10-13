@@ -88,7 +88,12 @@ id = "497eac980691495ea2a0bc8611892d65"
 binding = "LIKES_KV"
 id = "f7d480c281ad47d2bdf270fadf4de021"
 
-# ➕ Журнал енергії (з твого скріну)
+# ➕ Журнал енергії
 [[kv_namespaces]]
 binding = "ENERGY_LOG_KV"
 id = "9e6f0ed5bf2544a9a63d57455900a844"
+
+# ➕ Діалоги (коротка пам'ять між сесіями)
+[[kv_namespaces]]
+binding = "DIALOG_KV"
+id = "63c0d1e0962a419ca54082893410b28e"
