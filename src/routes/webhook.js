@@ -447,6 +447,7 @@ export async function handleTelegramWebhook(req, env) {
       }
 
       if (isBlank(reply)) reply = defaultAiReply();
+
       // Зберігаємо діалог
       await pushDialog(env, userId, "user", q);
       await pushDialog(env, userId, "assistant", reply);
@@ -556,7 +557,7 @@ export async function handleTelegramWebhook(req, env) {
 
       if (isBlank(out)) out = defaultAiReply();
 
-      // зберігаємо діалог
+      // Зберігаємо діалог
       await pushDialog(env, userId, "user", text);
       await pushDialog(env, userId, "assistant", out);
 
