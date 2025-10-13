@@ -29,6 +29,5 @@ export async function getUsdUahRate() {
     return await erHost("USD", "UAH");
   }
 }
-// compatibility helpers
 export const formatRate = (r) => `💸 <b>USD → UAH:</b> ${Number(r||0).toFixed(2)}₴`;
 export const formatUsdRate = formatRate;
