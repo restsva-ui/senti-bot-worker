@@ -1,3 +1,4 @@
+// src/routes/webhook.js
 // Telegram webhook: тонкий клей над модулями (i18n / tone / energy / brain / statut).
 // Клавіатура: Drive, Senti, (Admin — лише адміну). Checklist винесено в Admin-меню.
 
@@ -14,9 +15,9 @@ import { getTone, setTone, toneHint } from "../lib/tone.js";
 import { getUserLang, tr } from "../lib/i18n.js";
 // energy
 import { getEnergy, spendEnergy } from "../lib/energy.js";
-// intent NLU + router (NEW)
-import { detectIntent } from "../lib/nlu.js";
-import { runIntent } from "../lib/intentRouter.js";
+
+// intents (єдине джерело правди)
+import { detectIntent, runIntent } from "../lib/intentRouter.js";
 
 // ───────────── helpers ─────────────
 const json = (data, init = {}) =>
@@ -32,6 +33,11 @@ async function sendMessage(env, chatId, text, extra = {}) {
     body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true, ...extra }),
   });
   await r.text().catch(() => {});
+}
+
+// Markdown+no preview (для news / wiki тощо)
+async function sendMd(env, chatId, text) {
+  return sendMessage(env, chatId, text, { parse_mode: "Markdown", disable_web_page_preview: true });
 }
 
 function parseAiCommand(text = "") {
@@ -196,7 +202,6 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
   if (!att) return false;
 
-  // дістали конфіг і поточну енергію одним викликом
   const info = await getEnergy(env, userId);
   const { costImage } = info;
   if (info.energy < costImage) {
@@ -227,7 +232,7 @@ export async function handleTelegramWebhook(req, env) {
       return json({ ok: false, error: "unauthorized" }, { status: 401 });
     }
   } else {
-    return json({ ok: true, note: "webhook alive (GET)" });
+    return json({ ok: true, method: "GET", message: "webhook alive" });
   }
 
   let update;
@@ -255,7 +260,7 @@ export async function handleTelegramWebhook(req, env) {
     try { await fn(); } catch (e) { await sendMessage(env, chatId, tr(lang, "generic_error", String(e))); }
   };
 
-  // /start — тільки дружнє вітання + клавіатура
+  // /start — дружнє вітання + клавіатура
   if (text === "/start") {
     await safe(async () => {
       await setDriveMode(env, userId, false);
@@ -315,13 +320,26 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /ai
+  // /ai — тепер теж intent-first
   const aiArg = parseAiCommand(textRaw);
   if (aiArg !== null) {
     await safe(async () => {
       const q = aiArg || "";
       if (!q) { await sendMessage(env, chatId, tr(lang, "ai_usage")); return; }
 
+      // 1) пробуємо інтент (безкоштовні API)
+      const intent = detectIntent(q, lang);
+      if (intent && intent.type && intent.type !== "none") {
+        try {
+          const apiReply = await runIntent(intent);
+          if (apiReply && apiReply.trim()) {
+            await sendMd(env, chatId, apiReply);
+            return;
+          }
+        } catch { /* падаємо у LLM нижче */ }
+      }
+
+      // 2) LLM фолбек з енергією
       const info = await getEnergy(env, userId);
       const { costText, low, energy } = info;
       if (energy < costText) {
@@ -369,7 +387,6 @@ export async function handleTelegramWebhook(req, env) {
         return;
       }
       await setDriveMode(env, userId, true);
-      // мінімальне "порожнє" повідомлення + інлайн-кнопка
       await sendMessage(env, chatId, "\u2060", { reply_markup: inlineOpenDrive() });
     });
     return json({ ok: true });
@@ -416,19 +433,17 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // ── INTENT-FIRST: маршрутизація в зовнішні API без слеш-команд (NEW) ──
+  // ── INTENT-FIRST для звичайного тексту ──
   if (text && !text.startsWith("/")) {
     const intent = detectIntent(text, lang);
-    if (intent.type !== "none") {
+    if (intent && intent.type && intent.type !== "none") {
       try {
         const reply = await runIntent(intent);
         if (reply && reply.trim()) {
-          await sendMessage(env, chatId, reply);
+          await sendMd(env, chatId, reply);
           return json({ ok: true, intent: intent.type });
         }
-      } catch (e) {
-        // якщо API впало — м'яко відпадаємо в LLM нижче
-      }
+      } catch { /* якщо API впало — фолбек у LLM нижче */ }
     }
   }
 
