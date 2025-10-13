@@ -6,8 +6,7 @@ account_id = "2cf6e316af8623546c95c0354bc3aa00"
 # --- CRONs ---
 # 1) heartbeat кожні 15 хв (для логів/живості)
 # 2) evolve щогодини рівно о :00 (UTC)
-# 3) додатковий фіксований тригер нічного агента о 02:10 UTC (опційний)
-#    Основний добовий запуск контролюється змінною NIGHTLY_UTC_HOUR (див. нижче)
+# 3) додатковий тригер нічного агента о 02:10 UTC (опційний)
 [triggers]
 crons = ["*/15 * * * *", "0 * * * *", "10 2 * * *"]
 
@@ -23,14 +22,13 @@ WEBHOOK_SECRET = "senti1984"
 # Секрет перевірки Telegram webhook
 TG_WEBHOOK_SECRET = "senti1984"
 
-# Локальна таймзона для UI/логів/дебагу часу (використовується у /debug/time та чеклісті)
+# Локальна таймзона для UI/логів/дебагу часу
 TIMEZONE = "Europe/Kyiv"
 
 # ДІАГНОСТИЧНІ ТЕГИ: "on" — показує [via ...], "off" — ховає
 DIAG_TAGS = "on"
 
 # --- Порядок fallback-моделей ---
-# Зліва направо: якщо попередня не відповіла — йдемо далі.
 MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:deepseek/deepseek-chat, free:meta-llama/llama-4-scout:free"
 
 # --- Дефолтні моделі (необов'язково) ---
@@ -46,20 +44,19 @@ FREE_API_PATH     = "/v1/chat/completions"
 # --- Керування нічними авто-поліпшеннями ---
 AUTO_IMPROVE     = "on"   # "off" щоб вимкнути
 # Основний добовий запуск агента відбувається на годинному кроні ("0 * * * *"),
-# коли getUTCHours() === NIGHTLY_UTC_HOUR.
-# 23 UTC ~= 02:00 за Києвом (UTC+3 у період літнього часу).
+# коли getUTCHours() === NIGHTLY_UTC_HOUR. 23 UTC ~= 02:00 за Києвом.
 NIGHTLY_UTC_HOUR = "23"
 
 # --- Self-Regulation (ввімк/вимк та сила тюнінгу) ---
-SELF_REGULATE       = "on"   # "off" щоб вимкнути само-налаштування
-SELF_TUNING_FACTOR  = "0.3"  # 0..1 – наскільки агресивно змінюємо правила
+SELF_REGULATE       = "on"
+SELF_TUNING_FACTOR  = "0.3"
 
-# --- Energy model (НЕ секрети; читаються з ENV у runtime) ---
-ENERGY_MAX = 100
-ENERGY_RECOVER_PER_MIN = 1
-ENERGY_COST_TEXT = 1
-ENERGY_COST_IMAGE = 5
-ENERGY_LOW_THRESHOLD = 10
+# --- ⚡ ЕНЕРГІЯ (щоб не зникали на деплої) ---
+ENERGY_MAX = "100"
+ENERGY_RECOVER_PER_MIN = "1"
+ENERGY_COST_TEXT = "1"
+ENERGY_COST_IMAGE = "5"
+ENERGY_LOW_THRESHOLD = "10"
 
 # --- KV bindings ---
 [[kv_namespaces]]
@@ -90,3 +87,8 @@ id = "497eac980691495ea2a0bc8611892d65"
 [[kv_namespaces]]
 binding = "LIKES_KV"
 id = "f7d480c281ad47d2bdf270fadf4de021"
+
+# ➕ Журнал енергії (з твого скріну)
+[[kv_namespaces]]
+binding = "ENERGY_LOG_KV"
+id = "9e6f0ed5bf2544a9a63d57455900a844"
