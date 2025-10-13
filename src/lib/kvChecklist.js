@@ -5,6 +5,33 @@ const CHECKLIST_KEY = "service:checklist";
 const STATUT_KEY = "service:statut";
 const ARCHIVE_PREFIX = "archive:checklist:";
 
+// --- default statut (UA, без мовних обмежень) -------------------------------
+const DEFAULT_STATUT = `Ти — Senti, розумний асистент і співрозмовник у Telegram.
+
+🔹 Основні принципи:
+• Спілкуйся природно, просто й дружньо — як реальна людина.
+• Тримай короткий, змістовний стиль, без канцеляризмів.
+• Використовуй емоції, емодзі та жарти помірно, лише коли доречно.
+• Відповідай тією ж мовою, якою пише користувач.
+• Не повторюй “привітання”, якщо діалог уже триває.
+• Не згадуй попередні факти, поки про це не просять.
+
+🔹 Поведінка:
+• Якщо питають про файли чи збереження — нагадай про Google Drive і Checklist/Repo.
+• Якщо просять допомогу — відповідай по суті, спокійно, без зайвих вибачень.
+• Якщо тема змінилась — плавно підлаштовуйся.
+
+🔹 Пам’ять:
+• Запам’ятовуй стабільні факти, що можуть стати в пригоді потім.
+• Не вигадуй. Якщо не впевнений — чесно скажи “Не впевнений”.
+
+🔹 Безпека:
+• Не давай шкідливих порад і не провокуй небезпечних дій.
+• Зберігай нейтральність і ввічливість.
+
+🔹 Енергія:
+• Кожна відповідь споживає енергію. Якщо рівень низький — ввічливо повідом користувача його мовою.`;
+ 
 // --- small helpers -----------------------------------------------------------
 function fmtNow() { return new Date().toISOString(); }
 
@@ -85,6 +112,7 @@ export async function statutHtml(env) {
   const body = await readStatut(env);
   const sec = env?.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
   const checklistHref = `/admin/checklist${sec}`;
+  const textForArea = body && String(body).trim() ? body : DEFAULT_STATUT;
   return `<!doctype html>
 <html lang="uk">
 <head>
@@ -107,7 +135,7 @@ export async function statutHtml(env) {
   <h1>📜 Statut</h1>
   <div class="card">
     <form method="post" action="/admin/statut?save=1">
-      <textarea name="text" placeholder="HTML...">${body || ""}</textarea>
+      <textarea name="text" placeholder="Тут текст статуту (plain text або HTML)...">${textForArea || ""}</textarea>
       <div class="row">
         <input type="submit" value="Зберегти"/>
         <a href="${checklistHref}">➡️ до Checklist</a>
@@ -143,7 +171,7 @@ export async function checklistHtml(env) {
   const esc = (s)=>s.replace(/[&<>]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
 
   return `<!doctype html>
-<html lang="ук">
+<html lang="uk">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -162,8 +190,8 @@ export async function checklistHtml(env) {
   .muted{opacity:.7}
   .danger{background:#3a1f1f;border-color:#5b2b2b}
   .viewer{max-height:340px;overflow:auto;
-          white-space:pre-wrap;      /* переносимо рядки */
-          overflow-wrap:anywhere;    /* довгі токени теж ламаємо */
+          white-space:pre-wrap;
+          overflow-wrap:anywhere;
           font-family: ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
           background:#0d0d0d;border:1px solid #2a2a2a;border-radius:10px;padding:10px}
   .controls{display:flex;gap:10px;align-items:center;justify-content:space-between;margin:8px 0}
@@ -238,7 +266,7 @@ export async function checklistHtml(env) {
     dateStyle: 'short',
     timeStyle: 'medium'
   });
-  const tzOffsetMin = -new Date().getTimezoneOffset(); // хвилини схід +, захід -
+  const tzOffsetMin = -new Date().getTimezoneOffset();
   const tzSign = tzOffsetMin >= 0 ? '+' : '-';
   const tzAbs = Math.abs(tzOffsetMin);
   const tzStr = 'GMT' + tzSign + String(Math.floor(tzAbs/60)).padStart(2,'0') + ':' + String(tzAbs%60).padStart(2,'0');
@@ -258,7 +286,6 @@ export async function checklistHtml(env) {
     out = toLocalPretty(out);
     viewer.textContent = out;
 
-    // автопрокрутка: останні — одразу у видимій зоні
     if (newestFirst.checked) viewer.scrollTop = 0;
     else viewer.scrollTop = viewer.scrollHeight;
   }
