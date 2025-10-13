@@ -1,9 +1,9 @@
 // Telegram webhook з інтеграцією "мозку" та перевірками доступу/режиму диска.
 // Додаємо Статут як системний підказник для AI на кожну текстову взаємодію.
-// ⬆️ ДОПОВНЕНО: Self-Tune — підтягувамо інсайти зі STATE_KV і додаємо rules/tone.
-// ⬆️ ДОПОВНЕНО: Energy — ліміт витрат на текст/медіа з авто-відновленням.
-// ⬆️ ДОПОВНЕНО: Dialog Memory — коротка історія спілкування у DIALOG_KV з TTL.
-// ⬆️ ДОПОВНЕНО: /mem show|reset — керування короткою пам’яттю без витрат енергії.
+// ⬆️ Self-Tune — інсайти зі STATE_KV (rules/tone).
+// ⬆️ Energy — ліміт витрат на текст/медіа з авто-відновленням.
+// ⬆️ Dialog Memory — коротка історія у DIALOG_KV з TTL.
+// ⬆️ Multilang + Casual — авто-вибір мови (uk/ru/de/en/fr) + розмовний стиль.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -25,35 +25,16 @@ async function sendMessage(env, chatId, text, extra = {}) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true, ...extra }),
   });
-  await r.text().catch(() => {}); // не валимо весь хендлер, якщо TG вернув помилку
+  await r.text().catch(() => {});
 }
 
-// Безпечний парсер команди /ai (підтримує /ai, /ai@Bot, з/без аргументів)
 function parseAiCommand(text = "") {
   const s = String(text).trim();
   const m = s.match(/^\/ai(?:@[\w_]+)?(?:\s+([\s\S]+))?$/i);
   if (!m) return null;
-  return (m[1] || "").trim(); // може бути ""
+  return (m[1] || "").trim();
 }
 
-// Парсер /mem
-function parseMemCommand(text = "") {
-  const s = String(text).trim();
-  const m = s.match(/^\/mem(?:@[\w_]+)?(?:\s+([\s\S]+))?$/i);
-  if (!m) return null;
-  const arg = (m[1] || "").trim();
-  if (!arg) return { cmd: "help" };
-  const parts = arg.split(/\s+/);
-  const sub = parts[0].toLowerCase();
-  if (sub === "show") {
-    const n = Math.min(50, Math.max(1, Number(parts[1] || 10)));
-    return { cmd: "show", n };
-  }
-  if (sub === "reset") return { cmd: "reset" };
-  return { cmd: "help" };
-}
-
-// Анти-порожній фолбек + утиліта перевірки
 function defaultAiReply() {
   return (
     "🤖 Я можу відповідати на питання, допомагати з кодом, " +
@@ -80,6 +61,149 @@ const inlineOpenDrive = () => ({
 
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 
+// ── Multilang (uk/ru/de/en/fr) ────────────────────────────────────────────────
+const SUP_LANGS = ["uk", "ru", "de", "en", "fr"];
+const LANG_KEY = (uid) => `lang:${uid}`;
+
+const TR = {
+  hello: {
+    uk: "Привіт! Я Senti 🤖 Готовий допомогти.",
+    ru: "Привет! Я Senti 🤖 Готов помочь.",
+    de: "Hi! Ich bin Senti 🤖 — bereit zu helfen.",
+    en: "Hey! I’m Senti 🤖—ready to help.",
+    fr: "Salut ! Je suis Senti 🤖, prêt à aider."
+  },
+  ai_usage: {
+    uk: "✍️ Напиши запит після команди /ai. Напр.:\n/ai Скільки буде 2+2?",
+    ru: "✍️ Напиши запрос после команды /ai. Например:\n/ai Сколько будет 2+2?",
+    de: "✍️ Schreib deine Frage nach /ai. Z. B.:\n/ai Wieviel ist 2+2?",
+    en: "✍️ Type your question after /ai. E.g.:\n/ai What’s 2+2?",
+    fr: "✍️ Écris ta question après /ai. Par ex. :\n/ai 2+2 = ?"
+  },
+  energy_not_enough: {
+    uk: (need, links) =>
+      `🔋 Не вистачає енергії (потрібно ${need}). Вона відновлюється автоматично.\nКерування:\n• Energy: ${links.energy}\n• Checklist: ${links.checklist}`,
+    ru: (need, links) =>
+      `🔋 Недостаточно энергии (нужно ${need}). Она восстанавливается автоматически.\nУправление:\n• Energy: ${links.energy}\n• Checklist: ${links.checklist}`,
+    de: (need, links) =>
+      `🔋 Nicht genug Energie (benötigt ${need}). Sie lädt sich automatisch auf.\nVerwalten:\n• Energy: ${links.energy}\n• Checklist: ${links.checklist}`,
+    en: (need, links) =>
+      `🔋 Not enough energy (need ${need}). It refills automatically.\nManage:\n• Energy: ${links.energy}\n• Checklist: ${links.checklist}`,
+    fr: (need, links) =>
+      `🔋 Pas assez d’énergie (il faut ${need}). Elle se recharge automatiquement.\nGérer :\n• Energy : ${links.energy}\n• Checklist : ${links.checklist}`
+  },
+  energy_low_hint: {
+    uk: (cur, link) => `⚠️ Низький рівень енергії (${cur}). Відновиться автоматично. Керування: ${link}`,
+    ru: (cur, link) => `⚠️ Низкий уровень энергии (${cur}). Восстановится автоматически. Управление: ${link}`,
+    de: (cur, link) => `⚠️ Niedriger Energiewert (${cur}). Lädt sich automatisch auf. Verwalten: ${link}`,
+    en: (cur, link) => `⚠️ Low energy (${cur}). It will refill automatically. Manage: ${link}`,
+    fr: (cur, link) => `⚠️ Énergie faible (${cur}). Recharge automatique. Gérer : ${link}`
+  },
+  drive_auth: {
+    uk: (url) => `Щоб зберігати у свій Google Drive — дозволь доступ:\n${url}\n\nПотім натисни «${BTN_DRIVE}» ще раз.`,
+    ru: (url) => `Чтобы сохранять в свой Google Drive — дай доступ:\n${url}\n\nПотом нажми «${BTN_DRIVE}» ещё раз.`,
+    de: (url) => `Zum Speichern auf deinem Google Drive: bitte Zugriff erlauben:\n${url}\n\nDann drücke nochmal «${BTN_DRIVE}».`,
+    en: (url) => `To save to your Google Drive, grant access first:\n${url}\n\nThen tap “${BTN_DRIVE}” again.`,
+    fr: (url) => `Pour enregistrer sur ton Google Drive, accorde d’abord l’accès :\n${url}\n\nPuis appuie encore sur « ${BTN_DRIVE} ».`
+  },
+  drive_on: {
+    uk: "📁 Режим диска: ON. Надсилай фото/відео/документи — збережу на твій Google Drive.",
+    ru: "📁 Режим диска: ON. Присылай фото/видео/доки — сохраню в твой Google Drive.",
+    de: "📁 Drive-Modus: AN. Schick Fotos/Videos/Dokumente — ich speichere sie in deinem Drive.",
+    en: "📁 Drive mode: ON. Send photos/videos/docs — I’ll save them to your Drive.",
+    fr: "📁 Mode Drive : activé. Envoie photos/vidéos/docs — je les mets sur ton Drive."
+  },
+  drive_off: {
+    uk: "Режим диска вимкнено. Це звичайний чат Senti.",
+    ru: "Режим диска выключен. Это обычный чат Senti.",
+    de: "Drive-Modus aus. Das ist wieder der normale Senti-Chat.",
+    en: "Drive mode is off. Back to normal chat.",
+    fr: "Mode Drive désactivé. Retour au chat habituel."
+  },
+  saved_to_drive: {
+    uk: (name) => `✅ Збережено на твоєму диску: ${name}`,
+    ru: (name) => `✅ Сохранено на твоём диске: ${name}`,
+    de: (name) => `✅ Auf deinem Drive gespeichert: ${name}`,
+    en: (name) => `✅ Saved to your Drive: ${name}`,
+    fr: (name) => `✅ Enregistré sur ton Drive : ${name}`
+  },
+  checklist_link: {
+    uk: (link) => `📋 Чеклист (HTML):\n${link}`,
+    ru: (link) => `📋 Чеклист (HTML):\n${link}`,
+    de: (link) => `📋 Checkliste (HTML):\n${link}`,
+    en: (link) => `📋 Checklist (HTML):\n${link}`,
+    fr: (link) => `📋 Checklist (HTML) :\n${link}`
+  },
+  admin_menu: {
+    uk: (cl, repo, hook) => `🛠 Адмін-меню\n\n• Чеклист: ${cl}\n• Repo: ${repo}\n• Вебхук GET: ${hook}`,
+    ru: (cl, repo, hook) => `🛠 Админ-меню\n\n• Чеклист: ${cl}\n• Repo: ${repo}\n• Вебхук GET: ${hook}`,
+    de: (cl, repo, hook) => `🛠 Admin-Menü\n\n• Checkliste: ${cl}\n• Repo: ${repo}\n• Webhook GET: ${hook}`,
+    en: (cl, repo, hook) => `🛠 Admin menu\n\n• Checklist: ${cl}\n• Repo: ${repo}\n• Webhook GET: ${hook}`,
+    fr: (cl, repo, hook) => `🛠 Menu admin\n\n• Checklist : ${cl}\n• Repo : ${repo}\n• Webhook GET : ${hook}`
+  },
+  generic_error: {
+    uk: (e) => `❌ Помилка: ${e}`,
+    ru: (e) => `❌ Ошибка: ${e}`,
+    de: (e) => `❌ Fehler: ${e}`,
+    en: (e) => `❌ Error: ${e}`,
+    fr: (e) => `❌ Erreur : ${e}`
+  }
+};
+
+function normTgLang(code = "") {
+  const c = String(code || "").toLowerCase();
+  if (c.startsWith("uk")) return "uk";
+  if (c.startsWith("ru")) return "ru";
+  if (c.startsWith("de")) return "de";
+  if (c.startsWith("fr")) return "fr";
+  return "en";
+}
+
+function detectLangFromText(s = "", fallback = "en") {
+  const t = String(s).toLowerCase();
+
+  // quick heuristics by characters
+  if (/[їєґі]/i.test(t)) return "uk";
+  if (/[ёыэъ]/i.test(t)) return "ru";
+  if (/[äöüß]/i.test(t)) return "de";
+  if (/[àâçéèêëîïôûùüÿœæ]/i.test(t)) return "fr";
+
+  // stopwords vote
+  const votes = { uk: 0, ru: 0, de: 0, en: 0, fr: 0 };
+  const bump = (lang, count = 1) => (votes[lang] += count);
+
+  if (/\b(і|та|що|це|так)\b/.test(t)) bump("uk", 2);
+  if (/\b(и|что|это|так|ну)\b/.test(t)) bump("ru", 2);
+  if (/\b(der|die|und|ist|nicht|ich)\b/.test(t)) bump("de", 2);
+  if (/\b(the|and|is|you|i|not)\b/.test(t)) bump("en", 2);
+  if (/\b(le|la|et|est|pas|je|tu)\b/.test(t)) bump("fr", 2);
+
+  let best = fallback, max = -1;
+  for (const k of SUP_LANGS) { if (votes[k] > max) { max = votes[k]; best = k; } }
+  return best;
+}
+
+async function getUserLang(env, userId, tgCode, lastText = "") {
+  const kv = ensureState(env);
+  const key = LANG_KEY(userId);
+  const saved = await kv.get(key);
+  let lang = saved || normTgLang(tgCode);
+
+  // if user actually writes in another language — switch
+  if (lastText && lastText.length >= 3) {
+    const detected = detectLangFromText(lastText, lang);
+    if (SUP_LANGS.includes(detected) && detected !== lang) {
+      lang = detected;
+      await kv.put(key, lang, { expirationTtl: 60 * 60 * 24 * 90 }); // 90d
+    }
+  }
+  return SUP_LANGS.includes(lang) ? lang : "en";
+}
+const tr = (lang, key, ...args) => {
+  const v = TR[key]?.[lang] ?? TR[key]?.en;
+  return typeof v === "function" ? v(...args) : v;
+};
+
 // ── STATE_KV: режим диска ─────────────────────────────────────────────────────
 const DRIVE_MODE_KEY = (uid) => `drive_mode:${uid}`;
 function ensureState(env) {
@@ -104,7 +228,6 @@ function energyCfg(env) {
     low: Number(env.ENERGY_LOW_THRESHOLD ?? 10),
   };
 }
-
 async function getEnergy(env, userId) {
   const cfg = energyCfg(env);
   const raw = await ensureState(env).get(ENERGY_KEY(userId));
@@ -124,13 +247,11 @@ async function getEnergy(env, userId) {
   }
   return obj.v;
 }
-
 async function setEnergy(env, userId, v) {
   const now = Math.floor(Date.now() / 1000);
   await ensureState(env).put(ENERGY_KEY(userId), JSON.stringify({ v, t: now }));
   return v;
 }
-
 async function spendEnergy(env, userId, cost) {
   const cfg = energyCfg(env);
   const cur = await getEnergy(env, userId);
@@ -139,7 +260,6 @@ async function spendEnergy(env, userId, cost) {
   await setEnergy(env, userId, left);
   return { ok: true, cur: left, cfg };
 }
-
 function energyLinks(env, userId) {
   const s = env.WEBHOOK_SECRET || "";
   const qs = `s=${encodeURIComponent(s)}&u=${encodeURIComponent(String(userId || ""))}`;
@@ -150,50 +270,24 @@ function energyLinks(env, userId) {
 }
 
 // ── Dialog Memory (DIALOG_KV) ────────────────────────────────────────────────
-// Зберігаємо останні ходи діалогу користувача з ботом.
-// Обмеження: maxTurns та maxBytes запобігають розростанню.
-// TTL: 14 днів неактивності — запис зникне автоматично.
 const DIALOG_KEY = (uid) => `dlg:${uid}`;
-const DLG_CFG = {
-  maxTurns: 12,          // скільки повідомлень тримати (user+assistant разом)
-  maxBytes: 8_000,       // максимальний розмір JSON-рядка
-  ttlSec: 14 * 24 * 3600 // 14 днів
-};
-function ensureDialog(env) {
-  return env.DIALOG_KV || null;
-}
+const DLG_CFG = { maxTurns: 12, maxBytes: 8_000, ttlSec: 14 * 24 * 3600 };
+function ensureDialog(env) { return env.DIALOG_KV || null; }
 async function readDialog(env, userId) {
-  const kv = ensureDialog(env);
-  if (!kv) return [];
-  try {
-    const raw = await kv.get(DIALOG_KEY(userId));
-    if (!raw) return [];
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
+  const kv = ensureDialog(env); if (!kv) return [];
+  try { const raw = await kv.get(DIALOG_KEY(userId)); if (!raw) return []; const arr = JSON.parse(raw); return Array.isArray(arr) ? arr : []; }
+  catch { return []; }
 }
 function trimDialog(arr) {
   let out = Array.isArray(arr) ? arr.slice(-DLG_CFG.maxTurns) : [];
-  // якщо перевищили байти — жорсткіше ріжемо з початку
   let s = new TextEncoder().encode(JSON.stringify(out)).length;
-  while (out.length > 4 && s > DLG_CFG.maxBytes) {
-    out = out.slice(2); // відсікаємо найстарші 2 записи
-    s = new TextEncoder().encode(JSON.stringify(out)).length;
-  }
+  while (out.length > 4 && s > DLG_CFG.maxBytes) { out = out.slice(2); s = new TextEncoder().encode(JSON.stringify(out)).length; }
   return out;
 }
 async function writeDialog(env, userId, arr) {
-  const kv = ensureDialog(env);
-  if (!kv) return false;
+  const kv = ensureDialog(env); if (!kv) return false;
   const val = JSON.stringify(trimDialog(arr));
-  try {
-    await kv.put(DIALOG_KEY(userId), val, { expirationTtl: DLG_CFG.ttlSec });
-    return true;
-  } catch {
-    return false;
-  }
+  try { await kv.put(DIALOG_KEY(userId), val, { expirationTtl: DLG_CFG.ttlSec }); return true; } catch { return false; }
 }
 async function pushDialog(env, userId, role, content) {
   const now = Date.now();
@@ -204,16 +298,15 @@ async function pushDialog(env, userId, role, content) {
 async function buildDialogHint(env, userId) {
   const turns = await readDialog(env, userId);
   if (!turns.length) return "";
-  // Формуємо короткий readable-хінт
-  const lines = ["[Context: попередній діалог (останні повідомлення)]"];
+  const lines = ["[Context: previous dialog (last messages)]"];
   for (const it of turns.slice(-DLG_CFG.maxTurns)) {
-    const who = it.r === "user" ? "Користувач" : "Senti";
+    const who = it.r === "user" ? "User" : "Senti";
     lines.push(`${who}: ${it.c}`);
   }
   return lines.join("\n");
 }
 
-// ── Self-Tune: підтягування інсайтів зі STATE_KV ─────────────────────────────
+// ── Self-Tune ────────────────────────────────────────────────────────────────
 async function loadSelfTune(env, chatId) {
   try {
     if (!env.STATE_KV) return null;
@@ -223,17 +316,13 @@ async function loadSelfTune(env, chatId) {
     const obj = JSON.parse(raw);
     const rules = Array.isArray(obj?.analysis?.rules) ? obj.analysis.rules : [];
     const tone  = obj?.analysis?.tone ? String(obj.analysis.tone).trim() : "";
-
     if (!rules.length && !tone) return null;
 
-    // Будуємо короткий блок політик для системного хінта
     const lines = [];
-    if (tone) lines.push(`• Тон розмови користувача: ${tone}.`);
+    if (tone) lines.push(`• User tone: ${tone}.`);
     if (rules.length) {
-      lines.push("• Дотримуйся правил:");
-      for (const r of rules.slice(0, 5)) {
-        lines.push(`  - ${String(r).trim()}`);
-      }
+      lines.push("• Follow these rules:");
+      for (const r of rules.slice(0, 5)) lines.push(`  - ${String(r).trim()}`);
     }
     const text = lines.join("\n");
     return text ? `\n\n[Self-Tune]\n${text}\n` : null;
@@ -242,18 +331,25 @@ async function loadSelfTune(env, chatId) {
   }
 }
 
-// Збір системного підказника (Статут + Self-Tune + базова інструкція + Діалог)
-async function buildSystemHint(env, chatId, userId, extra = "") {
+// ── System hint (Statut + Self-Tune + Dialog + Language & Casual style) ─────
+function langName(l) {
+  return { uk: "Ukrainian", ru: "Russian", de: "German", en: "English (US)", fr: "French" }[l] || "English (US)";
+}
+async function buildSystemHint(env, chatId, userId, lang, extra = "") {
   const statut = await readStatut(env).catch(() => "");
   const selfTune = chatId ? await loadSelfTune(env, chatId) : null;
   const dialogCtx = userId ? await buildDialogHint(env, userId) : "";
 
+  const style =
+    `Always reply in ${langName(lang)}.\n` +
+    "Use a casual, friendly conversational tone (not formal), short sentences, and be concise.\n" +
+    "Use emojis sparingly (only when it feels natural).";
+
   const base =
     (statut ? `${statut.trim()}\n\n` : "") +
-    "Ти — Senti, помічник у Telegram. Відповідай стисло та дружньо. " +
-    "Якщо просять зберегти файл — нагадай про Google Drive та розділ Checklist/Repo.";
+    "You are Senti, a Telegram assistant. If user asks to save a file — remind about Google Drive and Checklist/Repo.";
 
-  const parts = [base, selfTune || "", dialogCtx || "", extra || ""].filter(Boolean);
+  const parts = [base, style, selfTune || "", dialogCtx || "", extra || ""].filter(Boolean);
   return parts.join("\n\n");
 }
 
@@ -299,60 +395,43 @@ async function tgFileUrl(env, file_id) {
   if (!path) throw new Error("getFile: file_path missing");
   return `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${path}`;
 }
-
-async function handleIncomingMedia(env, chatId, userId, msg) {
+async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
   if (!att) return false;
 
-  // energy check for media
   const { costImage } = energyCfg(env);
   const spend = await spendEnergy(env, userId, costImage);
   if (!spend.ok) {
     const links = energyLinks(env, userId);
-    await sendMessage(
-      env,
-      chatId,
-      `🔋 Недостатньо енергії для збереження медіа (потрібно ${costImage}).\n` +
-      `Відновлюйся автоматично, або керуй тут:\n• Energy: ${links.energy}\n• Checklist: ${links.checklist}`
-    );
+    await sendMessage(env, chatId, tr(lang, "energy_not_enough", costImage, links));
     return true;
   }
 
   const ut = await getUserTokens(env, userId);
   if (!ut?.refresh_token) {
     const authUrl = abs(env, `/auth/start?u=${userId}`);
-    await sendMessage(
-      env,
-      chatId,
-      `Щоб зберігати у свій Google Drive — спочатку дозволь доступ:\n${authUrl}\n\nПотім натисни «${BTN_DRIVE}» ще раз.`
-    );
+    await sendMessage(env, chatId, tr(lang, "drive_auth", authUrl));
     return true;
   }
   const url = await tgFileUrl(env, att.file_id);
   const saved = await driveSaveFromUrl(env, userId, url, att.name);
-  await sendMessage(env, chatId, `✅ Збережено на твоєму диску: ${saved?.name || att.name}`);
+  await sendMessage(env, chatId, tr(lang, "saved_to_drive", saved?.name || att.name));
   return true;
 }
 
 // ── головний обробник вебхуку ────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
-  // захист секретом Telegram webhook
   if (req.method === "POST") {
     const sec = req.headers.get("x-telegram-bot-api-secret-token");
     if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
       return json({ ok: false, error: "unauthorized" }, { status: 401 });
     }
   } else {
-    // GET /webhook — сигнал alive
     return json({ ok: true, note: "webhook alive (GET)" });
   }
 
   let update;
-  try {
-    update = await req.json();
-  } catch {
-    return json({ ok: false }, { status: 400 });
-  }
+  try { update = await req.json(); } catch { return json({ ok: false }, { status: 400 }); }
 
   const msg =
     update.message ||
@@ -369,21 +448,23 @@ export async function handleTelegramWebhook(req, env) {
   const userId = msg.from?.id;
   const isAdmin = ADMIN(env, userId);
 
+  // resolve language (from KV -> TG -> detect by text), update if user speaks another
+  const lang = await getUserLang(env, userId, msg.from?.language_code, text);
+
   const safe = async (fn) => {
-    try { await fn(); } catch (e) { await sendMessage(env, chatId, `❌ Помилка: ${String(e)}`); }
+    try { await fn(); } catch (e) { await sendMessage(env, chatId, tr(lang, "generic_error", String(e))); }
   };
 
   // /start
   if (text === "/start") {
     await safe(async () => {
       await setDriveMode(env, userId, false);
-      await sendMessage(env, chatId, "Привіт! Я Senti 🤖", { reply_markup: mainKeyboard(isAdmin) });
-      // нульовий запис діалогу не створюємо — з’явиться після першого повідомлення
+      await sendMessage(env, chatId, tr(lang, "hello"), { reply_markup: mainKeyboard(isAdmin) });
     });
     return json({ ok: true });
   }
 
-  // /diag — коротка діагностика (тільки для адміна)
+  // /diag — only admin (left in Ukrainian for you)
   if (text === "/diag" && isAdmin) {
     await safe(async () => {
       const hasGemini   = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
@@ -402,7 +483,6 @@ export async function handleTelegramWebhook(req, env) {
         `FreeLLM (BASE_URL + KEY): ${hasFreeBase && hasFreeKey ? "✅" : "❌"}`,
       ];
 
-      // Health summary (EWMA, fail streak, cooldown)
       const entries = mo ? mo.split(",").map(s => s.trim()).filter(Boolean) : [];
       if (entries.length) {
         const health = await getAiHealthSummary(env, entries);
@@ -413,194 +493,126 @@ export async function handleTelegramWebhook(req, env) {
           lines.push(`${light} ${h.provider}:${h.model} — ewma ${ms}, fails ${h.failStreak || 0}`);
         }
       }
-
       await sendMessage(env, chatId, lines.join("\n"));
     });
     return json({ ok: true });
   }
 
-  // /mem — керування пам’яттю (без витрат енергії)
-  const memCmd = parseMemCommand(textRaw);
-  if (memCmd) {
-    await safe(async () => {
-      if (memCmd.cmd === "show") {
-        const arr = await readDialog(env, userId);
-        if (!arr.length) {
-          await sendMessage(env, chatId, "🧠 Пам’ять порожня.");
-          return;
-        }
-        const last = arr.slice(-memCmd.n);
-        const lines = ["🧠 Останні записи:"];
-        for (const it of last) {
-          const who = it.r === "user" ? "Користувач" : "Senti";
-          lines.push(`${who}: ${it.c}`);
-        }
-        await sendMessage(env, chatId, lines.join("\n"));
-        return;
-      }
-      if (memCmd.cmd === "reset") {
-        await writeDialog(env, userId, []);
-        await sendMessage(env, chatId, "🧽 Пам’ять чату очищено.");
-        return;
-      }
-      await sendMessage(
-        env,
-        chatId,
-        "Команди /mem:\n• /mem show [N] — показати останні N (дефолт 10)\n• /mem reset — очистити пам’ять"
-      );
-    });
-    return json({ ok: true });
-  }
-
-  // /ai (надійний парсинг: /ai, /ai@Bot, з/без аргументів)
+  // /ai
   const aiArg = parseAiCommand(textRaw);
   if (aiArg !== null) {
     await safe(async () => {
       const q = aiArg || "";
       if (!q) {
-        await sendMessage(
-          env,
-          chatId,
-          "✍️ Надішли запит після команди /ai. Приклад:\n/ai Скільки буде 2+2?",
-          { parse_mode: undefined }
-        );
+        await sendMessage(env, chatId, tr(lang, "ai_usage"));
         return;
       }
 
-      // енергія для тексту
       const { costText, low } = energyCfg(env);
       const spent = await spendEnergy(env, userId, costText);
       if (!spent.ok) {
         const links = energyLinks(env, userId);
-        await sendMessage(
-          env,
-          chatId,
-          `🔋 Не вистачає енергії (потрібно ${costText}).\n` +
-          `Вона відновлюється автоматично.\n` +
-          `Керування:\n• Energy: ${links.energy}\n• Checklist: ${links.checklist}`
-        );
+        await sendMessage(env, chatId, tr(lang, "energy_not_enough", costText, links));
         return;
       }
 
-      // ⬇️ Self-Tune + Статут + Контекст діалогу як системний хінт
-      const systemHint = await buildSystemHint(env, chatId, userId);
+      const systemHint = await buildSystemHint(env, chatId, userId, lang);
       const modelOrder = String(env.MODEL_ORDER || "").trim();
       let reply = "";
       try {
         if (modelOrder) {
-          const merged = `${systemHint}\n\nКористувач: ${q}`;
+          const merged = `${systemHint}\n\nUser: ${q}`;
           reply = await askAnyModel(env, merged, { temperature: 0.6, max_tokens: 800 });
         } else {
           reply = await think(env, q, systemHint);
         }
       } catch (e) {
-        reply = `🧠 Помилка AI: ${String(e?.message || e)}`;
+        reply = `🧠 AI error: ${String(e?.message || e)}`;
       }
 
       if (isBlank(reply)) reply = defaultAiReply();
 
-      // Зберігаємо діалог
       await pushDialog(env, userId, "user", q);
       await pushDialog(env, userId, "assistant", reply);
 
-      // low-mode підказка
       if (spent.cur <= low) {
         const links = energyLinks(env, userId);
-        reply += `\n\n⚠️ Низький рівень енергії (${spent.cur}). Відновиться автоматично. Керування: ${links.energy}`;
+        reply += `\n\n${tr(lang, "energy_low_hint", spent.cur, links.energy)}`;
       }
-      await sendMessage(env, chatId, reply, { parse_mode: undefined });
+      await sendMessage(env, chatId, reply);
     });
     return json({ ok: true });
   }
 
-  // Кнопка Google Drive
+  // Google Drive
   if (text === BTN_DRIVE) {
     await safe(async () => {
       const ut = await getUserTokens(env, userId);
       if (!ut?.refresh_token) {
         const authUrl = abs(env, `/auth/start?u=${userId}`);
-        await sendMessage(
-          env,
-          chatId,
-          `Дай доступ до свого Google Drive:\n${authUrl}\n\nПісля дозволу повернись у чат і ще раз натисни «${BTN_DRIVE}».`
-        );
+        await sendMessage(env, chatId, tr(lang, "drive_auth", authUrl));
         return;
       }
       await setDriveMode(env, userId, true);
-      await sendMessage(env, chatId, "📁 Режим диска: ON\nНадсилай фото/відео/документи — збережу на твій Google Drive.", {
-        reply_markup: mainKeyboard(isAdmin),
-      });
-      await sendMessage(env, chatId, "Переглянути вміст диска:", { reply_markup: inlineOpenDrive() });
+      await sendMessage(env, chatId, tr(lang, "drive_on"), { reply_markup: mainKeyboard(isAdmin) });
+      await sendMessage(env, chatId, "Open your Drive:", { reply_markup: inlineOpenDrive() });
     });
     return json({ ok: true });
   }
 
-  // Кнопка Senti (вимкнути режим диска)
+  // Senti (drive off)
   if (text === BTN_SENTI) {
     await safe(async () => {
       await setDriveMode(env, userId, false);
-      await sendMessage(env, chatId, "Режим диска вимкнено. Це звичайний чат Senti.", {
-        reply_markup: mainKeyboard(isAdmin),
-      });
+      await sendMessage(env, chatId, tr(lang, "drive_off"), { reply_markup: mainKeyboard(isAdmin) });
     });
     return json({ ok: true });
   }
 
-  // Декілька базових адмін-дій прямо з чату (посилання на HTML-панелі)
+  // Admin links
   if (text === BTN_CHECK && isAdmin) {
     await safe(async () => {
       const link = abs(env, `/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET || "")}`);
-      await sendMessage(env, chatId, `📋 Чеклист (HTML):\n${link}`);
+      await sendMessage(env, chatId, tr(lang, "checklist_link", link));
     });
     return json({ ok: true });
   }
-
   if ((text === "Admin" || text === "/admin") && isAdmin) {
     await safe(async () => {
       const cl = abs(env, `/admin/checklist/html?s=${encodeURIComponent(env.WEBHOOK_SECRET || "")}`);
       const repo = abs(env, `/admin/repo/html?s=${encodeURIComponent(env.WEBHOOK_SECRET || "")}`);
-      await sendMessage(
-        env,
-        chatId,
-        `🛠 Адмін-меню\n\n• Чеклист: ${cl}\n• Repo: ${repo}\n• Вебхук GET: ${abs(env, "/webhook")}`
-      );
+      await sendMessage(env, chatId, tr(lang, "admin_menu", cl, repo, abs(env, "/webhook")));
     });
     return json({ ok: true });
   }
 
-  // Якщо увімкнено режим диска — перехоплюємо та зберігаємо медіа (зі списанням енергії)
+  // Drive mode media
   try {
     if (await getDriveMode(env, userId)) {
-      if (await handleIncomingMedia(env, chatId, userId, msg)) return json({ ok: true });
+      if (await handleIncomingMedia(env, chatId, userId, msg, lang)) return json({ ok: true });
     }
   } catch (e) {
-    await sendMessage(env, chatId, `❌ Не вдалось зберегти вкладення: ${String(e)}`);
+    await sendMessage(env, chatId, tr(lang, "generic_error", String(e)));
     return json({ ok: true });
   }
 
-  // Якщо це не команда і не медіа — відповідаємо AI з підвантаженням Статуту + Self-Tune + Діалогу
+  // Regular text -> AI (with language + casual style)
   if (text && !text.startsWith("/")) {
     try {
-      // списання енергії для звичайного тексту
       const { costText, low } = energyCfg(env);
       const spent = await spendEnergy(env, userId, costText);
       if (!spent.ok) {
         const links = energyLinks(env, userId);
-        await sendMessage(
-          env,
-          chatId,
-          `🔋 Не вистачає енергії (потрібно ${costText}). Відновлення авто.\n` +
-          `Energy: ${links.energy}`
-        );
+        await sendMessage(env, chatId, tr(lang, "energy_not_enough", costText, links));
         return json({ ok: true });
       }
 
-      const systemHint = await buildSystemHint(env, chatId, userId);
+      const systemHint = await buildSystemHint(env, chatId, userId, lang);
       const modelOrder = String(env.MODEL_ORDER || "").trim();
       let out = "";
 
       if (modelOrder) {
-        const merged = `${systemHint}\n\nКористувач: ${text}`;
+        const merged = `${systemHint}\n\nUser: ${text}`;
         out = await askAnyModel(env, merged, { temperature: 0.6, max_tokens: 800 });
       } else {
         out = await think(env, text, systemHint);
@@ -608,23 +620,22 @@ export async function handleTelegramWebhook(req, env) {
 
       if (isBlank(out)) out = defaultAiReply();
 
-      // Зберігаємо діалог
       await pushDialog(env, userId, "user", text);
       await pushDialog(env, userId, "assistant", out);
 
       if (spent.cur <= low) {
         const links = energyLinks(env, userId);
-        out += `\n\n⚠️ Низький рівень енергії (${spent.cur}). Керування: ${links.energy}`;
+        out += `\n\n${tr(lang, "energy_low_hint", spent.cur, links.energy)}`;
       }
-      await sendMessage(env, chatId, out, { parse_mode: undefined });
+      await sendMessage(env, chatId, out);
       return json({ ok: true });
     } catch (e) {
-      await sendMessage(env, chatId, defaultAiReply(), { parse_mode: undefined });
+      await sendMessage(env, chatId, defaultAiReply());
       return json({ ok: true });
     }
   }
 
-  // дефолт
-  await sendMessage(env, chatId, "Чіназес 👋", { reply_markup: mainKeyboard(isAdmin) });
+  // default
+  await sendMessage(env, chatId, tr(lang, "hello"), { reply_markup: mainKeyboard(isAdmin) });
   return json({ ok: true });
 }
