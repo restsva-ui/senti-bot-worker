@@ -20,3 +20,9 @@ export async function getHolidays(country = "UA", year = new Date().getFullYear(
     return [];
   }
 }
+
+export function formatHolidays(items = [], country = "UA", year = new Date().getFullYear()) {
+  const head = `🎉 <b>Державні свята ${country} у ${year}</b>`;
+  const body = items.slice(0, 10).map(h => `• ${h.date} — ${h.name}`).join("\n");
+  return items.length ? `${head}\n${body}` : "Не вдалося отримати свята 😕";
+}
