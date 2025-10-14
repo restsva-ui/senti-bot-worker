@@ -5,12 +5,20 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
+concurrency:
+  group: deploy-worker-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
+
+    env:
+      # Для npx/wrangler і curl логів
+      NODE_OPTIONS: --max-old-space-size=1536
 
     steps:
       - name: 🛠️ Checkout repository
@@ -20,31 +28,61 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
 
-      - name: ⚙️ Install Wrangler
-        run: npm install -g wrangler@3
+      - name: 📦 Install deps (local wrangler)
+        run: npm i --no-audit --no-fund
+
+      - name: 🔎 Wrangler version
+        run: npx wrangler --version
 
       - name: 🚀 Deploy to Cloudflare
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: wrangler deploy
+        run: npx wrangler deploy
 
-      # ⬇️ автолог у чеклист після деплою
+      - name: 🩺 Health check
+        if: always()
+        env:
+          WORKER_HOST: ${{ secrets.WORKER_HOST }} # напр. senti-bot-worker.restsva.workers.dev
+        run: |
+          if [ -n "$WORKER_HOST" ]; then
+            curl -sS "https://${WORKER_HOST}/health" || true
+          else
+            echo "WORKER_HOST secret not set — skipping health check."
+          fi
+
+      - name: 🤖 Set Telegram webhook (optional)
+        if: success()
+        env:
+          WORKER_HOST: ${{ secrets.WORKER_HOST }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }} # має збігатися з TG_WEBHOOK_SECRET у Worker
+        run: |
+          if [ -n "$WORKER_HOST" ] && [ -n "$WEBHOOK_SECRET" ]; then
+            curl -sS "https://${WORKER_HOST}/tg/set-webhook?s=${WEBHOOK_SECRET}" || true
+          else
+            echo "WORKER_HOST/WEBHOOK_SECRET not set — skipping set-webhook."
+          fi
+
       - name: ✍️ Note deploy to Checklist
         if: always()
         env:
-          WORKER_HOST: ${{ secrets.WORKER_HOST }}          # напр. senti-bot-worker.restsva.workers.dev
-          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}    # має збігатися з env.WEBHOOK_SECRET у Worker
+          WORKER_HOST: ${{ secrets.WORKER_HOST }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           COMMIT_SHA: ${{ github.sha }}
           ACTOR: ${{ github.actor }}
           RUN_ID: ${{ github.run_id }}
           STATUS: ${{ job.status }}
         run: |
-          curl -sS --get "https://${WORKER_HOST}/ci/deploy-note" \
-            --data-urlencode "s=${WEBHOOK_SECRET}" \
-            --data-urlencode "commit=${COMMIT_SHA}" \
-            --data-urlencode "actor=${ACTOR}" \
-            --data-urlencode "deploy=${RUN_ID}" \
-            --data-urlencode "status=${STATUS}" \
-            --data-urlencode "from=github-actions" || true
+          if [ -n "$WORKER_HOST" ] && [ -n "$WEBHOOK_SECRET" ]; then
+            curl -sS --get "https://${WORKER_HOST}/ci/deploy-note" \
+              --data-urlencode "s=${WEBHOOK_SECRET}" \
+              --data-urlencode "commit=${COMMIT_SHA}" \
+              --data-urlencode "actor=${ACTOR}" \
+              --data-urlencode "deploy=${RUN_ID}" \
+              --data-urlencode "status=${STATUS}" \
+              --data-urlencode "from=github-actions" || true
+          else
+            echo "WORKER_HOST/WEBHOOK_SECRET not set — skipping deploy-note."
+          fi
