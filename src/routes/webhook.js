@@ -124,4 +124,75 @@ export async function handleTelegramWebhook(request, env, url) {
     }
 
     // Адмін: "чеклист" → лінк на UI
-    if (/^чеклист$/i.test(text
+    if (/^чеклист$/i.test(text) && isAdmin(env, from)) {
+      const link = abs(env, "/admin/checklist/with-energy");
+      await sendMessage(env, chatId, `Відкрити чеклист:\n${link}`, {
+        reply_markup: adminKeyboard(),
+      });
+      return ok();
+    }
+
+    // Адмін: "поставити вебхук" → виклик /tg/set-webhook
+    if (/^поставити\s+вебхук$/i.test(text) && isAdmin(env, from)) {
+      const setUrl = abs(env, "/tg/set-webhook");
+      const r = await fetch(setUrl);
+      let msg = "Вебхук оновлено.";
+      try {
+        const d = await r.text();
+        msg = d?.length < 200 ? d : "Webhook set (response too long)";
+      } catch {}
+      await sendMessage(env, chatId, msg, { reply_markup: adminKeyboard() });
+      return ok();
+    }
+
+    // Адмін: "запустити нічного агента" → /cron/auto-improve?s=<secret>
+    if (/^запустити\s+нічного\s+агента$/i.test(text) && isAdmin(env, from)) {
+      let runUrl = new URL(abs(env, "/cron/auto-improve"));
+      if (env.WEBHOOK_SECRET) runUrl.searchParams.set("s", env.WEBHOOK_SECRET);
+      const r = await fetch(runUrl.toString());
+      let msg = "Нічного агента запущено.";
+      try {
+        const d = await r.json();
+        msg = `Auto-improve: ${d?.ok ? "OK" : "FAIL"}`
+          + (d?.insights ? `, insights: ${d.insights.length}` : "");
+      } catch {}
+      await sendMessage(env, chatId, msg, { reply_markup: adminKeyboard() });
+      return ok();
+    }
+
+    // Пінг
+    if (text.toLowerCase().includes("ping")) {
+      await sendMessage(env, chatId, "pong ✅", { reply_markup: defaultKeyboard() });
+      return ok();
+    }
+
+    // Інше — просто ехо + клавіатура
+    await sendMessage(env, chatId, `Ти написав: ${text}`, {
+      reply_markup: defaultKeyboard(),
+    });
+
+    // Тихий лог у приват адміна
+    if (env.TELEGRAM_ADMIN_ID) {
+      await sendMessage(env, env.TELEGRAM_ADMIN_ID, `[update] ${chatId}: ${text}`);
+    }
+
+    return ok();
+
+    function ok() {
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  } catch (e) {
+    // тихе повідомлення адміна і завжди 200
+    try {
+      if (env.TELEGRAM_ADMIN_ID) {
+        await sendMessage(env, env.TELEGRAM_ADMIN_ID, `[webhook error] ${String(e?.message || e)}`);
+      }
+    } catch {}
+    return new Response(JSON.stringify({ ok: false, error: String(e?.message || e) }), {
+      headers: { "Content-Type": "application/json" },
+      status: 200,
+    });
+  }
+}
