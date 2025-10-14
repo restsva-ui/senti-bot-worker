@@ -1,33 +1,19 @@
 // src/lib/apis/rates.js
-// USD→UAH via NBU with exchangerate.host fallback.
 
-async function nbuRate() {
-  const url = "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json";
-  const res = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 60 * 30 } });
-  if (!res.ok) throw new Error(`NBU HTTP ${res.status}`);
-  const data = await res.json();
-  const usd = Array.isArray(data) ? data.find(x => x?.cc === "USD") : null;
-  if (!usd?.rate) throw new Error("NBU: USD not found");
-  return Number(usd.rate);
-}
-
-async function erHost(base = "USD", symbol = "UAH") {
-  const url = `https://api.exchangerate.host/latest?base=${encodeURIComponent(base)}&symbols=${encodeURIComponent(symbol)}`;
-  const res = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 60 * 30 } });
-  if (!res.ok) throw new Error(`ERHost HTTP ${res.status}`);
-  const data = await res.json();
-  const v = data?.rates?.[symbol];
-  if (typeof v !== "number") throw new Error("ERHost: no rate");
-  return Number(v);
-}
+function arrow(url) { return ` <a href="${url}">↗︎</a>`; }
 
 export async function getUsdUahRate() {
-  try {
-    return await nbuRate();
-  } catch (e) {
-    console.warn("[rates] NBU failed, fallback ERHost:", e.message);
-    return await erHost("USD", "UAH");
-  }
+  // Офіційний курс НБУ
+  const res = await fetch("https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode=USD&json", {
+    cf: { cacheEverything: true, cacheTtl: 300 }
+  });
+  if (!res.ok) throw new Error(`nbu HTTP ${res.status}`);
+  const data = await res.json();
+  const v = Number(data?.[0]?.rate);
+  if (!Number.isFinite(v)) throw new Error("nbu: no rate");
+  return { rate: v, source: "НБУ", url: "https://bank.gov.ua/ua/markets/exchangerates" };
 }
-export const formatRate = (r) => `💸 <b>USD → UAH:</b> ${Number(r||0).toFixed(2)}₴`;
-export const formatUsdRate = formatRate;
+
+export function formatUsdRate(r) {
+  return `💸 Курс USD → UAH: <b>${r.rate.toFixed(2)}₴</b>${arrow(r.url)}`;
+}
