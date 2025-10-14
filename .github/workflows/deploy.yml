@@ -59,3 +59,4 @@ jobs:
             --data-urlencode "deploy=${RUN_ID}" \
             --data-urlencode "status=${STATUS}" \
             --data-urlencode "from=github-actions" || true
+
