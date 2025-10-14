@@ -19,12 +19,12 @@ import { getEnergy, spendEnergy } from "../lib/energy.js";
 import { detectIntent } from "../lib/nlu.js";
 import { runIntent } from "../lib/intentRouter.js";
 
-// --- прямі імпорти API-модулів для швидких викликів (шляхи виправлені) ---
-import { weatherByCity, formatWeather } from "../lib/apis/weather.js";
+// --- прямі імпорти API-модулів для швидких викликів (залишаємо лише робочі експорти) ---
+import { weatherByCity } from "../lib/apis/weather.js";
 import { getUsdUahRate } from "../lib/apis/rates.js";
-import { fetchTopNews, formatNewsList } from "../lib/apis/news.js";
+import { fetchTopNews } from "../lib/apis/news.js";
 import { getHolidays } from "../lib/apis/holidays.js";
-import { wikiSummary, formatWiki } from "../lib/apis/wiki.js";
+import { wikiSummary } from "../lib/apis/wiki.js";
 
 // ───────────── helpers ─────────────
 const json = (data, init = {}) =>
@@ -35,6 +35,7 @@ const json = (data, init = {}) =>
 
 // Автовизначення чи є в тексті Markdown-лінки [title](https://...)
 const hasMdLinks = (s = "") => /\[[^\]]+\]\(https?:\/\/[^)]+\)/.test(String(s));
+
 // Проста евристика: чи є HTML-теги (щоби автоматично перейти на parse_mode: HTML)
 const looksLikeHtml = (s = "") => /<\/?[a-z][\s>]/i.test(String(s));
 
@@ -442,75 +443,17 @@ export async function handleTelegramWebhook(req, env) {
 
   // ── INTENT-FIRST: маршрутизація в зовнішні API без слеш-команд ──
   if (text && !text.startsWith("/")) {
-    // ШВИДКІ ПРЯМІ ВІДПОВІДІ (HTML) + клікабельне джерело ↗︎
-    const lower = text.toLowerCase();
-
-    // Погода
-    if (/(^|[\s,])погода\b|(^|[\s,])weather\b/.test(lower)) {
-      try {
-        const city = text.replace(/(^|[\s,])(погода|weather)\b/gi, "").trim() || "Київ";
-        const w = await weatherByCity(city);
-        const src = w?.provider === "wttr.in" ? "https://wttr.in/" : "https://open-meteo.com/";
-        const html = `${formatWeather(w)}\n\n<a href="${src}">↗︎</a>`;
-        await sendHtml(env, chatId, html);
-        return json({ ok: true, intent: "weather" });
-      } catch {}
-    }
-
-    // Курс USD→UAH
-    if (/(курс|долар|usd|exchange)/i.test(text)) {
-      try {
-        const rate = await getUsdUahRate();
-        const html = `💵 Курс USD → UAH: <b>${rate.toFixed(2)}₴</b>\n<i>джерело:</i> <a href="https://bank.gov.ua/">НБУ</a> / <a href="https://exchangerate.host/">exchangerate.host</a> ↗︎`;
-        await sendHtml(env, chatId, html);
-        return json({ ok: true, intent: "rate" });
-      } catch {}
-    }
-
-    // Новини
-    if (/новин|новини|news/i.test(text)) {
-      try {
-        const items = await fetchTopNews(env);
-        const src = (env.NEWS_API_KEY || env.NEWSDATA_API_KEY) ? "https://newsdata.io/" : "https://www.pravda.com.ua/";
-        const html = `${formatNewsList(items)}\n\n<a href="${src}">↗︎</a>`;
-        await sendHtml(env, chatId, html);
-        return json({ ok: true, intent: "news" });
-      } catch {}
-    }
-
-    // Свята
-    if (/свят|свята|holidays/i.test(text)) {
-      try {
-        const yearMatch = text.match(/20\d{2}/);
-        const year = yearMatch ? Number(yearMatch[0]) : new Date().getFullYear();
-        const country = /україн|ukrain|ua/i.test(text) ? "UA" : "UA";
-        const items = await getHolidays(country, year);
-        const head = `🎉 <b>Державні свята ${country} у ${year}</b>`;
-        const body = items.slice(0, 10).map(h => `• ${h.date} — ${h.name}`).join("\n");
-        const html = (items.length ? `${head}\n${body}` : "Не вдалося отримати свята 😕") + `\n\n<a href="https://date.nager.at/">↗︎</a>`;
-        await sendHtml(env, chatId, html);
-        return json({ ok: true, intent: "holidays" });
-      } catch {}
-    }
-
-    // Вікі
-    if (/хто такий|хто така|що таке|wiki|вікі/i.test(lower)) {
-      try {
-        const q = text.replace(/хто такий|хто така|що таке|wiki|вікі/gi, "").trim() || text;
-        const w = await wikiSummary(q, "uk");
-        const html = `${formatWiki(w)}\n\n<a href="${w?.url || "https://uk.wikipedia.org/"}">↗︎</a>`;
-        await sendHtml(env, chatId, html);
-        return json({ ok: true, intent: "wiki" });
-      } catch {}
-    }
-
-    // Якщо жоден із швидких шляхів не спрацював — пробуємо ваш існуючий router
     const intent = detectIntent(text, lang);
     if (intent.type !== "none") {
       try {
-        const reply = await runIntent(intent);
-        if (reply && reply.trim()) {
-          await sendMessage(env, chatId, reply);
+        // новий runIntent повертає { text, mode }
+        const out = await runIntent(intent, env);
+        if (out && out.text) {
+          const extra =
+            out.mode === "HTML"
+              ? { parse_mode: "HTML", disable_web_page_preview: true }
+              : {};
+          await sendMessage(env, chatId, out.text, extra);
           return json({ ok: true, intent: intent.type });
         }
       } catch {
