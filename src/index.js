@@ -28,7 +28,7 @@ import { handleAiTrain } from "./routes/aiTrain.js";
 import { handleAiEvolve } from "./routes/aiEvolve.js";
 import { handleBrainPromote } from "./routes/brainPromote.js";
 import { handleAdminEnergy } from "./routes/adminEnergy.js"; // energy UI/API
-import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js"; // ← ДОДАНО
+import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
 
 // ✅ локальний selftest
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
@@ -52,7 +52,8 @@ import { runSelfRegulation } from "./lib/selfRegulate.js";
 // ✅ HTTP-роутер нічного агента + debug (/ai/improve*, /debug/*)
 import { handleAiImprove } from "./routes/aiImprove.js";
 
-const VERSION = "senti-worker-2025-10-12-00-59+aiimprove-router";
+// ⬇️ ОНОВЛЕНО: версія
+const VERSION = "senti-worker-2025-10-15-01-20+webhook-safe-mode";
 
 export default {
   async fetch(req, env) {
@@ -201,8 +202,8 @@ export default {
       }
 
       // --- ADMIN ---
-      // 1) Комбінована сторінка: Checklist + Energy (ifrаme)
-      if (p.startsWith("/admin/checklist/with-energy")) { // ← ДОДАНО
+      // 1) Комбінована сторінка: Checklist + Energy (iframe)
+      if (p.startsWith("/admin/checklist/with-energy")) {
         try {
           const r = await handleAdminChecklistWithEnergy?.(req, env, url);
           if (r && r.status !== 404) return r;
@@ -241,7 +242,7 @@ export default {
       if (p.startsWith("/admin/brain")) {
         try {
           const r = await handleAdminBrain?.(req, env, url);
-          if (r && r.status !== 404) return r; // ← виправлено (було кириличне 'р')
+          if (r && r.status !== 404) return r;
         } catch {}
         return json({ ok: true, note: "admin brain fallback" }, 200, CORS);
       }
@@ -255,16 +256,65 @@ export default {
         return json({ ok: true, note: "admin energy fallback" }, 200, CORS);
       }
 
-      // webhook POST
+      /** ******************************************************************
+       *  TELEGRAM WEBHOOK (POST)
+       *
+       *  ⬇️ ВАЖЛИВО: додано "safe-mode" обробник /start та м’який чек секрету.
+       ******************************************************************* */
       if (p === "/webhook" && req.method === "POST") {
         try {
+          // 1) Перевірка секрету: приймаємо TG_WEBHOOK_SECRET або WEBHOOK_SECRET
           const sec = req.headers.get("x-telegram-bot-api-secret-token");
-          if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
-            return json({ ok: false, error: "unauthorized" }, 401, CORS);
+          const needSec = (env.TG_WEBHOOK_SECRET || env.WEBHOOK_SECRET || "").trim();
+          if (needSec) {
+            if (!sec || sec !== needSec) {
+              // лог у чекліст для дебагу (без розкриття секрету)
+              await appendChecklist(env, `[miss] ${new Date().toISOString()} webhook: bad secret`);
+              return json({ ok: false, error: "unauthorized" }, 401, CORS);
+            }
           }
+
+          // 2) SAFE-MODE: спробуємо швидко обробити /start, навіть якщо основний хендлер зламається
+          let body = null;
+          try {
+            // clone(), щоб дати основному хендлеру ще раз прочитати body
+            body = await req.clone().json();
+          } catch {
+            body = null;
+          }
+
+          if (body?.message?.text) {
+            const chatId = body.message.chat?.id;
+            const text = body.message.text;
+
+            // універсальний матч /start (дозволяє параметри)
+            if (chatId && /^\/start\b/i.test(text || "")) {
+              try {
+                // TG.sendMessage якщо є, інакше прямий fetch
+                if (TG?.sendMessage) {
+                  await TG.sendMessage(env.BOT_TOKEN, chatId, "Привіт! Я на звʼязку 👋");
+                } else {
+                  await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ chat_id: chatId, text: "Привіт! Я на звʼязку 👋" }),
+                  });
+                }
+                await appendChecklist(env, `[direct] ${new Date().toISOString()} handled /start`);
+                return json({ ok: true, note: "start handled (safe-mode)" }, 200, CORS);
+              } catch (e) {
+                await appendChecklist(env, `[error] start safe-mode: ${String(e)}`);
+              }
+            }
+          }
+
+          // 3) Основний хендлер (твій routes/webhook.js)
           const r = await handleTelegramWebhook?.(req, env, url);
           if (r) return r;
-        } catch {}
+        } catch (e) {
+          await appendChecklist(env, `[error] webhook outer: ${String(e)}`);
+        }
+        // 4) Фолбек, якщо нічого не відповіло
         return json({ ok: true, note: "fallback webhook POST" }, 200, CORS);
       }
 
@@ -277,7 +327,7 @@ export default {
       }
       if (p === "/tg/set-webhook") {
         const target = abs(env, "/webhook");
-        const r = await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
+        const r = await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET || env.WEBHOOK_SECRET);
         return new Response(await r.text(), {
           headers: { "content-type": "application/json" },
         });
