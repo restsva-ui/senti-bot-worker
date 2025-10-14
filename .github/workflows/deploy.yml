@@ -5,11 +5,15 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
+# щоб старі запуски не валилися "operation was canceled"
+concurrency:
+  group: deploy-worker-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
     permissions:
       contents: read
 
@@ -28,21 +32,23 @@ jobs:
       - name: 🔎 Wrangler version
         run: wrangler --version
 
-      - name: 🚀 Deploy to Cloudflare (makes job green/red)
+      # ⬇️ ЦЕЙ крок робить job зеленим/червоним
+      - name: 🚀 Deploy to Cloudflare
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        # Якщо цей крок проходить — workflow ЗЕЛЕНИЙ; якщо ні — ЧЕРВОНИЙ.
-        run: wrangler deploy --package-manager npm
+        run: wrangler deploy
 
+      # необов’язково, не ламає job
       - name: 🩺 Health check (non-blocking)
         if: always()
         env:
-          WORKER_HOST: ${{ secrets.WORKER_HOST }} # напр. senti-bot-worker.restsva.workers.dev
+          WORKER_HOST: ${{ secrets.WORKER_HOST }}
         run: |
           curl -sS --fail --max-time 10 "https://${WORKER_HOST}/health" || true
 
-      - name: ✍️ Note deploy to Checklist (safe, non-blocking)
+      # лог у чеклист — теж не ламає job
+      - name: ✍️ Note deploy to Checklist (non-blocking)
         if: always()
         env:
           WORKER_HOST: ${{ secrets.WORKER_HOST }}
