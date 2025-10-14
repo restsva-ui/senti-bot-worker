@@ -1,4 +1,4 @@
-// Telegram webhook handler (safe + logging) + reply-keyboards
+// Telegram webhook handler (safe + logging) + reply/inline keyboards
 
 import { sendMessage } from "../lib/telegram.js";
 import { abs } from "../utils/url.js";
@@ -65,6 +65,12 @@ export async function handleTelegramWebhook(request, env) {
     const from = message.from || {};
     const text = (message.text || "").trim();
 
+    // helper
+    const ok = () =>
+      new Response(JSON.stringify({ ok: true }), {
+        headers: { "Content-Type": "application/json" },
+      });
+
     // --- ROUTER ---
 
     // /start → вітання + дефолтні кнопки
@@ -78,24 +84,33 @@ export async function handleTelegramWebhook(request, env) {
       return ok();
     }
 
-    // Кнопка "Гугл драйв" → посилання на OAuth
+    // Кнопка "Гугл драйв" → inline-кнопка з URL (стабільне відкриття у клієнті)
     if (/^гугл\s*драйв$/i.test(text)) {
       const authUrl = new URL(abs(env, "/auth/start"));
       authUrl.searchParams.set("u", String(chatId));
       await sendMessage(
         env,
         chatId,
-        `Щоб під’єднати Google Drive, відкрий посилання:\n${authUrl.toString()}`,
-        { reply_markup: defaultKeyboard() }
+        `Щоб під’єднати Google Drive, натисни кнопку нижче 👇`,
+        {
+          reply_markup: {
+            inline_keyboard: [[{ text: "Авторизувати Google Drive", url: authUrl.toString() }]],
+          },
+        }
       );
       return ok();
     }
 
-    // Кнопка "Senti"
+    // Кнопка "Senti" — просте підтвердження (LLM окремо)
     if (/^senti$/i.test(text)) {
-      await sendMessage(env, chatId, "Senti тут. Чим допомогти? 🙂", {
-        reply_markup: defaultKeyboard(),
-      });
+      // Додаткова діагностика: лінк-пінг для LLM (відкривається у браузері)
+      const pingUrl = abs(env, "/ai/improve/ping");
+      await sendMessage(
+        env,
+        chatId,
+        `Senti тут. Для перевірки AI відкрий тестовий пінг:\n${pingUrl}`,
+        { reply_markup: defaultKeyboard() }
+      );
       return ok();
     }
 
@@ -107,9 +122,30 @@ export async function handleTelegramWebhook(request, env) {
         });
         return ok();
       }
-      await sendMessage(env, chatId, "Адмін-панель:", {
-        reply_markup: adminKeyboard(),
-      });
+      const getWebhook = abs(env, "/tg/get-webhook");
+      const pingLLM = abs(env, "/ai/improve/ping");
+      await sendMessage(
+        env,
+        chatId,
+        "Адмін-панель:",
+        {
+          reply_markup: adminKeyboard(),
+        }
+      );
+      // Додатково: інлайн посилання для діагностики
+      await sendMessage(
+        env,
+        chatId,
+        "Швидкі посилання для діагностики:",
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "Перевірити webhook", url: getWebhook }],
+              [{ text: "AI ping", url: pingLLM }],
+            ],
+          },
+        }
+      );
       return ok();
     }
 
@@ -121,11 +157,18 @@ export async function handleTelegramWebhook(request, env) {
       return ok();
     }
 
-    // Адмін: "чеклист" → лінк на UI (додаємо ?s=WEBHOOK_SECRET якщо він заданий)
+    // Адмін: "чеклист" → лінк + inline-кнопка (додаємо ?s=WEBHOOK_SECRET якщо заданий)
     if (/^чеклист$/i.test(text) && isAdmin(env, from)) {
       const linkUrl = new URL(abs(env, "/admin/checklist/with-energy"));
       if (env.WEBHOOK_SECRET) linkUrl.searchParams.set("s", env.WEBHOOK_SECRET);
-      await sendMessage(env, chatId, `Відкрити чеклист:\n${linkUrl.toString()}`, {
+
+      await sendMessage(env, chatId, `Відкрити чеклист:`, {
+        reply_markup: {
+          inline_keyboard: [[{ text: "Checklist", url: linkUrl.toString() }]],
+        },
+      });
+
+      await sendMessage(env, chatId, linkUrl.toString(), {
         reply_markup: adminKeyboard(),
       });
       return ok();
@@ -179,12 +222,6 @@ export async function handleTelegramWebhook(request, env) {
     }
 
     return ok();
-
-    function ok() {
-      return new Response(JSON.stringify({ ok: true }), {
-        headers: { "Content-Type": "application/json" },
-      });
-    }
   } catch (e) {
     try {
       if (env.TELEGRAM_ADMIN_ID) {
