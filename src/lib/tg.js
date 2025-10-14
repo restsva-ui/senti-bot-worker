@@ -1,4 +1,7 @@
 // src/lib/tg.js
+// Helper для Telegram API з безпечним розбиттям довгих повідомлень.
+// За замовчуванням вимикаємо web-preview, parse_mode не нав'язуємо.
+
 export const TG = {
   async api(botToken, method, payload) {
     const url = `https://api.telegram.org/bot${botToken}/${method}`;
@@ -8,7 +11,7 @@ export const TG = {
       body: payload ? JSON.stringify(payload) : undefined,
     });
 
-    // Спробуємо розпарсити відповідь, навіть якщо статус не 200
+    // Парсимо відповідь навіть якщо не 200
     let data = {};
     try { data = await res.json(); } catch {}
 
@@ -21,9 +24,11 @@ export const TG = {
 
   /**
    * Надсилання тексту в чат.
-   * - За замовчуванням БЕЗ parse_mode (plain text) — безпечніше для довільного контенту.
+   * - За замовчуванням БЕЗ parse_mode (plain text).
    * - Якщо потрібно, передай opts.parse_mode ("MarkdownV2" або "HTML").
    * - Довгі повідомлення діляться на шматки ~3500 символів.
+   * - Прев’ю лінків вимкнено за замовчуванням.
+   * - Важливо: передавай opts.token (BOT_TOKEN) — API його використовує.
    */
   async text(chat_id, text, opts = {}) {
     const base = {
@@ -37,12 +42,14 @@ export const TG = {
     const MAX = 3500;
     const chunks = [];
     const s = String(text ?? "");
-    if (s.length <= MAX) chunks.push(s);
-    else {
+    if (s.length <= MAX) {
+      chunks.push(s);
+    } else {
       let buf = "";
       for (const line of s.split("\n")) {
-        if ((buf + line + "\n").length > MAX) {
-          chunks.push(buf);
+        const next = buf + line + "\n";
+        if (next.length > MAX) {
+          if (buf) chunks.push(buf);
           buf = "";
         }
         buf += line + "\n";
@@ -63,6 +70,7 @@ export const TG = {
   },
 
   getWebhook(token) {
+    // Повертаємо сирий fetch — вище нехай сам викликає .json() за потреби
     return fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`);
   },
 
