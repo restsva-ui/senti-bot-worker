@@ -19,7 +19,7 @@ import { getEnergy, spendEnergy } from "../lib/energy.js";
 import { detectIntent } from "../lib/nlu.js";
 import { runIntent } from "../lib/intentRouter.js";
 
-// --- прямі імпорти API-модулів для швидких викликів (залишаємо лише робочі експорти) ---
+// --- прямі імпорти API-модулів для швидких викликів ---
 import { weatherByCity } from "../lib/apis/weather.js";
 import { getUsdUahRate } from "../lib/apis/rates.js";
 import { fetchTopNews } from "../lib/apis/news.js";
@@ -59,6 +59,66 @@ async function sendMessage(env, chatId, text, extra = {}) {
 const sendHtml = (env, chatId, html, extra = {}) =>
   sendMessage(env, chatId, html, { parse_mode: "HTML", disable_web_page_preview: false, ...extra });
 
+// маленька стрілочка-посилання (вимога Шефа)
+const arrow = (url) => (url ? ` <a href="${url}">↗︎</a>` : "");
+
+// безпечне обрізання
+const clip = (s = "", n = 420) => {
+  const t = String(s);
+  return t.length > n ? t.slice(0, n - 1) + "…": t;
+};
+
+// форматери fast-path (мінімальні, без залежностей)
+function formatNews(items = []) {
+  const top = items.slice(0, 3);
+  if (!top.length) return "";
+  const body = top.map(i => `• <a href="${i.link}">${clip(i.title, 160)}</a>`).join("\n");
+  return body + arrow(top[0].link);
+}
+
+function formatRate(rate) {
+  const n = Number(rate || 0);
+  const s = n ? n.toFixed(2) : "—";
+  const url = "https://bank.gov.ua/ua/markets/exchangerates";
+  return `💵 USD/UAH: <b>${s} ₴</b>${arrow(url)}`;
+}
+
+function formatWeatherInline(w, lang = "uk") {
+  if (!w) return "";
+  const L = {
+    uk: { now: "зараз", feels: "відчувається", wind: "вітер", hum: "вологість" },
+    ru: { now: "сейчас", feels: "ощущается", wind: "ветер", hum: "влажн." },
+    en: { now: "now", feels: "feels", wind: "wind", hum: "humidity" },
+  }[lang] || { now: "now", feels: "feels", wind: "wind", hum: "humidity" };
+
+  const srcUrl = w.provider === "wttr.in" ? "https://wttr.in/" : "https://open-meteo.com/";
+  const desc = w.desc ? `• ${w.desc}\n` : "";
+  return (
+    `🌤️ <b>${w.city}</b> — ${L.now}\n` +
+    desc +
+    `• ${w.tempC}°C (${L.feels} ${w.feelsLikeC}°C)\n` +
+    `• ${L.wind}: ${w.windKph} km/h\n` +
+    `• ${L.hum}: ${w.humidity}%\n` +
+    arrow(srcUrl)
+  );
+}
+
+function formatWiki(w) {
+  if (!w) return "";
+  // Підтримуємо і string, і {title, extract, url}
+  if (typeof w === "string") return clip(w, 500);
+  const t = w.title ? `<b>${clip(w.title, 120)}</b>\n` : "";
+  const u = w.url || w.link || "";
+  const ex = clip(w.extract || w.summary || w.text || "", 500);
+  return `${t}${ex}${arrow(u)}`;
+}
+
+function formatHolidays(list = []) {
+  const top = list.slice(0, 8).map(x => `* <b>${x.name}</b> — ${x.date}`);
+  return top.join("\n");
+}
+
+// ───────────── ENERGY/ADMIN/UI ─────────────
 function parseAiCommand(text = "") {
   const s = String(text).trim();
   const m = s.match(/^\/ai(?:@[\w_]+)?(?:\s+([\s\S]+))?$/i);
@@ -441,7 +501,63 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // ── INTENT-FIRST: маршрутизація в зовнішні API без слеш-команд ──
+  // ── FAST-PATH: прямі запити в зовнішні API (без слешів) ──
+  if (text && !text.startsWith("/")) {
+    // Погода: "погода Львів" / "weather Kyiv"
+    let m = text.match(/^\s*(?:погода|weather)\s+(.+?)\s*$/i);
+    if (m) {
+      await safe(async () => {
+        const city = m[1];
+        const w = await weatherByCity(city);
+        const html = formatWeatherInline(w, lang);
+        await sendHtml(env, chatId, html);
+      });
+      return json({ ok: true, fast: "weather" });
+    }
+
+    // Новини: "новини", "головні новини"
+    if (/^новини$/i.test(text) || (/головн/i.test(text) && /новин/i.test(text))) {
+      await safe(async () => {
+        const list = await fetchTopNews(env.NEWS_API_KEY || "");
+        const html = formatNews(list);
+        await sendHtml(env, chatId, html || "Зараз не вдалось отримати новини.");
+      });
+      return json({ ok: true, fast: "news" });
+    }
+
+    // Курс долара: "курс долара", "usd uah"
+    if ((/курс/i.test(text) && /(usd|долар|долара)/i.test(text)) || /\busd\s*uah\b/i.test(text)) {
+      await safe(async () => {
+        const rate = await getUsdUahRate();
+        await sendHtml(env, chatId, formatRate(rate));
+      });
+      return json({ ok: true, fast: "rate" });
+    }
+
+    // Вікі: "вікі Тарас Шевченко" / "wiki Ada Lovelace"
+    m = text.match(/^\s*(?:вікі|wiki)\s+(.+?)\s*$/i);
+    if (m) {
+      await safe(async () => {
+        const q = m[1];
+        const w = await wikiSummary(q, lang).catch(() => null);
+        const html = formatWiki(w) || "Не знайшов статтю.";
+        await sendHtml(env, chatId, html);
+      });
+      return json({ ok: true, fast: "wiki" });
+    }
+
+    // Свята: "свята" / "свята україни"
+    if (/свят[аи]/i.test(text)) {
+      await safe(async () => {
+        const list = await getHolidays(lang).catch(() => []);
+        const html = formatHolidays(list) || "Немає даних про свята.";
+        await sendHtml(env, chatId, html);
+      });
+      return json({ ok: true, fast: "holidays" });
+    }
+  }
+
+  // ── INTENT-FIRST: маршрутизація в зовнішні API (NLU) ──
   if (text && !text.startsWith("/")) {
     const intent = detectIntent(text, lang);
     if (intent.type !== "none") {
