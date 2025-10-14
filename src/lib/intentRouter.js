@@ -85,38 +85,39 @@ const D = {
   },
 };
 
-function A(url) {
-  return ` <a href="${url}">↗︎</a>`;
-}
+const tinyLink = (url) => ` <a href="${url}">↗︎</a>`;
 
+// ───────────────────────────────
+// TEXT-FIRST entry (для простих випадків)
+// ───────────────────────────────
 export async function handleIntent(text, env = {}) {
   const t = (text || "").trim();
-  const lang = guessLang(t);
+  return await _byText(t, env);
+}
+
+async function _byText(t, env = {}, langHint) {
+  const lang = (langHint && D[langHint]) ? langHint : guessLang(t);
   const L = D[lang] || D.en;
 
   // WEATHER
   if (/(погода|weather|wetter|météo|meteo)/i.test(t)) {
     try {
-      // дістаємо місто після слова "погода|weather|..." та можливих прийменників
       let city = t
         .replace(/^(.*?)(погода|weather|wetter|météo|meteo)/i, "")
         .replace(/^(у|в|in|à|en)\s*/i, "")
         .trim();
       if (!city)
         city =
-          lang === "uk"
-            ? "Київ"
-            : lang === "ru"
-            ? "Киев"
-            : lang === "de"
-            ? "Wien"
-            : lang === "fr"
-            ? "Paris"
-            : "Kyiv";
+          lang === "uk" ? "Київ"
+          : lang === "ru" ? "Киев"
+          : lang === "de" ? "Wien"
+          : lang === "fr" ? "Paris"
+          : "Kyiv";
 
       const w = await weatherByCity(city);
       if (!w) return { mode: "HTML", text: L.weather_fail };
 
+      const src = w.provider === "wttr.in" ? "https://wttr.in/" : "https://open-meteo.com/";
       const parts = [
         `🌤️ <b>${L.weather_now(w.city)}</b>`,
         w.desc ? `• ${w.desc}` : "",
@@ -124,38 +125,32 @@ export async function handleIntent(text, env = {}) {
         `• ${L.wind(w.windKph)}`,
         `• ${L.humidity(w.humidity)}`,
       ];
-      const src = w.provider === "wttr.in" ? "https://wttr.in/" : "https://open-meteo.com/";
-      return { mode: "HTML", text: parts.filter(Boolean).join("\n") + A(src) };
+      return { mode: "HTML", text: parts.filter(Boolean).join("\n") + tinyLink(src) };
     } catch {
       return { mode: "HTML", text: L.weather_fail };
     }
   }
 
   // USD RATE
-  if (/(курс|долар|доллар|usd|exchange|taux|dollar|wechselkurs)/i.test(t)) {
+  if (/(курс|гривн|долар|доллар|usd|exchange|taux|dollar|wechselkurs)/i.test(t)) {
     try {
       const rate = await getUsdUahRate();
-      return {
-        mode: "HTML",
-        text: `💸 <b>${L.rate(Number(rate).toFixed(2))}</b>${A("https://bank.gov.ua/")}`,
-      };
+      return { mode: "HTML", text: `💸 <b>${L.rate(Number(rate).toFixed(2))}</b>${tinyLink("https://bank.gov.ua/")}` };
     } catch {
       return { mode: "HTML", text: "😕" };
     }
   }
 
-  // NEWS — короткий дайджест 3 заголовків, без посилань у тексті, лише одна стрілка в кінці
+  // NEWS — короткий дайджест
   if (/(новин|новини|news|nachrichten|actus?|actualités|nouvelles)/i.test(t)) {
     try {
       const items = await fetchTopNews(env);
-      if (!items?.length)
-        return { mode: "HTML", text: `${L.news_fail}${A("https://www.pravda.com.ua/")}` };
-
+      if (!items?.length) return { mode: "HTML", text: `${D[lang].news_fail}${tinyLink("https://www.pravda.com.ua/")}` };
       const top3 = items.slice(0, 3).map((n, i) => `${i + 1}) ${n.title}`).join("\n");
       const jump = items[0]?.link || "https://www.pravda.com.ua/";
-      return { mode: "HTML", text: `🗞️ <b>${L.news_title}</b>\n${top3}${A(jump)}` };
+      return { mode: "HTML", text: `🗞️ <b>${L.news_title}</b>\n${top3}${tinyLink(jump)}` };
     } catch {
-      return { mode: "HTML", text: `${L.news_fail}${A("https://www.pravda.com.ua/")}` };
+      return { mode: "HTML", text: `${L.news_fail}${tinyLink("https://www.pravda.com.ua/")}` };
     }
   }
 
@@ -166,40 +161,24 @@ export async function handleIntent(text, env = {}) {
       const year = m ? Number(m[0]) : new Date().getFullYear();
       const country = /ua|укр|україн/i.test(t) ? "UA" : "UA";
       const items = await getHolidays(country, year);
-      if (!items?.length)
-        return { mode: "HTML", text: `${L.holidays_fail}${A("https://date.nager.at/")}` };
-
+      if (!items?.length) return { mode: "HTML", text: `${L.holidays_fail}${tinyLink("https://date.nager.at/")}` };
       const head = `🎉 <b>${L.holidays_title(country, year)}</b>`;
-      const body = items
-        .slice(0, 10)
-        .map((h) => `• ${h.date} — ${h.name}`)
-        .join("\n");
-      return { mode: "HTML", text: `${head}\n${body}${A("https://date.nager.at/")}` };
+      const body = items.slice(0, 10).map(h => `• ${h.date} — ${h.name}`).join("\n");
+      return { mode: "HTML", text: `${head}\n${body}${tinyLink("https://date.nager.at/")}` };
     } catch {
-      return { mode: "HTML", text: `${L.holidays_fail}${A("https://date.nager.at/")}` };
+      return { mode: "HTML", text: `${L.holidays_fail}${tinyLink("https://date.nager.at/")}` };
     }
   }
 
   // WIKI
   if (/(хто такий|хто така|що таке|кто такой|кто такая|что такое|wiki|вікі|вики|wikipedia|wikipédia)/i.test(t)) {
     try {
-      const q =
-        t
-          .replace(
-            /хто такий|хто така|що таке|кто такой|кто такая|что такое|wiki|вікі|вики|wikipedia|wikipédia/gi,
-            ""
-          )
-          .trim() || t;
-
-      const langCode =
-        lang === "ru" ? "ru" : lang === "uk" ? "uk" : lang === "de" ? "de" : lang === "fr" ? "fr" : "en";
-
+      const q = t.replace(/хто такий|хто така|що таке|кто такой|кто такая|что такое|wiki|вікі|вики|wikipedia|wikipédia/gi, "").trim() || t;
+      const langCode = lang === "ru" ? "ru" : lang === "uk" ? "uk" : lang === "de" ? "de" : lang === "fr" ? "fr" : "en";
       const w = await wikiSummary(q, langCode);
       if (!w) return { mode: "HTML", text: (D[lang]?.wiki_fail || D.en.wiki_fail) };
-
-      const excerpt =
-        w.extract && w.extract.length > 700 ? w.extract.slice(0, 700) + "…" : w.extract || "";
-      return { mode: "HTML", text: `📚 <b>${w.title}</b>\n${excerpt}${A(w.url)}` };
+      const excerpt = w.extract && w.extract.length > 700 ? w.extract.slice(0, 700) + "…" : (w.extract || "");
+      return { mode: "HTML", text: `📚 <b>${w.title}</b>\n${excerpt}${tinyLink(w.url)}` };
     } catch {
       return { mode: "HTML", text: (D[lang]?.wiki_fail || D.en.wiki_fail) };
     }
@@ -208,10 +187,85 @@ export async function handleIntent(text, env = {}) {
   return null;
 }
 
-// Backward-compat wrapper.
-// Новий webhook очікує об'єкт { text, mode }. Якщо десь ще викликається
-// старим способом і чекає рядок — просто візьми .text від результату.
+// ───────────────────────────────
+// INTENT-FIRST entry (для detectIntent(...))
+// Приймає структуру від NLU: { type, args?, lang? , text? , query? }
+// ───────────────────────────────
 export async function runIntent(intent = {}, env = {}) {
-  const t = intent?.query || intent?.text || intent?.raw || intent?.original || "";
-  return await handleIntent(t, env); // повертаємо { text, mode }
+  if (!intent || typeof intent !== "object") return null;
+
+  // якщо прийшов текст — використаємо текстовий шлях
+  const rawText = intent.text || intent.query || intent.original || intent.raw || "";
+  if (rawText && String(rawText).trim()) {
+    const langHint = intent.lang || intent.langHint;
+    return await _byText(String(rawText), env, langHint);
+  }
+
+  const lang = intent.lang || intent.langHint || "en";
+  const L = D[lang] || D.en;
+  const t = (intent.type || "").toLowerCase();
+  const args = intent.args || intent.parameters || {};
+
+  // нормалізатори типів
+  const isRate = /(rate|rates?|usd|usd_uah|currency|fx)/i.test(t);
+  const isWeather = /(weather|погода|meteo|wetter)/i.test(t);
+  const isNews = /(news|новини|nachrichten|actus?|actualités|nouvelles)/i.test(t);
+  const isHolidays = /(holidays|feiertage|свят|свята)/i.test(t);
+  const isWiki = /(wiki|wikipedia|вікі|вики|who_is|what_is)/i.test(t);
+
+  try {
+    if (isRate) {
+      const rate = await getUsdUahRate();
+      return { mode: "HTML", text: `💸 <b>${L.rate(Number(rate).toFixed(2))}</b>${tinyLink("https://bank.gov.ua/")}` };
+    }
+
+    if (isWeather) {
+      const city = args.city || args.location || args.place ||
+        (lang === "uk" ? "Київ" : lang === "ru" ? "Киев" : lang === "de" ? "Wien" : lang === "fr" ? "Paris" : "Kyiv");
+      const w = await weatherByCity(city);
+      if (!w) return { mode: "HTML", text: D[lang]?.weather_fail || D.en.weather_fail };
+      const src = w.provider === "wttr.in" ? "https://wttr.in/" : "https://open-meteo.com/";
+      const parts = [
+        `🌤️ <b>${(D[lang] || D.en).weather_now(w.city)}</b>`,
+        w.desc ? `• ${w.desc}` : "",
+        `• ${(D[lang] || D.en).weather_desc(w.tempC, w.feelsLikeC)}`,
+        `• ${(D[lang] || D.en).wind(w.windKph)}`,
+        `• ${(D[lang] || D.en).humidity(w.humidity)}`,
+      ];
+      return { mode: "HTML", text: parts.filter(Boolean).join("\n") + tinyLink(src) };
+    }
+
+    if (isNews) {
+      const items = await fetchTopNews(env);
+      if (!items?.length) return { mode: "HTML", text: `${(D[lang] || D.en).news_fail}${tinyLink("https://www.pravda.com.ua/")}` };
+      const top3 = items.slice(0, 3).map((n, i) => `${i + 1}) ${n.title}`).join("\n");
+      const jump = items[0]?.link || "https://www.pravda.com.ua/";
+      return { mode: "HTML", text: `🗞️ <b>${(D[lang] || D.en).news_title}</b>\n${top3}${tinyLink(jump)}` };
+    }
+
+    if (isHolidays) {
+      const year = Number(args.year) || new Date().getFullYear();
+      const country = (args.country || args.cc || "UA").toUpperCase();
+      const items = await getHolidays(country, year);
+      if (!items?.length) return { mode: "HTML", text: `${(D[lang] || D.en).holidays_fail}${tinyLink("https://date.nager.at/")}` };
+      const head = `🎉 <b>${(D[lang] || D.en).holidays_title(country, year)}</b>`;
+      const body = items.slice(0, 10).map(h => `• ${h.date} — ${h.name}`).join("\n");
+      return { mode: "HTML", text: `${head}\n${body}${tinyLink("https://date.nager.at/")}` };
+    }
+
+    if (isWiki) {
+      const q = args.query || args.q || args.name || "Wikipedia";
+      const code = lang === "ru" ? "ru" : lang === "uk" ? "uk" : lang === "de" ? "de" : lang === "fr" ? "fr" : "en";
+      const w = await wikiSummary(q, code);
+      if (!w) return { mode: "HTML", text: (D[lang]?.wiki_fail || D.en.wiki_fail) };
+      const excerpt = w.extract && w.extract.length > 700 ? w.extract.slice(0, 700) + "…" : (w.extract || "");
+      return { mode: "HTML", text: `📚 <b>${w.title}</b>\n${excerpt}${tinyLink(w.url)}` };
+    }
+  } catch {
+    // мʼякий фолбек у випадку API-факапа
+    return { mode: "HTML", text: "😕" };
+  }
+
+  // якщо тип невідомий — нічого не робимо (нехай вебхук піде у LLM)
+  return null;
 }
