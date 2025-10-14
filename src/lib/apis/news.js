@@ -1,11 +1,9 @@
 // src/lib/apis/news.js
-// News via newsdata.io (якщо є ключ) + RSS фолбек (без ключів)
-
 function arrow(url){ return ` <a href="${url}">↗︎</a>`; }
 
 async function newsdataIO(key) {
   const url = `https://newsdata.io/api/1/latest?apikey=${encodeURIComponent(key)}&country=ua&language=uk`;
-  const res = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 60 * 5 } });
+  const res = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 300 } });
   if (!res.ok) throw new Error(`newsdata HTTP ${res.status}`);
   const data = await res.json();
   const list = data?.results || [];
@@ -15,45 +13,38 @@ async function newsdataIO(key) {
   })).filter(x => x.title && x.link);
 }
 
-// RSS через proxy (без CORS)
-async function fetchRSS(url) {
-  const r = await fetch(`https://r.jina.ai/http://` + url, { cf: { cacheEverything: true, cacheTtl: 60 * 5 } });
-  if (!r.ok) throw new Error("RSS fetch failed");
-  const text = await r.text();
+async function rss(url) {
+  const res = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 300 } });
+  if (!res.ok) throw new Error(`rss HTTP ${res.status}`);
+  const xml = await res.text();
   const items = [];
-  const re = /<item>([\s\S]*?)<\/item>/g;
+  const re = /<item>[\s\S]*?<title>([\s\S]*?)<\/title>[\s\S]*?<link>([\s\S]*?)<\/link>[\s\S]*?<\/item>/gi;
   let m;
-  while ((m = re.exec(text))) {
-    const chunk = m[1];
-    const t = (chunk.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/) || chunk.match(/<title>(.*?)<\/title>/))?.[1];
-    const l = (chunk.match(/<link>(.*?)<\/link>/))?.[1];
-    if (t && l) items.push({ title: t.replace(/&amp;/g,"&").trim(), link: l.trim() });
-    if (items.length >= 8) break;
+  while ((m = re.exec(xml)) && items.length < 8) {
+    const t = m[1].replace(/<!\[CDATA\[|\]\]>/g, "").trim();
+    const l = m[2].replace(/<!\[CDATA\[|\]\]>/g, "").trim();
+    if (t && l) items.push({ title: t, link: l });
   }
   return items;
 }
 
 async function rssTop() {
   const feeds = [
-    "www.pravda.com.ua/rss/view_pubs/",
-    "www.epravda.com.ua/rss/all/",
-    "telegraf.com.ua/feed/",
+    "https://www.pravda.com.ua/rss/view_pubs/",
+    "https://suspilne.media/rss/all/rss.xml",
+    "https://www.ukrinform.ua/rss/block-lastnews",
+    "https://www.bbc.com/ukrainian/index.xml"
   ];
-  const results = [];
   for (const f of feeds) {
     try {
-      const items = await fetchRSS(f);
-      results.push(...items);
-      if (results.length >= 8) break;
-    } catch (e) {
-      console.warn("[news] RSS failed:", f, e.message);
-    }
+      const items = await rss(f);
+      if (items.length) return items;
+    } catch {}
   }
-  return results.slice(0, 8);
+  return [];
 }
 
-export async function fetchTopNews(env = {}) {
-  const key = env.NEWS_API_KEY || env.NEWSDATA_API_KEY;
+export async function fetchTopNews(key) {
   if (key) {
     try {
       const viaKey = await newsdataIO(key);
@@ -65,7 +56,6 @@ export async function fetchTopNews(env = {}) {
   return await rssTop();
 }
 
-// ── форматер, який потребує твій webhook ──
 export function formatNewsList(items = []) {
   if (!items?.length) return "";
   const list = items.slice(0, 8).map(n => `• <a href="${n.link}">${n.title}</a>`).join("\n");
