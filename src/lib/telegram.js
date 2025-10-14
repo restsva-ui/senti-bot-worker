@@ -1,58 +1,39 @@
-// src/lib/telegram.js
-// Telegram API helpers with safe error logging
+// Minimal Telegram API helpers with optional `extra` (reply_markup, parse_mode, etc.)
 
-export const TG_API_BASE = "https://api.telegram.org";
+export async function sendMessage(env, chatId, text, extra = {}) {
+  const body = {
+    chat_id: chatId,
+    text,
+    ...extra,
+  };
 
-export const sendTelegram = async (env, method, payload = {}) => {
-  const token = env.TELEGRAM_SECRET_TOKEN || env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
-  if (!token) throw new Error("Missing Telegram token");
-
-  const url = `${TG_API_BASE}/bot${token}/${method}`;
-  const res = await fetch(url, {
+  const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
   });
 
-  let data = {};
+  // Do not throw on non-200 to avoid webhook retries storm
   try {
-    data = await res.json();
-  } catch (err) {
-    console.error("TG parse fail", err);
+    return await r.json();
+  } catch {
+    return { ok: false, status: r.status };
   }
+}
 
-  if (!res.ok) {
-    const body = JSON.stringify(data);
-    throw new Error(`TG ${method} HTTP ${res.status}: ${body}`);
+export async function editMessageReplyMarkup(env, chatId, messageId, replyMarkup) {
+  const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/editMessageReplyMarkup`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: replyMarkup,
+    }),
+  });
+  try {
+    return await r.json();
+  } catch {
+    return { ok: false, status: r.status };
   }
-  if (!data.ok) {
-    throw new Error(`TG ${method} API error: ${data.description || JSON.stringify(data)}`);
-  }
-
-  return data.result;
-};
-
-// sendMessage без parse_mode за замовчуванням
-export const sendMessage = (env, chat_id, text, extra = {}) =>
-  sendTelegram(env, "sendMessage", {
-    chat_id,
-    text,
-    ...(extra.parse_mode ? { parse_mode: extra.parse_mode } : {}),
-    ...extra,
-  });
-
-export const sendPhoto = (env, chat_id, photo, extra = {}) =>
-  sendTelegram(env, "sendPhoto", {
-    chat_id,
-    photo,
-    ...(extra.caption ? { caption: extra.caption } : {}),
-    ...(extra.parse_mode ? { parse_mode: extra.parse_mode } : {}),
-  });
-
-export const answerCallbackQuery = (env, callback_query_id, text = "", extra = {}) =>
-  sendTelegram(env, "answerCallbackQuery", {
-    callback_query_id,
-    text,
-    show_alert: false,
-    ...extra,
-  });
+}
