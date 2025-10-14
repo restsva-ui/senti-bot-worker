@@ -88,11 +88,12 @@ const D = {
 const tinyLink = (url) => ` <a href="${url}">↗︎</a>`;
 
 // ───────────────────────────────
-// TEXT-FIRST entry (для простих випадків)
+// TEXT-FIRST entry
 // ───────────────────────────────
 export async function handleIntent(text, env = {}) {
   const t = (text || "").trim();
-  return await _byText(t, env);
+  const out = await _byText(t, env);
+  return out; // { mode, text }
 }
 
 async function _byText(t, env = {}, langHint) {
@@ -145,7 +146,9 @@ async function _byText(t, env = {}, langHint) {
   if (/(новин|новини|news|nachrichten|actus?|actualités|nouvelles)/i.test(t)) {
     try {
       const items = await fetchTopNews(env);
-      if (!items?.length) return { mode: "HTML", text: `${D[lang].news_fail}${tinyLink("https://www.pravda.com.ua/")}` };
+      if (!items?.length) {
+        return { mode: "HTML", text: `${L.news_fail}${tinyLink("https://www.pravda.com.ua/")}` };
+      }
       const top3 = items.slice(0, 3).map((n, i) => `${i + 1}) ${n.title}`).join("\n");
       const jump = items[0]?.link || "https://www.pravda.com.ua/";
       return { mode: "HTML", text: `🗞️ <b>${L.news_title}</b>\n${top3}${tinyLink(jump)}` };
@@ -161,7 +164,9 @@ async function _byText(t, env = {}, langHint) {
       const year = m ? Number(m[0]) : new Date().getFullYear();
       const country = /ua|укр|україн/i.test(t) ? "UA" : "UA";
       const items = await getHolidays(country, year);
-      if (!items?.length) return { mode: "HTML", text: `${L.holidays_fail}${tinyLink("https://date.nager.at/")}` };
+      if (!items?.length) {
+        return { mode: "HTML", text: `${L.holidays_fail}${tinyLink("https://date.nager.at/")}` };
+      }
       const head = `🎉 <b>${L.holidays_title(country, year)}</b>`;
       const body = items.slice(0, 10).map(h => `• ${h.date} — ${h.name}`).join("\n");
       return { mode: "HTML", text: `${head}\n${body}${tinyLink("https://date.nager.at/")}` };
@@ -189,16 +194,17 @@ async function _byText(t, env = {}, langHint) {
 
 // ───────────────────────────────
 // INTENT-FIRST entry (для detectIntent(...))
-// Приймає структуру від NLU: { type, args?, lang? , text? , query? }
+// Повертає РЯДОК (сумісно зі старим webhook).
 // ───────────────────────────────
 export async function runIntent(intent = {}, env = {}) {
-  if (!intent || typeof intent !== "object") return null;
+  if (!intent || typeof intent !== "object") return "";
 
-  // якщо прийшов текст — використаємо текстовий шлях
+  // Якщо є сирий текст — обробляємо текстовим шляхом
   const rawText = intent.text || intent.query || intent.original || intent.raw || "";
   if (rawText && String(rawText).trim()) {
     const langHint = intent.lang || intent.langHint;
-    return await _byText(String(rawText), env, langHint);
+    const out = await _byText(String(rawText), env, langHint);
+    return out?.text || "";
   }
 
   const lang = intent.lang || intent.langHint || "en";
@@ -206,7 +212,6 @@ export async function runIntent(intent = {}, env = {}) {
   const t = (intent.type || "").toLowerCase();
   const args = intent.args || intent.parameters || {};
 
-  // нормалізатори типів
   const isRate = /(rate|rates?|usd|usd_uah|currency|fx)/i.test(t);
   const isWeather = /(weather|погода|meteo|wetter)/i.test(t);
   const isNews = /(news|новини|nachrichten|actus?|actualités|nouvelles)/i.test(t);
@@ -216,14 +221,14 @@ export async function runIntent(intent = {}, env = {}) {
   try {
     if (isRate) {
       const rate = await getUsdUahRate();
-      return { mode: "HTML", text: `💸 <b>${L.rate(Number(rate).toFixed(2))}</b>${tinyLink("https://bank.gov.ua/")}` };
+      return `💸 <b>${L.rate(Number(rate).toFixed(2))}</b>${tinyLink("https://bank.gov.ua/")}`;
     }
 
     if (isWeather) {
       const city = args.city || args.location || args.place ||
         (lang === "uk" ? "Київ" : lang === "ru" ? "Киев" : lang === "de" ? "Wien" : lang === "fr" ? "Paris" : "Kyiv");
       const w = await weatherByCity(city);
-      if (!w) return { mode: "HTML", text: D[lang]?.weather_fail || D.en.weather_fail };
+      if (!w) return D[lang]?.weather_fail || D.en.weather_fail;
       const src = w.provider === "wttr.in" ? "https://wttr.in/" : "https://open-meteo.com/";
       const parts = [
         `🌤️ <b>${(D[lang] || D.en).weather_now(w.city)}</b>`,
@@ -232,40 +237,39 @@ export async function runIntent(intent = {}, env = {}) {
         `• ${(D[lang] || D.en).wind(w.windKph)}`,
         `• ${(D[lang] || D.en).humidity(w.humidity)}`,
       ];
-      return { mode: "HTML", text: parts.filter(Boolean).join("\n") + tinyLink(src) };
+      return parts.filter(Boolean).join("\n") + tinyLink(src);
     }
 
     if (isNews) {
       const items = await fetchTopNews(env);
-      if (!items?.length) return { mode: "HTML", text: `${(D[lang] || D.en).news_fail}${tinyLink("https://www.pravda.com.ua/")}` };
+      if (!items?.length) return `${(D[lang] || D.en).news_fail}${tinyLink("https://www.pravda.com.ua/")}`;
       const top3 = items.slice(0, 3).map((n, i) => `${i + 1}) ${n.title}`).join("\n");
       const jump = items[0]?.link || "https://www.pravda.com.ua/";
-      return { mode: "HTML", text: `🗞️ <b>${(D[lang] || D.en).news_title}</b>\n${top3}${tinyLink(jump)}` };
+      return `🗞️ <b>${(D[lang] || D.en).news_title}</b>\n${top3}${tinyLink(jump)}`;
     }
 
     if (isHolidays) {
       const year = Number(args.year) || new Date().getFullYear();
       const country = (args.country || args.cc || "UA").toUpperCase();
       const items = await getHolidays(country, year);
-      if (!items?.length) return { mode: "HTML", text: `${(D[lang] || D.en).holidays_fail}${tinyLink("https://date.nager.at/")}` };
+      if (!items?.length) return `${(D[lang] || D.en).holidays_fail}${tinyLink("https://date.nager.at/")}`;
       const head = `🎉 <b>${(D[lang] || D.en).holidays_title(country, year)}</b>`;
       const body = items.slice(0, 10).map(h => `• ${h.date} — ${h.name}`).join("\n");
-      return { mode: "HTML", text: `${head}\n${body}${tinyLink("https://date.nager.at/")}` };
+      return `${head}\n${body}${tinyLink("https://date.nager.at/")}`;
     }
 
     if (isWiki) {
       const q = args.query || args.q || args.name || "Wikipedia";
       const code = lang === "ru" ? "ru" : lang === "uk" ? "uk" : lang === "de" ? "de" : lang === "fr" ? "fr" : "en";
       const w = await wikiSummary(q, code);
-      if (!w) return { mode: "HTML", text: (D[lang]?.wiki_fail || D.en.wiki_fail) };
+      if (!w) return (D[lang]?.wiki_fail || D.en.wiki_fail);
       const excerpt = w.extract && w.extract.length > 700 ? w.extract.slice(0, 700) + "…" : (w.extract || "");
-      return { mode: "HTML", text: `📚 <b>${w.title}</b>\n${excerpt}${tinyLink(w.url)}` };
+      return `📚 <b>${w.title}</b>\n${excerpt}${tinyLink(w.url)}`;
     }
   } catch {
-    // мʼякий фолбек у випадку API-факапа
-    return { mode: "HTML", text: "😕" };
+    return "😕";
   }
 
-  // якщо тип невідомий — нічого не робимо (нехай вебхук піде у LLM)
-  return null;
+  // невідомий тип → нехай webHook віддасть у LLM
+  return "";
 }
