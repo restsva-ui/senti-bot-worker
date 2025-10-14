@@ -4,9 +4,9 @@ compatibility_date = "2024-09-25"
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
 
 # --- CRONs ---
-# 1) heartbeat кожні 15 хв (для логів/живості)
-# 2) evolve щогодини рівно о :00 (UTC)
-# 3) додатковий тригер нічного агента о 02:10 UTC (опційний)
+# 1) heartbeat — кожні 15 хв (для логів/живості)
+# 2) evolve — щогодини рівно о :00 (UTC)
+# 3) додатковий тригер нічного агента — 02:10 UTC
 [triggers]
 crons = ["*/15 * * * *", "0 * * * *", "10 2 * * *"]
 
@@ -17,41 +17,39 @@ DRIVE_FOLDER_ID = "root"
 TELEGRAM_ADMIN_ID = "784869835"
 DEPLOY_ID = "local-dev"
 
-# Секрет для власних HTTP-ендпойнтів (передається як ?s=...)
+# Секрети HTTP / Telegram
 WEBHOOK_SECRET = "senti1984"
-# Секрет перевірки Telegram webhook
 TG_WEBHOOK_SECRET = "senti1984"
 
-# Локальна таймзона для UI/логів/дебагу часу
+# Локальна таймзона для логів/часу
 TIMEZONE = "Europe/Kyiv"
 
-# ДІАГНОСТИЧНІ ТЕГИ: "on" — показує [via ...], "off" — ховає
+# --- Діагностичні теги ---
 DIAG_TAGS = "on"
 
-# --- Порядок fallback-моделей ---
+# --- Порядок fallback моделей ---
 MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:deepseek/deepseek-chat, free:meta-llama/llama-4-scout:free"
 
-# --- Дефолтні моделі (необов'язково) ---
+# --- Дефолтні моделі ---
 GEMINI_MODEL = "gemini-2.5-flash"
 CF_MODEL     = "@cf/meta/llama-3.1-8b-instruct"
 
 # --- OpenAI-compatible fallback (через OpenRouter) ---
-# ВАЖЛИВО: сам ключ додай як secret:  wrangler secret put FREE_API_KEY
+# ❗ Ключ додай командою:
+#   wrangler secret put FREE_API_KEY
 FREE_API_BASE_URL = "https://openrouter.ai/api"
 FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
 FREE_API_PATH     = "/v1/chat/completions"
 
-# --- Керування нічними авто-поліпшеннями ---
-AUTO_IMPROVE     = "on"   # "off" щоб вимкнути
-# Основний добовий запуск агента відбувається на годинному кроні ("0 * * * *"),
-# коли getUTCHours() === NIGHTLY_UTC_HOUR. 23 UTC ~= 02:00 за Києвом.
+# --- Нічні авто-поліпшення ---
+AUTO_IMPROVE     = "on"
 NIGHTLY_UTC_HOUR = "23"
 
-# --- Self-Regulation (ввімк/вимк та сила тюнінгу) ---
+# --- Self-Regulation ---
 SELF_REGULATE       = "on"
 SELF_TUNING_FACTOR  = "0.3"
 
-# --- ⚡ ЕНЕРГІЯ (щоб не зникали на деплої) ---
+# --- ⚡ Енергія ---
 ENERGY_MAX = "100"
 ENERGY_RECOVER_PER_MIN = "1"
 ENERGY_COST_TEXT = "1"
@@ -72,10 +70,6 @@ binding = "STATE_KV"
 id = "7b32e2d1f60846ddb1c653eb52180bf7"
 
 [[kv_namespaces]]
-binding = "TODO_KV"
-id = "497eac980691495ea2a0bc8611892d65"
-
-[[kv_namespaces]]
 binding = "USER_OAUTH_KV"
 id = "470d4f5c164a4a828c569eb9a52a5133"
 
@@ -83,17 +77,18 @@ id = "470d4f5c164a4a828c569eb9a52a5133"
 binding = "CHECKLIST_KV"
 id = "497eac980691495ea2a0bc8611892d65"
 
-# Пам'ять/лайки/нічні імпруви
 [[kv_namespaces]]
 binding = "LIKES_KV"
 id = "f7d480c281ad47d2bdf270fadf4de021"
 
-# ➕ Журнал енергії
 [[kv_namespaces]]
 binding = "ENERGY_LOG_KV"
 id = "9e6f0ed5bf2544a9a63d57455900a844"
 
-# ➕ Діалоги (коротка пам'ять між сесіями)
 [[kv_namespaces]]
 binding = "DIALOG_KV"
 id = "63c0d1e0962a419ca54082893410b28e"
+
+# --- Спостереження / логи (Dashboard Observability) ---
+[observability]
+enabled = true
