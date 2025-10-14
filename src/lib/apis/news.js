@@ -1,5 +1,6 @@
 // src/lib/apis/news.js
-function arrow(url){ return ` <a href="${url}">↗︎</a>`; }
+
+function arrow(url) { return ` <a href="${url}">↗︎</a>`; }
 
 async function newsdataIO(key) {
   const url = `https://newsdata.io/api/1/latest?apikey=${encodeURIComponent(key)}&country=ua&language=uk`;
@@ -58,6 +59,8 @@ export async function fetchTopNews(key) {
 
 export function formatNewsList(items = []) {
   if (!items?.length) return "";
-  const list = items.slice(0, 8).map(n => `• <a href="${n.link}">${n.title}</a>`).join("\n");
+  // У списку — ТІЛЬКИ текст заголовків (без <a>), щоб не було прев’ю.
+  const list = items.slice(0, 8).map(n => `• ${n.title}`).join("\n");
+  // Одна маленька стрілочка веде на першу новину.
   return list + arrow(items[0].link);
 }
