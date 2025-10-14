@@ -1,5 +1,6 @@
 // src/lib/apis/weather.js
-function arrow(url){ return ` <a href="${url}">↗︎</a>`; }
+
+function arrow(url) { return ` <a href="${url}">↗︎</a>`; }
 
 async function wttr(city) {
   const url = `https://wttr.in/${encodeURIComponent(city)}?format=j1`;
@@ -26,8 +27,10 @@ async function wttr(city) {
 async function openMeteo(city) {
   // 1) геокод
   const gq = new URL("https://geocoding-api.open-meteo.com/v1/search");
-  gq.searchParams.set("name", city); gq.searchParams.set("count", "1");
-  gq.searchParams.set("language", "uk"); gq.searchParams.set("format", "json");
+  gq.searchParams.set("name", city);
+  gq.searchParams.set("count", "1");
+  gq.searchParams.set("language", "uk");
+  gq.searchParams.set("format", "json");
   const g = await fetch(gq, { cf: { cacheEverything: true, cacheTtl: 60 * 60 } });
   if (!g.ok) throw new Error(`geocode HTTP ${g.status}`);
   const gj = await g.json();
@@ -50,9 +53,10 @@ async function openMeteo(city) {
     city: p.name,
     desc: "",
     tempC: Number(c.temperature),
-    feelsLikeC: Number(c.temperature), // у open-meteo немає feels-like у current_weather
+    feelsLikeC: Number(c.temperature),
     windKph: Number(c.windspeed),
-    humidity: Number.isFinite(wj?.hourly?.relativehumidity_2m?.[0]) ? Number(wj.hourly.relativehumidity_2m[0]) : 0,
+    humidity: Number.isFinite(wj?.hourly?.relativehumidity_2m?.[0])
+      ? Number(wj.hourly.relativehumidity_2m[0]) : 0,
   };
 }
 
@@ -64,10 +68,8 @@ export async function weatherByCity(city) {
 export function formatWeather(w, lang = "uk") {
   const map = {
     uk: { now: "зараз", temp: "Температура", feels: "відчувається", wind: "Вітер", hum: "Вологість", src: "джерело" },
-    ru: { now: "сейчас", temp: "Температура", feels: "ощущается", wind: "Ветер", hum: "Влажность", src: "источник" },
     en: { now: "now", temp: "Temperature", feels: "feels like", wind: "Wind", hum: "Humidity", src: "source" },
-    de: { now: "jetzt", temp: "Temperatur", feels: "gefühlt", wind: "Wind", hum: "Luftfeuchtigkeit", src: "Quelle" },
-    fr: { now: "maintenant", temp: "Température", feels: "ressenti", wind: "Vent", hum: "Humidité", src: "source" },
+    ru: { now: "сейчас", temp: "Температура", feels: "ощущается", wind: "Ветер", hum: "Влажность", src: "источник" },
   };
   const L = map[lang] || map.en;
   const srcUrl = w.provider === "wttr.in" ? "https://wttr.in/" : "https://open-meteo.com/";
@@ -77,7 +79,7 @@ export function formatWeather(w, lang = "uk") {
     `• ${L.temp}: <b>${w.tempC}°C</b> (${L.feels} ${w.feelsLikeC}°C)`,
     `• ${L.wind}: ${w.windKph} km/h`,
     `• ${L.hum}: ${w.humidity}%`,
-    `\n<i>${L.src}:</i> ${w.provider}${arrow(srcUrl)}`,
+    `\n<i>${L.src}:</i> ${w.provider} <a href="${srcUrl}">↗︎</a>`,
   ];
   return lines.filter(Boolean).join("\n");
 }
