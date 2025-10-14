@@ -57,7 +57,7 @@ async function sendMessage(env, chatId, text, extra = {}) {
 
 // зручний обгортчик для HTML-текстів
 const sendHtml = (env, chatId, html, extra = {}) =>
-  sendMessage(env, chatId, html, { parse_mode: "HTML", disable_web_page_preview: false, ...extra });
+  sendMessage(env, chatId, html, { parse_mode: "HTML", disable_web_page_preview: true, ...extra });
 
 // маленька стрілочка-посилання (вимога Шефа)
 const arrow = (url) => (url ? ` <a href="${url}">↗︎</a>` : "");
@@ -65,20 +65,21 @@ const arrow = (url) => (url ? ` <a href="${url}">↗︎</a>` : "");
 // безпечне обрізання
 const clip = (s = "", n = 420) => {
   const t = String(s);
-  return t.length > n ? t.slice(0, n - 1) + "…": t;
+  return t.length > n ? t.slice(0, n - 1) + "…" : t;
 };
 
 // форматери fast-path (мінімальні, без залежностей)
 function formatNews(items = []) {
   const top = items.slice(0, 3);
   if (!top.length) return "";
-  const body = top.map(i => `• <a href="${i.link}">${clip(i.title, 160)}</a>`).join("\n");
+  // Лише текст у пунктах (без <a>), щоб не було прев’ю. Одна маленька стрілочка – на перше джерело.
+  const body = top.map(i => `• ${clip(i.title, 160)}`).join("\n");
   return body + arrow(top[0].link);
 }
 
-function formatRate(rate) {
-  const n = Number(rate || 0);
-  const s = n ? n.toFixed(2) : "—";
+function formatRate(rateIn) {
+  const val = typeof rateIn === "number" ? rateIn : (rateIn && typeof rateIn.rate === "number" ? rateIn.rate : 0);
+  const s = val ? val.toFixed(2) : "—";
   const url = "https://bank.gov.ua/ua/markets/exchangerates";
   return `💵 USD/UAH: <b>${s} ₴</b>${arrow(url)}`;
 }
@@ -114,7 +115,7 @@ function formatWiki(w) {
 }
 
 function formatHolidays(list = []) {
-  const top = list.slice(0, 8).map(x => `* <b>${x.name}</b> — ${x.date}`);
+  const top = list.slice(0, 8).map(x => `• <b>${x.name}</b> — ${x.date}`);
   return top.join("\n");
 }
 
@@ -546,11 +547,21 @@ export async function handleTelegramWebhook(req, env) {
       return json({ ok: true, fast: "wiki" });
     }
 
-    // Свята: "свята" / "свята україни"
+    // Свята: "свята України 2026" / "державні свята 2026"
     if (/свят[аи]/i.test(text)) {
       await safe(async () => {
-        const list = await getHolidays(lang).catch(() => []);
-        const html = formatHolidays(list) || "Немає даних про свята.";
+        const mY = text.match(/(20\d{2})/);
+        const year = mY ? Number(mY[1]) : new Date().getFullYear();
+        // Працюємо по UA за замовчуванням
+        let list = [];
+        try {
+          // якщо ваш модуль очікує (country, year)
+          list = await getHolidays("UA", year);
+        } catch {
+          // або fallback на поточну сигнатуру, якщо всередині модуль сам розуміє
+          try { list = await getHolidays(year); } catch {}
+        }
+        const html = (list && list.length) ? formatHolidays(list) + arrow("https://date.nager.at/") : "Немає даних про свята.";
         await sendHtml(env, chatId, html);
       });
       return json({ ok: true, fast: "holidays" });
