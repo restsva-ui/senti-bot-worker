@@ -31,7 +31,7 @@ function isAdmin(env, from) {
   return adminId && String(from?.id || "") === adminId;
 }
 
-export async function handleTelegramWebhook(request, env, url) {
+export async function handleTelegramWebhook(request, env) {
   // GET check
   if (request.method === "GET") {
     return new Response(JSON.stringify({ ok: true, method: "GET", message: "webhook alive" }), {
@@ -49,8 +49,7 @@ export async function handleTelegramWebhook(request, env, url) {
       secretHeader === env.WEBHOOK_SECRET ||
       secretHeader === env.TELEGRAM_SECRET_TOKEN;
 
-    // Return 200 on unauthorized so Telegram doesn't drop webhook;
-    // but mark response as unauthorized.
+    // Відповідаємо 200, щоб Telegram не вимикав вебхук, але помічаємо як unauthorized
     if (!secretOk) {
       return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), { status: 200 });
     }
@@ -73,7 +72,6 @@ export async function handleTelegramWebhook(request, env, url) {
       await sendMessage(env, chatId, "Привіт! Я на зв’язку 👋", {
         reply_markup: defaultKeyboard(),
       });
-      // log for you
       if (env.TELEGRAM_ADMIN_ID) {
         await sendMessage(env, env.TELEGRAM_ADMIN_ID, `[direct] handled /start`);
       }
@@ -123,39 +121,43 @@ export async function handleTelegramWebhook(request, env, url) {
       return ok();
     }
 
-    // Адмін: "чеклист" → лінк на UI
+    // Адмін: "чеклист" → лінк на UI (додаємо ?s=WEBHOOK_SECRET якщо він заданий)
     if (/^чеклист$/i.test(text) && isAdmin(env, from)) {
-      const link = abs(env, "/admin/checklist/with-energy");
-      await sendMessage(env, chatId, `Відкрити чеклист:\n${link}`, {
+      const linkUrl = new URL(abs(env, "/admin/checklist/with-energy"));
+      if (env.WEBHOOK_SECRET) linkUrl.searchParams.set("s", env.WEBHOOK_SECRET);
+      await sendMessage(env, chatId, `Відкрити чеклист:\n${linkUrl.toString()}`, {
         reply_markup: adminKeyboard(),
       });
       return ok();
     }
 
-    // Адмін: "поставити вебхук" → виклик /tg/set-webhook
+    // Адмін: "поставити вебхук"
     if (/^поставити\s+вебхук$/i.test(text) && isAdmin(env, from)) {
       const setUrl = abs(env, "/tg/set-webhook");
-      const r = await fetch(setUrl);
-      let msg = "Вебхук оновлено.";
+      let msg = "";
       try {
-        const d = await r.text();
-        msg = d?.length < 200 ? d : "Webhook set (response too long)";
-      } catch {}
+        const r = await fetch(setUrl);
+        const raw = await r.text();
+        msg = raw || `HTTP ${r.status}`;
+      } catch (e) {
+        msg = `set-webhook error: ${String(e)}`;
+      }
       await sendMessage(env, chatId, msg, { reply_markup: adminKeyboard() });
       return ok();
     }
 
-    // Адмін: "запустити нічного агента" → /cron/auto-improve?s=<secret>
+    // Адмін: "запустити нічного агента"
     if (/^запустити\s+нічного\s+агента$/i.test(text) && isAdmin(env, from)) {
-      let runUrl = new URL(abs(env, "/cron/auto-improve"));
+      const runUrl = new URL(abs(env, "/cron/auto-improve"));
       if (env.WEBHOOK_SECRET) runUrl.searchParams.set("s", env.WEBHOOK_SECRET);
-      const r = await fetch(runUrl.toString());
       let msg = "Нічного агента запущено.";
       try {
-        const d = await r.json();
-        msg = `Auto-improve: ${d?.ok ? "OK" : "FAIL"}`
-          + (d?.insights ? `, insights: ${d.insights.length}` : "");
-      } catch {}
+        const r = await fetch(runUrl.toString());
+        const d = await r.json().catch(() => null);
+        if (d) msg = `Auto-improve: ${d.ok ? "OK" : "FAIL"}`;
+      } catch (e) {
+        msg = `Auto-improve error: ${String(e)}`;
+      }
       await sendMessage(env, chatId, msg, { reply_markup: adminKeyboard() });
       return ok();
     }
@@ -166,7 +168,7 @@ export async function handleTelegramWebhook(request, env, url) {
       return ok();
     }
 
-    // Інше — просто ехо + клавіатура
+    // Інше — ехо + клавіатура
     await sendMessage(env, chatId, `Ти написав: ${text}`, {
       reply_markup: defaultKeyboard(),
     });
@@ -184,7 +186,6 @@ export async function handleTelegramWebhook(request, env, url) {
       });
     }
   } catch (e) {
-    // тихе повідомлення адміна і завжди 200
     try {
       if (env.TELEGRAM_ADMIN_ID) {
         await sendMessage(env, env.TELEGRAM_ADMIN_ID, `[webhook error] ${String(e?.message || e)}`);
