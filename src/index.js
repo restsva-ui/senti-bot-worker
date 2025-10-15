@@ -29,7 +29,6 @@ import { handleAiEvolve } from "./routes/aiEvolve.js";
 import { handleBrainPromote } from "./routes/brainPromote.js";
 import { handleAdminEnergy } from "./routes/adminEnergy.js"; // energy UI/API
 import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js"; // ← ДОДАНО
-import { handleAdminEditor } from "./routes/adminEditor.js"; // ← ДОБАВЛЕНО
 
 // ✅ локальний selftest
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
@@ -53,7 +52,8 @@ import { runSelfRegulation } from "./lib/selfRegulate.js";
 // ✅ HTTP-роутер нічного агента + debug (/ai/improve*, /debug/*)
 import { handleAiImprove } from "./routes/aiImprove.js";
 
-const VERSION = "senti-worker-2025-10-12-00-59+aiimprove-router+kv-code-api+editor+checklist-link";
+const VERSION =
+  "senti-worker-2025-10-15-18-50+kv-editor-inline+kv-api-fix";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // KV helpers for code storage (read/write/list) — uses CODE_KV or STATE_KV
@@ -84,6 +84,149 @@ async function codeList(env) {
     ts: k?.metadata?.ts || null,
   }));
 }
+// ─────────────────────────────────────────────────────────────────────────────
+// General KV (STATE/CODE/ARCHIVE) editor API + UI
+
+function getNS(env, ns) {
+  if (ns === "CODE_KV") return env.CODE_KV || env.STATE_KV;
+  if (ns === "ARCHIVE_KV") return env.ARCHIVE_KV || env.STATE_KV;
+  return env.STATE_KV; // default
+}
+
+function kvEditorHtml(env, url) {
+  const s = url.searchParams.get("s") || "";
+  const ns = url.searchParams.get("ns") || "STATE_KV";
+  const base = abs(env, "/admin/kv");
+  const listUrl = (params) => {
+    const u = new URL(abs(env, "/admin/kv/list"));
+    u.searchParams.set("s", s);
+    Object.entries(params || {}).forEach(([k, v]) => v != null && u.searchParams.set(k, v));
+    return u.toString();
+  };
+  const getUrl = (params) => {
+    const u = new URL(abs(env, "/admin/kv/get"));
+    u.searchParams.set("s", s);
+    Object.entries(params || {}).forEach(([k, v]) => v != null && u.searchParams.set(k, v));
+    return u.toString();
+  };
+  const putUrl = (params) => {
+    const u = new URL(abs(env, "/admin/kv/put"));
+    u.searchParams.set("s", s);
+    Object.entries(params || {}).forEach(([k, v]) => v != null && u.searchParams.set(k, v));
+    return u.toString();
+  };
+  const checklist = abs(env, "/admin/checklist/html?s=" + encodeURIComponent(s));
+
+  return `<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>KV Editor</title>
+<style>
+  :root{--bg:#0f1115;--fg:#eaeefb;--muted:#9aa4b2;--accent:#8ab4ff;--surface:#171a21;--btn:#222633}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  a{color:var(--accent);text-decoration:none}
+  .wrap{max-width:1100px;margin:0 auto;padding:12px}
+  .top{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .pill{background:var(--btn);border-radius:999px;padding:8px 12px}
+  select,input,textarea,button{background:var(--surface);color:var(--fg);border:1px solid #2a2f3a;border-radius:12px;padding:10px}
+  input,select{height:40px}
+  textarea{width:100%;min-height:50vh;border-radius:14px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+  .row>*{flex:1}
+  .row .w60{flex:0 0 60%}
+  .row .w20{flex:0 0 20%}
+  .btn{cursor:pointer}
+  .hint{color:var(--muted);font-size:12px}
+  .toast{margin-top:8px;font-size:13px}
+  @media (max-width:700px){
+    .row .w60,.row .w20{flex:1 0 100%}
+    textarea{min-height:55vh}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <span class="pill">KV Editor · <b id="nsLbl">${ns}</b></span>
+    <a class="pill" href="${checklist}">← До Checklist</a>
+  </div>
+
+  <div class="row">
+    <select id="ns" class="w20">
+      <option value="STATE_KV"${ns==="STATE_KV"?" selected":""}>STATE_KV</option>
+      <option value="CODE_KV"${ns==="CODE_KV"?" selected":""}>CODE_KV</option>
+      <option value="ARCHIVE_KV"${ns==="ARCHIVE_KV"?" selected":""}>ARCHIVE_KV</option>
+    </select>
+    <input id="prefix" placeholder="prefix (optional)" class="w60"/>
+    <button id="btnList" class="btn w20">List</button>
+  </div>
+
+  <div class="row">
+    <input id="key" placeholder="key" class="w60"/>
+    <button id="btnLoad" class="btn w20">Load</button>
+    <button id="btnNew" class="btn w20">New</button>
+    <button id="btnSave" class="btn w20">Save</button>
+  </div>
+
+  <textarea id="val" placeholder='value (JSON/string)'></textarea>
+  <div id="toast" class="toast"></div>
+
+  <p class="hint">Порада: Save робить <code>POST</code> на <code>/admin/kv/put?ns=&key=&s=...</code> із сирим тілом.</p>
+</div>
+
+<script>
+  const S="${s}";
+  const base="${base}";
+  const listUrl=${listUrl.toString()};
+  const getUrl=${getUrl.toString()};
+  const putUrl=${putUrl.toString()};
+
+  const $ = (id)=>document.getElementById(id);
+  const nsEl=$("ns"), nsLbl=$("nsLbl"), prefix=$("prefix"), keyEl=$("key"), val=$("val"), toast=$("toast");
+
+  nsEl.addEventListener("change", ()=>{
+    const u=new URL(base); u.searchParams.set("s",S); u.searchParams.set("ns", nsEl.value);
+    location.href=u.toString();
+  });
+
+  $("btnList").onclick= async ()=>{
+    toast.textContent="Listing...";
+    const res = await fetch(listUrl({ns:nsEl.value, prefix:prefix.value||""}));
+    const j = await res.json();
+    toast.textContent = res.ok ? "OK: "+(j.items?.length||0)+" keys" : "List error";
+    if (j.items) {
+      alert(j.items.map(k=>k.name||k.key).join("\\n") || "(empty)");
+    }
+  };
+
+  $("btnLoad").onclick= async ()=>{
+    if (!keyEl.value) { toast.textContent="Set key first"; return; }
+    toast.textContent="Loading...";
+    const res = await fetch(getUrl({ns:nsEl.value, key:keyEl.value}));
+    const j = await res.json();
+    if (res.ok) { val.value = j.value ?? ""; toast.textContent="Loaded"; }
+    else { toast.textContent="Load error: "+(j.error||res.status); }
+  };
+
+  $("btnNew").onclick= ()=>{
+    const k = prompt("New key name (will not overwrite until Save):");
+    if (k) { keyEl.value=k; val.value=""; toast.textContent="Ready"; }
+  };
+
+  $("btnSave").onclick= async ()=>{
+    if (!keyEl.value) { toast.textContent="Set key first"; return; }
+    toast.textContent="Saving...";
+    const res = await fetch(putUrl({ns:nsEl.value, key:keyEl.value}), {method:"POST", body:val.value||""});
+    const j = await res.json().catch(()=>({}));
+    toast.textContent = res.ok ? "✅ Saved ("+(j.bytes||0)+" bytes)" : "Save error: "+(j.error||res.status);
+  };
+</script>
+</body>
+</html>`;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default {
@@ -233,49 +376,22 @@ export default {
       }
 
       // --- ADMIN ---
-      // 0) Простий браузерний редактор KV (STATE/ARCHIVE)
-      if (p.startsWith("/admin/editor")) {
-        try {
-          const r = await handleAdminEditor?.(req, env, url);
-          if (r && r.status !== 404) return r;
-        } catch {}
-        // fallback мінімальна сторінка, якщо handler відсутній
-        const s = url.searchParams.get("s") || env.WEBHOOK_SECRET || "";
-        const base = abs(env, "");
-        return html(`<!doctype html><meta charset="utf-8"><title>KV Editor</title>
-          <body style="font:16px system-ui;padding:16px">
-          <h3>KV Editor (fallback)</h3>
-          <p><a href="${base}/admin/api/list?s=${encodeURIComponent(s)}">📄 List</a></p>
-          <p>GET: ${base}/admin/api/get?path=<i>your/path.js</i>&s=${encodeURIComponent(s)}</p>
-          <p>PUT: ${base}/admin/api/put?path=<i>your/path.js</i>&s=${encodeURIComponent(s)} (POST body=code)</p>
-          </body>`);
-      }
-
       // 1) Комбінована сторінка: Checklist + Energy (ifrаme)
-      if (p.startsWith("/admin/checklist/with-energy")) { // ← ДОДАНО
+      if (p.startsWith("/admin/checklist/with-energy")) {
         try {
           const r = await handleAdminChecklistWithEnergy?.(req, env, url);
           if (r && r.status !== 404) return r;
         } catch {}
-        // fallback + кнопка до редактора
-        const secret = url.searchParams.get("s") || env.WEBHOOK_SECRET || "";
-        const editorHref = `${abs(env, "/admin/editor")}?s=${encodeURIComponent(secret)}`;
-        return html(`<h3>Checklist + Energy</h3><p>Fallback UI.</p>
-          <p><a href="${editorHref}" style="display:inline-block;padding:.6rem .9rem;border:1px solid #223049;border-radius:.6rem;text-decoration:none">🔧 Відкрити KV Editor</a></p>`);
+        return html("<h3>Checklist + Energy</h3><p>Fallback UI.</p>");
       }
 
-      // 2) Звичайний Checklist (fallback інжектить кнопку до редактора)
+      // 2) Звичайний Checklist
       if (p.startsWith("/admin/checklist")) {
         try {
           const r = await handleAdminChecklist?.(req, env, url);
-          if (r && r.status !== 404) return r;
+        if (r && r.status !== 404) return r;
         } catch {}
-        const secret = url.searchParams.get("s") || env.WEBHOOK_SECRET || "";
-        let body = await checklistHtml?.(env).catch(() => "<h3>Checklist</h3>");
-        const editorHref = `${abs(env, "/admin/editor")}?s=${encodeURIComponent(secret)}`;
-        const btn = `<p><a href="${editorHref}" style="display:inline-block;padding:.6rem .9rem;border:1px solid #223049;border-radius:.6rem;text-decoration:none">🔧 Відкрити KV Editor</a></p>`;
-        body = btn + body;
-        return html(body);
+        return html(await checklistHtml?.(env).catch(() => "<h3>Checklist</h3>"));
       }
 
       // 3) Repo / Архів
@@ -300,7 +416,7 @@ export default {
       if (p.startsWith("/admin/brain")) {
         try {
           const r = await handleAdminBrain?.(req, env, url);
-          if (r && r.status !== 404) return r; // ← виправлено (було кириличне 'р')
+          if (r && r.status !== 404) return r;
         } catch {}
         return json({ ok: true, note: "admin brain fallback" }, 200, CORS);
       }
@@ -351,6 +467,60 @@ export default {
         return json({ ok: true, saved: true, path, bytes: bodyText.length }, 200, CORS);
       }
       // ────────────────────────────────────────────────────────────────────
+      // KV EDITOR UI + API
+
+      if (p === "/admin/kv") {
+        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
+          return html("<h3>Unauthorized</h3>", 401);
+        }
+        return html(kvEditorHtml(env, url));
+      }
+
+      if (p === "/admin/kv/list") {
+        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
+          return json({ ok: false, error: "unauthorized" }, 401, CORS);
+        }
+        const ns = url.searchParams.get("ns") || "STATE_KV";
+        const prefix = url.searchParams.get("prefix") || "";
+        const kv = getNS(env, ns);
+        if (!kv) return json({ ok: false, error: "kv missing" }, 500, CORS);
+        const it = await kv.list(prefix ? { prefix } : {});
+        const items = (it?.keys || []).map((k) => ({
+          name: k.name,
+          ts: k?.metadata?.ts || null,
+        }));
+        return json({ ok: true, items }, 200, CORS);
+      }
+
+      if (p === "/admin/kv/get") {
+        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
+          return json({ ok: false, error: "unauthorized" }, 401, CORS);
+        }
+        const ns = url.searchParams.get("ns") || "STATE_KV";
+        const key = url.searchParams.get("key");
+        if (!key) return json({ ok: false, error: "key required" }, 400, CORS);
+        const kv = getNS(env, ns);
+        if (!kv) return json({ ok: false, error: "kv missing" }, 500, CORS);
+        const value = await kv.get(key, "text");
+        return json({ ok: true, key, value }, 200, CORS);
+      }
+
+      if (p === "/admin/kv/put") {
+        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
+          return json({ ok: false, error: "unauthorized" }, 401, CORS);
+        }
+        if (method !== "POST") {
+          return json({ ok: false, error: "method not allowed" }, 405, CORS);
+        }
+        const ns = url.searchParams.get("ns") || "STATE_KV";
+        const key = url.searchParams.get("key");
+        if (!key) return json({ ok: false, error: "key required" }, 400, CORS);
+        const body = await req.text();
+        const kv = getNS(env, ns);
+        if (!kv) return json({ ok: false, error: "kv missing" }, 500, CORS);
+        await kv.put(key, body);
+        return json({ ok: true, key, bytes: body.length }, 200, CORS);
+      }
 
       // webhook POST
       if (p === "/webhook" && req.method === "POST") {
@@ -366,27 +536,27 @@ export default {
       }
 
       // tg helpers
-if (p === "/tg/get-webhook") {
-  const r = await TG.getWebhook(env.BOT_TOKEN);
-  return new Response(await r.text(), {
-    headers: { "content-type": "application/json" },
-  });
-}
-if (p === "/tg/set-webhook") {
-  const target = abs(env, "/webhook");
-  const r = await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
-  return new Response(await r.text(), {
-    headers: { "content-type": "application/json" },
-  });
-}
-if (p === "/tg/del-webhook") {
-  const r =
-    (await TG.deleteWebhook?.(env.BOT_TOKEN)) ||
-    (await fetch("https://api.telegram.org/bot" + env.BOT_TOKEN + "/deleteWebhook"));
-  return new Response(await r.text(), {
-    headers: { "content-type": "application/json" },
-  });
-}
+      if (p === "/tg/get-webhook") {
+        const r = await TG.getWebhook(env.BOT_TOKEN);
+        return new Response(await r.text(), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (p === "/tg/set-webhook") {
+        const target = abs(env, "/webhook");
+        const r = await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
+        return new Response(await r.text(), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (p === "/tg/del-webhook") {
+        const r =
+          (await TG.deleteWebhook?.(env.BOT_TOKEN)) ||
+          (await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteWebhook`));
+        return new Response(await r.text(), {
+          headers: { "content-type": "application/json" },
+        });
+      }
 
       // ci deploy
       if (p.startsWith("/ci/deploy-note")) {
@@ -433,7 +603,8 @@ if (p === "/tg/del-webhook") {
         const tokens = {
           access_token: d.access_token,
           refresh_token: d.refresh_token,
-          expiry: Math.floor(Date.now() / 1000) + (d.expires_in || 3600) - 60,
+          expiry:
+            Math.floor(Date.now() / 1000) + (d.expires_in || 3600) - 60,
         };
         await putUserTokens(env, state.u, tokens);
         return html(
@@ -483,7 +654,10 @@ if (p === "/tg/del-webhook") {
         String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" &&
         (runByCron || runByHour)
       ) {
-        const res = await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
+        const res = await nightlyAutoImprove(env, {
+          now: new Date(),
+          reason: event?.cron || \`utc@\${hour}\`,
+        });
         if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
           await runSelfRegulation(env, res?.insights || null).catch(() => {});
         }
