@@ -52,7 +52,10 @@ import { runSelfRegulation } from "./lib/selfRegulate.js";
 // ✅ HTTP-роутер нічного агента + debug (/ai/improve*, /debug/*)
 import { handleAiImprove } from "./routes/aiImprove.js";
 
-const VERSION = "senti-worker-2025-10-12-00-59+aiimprove-router";
+// ✅ 🔸 МІКРОКРОК №1: read-only Admin JSON API (ping + list)
+import { handleAdminApi } from "./routes/adminApi.js";
+
+const VERSION = "senti-worker-2025-10-12-00-59+aiimprove-router+adminapi-readonly";
 
 export default {
   async fetch(req, env) {
@@ -94,6 +97,15 @@ export default {
 
       if (p === "/webhook" && method === "GET") {
         return json({ ok: true, method: "GET", message: "webhook alive" }, 200, CORS);
+      }
+
+      // 🔸 Admin JSON API (read-only): /admin/api/*
+      if (p.startsWith("/admin/api/")) {
+        try {
+          const r = await handleAdminApi?.(req, env, url);
+          if (r) return r;
+        } catch {}
+        return json({ ok: false, error: "admin api handler missing" }, 500, CORS);
       }
 
       // brain state
@@ -386,7 +398,7 @@ export default {
         String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" &&
         (runByCron || runByHour)
       ) {
-        const res = await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
+        const res = await nightlyAutoImprove(env, { now: new Date(), reason: "manual" });
         if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
           await runSelfRegulation(env, res?.insights || null).catch(() => {});
         }
