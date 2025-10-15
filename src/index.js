@@ -29,6 +29,7 @@ import { handleAiEvolve } from "./routes/aiEvolve.js";
 import { handleBrainPromote } from "./routes/brainPromote.js";
 import { handleAdminEnergy } from "./routes/adminEnergy.js"; // energy UI/API
 import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js"; // ← ДОДАНО
+import { handleAdminEditor } from "./routes/adminEditor.js"; // ← ДОБАВЛЕНО
 
 // ✅ локальний selftest
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
@@ -52,10 +53,7 @@ import { runSelfRegulation } from "./lib/selfRegulate.js";
 // ✅ HTTP-роутер нічного агента + debug (/ai/improve*, /debug/*)
 import { handleAiImprove } from "./routes/aiImprove.js";
 
-// ✅ НОВЕ: мобільний KV-редактор
-import { kvEditor } from "./ui/editor.js";
-
-const VERSION = "senti-worker-2025-10-12-00-59+aiimprove-router+kv-code-api+editor";
+const VERSION = "senti-worker-2025-10-12-00-59+aiimprove-router+kv-code-api+editor+checklist-link";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // KV helpers for code storage (read/write/list) — uses CODE_KV or STATE_KV
@@ -112,7 +110,7 @@ export default {
       if (p === "/health") {
         try {
           const r = await handleHealth?.(req, env, url);
-        if (r && r.status !== 404) return r;
+          if (r && r.status !== 404) return r;
         } catch {}
         return json(
           {
@@ -235,31 +233,47 @@ export default {
       }
 
       // --- ADMIN ---
-      // 1) Комбінована сторінка: Checklist + Energy (iframe)
-      if (p.startsWith("/admin/checklist/with-energy")) {
+      // 0) Простий браузерний редактор KV (STATE/ARCHIVE)
+      if (p.startsWith("/admin/editor")) {
+        try {
+          const r = await handleAdminEditor?.(req, env, url);
+          if (r && r.status !== 404) return r;
+        } catch {}
+        // fallback мінімальна сторінка, якщо handler відсутній
+        const s = url.searchParams.get("s") || env.WEBHOOK_SECRET || "";
+        const base = abs(env, "");
+        return html(`<!doctype html><meta charset="utf-8"><title>KV Editor</title>
+          <body style="font:16px system-ui;padding:16px">
+          <h3>KV Editor (fallback)</h3>
+          <p><a href="${base}/admin/api/list?s=${encodeURIComponent(s)}">📄 List</a></p>
+          <p>GET: ${base}/admin/api/get?path=<i>your/path.js</i>&s=${encodeURIComponent(s)}</p>
+          <p>PUT: ${base}/admin/api/put?path=<i>your/path.js</i>&s=${encodeURIComponent(s)} (POST body=code)</p>
+          </body>`);
+      }
+
+      // 1) Комбінована сторінка: Checklist + Energy (ifrаme)
+      if (p.startsWith("/admin/checklist/with-energy")) { // ← ДОДАНО
         try {
           const r = await handleAdminChecklistWithEnergy?.(req, env, url);
           if (r && r.status !== 404) return r;
         } catch {}
-        // Fallback: кнопка до редактора
-        const href = new URL(abs(env, "/admin/editor"));
-        const s = url.searchParams.get("s") || env.WEBHOOK_SECRET || "";
-        if (s) href.searchParams.set("s", s);
-        return html('<h3>Checklist + Energy</h3><p>Fallback UI.</p><p><a href="'+href.toString()+'">🔧 Відкрити KV Editor</a></p>');
+        // fallback + кнопка до редактора
+        const secret = url.searchParams.get("s") || env.WEBHOOK_SECRET || "";
+        const editorHref = `${abs(env, "/admin/editor")}?s=${encodeURIComponent(secret)}`;
+        return html(`<h3>Checklist + Energy</h3><p>Fallback UI.</p>
+          <p><a href="${editorHref}" style="display:inline-block;padding:.6rem .9rem;border:1px solid #223049;border-radius:.6rem;text-decoration:none">🔧 Відкрити KV Editor</a></p>`);
       }
 
-      // 2) Звичайний Checklist (+ інжекція кнопки до редактора у fallback)
+      // 2) Звичайний Checklist (fallback інжектить кнопку до редактора)
       if (p.startsWith("/admin/checklist")) {
         try {
           const r = await handleAdminChecklist?.(req, env, url);
           if (r && r.status !== 404) return r;
         } catch {}
-        // fallback HTML + кнопка
-        const s = url.searchParams.get("s") || env.WEBHOOK_SECRET || "";
+        const secret = url.searchParams.get("s") || env.WEBHOOK_SECRET || "";
         let body = await checklistHtml?.(env).catch(() => "<h3>Checklist</h3>");
-        const link = new URL(abs(env, "/admin/editor"));
-        if (s) link.searchParams.set("s", s);
-        const btn = `<p><a href="${link.toString()}" style="display:inline-block;padding:.6rem .9rem;border:1px solid #223049;border-radius:.6rem;text-decoration:none">🔧 Відкрити KV Editor</a></p>`;
+        const editorHref = `${abs(env, "/admin/editor")}?s=${encodeURIComponent(secret)}`;
+        const btn = `<p><a href="${editorHref}" style="display:inline-block;padding:.6rem .9rem;border:1px solid #223049;border-radius:.6rem;text-decoration:none">🔧 Відкрити KV Editor</a></p>`;
         body = btn + body;
         return html(body);
       }
@@ -300,14 +314,8 @@ export default {
         return json({ ok: true, note: "admin energy fallback" }, 200, CORS);
       }
 
-      // 7) НОВЕ: сторінка мобільного KV-редактора
-      if (p === "/admin/editor") {
-        const s = url.searchParams.get("s") || env.WEBHOOK_SECRET || "";
-        return html(kvEditor(s));
-      }
-
       // ────────────────────────────────────────────────────────────────────
-      // KV-backed code repo API (list/get/put)
+      // NEW: Simple KV-backed code repo API (list/get/put)
       if (p === "/admin/api/list") {
         if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
           return json({ ok: false, error: "unauthorized" }, 401, CORS);
@@ -374,7 +382,7 @@ export default {
       if (p === "/tg/del-webhook") {
         const r =
           (await TG.deleteWebhook?.(env.BOT_TOKEN)) ||
-          (await fetch(\`https://api.telegram.org/bot\${env.BOT_TOKEN}/deleteWebhook\`));
+          (await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteWebhook`));
         return new Response(await r.text(), {
           headers: { "content-type": "application/json" },
         });
@@ -421,7 +429,7 @@ export default {
           body,
         });
         const d = await r.json();
-        if (!r.ok) return html(\`<pre>\${JSON.stringify(d, null, 2)}</pre>\`);
+        if (!r.ok) return html(`<pre>${JSON.stringify(d, null, 2)}</pre>`);
         const tokens = {
           access_token: d.access_token,
           refresh_token: d.refresh_token,
@@ -429,7 +437,7 @@ export default {
         };
         await putUserTokens(env, state.u, tokens);
         return html(
-          \`<h3>✅ Готово</h3><p>Тепер повернись у Telegram і натисни <b>Google Drive</b> ще раз.</p>\`
+          `<h3>✅ Готово</h3><p>Тепер повернись у Telegram і натисни <b>Google Drive</b> ще раз.</p>`
         );
       }
 
@@ -437,7 +445,7 @@ export default {
       try {
         await appendChecklist(
           env,
-          \`[miss] \${new Date().toISOString()} \${req.method} \${p}\${url.search}\`
+          `[miss] ${new Date().toISOString()} ${req.method} ${p}${url.search}`
         );
       } catch {}
       return json({ ok: false, error: "Not found", path: p }, 404, CORS);
@@ -460,7 +468,7 @@ export default {
     } catch (e) {
       await appendChecklist(
         env,
-        \`[\${new Date().toISOString()}] evolve_auto:error \${String(e)}\`
+        `[${new Date().toISOString()}] evolve_auto:error ${String(e)}`
       );
     }
 
@@ -475,7 +483,7 @@ export default {
         String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" &&
         (runByCron || runByHour)
       ) {
-        const res = await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || \`utc@\${hour}\` });
+        const res = await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
         if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
           await runSelfRegulation(env, res?.insights || null).catch(() => {});
         }
@@ -483,7 +491,7 @@ export default {
     } catch (e) {
       await appendChecklist(
         env,
-        \`[\${new Date().toISOString()}] auto_improve:error \${String(e)}\`
+        `[${new Date().toISOString()}] auto_improve:error ${String(e)}`
       );
     }
   },
