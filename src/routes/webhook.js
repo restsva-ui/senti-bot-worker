@@ -1,6 +1,6 @@
+// src/routes/webhook.js
 // Telegram webhook з інтеграцією "мозку", Статутом, Self-Tune, Dialog Memory і режимом диска.
-// ВАЖЛИВО: прибрано локальну енергетику та локальні json/sendMessage.
-// Використовуємо існуючі модулі та шлемо AI-відповіді без parse_mode (sendPlain).
+// Відправка AI-відповідей — без parse_mode (щоб уникнути MarkdownV2-помилок).
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -11,26 +11,36 @@ import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
 import { json } from "../lib/utils.js";
 import { sendMessage as sendTG } from "../lib/telegram.js";
 
-// Енергія — беремо існуючий модуль з архіву
+// Енергія (існуючий модуль)
 import { getEnergy, spendEnergy } from "../lib/energy.js";
+
+// Dialog Memory — НОВИЙ імпорт
+import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-// Відправка без parse_mode (щоб Telegram не валився на MarkdownV2)
+// Надсилати текст без parse_mode (безпечніше для довільного AI-виводу)
 async function sendPlain(env, chatId, text, extra = {}) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
-  const body = { chat_id: chatId, text, disable_web_page_preview: true, ...(extra.reply_markup ? { reply_markup: extra.reply_markup } : {}) };
-  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
+  const body = {
+    chat_id: chatId,
+    text,
+    disable_web_page_preview: true,
+    ...(extra.reply_markup ? { reply_markup: extra.reply_markup } : {})
+  };
+  await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  }).catch(() => {});
 }
 
-// Парсер команди /ai
 function parseAiCommand(text = "") {
   const s = String(text).trim();
   const m = s.match(/^\/ai(?:@[\w_]+)?(?:\s+([\s\S]+))?$/i);
   if (!m) return null;
   return (m[1] || "").trim();
 }
-
 function defaultAiReply() {
   return "Вибач, зараз не готовий відповісти чітко. Спробуй переформулювати або дай більше контексту.";
 }
@@ -45,11 +55,9 @@ const mainKeyboard = (isAdmin = false) => {
   if (isAdmin) rows.push([{ text: BTN_ADMIN }, { text: BTN_CHECK }]);
   return { keyboard: rows, resize_keyboard: true };
 };
-
 const inlineOpenDrive = () => ({
   inline_keyboard: [[{ text: "Відкрити Диск", url: "https://drive.google.com/drive/my-drive" }]],
 });
-
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 
 // ── STATE_KV: режим диска ─────────────────────────────────────────────────────
@@ -75,36 +83,6 @@ function energyLinks(env, userId) {
   };
 }
 
-// ── Dialog Memory (DIALOG_KV) ────────────────────────────────────────────────
-const DIALOG_KEY = (uid) => `dlg:${uid}`;
-const DLG_CFG = { maxTurns: 12, maxBytes: 8000, ttlSec: 14 * 24 * 3600 };
-function ensureDialog(env) {
-  if (!env.DIALOG_KV) throw new Error("DIALOG_KV binding missing");
-  return env.DIALOG_KV;
-}
-async function readDialog(env, userId) {
-  const kv = ensureDialog(env);
-  const raw = await kv.get(DIALOG_KEY(userId));
-  if (!raw) return [];
-  try { return JSON.parse(raw) || []; } catch { return []; }
-}
-async function writeDialog(env, userId, arr) {
-  const kv = ensureDialog(env);
-  const s = JSON.stringify(arr);
-  if (s.length > DLG_CFG.maxBytes) {
-    const over = s.length - DLG_CFG.maxBytes;
-    const drop = Math.ceil((over / s.length) * arr.length) + 1;
-    arr = arr.slice(drop);
-  }
-  await kv.put(DIALOG_KEY(userId), JSON.stringify(arr), { expirationTtl: DLG_CFG.ttlSec });
-}
-async function pushTurn(env, userId, role, content) {
-  const arr = await readDialog(env, userId);
-  arr.push({ r: role, c: String(content || "") });
-  if (arr.length > DLG_CFG.maxTurns) arr.splice(0, arr.length - DLG_CFG.maxTurns);
-  await writeDialog(env, userId, arr);
-}
-
 // ── Self-Tune ────────────────────────────────────────────────────────────────
 async function loadSelfTune(env, chatId) {
   try {
@@ -127,10 +105,7 @@ async function loadSelfTune(env, chatId) {
 
 async function buildSystemHint(env, chatId, userId) {
   const statut = String((await readStatut(env)) || "").trim();
-  const dlgTurns = await readDialog(env, userId);
-  const dlg = dlgTurns.length
-    ? ["[Context: попередній діалог (останні повідомлення)]", ...dlgTurns.slice(-DLG_CFG.maxTurns).map(it => (it.r === "user" ? `Користувач: ${it.c}` : `Senti: ${it.c}`))].join("\n")
-    : "";
+  const dlg = await buildDialogHint(env, userId); // ← з нового модуля
   const tune = await loadSelfTune(env, chatId);
   const blocks = [];
   if (statut) blocks.push(`[Статут/чеклист]\n${statut}`);
