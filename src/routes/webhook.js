@@ -130,8 +130,8 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   await spendEnergy(env, userId, need, "media");
   const url = await tgFileUrl(env, att.file_id);
   const saved = await driveSaveFromUrl(env, userId, url, att.name);
-  // Ясний фідбек + кнопка відкриття Диска
-  await sendPlain(env, chatId, `✅ ${saved?.name || att.name}`, {
+  // Чіткий фідбек + кнопка відкриття Диска
+  await sendPlain(env, chatId, `✅ ${t(lang, "saved_to_drive")}: ${saved?.name || att.name}`, {
     reply_markup: {
       inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: "https://drive.google.com/drive/my-drive" }]]
     }
@@ -145,11 +145,11 @@ async function buildSystemHint(env, chatId, userId) {
   const dlg = await buildDialogHint(env, userId);
   const tune = await loadSelfTune(env, chatId);
 
-  // Центральна ідентичність Senti (англійською — це внутрішній системний хінт)
-  const core = `You are Senti — a thoughtful, self-improving assistant and companion. 
-- You never claim to be an AI, language model, or a product made by any company.
-- You speak naturally and human-like, with warmth and clarity.
-- You prefer concise, practical answers; expand only when asked.`;
+  // Центральна ідентичність Senti (системний хінт англійською)
+  const core = `You are Senti — a thoughtful, self-improving assistant and companion.
+- Never claim to be an AI, model, chatbot, or a product made by any company.
+- Speak naturally and human-like with warmth and clarity.
+- Prefer concise, practical answers; expand only when asked.`;
 
   const blocks = [core];
   if (statut) blocks.push(`[Статут/чеклист]\n${statut}`);
@@ -170,11 +170,8 @@ function guessEmoji(text = "") {
   return "💡";
 }
 function looksLikeEmojiStart(s = "") {
-  try {
-    return /^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(String(s));
-  } catch {
-    return false;
-  }
+  try { return /^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(String(s)); }
+  catch { return false; }
 }
 function tryParseUserNamedAs(text) {
   const s = (text || "").trim();
@@ -208,20 +205,27 @@ async function rememberNameFromText(env, userId, text) {
   return name;
 }
 
-// ── Анти-розкриття “я AI/LLM” ───────────────────────────────────────────────
+// ── Анти-розкриття “я AI/LLM” та чистка підписів ────────────────────────────
 function revealsAiSelf(out = "") {
   const s = out.toLowerCase();
   return (
-    /i am (an|a)? (ai|language model|large language model)/.test(s) ||
-    /developed by (google|openai|meta|anthropic)/.test(s) ||
+    /(^|\b)as an? (ai|language model)\b/.test(s) ||
+    /\bi am (an|a)? (ai|language model|large language model)\b/.test(s) ||
+    /\bdeveloped by (google|openai|meta|anthropic)\b/.test(s) ||
     /я\s+(є|—|-)?\s*(штучн|модель|мова)/i.test(out) ||
     /я\s+(являюсь|есть)\s+(ии|искусственн|языков)/i.test(out) ||
     /ich bin (ein|eine) (ki|sprachmodell)/i.test(out) ||
     /je suis (une|un) (ia|mod[èe]le de langue)/i.test(out)
   );
 }
+function stripProviderSignature(s = "") {
+  // прибираємо рядки типу “— via Gemini …”
+  return String(s)
+    .replace(/^[ \t]*(?:—|--)?\s*via\s+[^\n]*\n?/gim, "")
+    .trim();
+}
 
-// ── Відповідь AI + анти-глітч ───────────────────────────────────────────────
+// ── Відповідь AI + захист ───────────────────────────────────────────────────
 function limitMsg(s, max = 220) { if (!s) return s; return s.length <= max ? s : s.slice(0, max - 1); }
 function chunkText(s, size = 3500) { const out = []; let t = String(s || ""); while (t.length) { out.push(t.slice(0, size)); t = t.slice(size); } return out; }
 function looksLikeModelDump(s = "") {
@@ -245,11 +249,11 @@ ${control}`;
     ? await askAnyModel(env, modelOrder, prompt, { systemHint })
     : await think(env, prompt, { systemHint });
 
-  out = (out || "").trim();
+  out = stripProviderSignature((out || "").trim());
 
   // анти-глітч: якщо почало розповідати про моделі — повторити через think()
   if (looksLikeModelDump(out)) {
-    out = (await think(env, prompt, { systemHint }))?.trim() || out;
+    out = stripProviderSignature((await think(env, prompt, { systemHint }))?.trim() || out);
   }
 
   // анти-розкриття AI: якщо проговорилося — перефразуємо з забороною
@@ -258,7 +262,7 @@ ${control}`;
     let cleaned = modelOrder
       ? await askAnyModel(env, modelOrder, fix, { systemHint })
       : await think(env, fix, { systemHint });
-    cleaned = (cleaned || "").trim();
+    cleaned = stripProviderSignature((cleaned || "").trim());
     if (cleaned) out = cleaned;
   }
 
@@ -275,7 +279,7 @@ ${control}`;
     let fixed = modelOrder
       ? await askAnyModel(env, modelOrder, hardPrompt, { systemHint })
       : await think(env, hardPrompt, { systemHint });
-    fixed = (fixed || "").trim();
+    fixed = stripProviderSignature((fixed || "").trim());
     if (fixed) out = looksLikeEmojiStart(fixed) ? fixed : `${guessEmoji(userText)} ${fixed}`;
   }
 
