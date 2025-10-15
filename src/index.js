@@ -366,27 +366,27 @@ export default {
       }
 
       // tg helpers
-      if (p === "/tg/get-webhook") {
-        const r = await TG.getWebhook(env.BOT_TOKEN);
-        return new Response(await r.text(), {
-          headers: { "content-type": "application/json" },
-        });
-      }
-      if (p === "/tg/set-webhook") {
-        const target = abs(env, "/webhook");
-        const r = await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
-        return new Response(await r.text(), {
-          headers: { "content-type": "application/json" },
-        });
-      }
-      if (p === "/tg/del-webhook") {
-        const r =
-          (await TG.deleteWebhook?.(env.BOT_TOKEN)) ||
-          (await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteWebhook`));
-        return new Response(await r.text(), {
-          headers: { "content-type": "application/json" },
-        });
-      }
+if (p === "/tg/get-webhook") {
+  const r = await TG.getWebhook(env.BOT_TOKEN);
+  return new Response(await r.text(), {
+    headers: { "content-type": "application/json" },
+  });
+}
+if (p === "/tg/set-webhook") {
+  const target = abs(env, "/webhook");
+  const r = await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
+  return new Response(await r.text(), {
+    headers: { "content-type": "application/json" },
+  });
+}
+if (p === "/tg/del-webhook") {
+  const r =
+    (await TG.deleteWebhook?.(env.BOT_TOKEN)) ||
+    (await fetch("https://api.telegram.org/bot" + env.BOT_TOKEN + "/deleteWebhook"));
+  return new Response(await r.text(), {
+    headers: { "content-type": "application/json" },
+  });
+}
 
       // ci deploy
       if (p.startsWith("/ci/deploy-note")) {
