@@ -269,7 +269,7 @@ ${control}`;
   }
 
   // контроль мови: якщо відповідь не мовою lang — переписати
-  const detected = detectFromText(out); // <-- беремо детектор з i18n
+  const detected = detectFromText(out); // беремо детектор з i18n
   if (detected && lang && detected !== lang) {
     const hardPrompt = `STRICT LANGUAGE MODE: Respond ONLY in ${lang}. If the previous answer used another language, rewrite it now in ${lang}. Keep it concise.
 User: ${userText}`;
