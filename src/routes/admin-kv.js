@@ -1,6 +1,6 @@
 // src/routes/admin-kv.js
 // Прості та надійні ендпоінти для KV: UI + list/get/put.
-// Працює з кількома KV: STATE_KV, CODE_KV, CHECKLIST_KV.
+// Працює з кількома KV: STATE_KV, CODE_KV, CHECKLIST_KV, ARCHIVE_KV.
 // Захист: ?s=WEBHOOK_SECRET (env.WEBHOOK_SECRET)
 
 function requireSecret(url, env) {
@@ -14,6 +14,7 @@ function pickNS(env, nsName) {
     "STATE_KV": env?.STATE_KV,
     "CODE_KV": env?.CODE_KV,
     "CHECKLIST_KV": env?.CHECKLIST_KV,
+    "ARCHIVE_KV": env?.ARCHIVE_KV,
   };
   return map[nsName] || null;
 }
@@ -31,17 +32,25 @@ function html(body) {
   });
 }
 
-function esc(s = "") {
-  return String(s).replace(/[&<>"]/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"':'&quot;' }[m]));
+function text(body, status = 200) {
+  return new Response(body ?? "", {
+    status,
+    headers: { "content-type": "text/plain; charset=utf-8" },
+  });
 }
 
-// -------- UI --------
+function esc(s = "") {
+  return String(s).replace(/[&<>"]/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[m]));
+}
+
+// -------- Основний UI-редактор (/admin/kv) --------
 function uiPage(url, env) {
   const ns = url.searchParams.get("ns") || "STATE_KV";
   const sec = url.searchParams.get("s") || "";
   const backHref = `/admin/checklist${sec ? `?s=${encodeURIComponent(sec)}` : ""}`;
-  const nsOptions = ["STATE_KV", "CODE_KV", "CHECKLIST_KV"]
-    .map(n => `<option ${n===ns?"selected":""} value="${n}">${n}</option>`).join("");
+  const nsOptions = ["STATE_KV", "CODE_KV", "CHECKLIST_KV", "ARCHIVE_KV"]
+    .map((n) => `<option ${n === ns ? "selected" : ""} value="${n}">${n}</option>`)
+    .join("");
 
   return `<!doctype html>
 <html lang="uk">
@@ -58,11 +67,18 @@ function uiPage(url, env) {
   button{cursor:pointer}
   a{color:#7dd3fc;text-decoration:none}
   .btn{background:#1f2937;border:1px solid #334155;border-radius:12px;padding:10px 14px;display:inline-flex;gap:8px;align-items:center}
+  .bar{display:flex;gap:8px;flex-wrap:wrap}
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>KV Editor · <code>${esc(ns)}</code> <a class="btn" href="${backHref}">← До Checklist</a></h1>
+
+  <div class="bar">
+    <a class="btn" href="/admin/kv/ui?s=${encodeURIComponent(sec)}&ns=${encodeURIComponent(ns)}">📱 Спрощена панель</a>
+    <a class="btn" href="/_version">ℹ️ Version</a>
+    <a class="btn" href="/health">🩺 Health</a>
+  </div>
 
   <div class="row">
     <label>Namespace:
@@ -139,23 +155,103 @@ function uiPage(url, env) {
 </html>`;
 }
 
+// -------- Мобільна спрощена панель (/admin/kv/ui) --------
+function uiMobile(url, env) {
+  const ns = url.searchParams.get("ns") || "STATE_KV";
+  const s = url.searchParams.get("s") || "";
+  const e = encodeURIComponent;
+  const sampleKey = "test.txt";
+  const sampleVal = "Senti";
+
+  // Допоміжні прямі лінки (всі клікабельні з телефону)
+  const linkList  = `/admin/kv/list?ns=${e(ns)}&s=${e(s)}&prefix=code:`;
+  const linkGet   = `/admin/kv/get?ns=${e(ns)}&s=${e(s)}&key=${e(sampleKey)}`;
+  const linkGetT  = `/admin/kv/get-text?ns=${e(ns)}&s=${e(s)}&key=${e(sampleKey)}`;
+  const linkPutQ  = `/admin/kv/putq?ns=${e(ns)}&s=${e(s)}&key=${e(sampleKey)}&value=${e(sampleVal)}`;
+
+  const nsOptions = ["STATE_KV", "CODE_KV", "CHECKLIST_KV", "ARCHIVE_KV"]
+    .map(n => `<option ${n===ns?'selected':''} value="${n}">${n}</option>`).join("");
+
+  return `<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>KV Panel</title>
+<style>
+  body{font:16px/1.45 -apple-system,system-ui,Segoe UI,Roboto,Ubuntu,sans-serif;background:#0b0b0b;color:#e6e6e6;margin:0;padding:16px}
+  .wrap{max-width:760px;margin:0 auto}
+  a.btn{display:block;background:#1f2937;border:1px solid #334155;border-radius:14px;padding:14px 16px;margin:10px 0;color:#eaf6ff;text-decoration:none}
+  .row{display:flex;gap:10px;align-items:center}
+  select{background:#0f1115;color:#e6e6e6;border:1px solid #2a2a2a;border-radius:12px;padding:10px}
+  small{opacity:.75}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h2>⚙️ Senti KV • <small>${esc(ns)}</small></h2>
+
+  <div class="row">
+    <label>NS:
+      <select id="ns">
+        ${nsOptions}
+      </select>
+    </label>
+    <a class="btn" id="go">🔁 Перемкнути</a>
+  </div>
+
+  <a class="btn" href="${esc(linkList)}">📂 List (prefix=code:)</a>
+  <a class="btn" href="${esc(linkGet)}">📄 Get JSON (${esc(sampleKey)})</a>
+  <a class="btn" href="${esc(linkGetT)}">📜 Get TEXT (${esc(sampleKey)})</a>
+  <a class="btn" href="${esc(linkPutQ)}">💾 Put (query) → ${esc(sampleKey)} = "${esc(sampleVal)}"</a>
+
+  <hr style="border-color:#222;margin:16px 0">
+  <a class="btn" href="/admin/kv?s=${e(s)}&ns=${e(ns)}">🧰 Повний редактор</a>
+  <a class="btn" href="/admin/checklist?s=${e(s)}">📋 Checklist</a>
+  <a class="btn" href="/admin/statut?s=${e(s)}">📜 Statut</a>
+  <a class="btn" href="/admin/energy?s=${e(s)}">⚡ Energy</a>
+  <a class="btn" href="/health">🩺 Health</a>
+  <a class="btn" href="/_version">ℹ️ Version</a>
+</div>
+<script>
+(function(){
+  const s = ${JSON.stringify(url.searchParams.get("s") || "")};
+  const nsSel = document.getElementById('ns');
+  document.getElementById('go').addEventListener('click', ()=>{
+    const u = new URL('/admin/kv/ui', location.origin);
+    if (s) u.searchParams.set('s', s);
+    u.searchParams.set('ns', nsSel.value);
+    location.href = u.toString();
+  });
+})();
+</script>
+</body>
+</html>`;
+}
+
 // -------- handlers --------
 export async function handleAdminKv(request, env) {
   const url = new URL(request.url);
 
-  // UI
+  // UI: повний редактор
   if (url.pathname === "/admin/kv" || url.pathname === "/admin/kv/") {
-    if (!requireSecret(url, env)) return json({ ok:false, error:"Forbidden" }, 403);
+    if (!requireSecret(url, env)) return json({ ok: false, error: "Forbidden" }, 403);
     return html(uiPage(url, env));
   }
 
+  // UI: мобільна спрощена панель
+  if (url.pathname === "/admin/kv/ui") {
+    if (!requireSecret(url, env)) return json({ ok: false, error: "Forbidden" }, 403);
+    return html(uiMobile(url, env));
+  }
+
   // API
-  if (!requireSecret(url, env)) return json({ ok:false, error:"Forbidden" }, 403);
+  if (!requireSecret(url, env)) return json({ ok: false, error: "Forbidden" }, 403);
 
   // choose namespace
   const nsName = url.searchParams.get("ns") || "STATE_KV";
   const ns = pickNS(env, nsName);
-  if (!ns) return json({ ok:false, error:`Unknown namespace '${nsName}'` }, 400);
+  if (!ns) return json({ ok: false, error: `Unknown namespace '${nsName}'` }, 400);
 
   // list
   if (url.pathname === "/admin/kv/list") {
@@ -167,26 +263,52 @@ export async function handleAdminKv(request, env) {
       for (const k of (keys || [])) out.push({ key: k.name, ts: k?.expiration || k?.metadata?.ts || undefined });
       cursor = list_complete ? null : next;
     } while (cursor);
-    return json({ ok:true, items: out });
+    return json({ ok: true, items: out });
   }
 
-  // get
+  // get (JSON-відповідь)
   if (url.pathname === "/admin/kv/get") {
     const key = url.searchParams.get("key") || "";
-    if (!key) return json({ ok:false, error:"Missing key" }, 400);
-    const value = await ns.get(key); // повертає string або null
-    return json({ ok:true, path: key, value });
+    if (!key) return json({ ok: false, error: "Missing key" }, 400);
+    const value = await ns.get(key); // string або null
+    return json({ ok: true, path: key, value });
   }
 
-  // put
-  if (url.pathname === "/admin/kv/put") {
-    if (request.method !== "POST") return json({ ok:false, error:"Use POST" }, 405);
+  // get-text (повертає text/plain для зручного перегляду у браузері)
+  if (url.pathname === "/admin/kv/get-text") {
     const key = url.searchParams.get("key") || "";
-    if (!key) return json({ ok:false, error:"Missing key" }, 400);
+    if (!key) return text("Missing key", 400);
+    const value = await ns.get(key);
+    return text(value ?? "");
+  }
+
+  // put (POST, сирий body)
+  if (url.pathname === "/admin/kv/put") {
+    if (request.method !== "POST") return json({ ok: false, error: "Use POST" }, 405);
+    const key = url.searchParams.get("key") || "";
+    if (!key) return json({ ok: false, error: "Missing key" }, 400);
     const body = await request.text(); // сирий текст
     await ns.put(key, body ?? "");
-    return json({ ok:true, path: key, saved: body?.length ?? 0 });
+    return json({ ok: true, path: key, saved: body?.length ?? 0 });
   }
 
-  return json({ ok:false, error:"Not found", path: url.pathname }, 404);
+  // putq (GET/POST з value у query — зручно натискати з телефону)
+  if (url.pathname === "/admin/kv/putq") {
+    const key = url.searchParams.get("key") || "";
+    let value = url.searchParams.get("value");
+    const b64 = url.searchParams.get("b64");
+    if (!key) return json({ ok: false, error: "Missing key" }, 400);
+    if (b64) {
+      try {
+        value = atob(b64);
+      } catch (e) {
+        return json({ ok: false, error: "Bad b64" }, 400);
+      }
+    }
+    if (value == null) value = "";
+    await ns.put(key, value);
+    return json({ ok: true, path: key, saved: value.length, mode: b64 ? "b64" : "query" });
+  }
+
+  return json({ ok: false, error: "Not found", path: url.pathname }, 404);
 }
