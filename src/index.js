@@ -30,8 +30,7 @@ import { handleBrainPromote } from "./routes/brainPromote.js";
 import { handleAdminEnergy } from "./routes/adminEnergy.js";
 import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
 import { handleAdminEditor } from "./routes/adminEditor.js";
-
-// ✅ новий імпорт KV-редактора
+// ✅ новий повноцінний KV Editor (UI + API)
 import { handleAdminKv } from "./routes/admin-kv.js";
 
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
@@ -47,7 +46,7 @@ import { nightlyAutoImprove } from "./lib/autoImprove.js";
 import { runSelfRegulation } from "./lib/selfRegulate.js";
 import { handleAiImprove } from "./routes/aiImprove.js";
 
-const VERSION = "senti-worker-2025-10-15-21-30+admin-kv";
+const VERSION = "senti-worker-2025-10-15-21-58+admin-kv+codekv";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // KV helpers for code storage (read/write/list)
@@ -78,6 +77,7 @@ async function codeGet(env, path, { ns, raw } = {}) {
   const key = normalizeCodeKey(path, { raw });
   return await kv.get(key, "text");
 }
+
 async function codePut(env, path, content, { ns, raw } = {}) {
   const kv = codeKV(env, ns);
   if (!kv) throw new Error("KV not configured");
@@ -85,6 +85,7 @@ async function codePut(env, path, content, { ns, raw } = {}) {
   await kv.put(key, content, { metadata: { path, ts: Date.now() } });
   return true;
 }
+
 async function codeList(env, { ns, prefix, raw } = {}) {
   const kv = codeKV(env, ns);
   if (!kv?.list) return [];
@@ -121,7 +122,7 @@ export default {
       if (p === "/health") {
         try {
           const r = await handleHealth?.(req, env, url);
-        if (r && r.status !== 404) return r;
+          if (r && r.status !== 404) return r;
         } catch {}
         return json(
           {
@@ -245,7 +246,7 @@ export default {
 
       // --- ADMIN ---
 
-      // 0) ✅ Новий KV Editor (повноцінний UI+API)
+      // ✅ 0) Новий KV Editor (повноцінний UI + API)
       if (p.startsWith("/admin/kv")) {
         const r = await handleAdminKv?.(req, env, url);
         if (r && r.status !== 404) return r;
