@@ -28,17 +28,17 @@ FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
 FREE_API_PATH     = "/v1/chat/completions"
 
 # --- Нічні авто-поліпшення / саморегуляція ---
-AUTO_IMPROVE     = "on"
-NIGHTLY_UTC_HOUR = "23"
-SELF_REGULATE       = "on"
-SELF_TUNING_FACTOR  = "0.3"
+AUTO_IMPROVE       = "on"
+NIGHTLY_UTC_HOUR   = "23"
+SELF_REGULATE      = "on"
+SELF_TUNING_FACTOR = "0.3"
 
 # --- ⚡ Енергія ---
-ENERGY_MAX = "100"
+ENERGY_MAX            = "100"
 ENERGY_RECOVER_PER_MIN = "1"
-ENERGY_COST_TEXT = "1"
-ENERGY_COST_IMAGE = "5"
-ENERGY_LOW_THRESHOLD = "10"
+ENERGY_COST_TEXT      = "1"
+ENERGY_COST_IMAGE     = "5"
+ENERGY_LOW_THRESHOLD  = "10"
 
 # --- KV bindings ---
 [[kv_namespaces]]
@@ -61,7 +61,6 @@ id = "497eac980691495ea2a0bc8611892d65"
 binding = "USER_OAUTH_KV"
 id = "470d4f5c164a4a828c569eb9a52a5133"
 
-# (За бажанням відокрем CODE від TODO) 
 [[kv_namespaces]]
 binding = "CHECKLIST_KV"
 id = "497eac980691495ea2a0bc8611892d65"
@@ -78,12 +77,12 @@ id = "9e6f0ed5bf2544a9a63d57455900a844"
 binding = "DIALOG_KV"
 id = "63c0d1e0962a419ca54082893410b28e"
 
-# ✅ ДОДАНО: архів (з твого скріншота)
+# Архів
 [[kv_namespaces]]
 binding = "ARCHIVE_KV"
 id = "5b3d9392b67f46d1b72d52cdd45788a3"
 
-# ✅ ДОДАНО: сховище коду (створи KV у CF і встав його ID)
+# Сховище коду
 [[kv_namespaces]]
 binding = "CODE_KV"
 id = "663259e3d61340238430fc05050e27d6"
