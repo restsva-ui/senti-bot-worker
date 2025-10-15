@@ -16,6 +16,7 @@ DEPLOY_ID = "local-dev"
 WEBHOOK_SECRET = "senti1984"
 TIMEZONE = "Europe/Kyiv"
 DIAG_TAGS = "on"
+REPO_PUBLIC = "on"           # ← дозволяє /repo/render без секрету
 
 # --- Моделі ---
 MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:deepseek/deepseek-chat, free:meta-llama/llama-4-scout:free"
