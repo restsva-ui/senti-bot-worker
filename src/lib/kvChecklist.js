@@ -93,13 +93,15 @@ export async function statutHtml(env) {
 <title>Statut</title>
 <style>
   body{font:14px/1.4 -apple-system,system-ui,Segoe UI,Roboto,Ubuntu,sans-serif;padding:16px;background:#0b0b0b;color:#e6e6e6}
-  a{color:#7dd3fc}
+  a{color:#7dd3fc;text-decoration:none}
   .wrap{max-width:900px;margin:0 auto}
   .card{background:#111;border:1px solid #222;border-radius:12px;padding:16px}
   h1{margin:0 0 12px;font-size:18px}
   textarea{width:100%;min-height:300px;background:#0d0d0d;color:#eaeaea;border:1px solid #2a2a2a;border-radius:10px;padding:10px}
   .row{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
-  button,input[type=submit]{background:#1f2937;border:1px solid #334155;color:#e5e7eb;border-radius:10px;padding:8px 12px}
+  .btn{background:#1e1f26;border:1px solid #2a2f3a;color:#eaeefb;border-radius:12px;padding:8px 12px;display:inline-block}
+  input[type=submit].btn{cursor:pointer}
+  @media(max-width:700px){.btn{flex:1 0 100%;text-align:center}}
 </style>
 </head>
 <body>
@@ -109,8 +111,8 @@ export async function statutHtml(env) {
     <form method="post" action="/admin/statut?save=1">
       <textarea name="text" placeholder="HTML...">${body || ""}</textarea>
       <div class="row">
-        <input type="submit" value="Зберегти"/>
-        <a href="${checklistHref}">➡️ до Checklist</a>
+        <input type="submit" class="btn" value="Зберегти"/>
+        <a class="btn" href="${checklistHref}">➡️ до Checklist</a>
       </div>
     </form>
   </div>
@@ -131,6 +133,7 @@ export async function checklistHtml(env) {
   const sec = env?.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
   const repoHref = `/admin/repo/html${sec}`;
   const statutHref = `/admin/statut${sec}`;
+  const kvHref = `/admin/kv${sec}`;
   const improveAction = `/ai/improve${sec}`;
 
   // ⚡ кнопка Energy (HTML-сторінка) для ADMIN_ID
@@ -151,43 +154,52 @@ export async function checklistHtml(env) {
 <meta http-equiv="refresh" content="15">
 <style>
   body{font:14px/1.4 -apple-system,system-ui,Segoe UI,Roboto,Ubuntu,sans-serif;padding:16px;background:#0b0b0b;color:#e6e6e6}
-  a{color:#7dd3fc}
+  a{color:#eaeefb;text-decoration:none}
   .wrap{max-width:900px;margin:0 auto}
   .card{background:#111;border:1px solid #222;border-radius:12px;padding:12px}
   h1{margin:0 0 12px;font-size:18px}
   textarea{width:100%;min-height:260px;background:#0d0d0d;color:#eaeaea;border:1px solid #2a2a2a;border-radius:10px;padding:10px}
   input[type=text]{width:100%;background:#0d0d0d;color:#eaeaea;border:1px solid #2a2a2a;border-radius:10px;padding:10px}
   .row{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap;align-items:center}
-  button,input[type=submit]{background:#1f2937;border:1px solid #334155;color:#e5e7eb;border-radius:10px;padding:8px 12px}
+  .btn{background:#1e1f26;border:1px solid #2a2f3a;color:#eaeefb;border-radius:12px;padding:8px 12px;display:inline-block}
+  .btn.secondary{background:#2a2f3a}
+  .btn.danger{background:#543131;border-color:#6b3a3a}
+  button.btn,input[type=submit].btn{cursor:pointer}
   .muted{opacity:.7}
-  .danger{background:#3a1f1f;border-color:#5b2b2b}
   .viewer{max-height:340px;overflow:auto;
-          white-space:pre-wrap;      /* переносимо рядки */
-          overflow-wrap:anywhere;    /* довгі токени теж ламаємо */
+          white-space:pre-wrap;
+          overflow-wrap:anywhere;
           font-family: ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
           background:#0d0d0d;border:1px solid #2a2a2a;border-radius:10px;padding:10px}
   .controls{display:flex;gap:10px;align-items:center;justify-content:space-between;margin:8px 0}
   details>summary{cursor:pointer;opacity:.9}
   .dot{display:inline-block;width:8px;height:8px;border-radius:999px;background:#22c55e;margin-left:6px}
+  @media(max-width:700px){.btn{flex:1 0 100%;text-align:center}}
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>📝 Checklist</h1>
+
+  <!-- Кнопки дій/навігації -->
   <div class="row">
-    <a href="${repoHref}">📁 Відкрити Repo</a>
-    <a href="${statutHref}">📜 Статут</a>
-    <a href="${energyHref}">⚡ Відкрити Energy</a>
+    <a class="btn" href="${kvHref}">🔧 Відкрити KV Editor</a>
+    <a class="btn" href="${repoHref}">📁 Відкрити Repo</a>
+    <a class="btn" href="${statutHref}">📜 Статут</a>
+    <a class="btn" href="${energyHref}">⚡ Відкрити Energy</a>
+
     <form method="post" action="/admin/checklist?archive=1">
-      <button title="Зберегти знімок у архів">💾 Зберегти архів</button>
+      <button class="btn secondary" title="Зберегти знімок у архів">💾 Зберегти архів</button>
     </form>
+
     ${
       env?.WEBHOOK_SECRET
         ? `<form method="post" action="${improveAction}">
-             <button class="danger" title="Запустити нічного агента прямо зараз">🌙 Запустити нічного агента</button>
+             <button class="btn danger" title="Запустити нічного агента прямо зараз">🌙 Запустити нічного агента</button>
            </form>`
         : `<span class="muted">🌙 Для ручного запуску нічного агента задай WEBHOOK_SECRET у ENV</span>`
     }
+
     <span class="muted">оновлюється кожні 15с<span class="dot" title="alive"></span></span>
   </div>
 
@@ -210,7 +222,7 @@ export async function checklistHtml(env) {
       <form method="post" action="/admin/checklist?replace=1">
         <textarea name="text" placeholder="повний текст">${raw}</textarea>
         <div class="row">
-          <input type="submit" value="Зберегти"/>
+          <input type="submit" class="btn" value="Зберегти"/>
         </div>
       </form>
     </details>
@@ -220,7 +232,7 @@ export async function checklistHtml(env) {
     <form method="post" action="/admin/checklist?append=1">
       <input type="text" name="line" placeholder="новий рядок…"/>
       <div class="row">
-        <input type="submit" value="Додати рядок"/>
+        <input type="submit" class="btn" value="Додати рядок"/>
       </div>
     </form>
   </div>
@@ -258,7 +270,7 @@ export async function checklistHtml(env) {
     out = toLocalPretty(out);
     viewer.textContent = out;
 
-    // автопрокрутка: останні — одразу у видимій зоні
+    // автопрокрутка
     if (newestFirst.checked) viewer.scrollTop = 0;
     else viewer.scrollTop = viewer.scrollHeight;
   }
