@@ -29,6 +29,7 @@ import { handleAiEvolve } from "./routes/aiEvolve.js";
 import { handleBrainPromote } from "./routes/brainPromote.js";
 import { handleAdminEnergy } from "./routes/adminEnergy.js"; // energy UI/API
 import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js"; // ← ДОДАНО
+import { handleAdminEditor } from "./routes/adminEditor.js"; // ← ДОБАВЛЕНО
 
 // ✅ локальний selftest
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
@@ -52,7 +53,7 @@ import { runSelfRegulation } from "./lib/selfRegulate.js";
 // ✅ HTTP-роутер нічного агента + debug (/ai/improve*, /debug/*)
 import { handleAiImprove } from "./routes/aiImprove.js";
 
-const VERSION = "senti-worker-2025-10-12-00-59+aiimprove-router+kv-code-api";
+const VERSION = "senti-worker-2025-10-12-00-59+aiimprove-router+kv-code-api+editor";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // KV helpers for code storage (read/write/list) — uses CODE_KV or STATE_KV
@@ -232,6 +233,12 @@ export default {
       }
 
       // --- ADMIN ---
+      // 0) Простий браузерний редактор KV (STATE/ARCHIVE)
+      if (p.startsWith("/admin/editor")) {
+        const r = await handleAdminEditor?.(req, env, url);
+        if (r && r.status !== 404) return r;
+      }
+
       // 1) Комбінована сторінка: Checklist + Energy (ifrаme)
       if (p.startsWith("/admin/checklist/with-energy")) { // ← ДОДАНО
         try {
