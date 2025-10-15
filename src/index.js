@@ -389,7 +389,7 @@ export default {
       if (p.startsWith("/admin/checklist")) {
         try {
           const r = await handleAdminChecklist?.(req, env, url);
-        if (r && r.status !== 404) return r;
+          if (r && r.status !== 404) return r;
         } catch {}
         return html(await checklistHtml?.(env).catch(() => "<h3>Checklist</h3>"));
       }
@@ -656,7 +656,7 @@ export default {
       ) {
         const res = await nightlyAutoImprove(env, {
           now: new Date(),
-          reason: event?.cron || \`utc@\${hour}\`,
+          reason: event?.cron || `utc@${hour}`,
         });
         if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
           await runSelfRegulation(env, res?.insights || null).catch(() => {});
