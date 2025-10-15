@@ -1,7 +1,7 @@
 // src/routes/webhook.js
 // Telegram webhook з інтеграцією "мозку", Статутом, Self-Tune, Dialog Memory і режимом диска.
-// Відправка AI-відповідей — без parse_mode (щоб уникнути MarkdownV2-помилок).
-// Додано: "стисло спочатку" + "детальніше за запитом", антиобрізання довгих SMS.
+// Режим відповідей: спочатку стисло (1 SMS), детально — за інтенцією користувача.
+// Емодзі підбираються за темою запиту. Без parse_mode (щоб уникнути MarkdownV2-помилок).
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -11,27 +11,26 @@ import { readStatut } from "../lib/kvChecklist.js";
 import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
 import { json } from "../lib/utils.js";
 
-// Енергія (існуючий модуль)
+// Енергія
 import { getEnergy, spendEnergy } from "../lib/energy.js";
 
-// Dialog Memory — модуль
+// Dialog Memory
 import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
 
-// Self-Tune — модуль
+// Self-Tune
 import { loadSelfTune } from "../lib/selfTune.js";
 
-// Drive-Mode — модуль
+// Drive-Mode
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 
 // ── Константи ────────────────────────────────────────────────────────────────
-const MAX_TG = 4096;                 // хард-ліміт Telegram
-const CHUNK = 3500;                  // безпечний розмір шматка
-const SUMMARY_TARGET = 800;          // бажана довжина стислої відповіді (символів)
-const SUMMARY_MIN = 450;             // нижня межа
+const CHUNK = 3500;            // безпечний розмір шматка під Telegram 4096
+const SUMMARY_TARGET = 800;    // цілим ~1 SMS
+const SUMMARY_MIN = 450;
 const LAST_Q_KEY = (u) => `dialog:last:q:${u}`;
+const LAST_MODE_KEY = (u) => `dialog:last:mode:${u}`; // "summary" | "expand"
 
 // ── helpers ──────────────────────────────────────────────────────────────────
-// Надсилати текст без parse_mode (безпечніше). Додає автобрейкінг на шматки.
 async function sendPlain(env, chatId, text, extra = {}) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
   const send = async (t) => {
@@ -49,27 +48,18 @@ async function sendPlain(env, chatId, text, extra = {}) {
   };
 
   if (!text) return;
-  // Якщо коротко — одна відправка
-  if (text.length <= CHUNK) {
-    await send(text);
-    return;
-  }
-  // Інакше — шматуємо по абзацах/реченнях, щоб красиво
+  if (text.length <= CHUNK) { await send(text); return; }
+
   let rest = text;
-  while (rest.length > 0) {
-    if (rest.length <= CHUNK) {
-      await send(rest);
-      break;
-    }
-    // шукаємо останній розрив рядка/крапку в межах CHUNK
+  while (rest.length) {
+    if (rest.length <= CHUNK) { await send(rest); break; }
     let cut = rest.lastIndexOf("\n", CHUNK);
     if (cut < CHUNK * 0.6) cut = rest.lastIndexOf(". ", CHUNK);
-    if (cut < CHUNK * 0.5) cut = CHUNK; // фолбек
+    if (cut < CHUNK * 0.5) cut = CHUNK;
     const part = rest.slice(0, cut).trim();
     rest = rest.slice(cut).trim();
     await send(part);
-    // після першого шматка прибираємо клавіатуру/markup, аби не дублювати
-    extra = {};
+    extra = {}; // не дублюємо markup
   }
 }
 
@@ -87,7 +77,6 @@ function defaultAiReply() {
 const BTN_DRIVE = "Google Drive";
 const BTN_SENTI = "Senti";
 const BTN_ADMIN = "Admin";
-// BTN_CHECK прибрано з головної клавіатури
 
 const mainKeyboard = (isAdmin = false) => {
   const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
@@ -99,7 +88,7 @@ const inlineOpenDrive = () => ({
 });
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 
-// Лінки адмін-панелі (використовують WEBHOOK_SECRET)
+// Адмін-посилання
 function energyLinks(env, userId) {
   const s = env.WEBHOOK_SECRET || "";
   const qs = `s=${encodeURIComponent(s)}&u=${encodeURIComponent(String(userId || ""))}`;
@@ -156,8 +145,7 @@ async function handleIncomingMedia(env, chatId, userId, msg) {
   const att = detectAttachment(msg);
   if (!att) return false;
 
-  // Енергія
-  const cur = await getEnergy(env, userId); // { energy, costImage, low, ... }
+  const cur = await getEnergy(env, userId);
   const need = Number(cur.costImage ?? 5);
   if ((cur.energy ?? 0) < need) {
     const links = energyLinks(env, userId);
@@ -172,11 +160,11 @@ async function handleIncomingMedia(env, chatId, userId, msg) {
   return true;
 }
 
-// ── SystemHint (Статут + Self-Tune + Dialog Memory) ──────────────────────────
+// ── SystemHint ───────────────────────────────────────────────────────────────
 async function buildSystemHint(env, chatId, userId) {
   const statut = String((await readStatut(env)) || "").trim();
-  const dlg = await buildDialogHint(env, userId); // з dialogMemory.js
-  const tune = await loadSelfTune(env, chatId);   // з selfTune.js
+  const dlg = await buildDialogHint(env, userId);
+  const tune = await loadSelfTune(env, chatId);
 
   const blocks = [];
   if (statut) blocks.push(`[Статут/чеклист]\n${statut}`);
@@ -185,57 +173,58 @@ async function buildSystemHint(env, chatId, userId) {
   return blocks.length ? blocks.join("\n\n") : "";
 }
 
-// ── Стисло/розгорнуто логіка ────────────────────────────────────────────────
-function isExpandCommand(s = "") {
+// ── Інтенція “детальніше” та емодзі ─────────────────────────────────────────
+function isExpandIntent(s = "") {
   const t = String(s).trim().toLowerCase();
   return (
-    t === "детальніше" ||
-    t === "докладніше" ||
-    t === "розгорни" ||
-    t === "more" ||
-    t === "dokladnishe" ||
-    t === "dokladnishe, bud laska" ||
-    t === "поясни детальніше"
+    /детал|доклад|розгорн|поясни|пояснення|приклад|поясни\s+чому|чому|як працю(є|є\?)|крок/i.test(t)
   );
 }
-
-async function kvGet(env, key) {
-  try { return await env.STATE_KV.get(key); } catch { return null; }
+function guessEmoji(text = "") {
+  const t = text.toLowerCase();
+  if (t.includes("колес")) return "🛞";
+  if (t.includes("дзеркал")) return "🪞";
+  if (t.includes("авто") || t.includes("машин")) return "🚗";
+  if (t.includes("вода") || t.includes("рідина")) return "💧";
+  if (t.includes("сонц") || t.includes("світло")) return "☀️";
+  if (t.includes("годинник")) return "⌚";
+  if (t.includes("електр") || t.includes("струм")) return "⚡";
+  if (t.includes("комп'ют") || t.includes("компют")) return "💻";
+  if (t.includes("телефон") || t.includes("смартф")) return "📱";
+  if (t.includes("серце") || t.includes("здоров")) return "❤️";
+  return "💡";
 }
-async function kvPut(env, key, val, opts) {
-  try { await env.STATE_KV.put(key, val, opts); } catch {}
-}
 
-/**
- * Генерує відповідь:
- *  - режим "summary": стисло (<= ~800 сим.), 1 повідомлення, з підказкою про "детальніше".
- *  - режим "expand": розгорнуто, багатоповідомленьо (шматування в sendPlain).
- */
+// KV helpers
+async function kvGet(env, key) { try { return await env.STATE_KV.get(key); } catch { return null; } }
+async function kvPut(env, key, val, opts) { try { await env.STATE_KV.put(key, val, opts); } catch {} }
+
+// ── Генерація відповідей ─────────────────────────────────────────────────────
 async function generateAi(env, userId, userText, { systemHint, expand = false }) {
   const modelOrder = String(env.MODEL_ORDER || "").trim();
+  const emoji = guessEmoji(userText);
 
   const controlHint = expand
-    ? `Відповідай детально, структуровано, з прикладами за потреби.`
-    : `Відповідай СТИСЛО (${SUMMARY_MIN}-${SUMMARY_TARGET} символів), 1 абзац або до 5 коротких пунктів. Уникай зайвих вступів.`;
+    ? `Відповідай детально українською, структуровано (пункти/підзаголовки), додавай приклади за потреби.`
+    : `Відповідай українською дуже стисло (${SUMMARY_MIN}-${SUMMARY_TARGET} символів): один насичений абзац або до 4 коротких пунктів. Без "вступів" і зайвих фраз.`;
 
-  const postHint = expand
-    ? ``
-    : `\n\n(Щоб отримати розгорнуте пояснення — напиши: "детальніше".)`;
+  const prompt = `${userText}\n\n[режим]: ${expand ? "детально" : "стисло"}`;
 
-  const prompt = `${userText}\n\n[режим відповіді]: ${expand ? "детально" : "стисло"}`;
-
-  const out = modelOrder
+  const llmOut = modelOrder
     ? await askAnyModel(env, modelOrder, prompt, { systemHint: `${systemHint}\n\n${controlHint}` })
     : await think(env, prompt, { systemHint: `${systemHint}\n\n${controlHint}` });
 
-  // Підрізаємо зайве, якщо раптом вилізло за 1 SMS у стислому режимі
-  const txt = expand ? out : (out.length > (CHUNK - 50) ? out.slice(0, CHUNK - 50).trim() + "…" : out);
-  return txt + postHint;
+  const text = expand
+    ? `${emoji} ${llmOut}`
+    : (llmOut.length > (CHUNK - 50)
+        ? `${emoji} ${llmOut.slice(0, CHUNK - 50).trim()}…`
+        : `${emoji} ${llmOut}`);
+
+  return text;
 }
 
 // ── ГОЛОВНИЙ ОБРОБНИК ────────────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
-  // Перевірка секрету Telegram webhook
   if (req.method === "POST") {
     const sec = req.headers.get("x-telegram-bot-api-secret-token");
     if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
@@ -260,11 +249,7 @@ export async function handleTelegramWebhook(req, env) {
   const textRaw = String(msg?.text || msg?.caption || "").trim();
   const text = textRaw;
 
-  const safe = async (fn) => {
-    try { await fn(); } catch (e) {
-      try { await sendPlain(env, chatId, "Внутрішня помилка. Спробуй ще раз трохи пізніше."); } catch {}
-    }
-  };
+  const safe = async (fn) => { try { await fn(); } catch { try { await sendPlain(env, chatId, "Внутрішня помилка. Спробуй ще раз трохи пізніше."); } catch {} } };
 
   // /admin
   if (text === "/admin" || text === "/admin@SentiBot") {
@@ -298,7 +283,6 @@ export async function handleTelegramWebhook(req, env) {
         }
       }
 
-      // інлайн-кнопки: Checklist / Energy
       await sendPlain(env, chatId, lines.join("\n"), {
         reply_markup: {
           inline_keyboard: [
@@ -316,12 +300,9 @@ export async function handleTelegramWebhook(req, env) {
   if (aiArg !== null) {
     await safe(async () => {
       const q = aiArg || "";
-      if (!q) {
-        await sendPlain(env, chatId, "Напиши запит після /ai, або просто відправ текст без команди — я відповім як зазвичай.");
-        return;
-      }
+      if (!q) { await sendPlain(env, chatId, "Напиши запит після /ai або просто надішли текст."); return; }
 
-      const cur = await getEnergy(env, userId); // { energy, costText, low, ... }
+      const cur = await getEnergy(env, userId);
       const need = Number(cur.costText ?? 1);
       if ((cur.energy ?? 0) < need) {
         const links = energyLinks(env, userId);
@@ -331,21 +312,15 @@ export async function handleTelegramWebhook(req, env) {
       await spendEnergy(env, userId, need, "text");
 
       const systemHint = await buildSystemHint(env, chatId, userId);
-      const out = await generateAi(env, userId, q, { systemHint, expand: false });
+      const expand = isExpandIntent(q);
+      const out = await generateAi(env, userId, q, { systemHint, expand });
 
-      // памʼятаємо останній запит для "детальніше"
-      await kvPut(env, LAST_Q_KEY(userId), q, { expirationTtl: 60 * 60 * 6 }); // 6 год
+      await kvPut(env, LAST_Q_KEY(userId), q, { expirationTtl: 60 * 60 * 6 });
+      await kvPut(env, LAST_MODE_KEY(userId), expand ? "expand" : "summary", { expirationTtl: 60 * 60 * 6 });
 
       await pushTurn(env, userId, "user", q);
       await pushTurn(env, userId, "assistant", out);
-
-      const after = (cur.energy - need);
-      if (after <= Number(cur.low ?? 10)) {
-        const links = energyLinks(env, userId);
-        await sendPlain(env, chatId, `${out}\n\n⚠️ Низький рівень енергії (${after}). Відновиться автоматично. Керування: ${links.energy}`);
-      } else {
-        await sendPlain(env, chatId, out);
-      }
+      await sendPlain(env, chatId, out);
     });
     return json({ ok: true });
   }
@@ -368,12 +343,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Інші кнопки (поки без спец-логіки)
-  if (text === BTN_SENTI || text === BTN_ADMIN) {
-    // тут можна додати власні шорткати майбутнім патчем
-  }
-
-  // Якщо увімкнено режим диска — перехоплюємо та зберігаємо медіа
+  // Диск: прийом медіа
   try {
     if (await getDriveMode(env, userId)) {
       if (await handleIncomingMedia(env, chatId, userId, msg)) return json({ ok: true });
@@ -383,33 +353,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // ── “Детальніше” триґер (без слеша) ───────────────────────────────────────
-  if (isExpandCommand(text)) {
-    await safe(async () => {
-      const lastQ = await kvGet(env, LAST_Q_KEY(userId));
-      if (!lastQ) { await sendPlain(env, chatId, "Немає попереднього запиту. Спробуй спочатку поставити питання."); return; }
-
-      const cur = await getEnergy(env, userId);
-      const need = Number(cur.costText ?? 1);
-      if ((cur.energy ?? 0) < need) {
-        const links = energyLinks(env, userId);
-        await sendPlain(env, chatId, `🔋 Не вистачає енергії (потрібно ${need}). Відновлення авто.\nEnergy: ${links.energy}`);
-        return;
-      }
-      await spendEnergy(env, userId, need, "text");
-
-      const systemHint = await buildSystemHint(env, chatId, userId);
-      const out = await generateAi(env, userId, lastQ, { systemHint, expand: true });
-
-      await pushTurn(env, userId, "user", "[детальніше]");
-      await pushTurn(env, userId, "assistant", out);
-
-      await sendPlain(env, chatId, out);
-    });
-    return json({ ok: true });
-  }
-
-  // ── Звичайний текст → AI (стисло спочатку) ────────────────────────────────
+  // Звичайний текст → визначення режиму
   if (text && !text.startsWith("/")) {
     try {
       const cur = await getEnergy(env, userId);
@@ -422,21 +366,20 @@ export async function handleTelegramWebhook(req, env) {
       await spendEnergy(env, userId, need, "text");
 
       const systemHint = await buildSystemHint(env, chatId, userId);
-      const out = await generateAi(env, userId, text, { systemHint, expand: false });
 
-      // збережемо останній користувацький запит
+      // якщо попереднє повідомлення було "summary" і тепер коротке "а чому/поясни/приклад" — вважаємо expand
+      const prevMode = await kvGet(env, LAST_MODE_KEY(userId));
+      const expand = isExpandIntent(text) || prevMode === "summary" && /^((а )?(чому|поясни|приклад|розгорни|більше|детальніше))[\s\?]*$/i.test(text);
+
+      const out = await generateAi(env, userId, text, { systemHint, expand });
+
       await kvPut(env, LAST_Q_KEY(userId), text, { expirationTtl: 60 * 60 * 6 });
+      await kvPut(env, LAST_MODE_KEY(userId), expand ? "expand" : "summary", { expirationTtl: 60 * 60 * 6 });
 
       await pushTurn(env, userId, "user", text);
       await pushTurn(env, userId, "assistant", out);
 
-      const after = (cur.energy - need);
-      if (after <= Number(cur.low ?? 10)) {
-        const links = energyLinks(env, userId);
-        await sendPlain(env, chatId, `${out}\n\n⚠️ Низький рівень енергії (${after}). Керування: ${links.energy}`);
-      } else {
-        await sendPlain(env, chatId, out);
-      }
+      await sendPlain(env, chatId, out);
       return json({ ok: true });
     } catch {
       await sendPlain(env, chatId, defaultAiReply());
