@@ -1,14 +1,28 @@
 // src/routes/adminRepo.js
-// Repo / Архіви: HTML-UI, завантаження ZIP, автопромоут після upload,
-// а також ручний авто-промоут через кнопку в адмінці.
+// ─────────────────────────────────────────────────────────────────────────────
+// Repo / Архіви: 
+// 1) HTML-UI для редагування репо в KV (list/get/put/delete + live preview)
+// 2) Публічний renderer /repo/render (з контент-тайпами)
+// 3) Завантаження ZIP-архівів + auto-promote після selftest
+// 4) Ручний auto-promote кнопкою
+//
+// Усі адмін-ендпоінти захищені ?s=WEBHOOK_SECRET
+// ─────────────────────────────────────────────────────────────────────────────
 
 import { saveArchive, listArchives, appendChecklist } from "../lib/kvChecklist.js";
 import { runSelfTestLocalDirect } from "./selfTestLocal.js";
 
-const json = (o, status = 200) =>
+// ───────── basics ─────────
+const J = (o, status = 200) =>
   new Response(JSON.stringify(o, null, 2), {
     status,
     headers: { "content-type": "application/json; charset=utf-8" },
+  });
+
+const H = (html, status = 200) =>
+  new Response(html, {
+    status,
+    headers: { "content-type": "text/html; charset=utf-8" },
   });
 
 // простий guard за секретом (?s=...)
@@ -38,7 +52,169 @@ function bytesToBase64(u8) {
   return btoa(res);
 }
 
-// компактний html (мобільний-френдлі)
+const esc = (s = "") =>
+  String(s).replace(/[&<>"]/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[m]));
+
+// ───────── Repo editor (KV) ─────────
+
+// вибір namespace для коду
+function pickNS(env, name) {
+  const map = {
+    CODE_KV: env?.CODE_KV,
+    STATE_KV: env?.STATE_KV,
+    ARCHIVE_KV: env?.ARCHIVE_KV,
+    CHECKLIST_KV: env?.CHECKLIST_KV,
+  };
+  return map[name] || env?.CODE_KV || env?.STATE_KV || null;
+}
+
+function normalizeKey(path) {
+  if (!path) return "code:index.html";
+  return path.startsWith("code:") ? path : `code:${path}`;
+}
+
+function guessType(name = "") {
+  const n = name.toLowerCase();
+  if (n.endsWith(".html") || n.endsWith(".htm")) return "text/html; charset=utf-8";
+  if (n.endsWith(".css")) return "text/css; charset=utf-8";
+  if (n.endsWith(".js")) return "application/javascript; charset=utf-8";
+  if (n.endsWith(".json")) return "application/json; charset=utf-8";
+  if (n.endsWith(".svg")) return "image/svg+xml";
+  if (n.endsWith(".png")) return "image/png";
+  if (n.endsWith(".jpg") || n.endsWith(".jpeg")) return "image/jpeg";
+  if (n.endsWith(".gif")) return "image/gif";
+  if (n.endsWith(".txt") || n.endsWith(".md")) return "text/plain; charset=utf-8";
+  if (n.endsWith(".zip")) return "application/zip";
+  return "application/octet-stream";
+}
+
+function repoUi(url, env) {
+  const sec = url.searchParams.get("s") || "";
+  const nsName = url.searchParams.get("ns") || "CODE_KV";
+  const nsOptions = ["CODE_KV", "STATE_KV", "ARCHIVE_KV", "CHECKLIST_KV"]
+    .map((n) => `<option ${n === nsName ? "selected" : ""} value="${n}">${n}</option>`)
+    .join("");
+
+  const archivesHref = (() => {
+    const u = new URL("/admin/repo/html", url.origin);
+    if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
+    return u.toString();
+  })();
+
+  return `<!doctype html>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Repo Editor</title>
+<style>
+  :root{color-scheme:dark}
+  body{font:14px/1.5 -apple-system,system-ui,Segoe UI,Roboto,Ubuntu,sans-serif;background:#0b0b0b;color:#eee;margin:0}
+  .wrap{max-width:1200px;margin:0 auto;padding:16px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:8px 0}
+  select,input,textarea,button{background:#0f1115;color:#e6e6e6;border:1px solid #2a2a2a;border-radius:12px;padding:10px}
+  textarea{width:100%;min-height:260px;font-family:ui-monospace,Menlo,Consolas,monospace;border-radius:16px}
+  button{cursor:pointer}
+  .btn{background:#1f2937;border:1px solid #334155;border-radius:12px;padding:10px 14px}
+  .split{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media (max-width:900px){.split{grid-template-columns:1fr}}
+  iframe{width:100%;height:60vh;border:1px solid #2a2a2a;border-radius:16px;background:#fff}
+  .muted{opacity:.7}
+  .badge{background:#111827;border:1px solid #374151;border-radius:10px;padding:6px 10px}
+</style>
+<div class="wrap">
+  <h1>📁 Repo Editor <span class="badge" id="nsLabel">${esc(nsName)}</span></h1>
+
+  <div class="row">
+    <label>Namespace:
+      <select id="ns">${nsOptions}</select>
+    </label>
+    <button class="btn" id="openHere">Відкрити</button>
+    <button class="btn" id="btnList">List</button>
+    <input id="prefix" placeholder="prefix (напр. code: або code:site/)" style="flex:1;min-width:220px"/>
+    <a class="btn" href="${archivesHref}">Архіви (ZIP)</a>
+  </div>
+
+  <div class="row">
+    <input id="path" placeholder="path (напр. index.html або code:index.html)" style="flex:1;min-width:220px"/>
+    <button class="btn" id="btnLoad">Load</button>
+    <button class="btn" id="btnSave">Save</button>
+    <button class="btn" id="btnDelete" style="border-color:#7f1d1d;background:#1f1020">Delete</button>
+    <button class="btn" id="btnOpen">Open /repo/render</button>
+  </div>
+
+  <div class="split">
+    <div>
+      <textarea id="value" placeholder="HTML/CSS/JS/JSON..."></textarea>
+      <p class="muted">Збереження: POST → <code>/admin/repo/put?ns=&path=&s=...</code></p>
+      <pre id="out" style="white-space:pre-wrap"></pre>
+    </div>
+    <div>
+      <iframe id="preview" src="about:blank"></iframe>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  const SECRET = ${JSON.stringify(sec)};
+  const nsSel = document.getElementById('ns');
+  const nsLabel = document.getElementById('nsLabel');
+  const prefix = document.getElementById('prefix');
+  const path = document.getElementById('path');
+  const value = document.getElementById('value');
+  const out = document.getElementById('out');
+  const preview = document.getElementById('preview');
+
+  function build(base, params){
+    const u = new URL(base, location.origin);
+    for(const [k,v] of Object.entries(params)) if (v!==undefined && v!=="") u.searchParams.set(k,v);
+    return u.toString();
+  }
+  function setOut(x){ out.textContent = typeof x === 'string' ? x : JSON.stringify(x,null,2); }
+
+  document.getElementById('openHere').onclick = () => {
+    location.href = build('/admin/repo', { ns: nsSel.value, s: SECRET });
+  };
+
+  document.getElementById('btnList').onclick = async () => {
+    const u = build('/admin/repo/list', { ns: nsSel.value, prefix: prefix.value, s: SECRET });
+    const r = await fetch(u); setOut(await r.json());
+  };
+
+  document.getElementById('btnLoad').onclick = async () => {
+    const u = build('/admin/repo/get', { ns: nsSel.value, path: path.value, s: SECRET });
+    const r = await fetch(u); const d = await r.json();
+    setOut(d); value.value = (d && d.value) || "";
+    if ((path.value||"").toLowerCase().endsWith('.html')) {
+      preview.src = build('/repo/render', { ns: nsSel.value, path: path.value, s: SECRET, _ts: Date.now() });
+    }
+  };
+
+  document.getElementById('btnSave').onclick = async () => {
+    const u = build('/admin/repo/put', { ns: nsSel.value, path: path.value, s: SECRET });
+    const r = await fetch(u, { method:'POST', body: value.value });
+    const d = await r.json(); setOut(d);
+    if ((path.value||"").toLowerCase().endsWith('.html')) {
+      preview.src = build('/repo/render', { ns: nsSel.value, path: path.value, s: SECRET, _ts: Date.now() });
+    }
+  };
+
+  document.getElementById('btnDelete').onclick = async () => {
+    if (!path.value) return alert("Вкажи path");
+    if (!confirm("Видалити " + path.value + " ?")) return;
+    const u = build('/admin/repo/delete', { ns: nsSel.value, path: path.value, s: SECRET });
+    const r = await fetch(u, { method:'POST' }); setOut(await r.json());
+  };
+
+  document.getElementById('btnOpen').onclick = () => {
+    if (!path.value) return alert("Вкажи path");
+    window.open(build('/repo/render', { ns: nsSel.value, path: path.value, s: SECRET }), '_blank');
+  };
+
+  nsSel.onchange = () => { nsLabel.textContent = nsSel.value; };
+})();
+</script>`;
+}
+
+// компактний html-шел для сторінки Архівів
 function pageShell({ title, body }) {
   return `<!doctype html>
 <meta charset="utf-8">
@@ -60,25 +236,29 @@ function pageShell({ title, body }) {
 ${body}`;
 }
 
+// список архівів (стара адмінка)
 async function htmlList(env, url) {
   const s = encodeURIComponent(env.WEBHOOK_SECRET || "");
   const items = await listArchives(env); // від нового до старого
   const cur = await env.CHECKLIST_KV.get("brain:current").catch(() => null);
 
-  const rows = items.map((k) => {
-    const isCur = k === cur;
-    const ap = new URL("/admin/repo/auto-promote", url.origin);
-    if (env.WEBHOOK_SECRET) ap.searchParams.set("s", env.WEBHOOK_SECRET);
-    ap.searchParams.set("key", k);
+  const rows =
+    items
+      .map((k) => {
+        const isCur = k === cur;
+        const ap = new URL("/admin/repo/auto-promote", url.origin);
+        if (env.WEBHOOK_SECRET) ap.searchParams.set("s", env.WEBHOOK_SECRET);
+        ap.searchParams.set("key", k);
 
-    return `
+        return `
     <div class="row">
       <div class="name">${k}${isCur ? '<span class="mark">● current</span>' : ""}</div>
       <div class="actions">
         <a class="btn" href="${ap.toString()}">Auto-promote</a>
       </div>
     </div>`;
-  }).join("") || `<p class="note">Немає архівів.</p>`;
+      })
+      .join("") || `<p class="note">Немає архівів.</p>`;
 
   const autoLatest = new URL("/admin/repo/auto-promote", url.origin);
   if (env.WEBHOOK_SECRET) autoLatest.searchParams.set("s", env.WEBHOOK_SECRET);
@@ -95,6 +275,7 @@ async function htmlList(env, url) {
   <div style="display:flex; gap:8px; margin:8px 0;">
     <a class="btn" href="${autoLatest.toString()}">Auto-promote latest</a>
     <a class="btn" href="/api/brain/current?s=${s}">Перевірити current</a>
+    <a class="btn" href="/admin/repo?s=${s}">Редактор репо</a>
   </div>
 
   ${rows}
@@ -103,35 +284,114 @@ async function htmlList(env, url) {
   return pageShell({ title: "Repo / Архіви", body });
 }
 
+// ───────── main handler ─────────
 export async function handleAdminRepo(req, env, url) {
   const p = (url.pathname || "").replace(/\/+$/, "");
 
-  if (!p.startsWith("/admin/repo")) return null;
-
-  // простий захист секретом
-  if (!ensureSecret(env, url)) {
-    return json({ ok: false, error: "unauthorized" }, 401);
+  // ── Repo editor UI ──
+  if (p === "/admin/repo" && req.method === "GET") {
+    if (!ensureSecret(env, url)) return J({ ok: false, error: "unauthorized" }, 401);
+    return H(repoUi(url, env));
   }
 
-  // GET /admin/repo/html — головна сторінка
+  // ── Repo editor API ──
+  if (
+    (p === "/admin/repo/list" || p === "/admin/repo/get") &&
+    req.method === "GET"
+  ) {
+    if (!ensureSecret(env, url)) return J({ ok: false, error: "unauthorized" }, 401);
+    const nsName = url.searchParams.get("ns") || "CODE_KV";
+    const store = pickNS(env, nsName);
+    if (!store) return J({ ok: false, error: `Unknown namespace ${nsName}` }, 400);
+
+    if (p === "/admin/repo/list") {
+      const prefix = url.searchParams.get("prefix") || "code:";
+      const items = [];
+      let cursor;
+      do {
+        const { keys, list_complete, cursor: next } = await store.list({ prefix, cursor });
+        (keys || []).forEach((k) => items.push({ key: k.name, ts: k?.metadata?.ts ?? k?.expiration ?? null }));
+        cursor = list_complete ? null : next;
+      } while (cursor);
+      return J({ ok: true, items });
+    }
+
+    if (p === "/admin/repo/get") {
+      const path = url.searchParams.get("path") || "";
+      if (!path) return J({ ok: false, error: "Missing path" }, 400);
+      const key = normalizeKey(path);
+      const value = await store.get(key, "text");
+      return J({ ok: true, path, key, value });
+    }
+  }
+
+  if (p === "/admin/repo/put" && req.method === "POST") {
+    if (!ensureSecret(env, url)) return J({ ok: false, error: "unauthorized" }, 401);
+    const nsName = url.searchParams.get("ns") || "CODE_KV";
+    const store = pickNS(env, nsName);
+    if (!store) return J({ ok: false, error: `Unknown namespace ${nsName}` }, 400);
+    const path = url.searchParams.get("path") || "";
+    if (!path) return J({ ok: false, error: "Missing path" }, 400);
+    const key = normalizeKey(path);
+    const body = await req.text();
+    await store.put(key, body ?? "", { metadata: { ts: Date.now(), path } });
+    return J({ ok: true, saved: true, key, bytes: (body || "").length });
+  }
+
+  if (p === "/admin/repo/delete" && req.method === "POST") {
+    if (!ensureSecret(env, url)) return J({ ok: false, error: "unauthorized" }, 401);
+    const nsName = url.searchParams.get("ns") || "CODE_KV";
+    const store = pickNS(env, nsName);
+    if (!store) return J({ ok: false, error: `Unknown namespace ${nsName}` }, 400);
+    const path = url.searchParams.get("path") || "";
+    if (!path) return J({ ok: false, error: "Missing path" }, 400);
+    const key = normalizeKey(path);
+    await store.delete(key);
+    return J({ ok: true, deleted: key });
+  }
+
+  // ── Public renderer (але теж під секретом) ──
+  if (p === "/repo/render" && req.method === "GET") {
+    if (!ensureSecret(env, url)) return J({ ok: false, error: "unauthorized" }, 401);
+    const nsName = url.searchParams.get("ns") || "CODE_KV";
+    const store = pickNS(env, nsName);
+    if (!store) return J({ ok: false, error: `Unknown namespace ${nsName}` }, 400);
+    const path = url.searchParams.get("path") || "index.html";
+    const key = normalizeKey(path);
+    const ct = guessType(path);
+
+    if (ct.startsWith("text/") || ct.includes("javascript") || ct.includes("json") || ct.includes("svg")) {
+      const text = await store.get(key, "text");
+      if (text == null) return J({ ok: false, error: "Not found", key }, 404);
+      return new Response(text, { headers: { "content-type": ct, "cache-control": "no-store" } });
+    } else {
+      const buf = await store.get(key, "arrayBuffer");
+      if (!buf) return J({ ok: false, error: "Not found", key }, 404);
+      return new Response(buf, { headers: { "content-type": ct, "cache-control": "no-store" } });
+    }
+  }
+
+  // ── Архіви (твоя існуюча логіка) ──
+
+  // GET /admin/repo/html — сторінка зі списком архівів
   if (p === "/admin/repo/html" && req.method === "GET") {
+    if (!ensureSecret(env, url)) return J({ ok: false, error: "unauthorized" }, 401);
     try {
-      return new Response(await htmlList(env, url), {
-        headers: { "content-type": "text/html; charset=utf-8" },
-      });
+      return H(await htmlList(env, url));
     } catch (e) {
       console.error("[repo.html]", e?.message || e);
-      return json({ ok: false, error: String(e) }, 500);
+      return J({ ok: false, error: String(e) }, 500);
     }
   }
 
   // POST /admin/repo/upload — завантаження архіву (ZIP)
   if (p === "/admin/repo/upload" && req.method === "POST") {
+    if (!ensureSecret(env, url)) return J({ ok: false, error: "unauthorized" }, 401);
     try {
       const form = await req.formData();
       const f = form.get("file");
       if (!f || !f.name || !f.arrayBuffer) {
-        return json({ ok: false, error: "file missing" }, 400);
+        return J({ ok: false, error: "file missing" }, 400);
       }
 
       const buf = new Uint8Array(await f.arrayBuffer());
@@ -141,52 +401,48 @@ export async function handleAdminRepo(req, env, url) {
       const datePart = new Date().toISOString().slice(0, 10);
       const key = `senti_archive/${datePart}__${f.name}`;
 
-      // зберігаємо ZIP (base64 string)
       await saveArchive(env, key, b64);
       await appendChecklist(env, `📦 upload success → ${key}`);
 
-      // selftest (локально, без fetch)
       const st = await runSelfTestLocalDirect(env).catch(() => ({ ok: false }));
       if (st?.ok) {
         await setCurrent(env, key, "upload");
-        return json({ ok: true, uploaded: key, auto_promoted: true, selftest: true });
+        return J({ ok: true, uploaded: key, auto_promoted: true, selftest: true });
       } else {
         await appendChecklist(env, `⚠️ upload done, but selftest failed → ${key}`);
-        return new Response(await htmlList(env, url), {
-          headers: { "content-type": "text/html; charset=utf-8" },
-        });
+        return H(await htmlList(env, url));
       }
     } catch (e) {
       console.error("[repo.upload]", e?.message || e);
       await appendChecklist(env, `❌ upload error: ${String(e)}`);
-      return json({ ok: false, error: String(e) }, 500);
+      return J({ ok: false, error: String(e) }, 500);
     }
   }
 
-  // GET /admin/repo/auto-promote[?key=] — ручний авто-промоут з кнопки
+  // GET /admin/repo/auto-promote[?key=] — ручний авто-промоут
   if (p === "/admin/repo/auto-promote" && req.method === "GET") {
+    if (!ensureSecret(env, url)) return J({ ok: false, error: "unauthorized" }, 401);
     const key = url.searchParams.get("key");
     try {
-      // якщо key не передали — беремо найновіший
       const items = await listArchives(env);
       const chosen = key || items[0];
-      if (!chosen) return json({ ok: false, error: "no archives" }, 400);
+      if (!chosen) return J({ ok: false, error: "no archives" }, 400);
 
       const st = await runSelfTestLocalDirect(env).catch(() => ({ ok: false }));
       if (!st?.ok) {
         await appendChecklist(env, `⚠️ auto-promote skipped (selftest fail) → ${chosen}`);
-        return json({ ok: false, error: "selftest failed", key: chosen }, 409);
+        return J({ ok: false, error: "selftest failed", key: chosen }, 409);
       }
 
       await setCurrent(env, chosen, key ? "button" : "latest");
-      return json({ ok: true, promoted: chosen, by: key ? "button" : "latest" });
+      return J({ ok: true, promoted: chosen, by: key ? "button" : "latest" });
     } catch (e) {
       console.error("[repo.auto-promote]", e?.message || e);
       await appendChecklist(env, `❌ auto-promote error: ${String(e)}`);
-      return json({ ok: false, error: String(e) }, 500);
+      return J({ ok: false, error: String(e) }, 500);
     }
   }
 
-  // інакше — не наш маршрут
+  // не наш маршрут
   return null;
 }
