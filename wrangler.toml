@@ -19,8 +19,6 @@ DEPLOY_ID = "local-dev"
 
 # Секрет для власних HTTP-ендпойнтів (передається як ?s=...)
 WEBHOOK_SECRET = "senti1984"
-# Секрет перевірки Telegram webhook
-TG_WEBHOOK_SECRET = "senti1984"
 
 # Локальна таймзона для UI/логів/дебагу часу
 TIMEZONE = "Europe/Kyiv"
