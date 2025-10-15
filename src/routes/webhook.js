@@ -7,7 +7,7 @@ import { getUserTokens } from "../lib/userDrive.js";
 import { abs } from "../utils/url.js";
 import { think } from "../lib/brain.js";
 import { readStatut } from "../lib/kvChecklist.js";
-import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
+import { getAiHealthSummary } from "../lib/modelRouter.js";
 import { json } from "../lib/utils.js";
 
 // Енергія (існуючий модуль)
@@ -50,29 +50,13 @@ function defaultAiReply() {
   return "Вибач, зараз не готовий відповісти чітко. Спробуй переформулювати або дай більше контексту.";
 }
 
-// ── PATCH: розширений анти-debug фільтр
-function looksLikeModelOrderExplain(out) {
-  if (typeof out !== "string") return false;
-  const s = out.toLowerCase();
-  if (s.includes("here's a breakdown")) return true;
-  if (s.includes("configuration list")) return true;
-  if (s.includes("corresponding model id")) return true;
-  if (s.includes("model aliases") || s.includes("model mappings") || s.includes("model identifiers")) return true;
-  if (s.includes("providers:") || s.includes("provider:")) return true;
-  return (
-    (s.includes("gemini") || s.includes("openrouter") || s.includes("meta-llama") || s.includes("deepseek") || s.includes("cf/")) &&
-    (s.includes("alias") || s.includes("identifier") || s.includes("mappings") || s.includes("providers"))
-  );
-}
-
 const BTN_DRIVE = "Google Drive";
 const BTN_SENTI = "Senti";
-const BTN_ADMIN = "Admin";
-// прибрали Checklist з головної клавіатури
+const BTN_ADMIN = "Admin"; // Checklist з клавіатури прибрано
 
 const mainKeyboard = (isAdmin = false) => {
   const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
-  if (isAdmin) rows.push([{ text: BTN_ADMIN }]); // без окремого Checklist
+  if (isAdmin) rows.push([{ text: BTN_ADMIN }]);
   return { keyboard: rows, resize_keyboard: true };
 };
 const inlineOpenDrive = () => ({
@@ -90,7 +74,7 @@ function energyLinks(env, userId) {
   };
 }
 
-// універсальний вивід адмін-діагностики (+ інлайн кнопка Checklist)
+// Універсальний вивід адмін-діагностики (+ інлайн кнопки)
 async function sendAdminPanel(env, chatId, userId) {
   const mo = String(env.MODEL_ORDER || "").trim();
   const hasGemini = !!env.GOOGLE_GEMINI_API_KEY;
@@ -248,7 +232,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /checklist (нова команда — через адмін)
+  // /checklist (окрема команда через адмін)
   if (text === "/checklist" || text === "/checklist@SentiBot") {
     await safe(async () => {
       if (!isAdmin) { await sendPlain(env, chatId, "Доступ заборонено."); return; }
@@ -258,7 +242,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /ai
+  // /ai → тільки через think()
   const aiArg = parseAiCommand(textRaw);
   if (aiArg !== null) {
     await safe(async () => {
@@ -278,15 +262,7 @@ export async function handleTelegramWebhook(req, env) {
       await spendEnergy(env, userId, need, "text");
 
       const systemHint = await buildSystemHint(env, chatId, userId);
-      const modelOrder = String(env.MODEL_ORDER || "").trim();
-      let out = modelOrder
-        ? await askAnyModel(env, modelOrder, q, { systemHint })
-        : await think(env, q, { systemHint });
-
-      // ── PATCH: якщо маршрутизатор повернув "розбір моделей" — перезапитуємо напряму
-      if (looksLikeModelOrderExplain(out)) {
-        out = await think(env, q, { systemHint });
-      }
+      const out = await think(env, q, { systemHint });
 
       await pushTurn(env, userId, "user", q);
       await pushTurn(env, userId, "assistant", out);
@@ -319,12 +295,15 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Кнопка Senti — поки без змін (можеш додати власну логіку)
+  // Кнопка Senti — простий привіт без витрат енергії
   if (text === BTN_SENTI) {
-    // ... за бажанням
+    await safe(async () => {
+      await sendPlain(env, chatId, "Привіт! Як я можу допомогти?");
+    });
+    return json({ ok: true });
   }
 
-  // Кнопка Admin — тепер показує діагностику та інлайн-кнопки
+  // Кнопка Admin — показати діагностику
   if (text === BTN_ADMIN) {
     await safe(async () => {
       if (!isAdmin) { await sendPlain(env, chatId, "Доступ заборонено."); return; }
@@ -343,7 +322,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Звичайний текст → AI
+  // Звичайний текст → тільки через think()
   if (text && !text.startsWith("/")) {
     try {
       const cur = await getEnergy(env, userId);
@@ -356,15 +335,7 @@ export async function handleTelegramWebhook(req, env) {
       await spendEnergy(env, userId, need, "text");
 
       const systemHint = await buildSystemHint(env, chatId, userId);
-      const modelOrder = String(env.MODEL_ORDER || "").trim();
-      let out = modelOrder
-        ? await askAnyModel(env, modelOrder, text, { systemHint })
-        : await think(env, text, { systemHint });
-
-      // ── PATCH: анти-debug для звичайних текстів
-      if (looksLikeModelOrderExplain(out)) {
-        out = await think(env, text, { systemHint });
-      }
+      const out = await think(env, text, { systemHint });
 
       await pushTurn(env, userId, "user", text);
       await pushTurn(env, userId, "assistant", out);
