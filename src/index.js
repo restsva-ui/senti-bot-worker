@@ -31,6 +31,9 @@ import { handleAdminEnergy } from "./routes/adminEnergy.js";
 import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
 import { handleAdminEditor } from "./routes/adminEditor.js";
 
+// ✅ новий імпорт KV-редактора
+import { handleAdminKv } from "./routes/admin-kv.js";
+
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
 
 import {
@@ -44,7 +47,7 @@ import { nightlyAutoImprove } from "./lib/autoImprove.js";
 import { runSelfRegulation } from "./lib/selfRegulate.js";
 import { handleAiImprove } from "./routes/aiImprove.js";
 
-const VERSION = "senti-worker-2025-10-15-20-45+api-ns+raw+kv-alias";
+const VERSION = "senti-worker-2025-10-15-21-30+admin-kv";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // KV helpers for code storage (read/write/list)
@@ -118,7 +121,7 @@ export default {
       if (p === "/health") {
         try {
           const r = await handleHealth?.(req, env, url);
-          if (r && r.status !== 404) return r;
+        if (r && r.status !== 404) return r;
         } catch {}
         return json(
           {
@@ -242,14 +245,13 @@ export default {
 
       // --- ADMIN ---
 
-      // 0) KV Editor (та аліас /admin/kv)
-      if (p === "/admin/kv") {
-        // простий аліас на /admin/editor зберігаючи секрет
-        const u = new URL(abs(env, "/admin/editor"));
-        const s = url.searchParams.get("s");
-        if (s) u.searchParams.set("s", s);
-        return Response.redirect(u.toString(), 302);
+      // 0) ✅ Новий KV Editor (повноцінний UI+API)
+      if (p.startsWith("/admin/kv")) {
+        const r = await handleAdminKv?.(req, env, url);
+        if (r && r.status !== 404) return r;
       }
+
+      // 0.1) Старий /admin/editor (залишаємо як опціональний)
       if (p.startsWith("/admin/editor")) {
         const r = await handleAdminEditor?.(req, env, url);
         if (r && r.status !== 404) return r;
