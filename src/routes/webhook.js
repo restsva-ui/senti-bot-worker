@@ -37,7 +37,7 @@ const BTN_SENTI = "Senti";
 const BTN_ADMIN = "Admin";
 const mainKeyboard = (isAdmin = false) => {
   const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
-  if (isAdmin) rows.push([{ text: BTN_ADMIN }]); // Checklist — прибрано з головної
+  if (isAdmin) rows.push([{ text: BTN_ADMIN }]); // Checklist прибрано
   return { keyboard: rows, resize_keyboard: true };
 };
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
@@ -86,7 +86,10 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   await spendEnergy(env, userId, need, "media");
   const url = await tgFileUrl(env, att.file_id);
   const saved = await driveSaveFromUrl(env, userId, url, att.name);
-  await sendPlain(env, chatId, `✅ ${saved?.name || att.name}`);
+  // Чіткий фідбек про завантаження + кнопка відкриття диска
+  await sendPlain(env, chatId, `✅ ${t(lang, "saved_to_drive")}: ${saved?.name || att.name}`, {
+    reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: "https://drive.google.com/drive/my-drive" }]] }
+  });
   return true;
 }
 
@@ -114,11 +117,8 @@ function guessEmoji(text = "") {
   return "💡";
 }
 function looksLikeEmojiStart(s = "") {
-  try {
-    return /^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(String(s));
-  } catch {
-    return false;
-  }
+  try { return /^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(String(s)); }
+  catch { return false; }
 }
 function tryParseUserNamedAs(text) {
   const s = (text || "").trim();
@@ -148,8 +148,21 @@ async function rememberNameFromText(env, userId, text) {
   return name;
 }
 
+// ── Мовні хелпери ────────────────────────────────────────────────────────────
+function detectLangHeuristic(s = "") {
+  const text = String(s || "");
+  if (/[äöüß]/i.test(text)) return "de";
+  if (/[àâçéèêëîïôûùüÿœ]/i.test(text)) return "fr";
+  if (/[A-Za-z]/.test(text) && !/[А-Яа-яЇІЄҐё]/.test(text)) return "en";
+  // кирилиця
+  if (/[ыэё]/i.test(text)) return "ru";
+  if (/[іїєґ]/i.test(text)) return "uk";
+  // fallback: якщо кирилиця, але без маркерів — повертаємо те, що запитували
+  return null;
+}
+
 // ── Відповідь AI + анти-глітч ───────────────────────────────────────────────
-// 1 SMS ~ 160–220 символів → візьмемо 220 як межу
+// 1 SMS ~ 160–220 символів
 function limitMsg(s, max = 220) { if (!s) return s; return s.length <= max ? s : s.slice(0, max - 1); }
 function chunkText(s, size = 3500) { const out = []; let t = String(s || ""); while (t.length) { out.push(t.slice(0, size)); t = t.slice(size); } return out; }
 
@@ -161,26 +174,37 @@ function looksLikeModelDump(s = "") {
 
 async function callSmartLLM(env, userText, { lang, name, systemHint, expand }) {
   const modelOrder = String(env.MODEL_ORDER || "").trim();
-  const control = expand
-    ? `Write in ${lang}. Tone: warm, helpful. Split into short Telegram-friendly messages.`
-    : `Write in ${lang}. Tone: friendly and concise. 1–3 sentences max. If the user later asks for more, elaborate.`;
-  const prompt = `Add one relevant emoji at the start if natural.\nUser (${name}): ${userText}\n${control}`;
 
-  // 1) основний маршрут
+  const control = expand
+    ? `Write ONLY in ${lang}. Be warm and helpful. Split into short Telegram-friendly messages. Do NOT translate or restate the question — answer it directly.`
+    : `Write ONLY in ${lang}. Be friendly and concise (1–3 sentences). Do NOT translate or restate the question — answer it directly.`;
+
+  const prompt = `Add one relevant emoji at the start if natural.\nUser (${name}) says: ${userText}\n${control}`;
+
   let out = modelOrder
     ? await askAnyModel(env, modelOrder, prompt, { systemHint })
     : await think(env, prompt, { systemHint });
 
   out = (out || "").trim();
-  // 2) анти-глітч: якщо модель почала пояснювати MODEL_ORDER — повторити напряму
   if (looksLikeModelDump(out)) {
     out = (await think(env, prompt, { systemHint }))?.trim() || out;
   }
 
-  // 3) авто-емодзі, якщо відповідь починається без нього
+  // Авто-емодзі
   if (!looksLikeEmojiStart(out)) {
     const em = guessEmoji(userText);
     out = `${em} ${out}`;
+  }
+
+  // Мовна перевірка: якщо модель з'їхала — повторюємо з жорсткою інструкцією
+  const detected = detectLangHeuristic(out);
+  if (detected && lang && detected !== lang) {
+    const hardPrompt = `STRICT LANGUAGE MODE: Respond ONLY in ${lang}. If the previous answer used another language, rewrite it now in ${lang}. Keep it concise.\nUser: ${userText}`;
+    let fixed = modelOrder
+      ? await askAnyModel(env, modelOrder, hardPrompt, { systemHint })
+      : await think(env, hardPrompt, { systemHint });
+    fixed = (fixed || "").trim();
+    if (fixed) out = looksLikeEmojiStart(fixed) ? fixed : `${guessEmoji(userText)} ${fixed}`;
   }
 
   const short = expand ? out : limitMsg(out, 220);
@@ -206,7 +230,7 @@ export async function handleTelegramWebhook(req, env) {
 
   const safe = async (fn) => { try { await fn(); } catch { try { await sendPlain(env, chatId, t(lang, "default_reply")); } catch {} } };
 
-  // /admin або кнопка
+  // /admin
   if (textRaw === "/admin" || textRaw === "/admin@SentiBot" || textRaw === BTN_ADMIN) {
     await safe(async () => {
       if (!isAdmin) { await sendPlain(env, chatId, t(lang, "admin_denied")); return; }
@@ -271,31 +295,30 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Google Drive — тільки клікабельна кнопка без зайвого тексту
+  // Google Drive — тільки клікабельна кнопка (без тексту)
   if (textRaw === BTN_DRIVE) {
     await safe(async () => {
       const ut = await getUserTokens(env, userId);
+      await setDriveMode(env, userId, true);
+      const zeroWidth = "\u2063"; // невидимий символ, щоб TG показав інлайн-кнопку
       if (!ut?.refresh_token) {
         const authUrl = abs(env, `/auth/start?u=${userId}`);
-        await setDriveMode(env, userId, true);
-        // Порожній текст: телеграм вимагає хоч щось → ставимо нерозривний пробіл
-        await sendPlain(env, chatId, " ", {
+        await sendPlain(env, chatId, zeroWidth, {
           reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: authUrl }]] }
         });
         return;
       }
-      await setDriveMode(env, userId, true);
-      await sendPlain(env, chatId, " ", {
+      await sendPlain(env, chatId, zeroWidth, {
         reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: "https://drive.google.com/drive/my-drive" }]] }
       });
     });
     return json({ ok: true });
   }
 
-  // Кнопка Senti → дружня підказка
+  // Кнопка Senti → коротке привітання без інструкцій
   if (textRaw === BTN_SENTI) {
     const name = await getPreferredName(env, msg);
-    await sendPlain(env, chatId, `${t(lang, "hello_name", name)} ${t(lang, "how_help")}\n${t(lang, "senti_tip")}`, {
+    await sendPlain(env, chatId, `${t(lang, "hello_name", name)} ${t(lang, "how_help")}`, {
       reply_markup: mainKeyboard(isAdmin),
     });
     return json({ ok: true });
