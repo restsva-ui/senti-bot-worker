@@ -52,10 +52,38 @@ import { runSelfRegulation } from "./lib/selfRegulate.js";
 // ✅ HTTP-роутер нічного агента + debug (/ai/improve*, /debug/*)
 import { handleAiImprove } from "./routes/aiImprove.js";
 
-// ✅ 🔸 МІКРОКРОК №1: read-only Admin JSON API (ping + list)
-import { handleAdminApi } from "./routes/adminApi.js";
+const VERSION = "senti-worker-2025-10-12-00-59+aiimprove-router+kv-code-api";
 
-const VERSION = "senti-worker-2025-10-12-00-59+aiimprove-router+adminapi-readonly";
+// ─────────────────────────────────────────────────────────────────────────────
+// KV helpers for code storage (read/write/list) — uses CODE_KV or STATE_KV
+function codeKV(env) {
+  return env.CODE_KV || env.STATE_KV;
+}
+async function codeGet(env, path) {
+  const kv = codeKV(env);
+  if (!kv) return null;
+  const key = `code:${path}`;
+  return await kv.get(key, "text");
+}
+async function codePut(env, path, content) {
+  const kv = codeKV(env);
+  if (!kv) throw new Error("KV not configured");
+  const key = `code:${path}`;
+  await kv.put(key, content, {
+    metadata: { path, ts: Date.now() },
+  });
+  return true;
+}
+async function codeList(env) {
+  const kv = codeKV(env);
+  if (!kv) return [];
+  const it = await kv.list({ prefix: "code:" });
+  return (it?.keys || []).map((k) => ({
+    key: k.name.replace(/^code:/, ""),
+    ts: k?.metadata?.ts || null,
+  }));
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 export default {
   async fetch(req, env) {
@@ -97,15 +125,6 @@ export default {
 
       if (p === "/webhook" && method === "GET") {
         return json({ ok: true, method: "GET", message: "webhook alive" }, 200, CORS);
-      }
-
-      // 🔸 Admin JSON API (read-only): /admin/api/*
-      if (p.startsWith("/admin/api/")) {
-        try {
-          const r = await handleAdminApi?.(req, env, url);
-          if (r) return r;
-        } catch {}
-        return json({ ok: false, error: "admin api handler missing" }, 500, CORS);
       }
 
       // brain state
@@ -267,6 +286,44 @@ export default {
         return json({ ok: true, note: "admin energy fallback" }, 200, CORS);
       }
 
+      // ────────────────────────────────────────────────────────────────────
+      // NEW: Simple KV-backed code repo API (list/get/put)
+      if (p === "/admin/api/list") {
+        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
+          return json({ ok: false, error: "unauthorized" }, 401, CORS);
+        }
+        const items = await codeList(env);
+        return json({ ok: true, items }, 200, CORS);
+      }
+
+      if (p === "/admin/api/get") {
+        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
+          return json({ ok: false, error: "unauthorized" }, 401, CORS);
+        }
+        const path = url.searchParams.get("path") || "";
+        if (!path) return json({ ok: false, error: "path required" }, 400, CORS);
+        const value = await codeGet(env, path);
+        return json({ ok: true, path, value }, 200, CORS);
+      }
+
+      if (p === "/admin/api/put") {
+        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
+          return json({ ok: false, error: "unauthorized" }, 401, CORS);
+        }
+        if (method !== "POST") {
+          return json({ ok: false, error: "method not allowed" }, 405, CORS);
+        }
+        const path = url.searchParams.get("path") || "";
+        if (!path) return json({ ok: false, error: "path required" }, 400, CORS);
+        const bodyText = await req.text();
+        if (!bodyText?.length) {
+          return json({ ok: false, error: "empty body" }, 400, CORS);
+        }
+        await codePut(env, path, bodyText);
+        return json({ ok: true, saved: true, path, bytes: bodyText.length }, 200, CORS);
+      }
+      // ────────────────────────────────────────────────────────────────────
+
       // webhook POST
       if (p === "/webhook" && req.method === "POST") {
         try {
@@ -398,7 +455,7 @@ export default {
         String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" &&
         (runByCron || runByHour)
       ) {
-        const res = await nightlyAutoImprove(env, { now: new Date(), reason: "manual" });
+        const res = await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
         if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
           await runSelfRegulation(env, res?.insights || null).catch(() => {});
         }
