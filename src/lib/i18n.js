@@ -1,11 +1,8 @@
-// src/lib/i18n.js
-
 const SUP = ["uk", "ru", "en", "de", "fr"];
 
 // —————— language detection ——————
 function detectFromText(text = "") {
   const s = String(text).trim();
-
   if (!s) return null;
 
   // Cyrillic vs Latin
@@ -23,14 +20,21 @@ function detectFromText(text = "") {
     return "uk"; // default for cyrillic
   }
 
-  // German accents / words
-  if (/[äöüßÄÖÜ]/.test(s) || /\b(der|die|das|und|ist|wie|viele|bist|heute)\b/i.test(s)) return "de";
+  // German accents / words (додав кілька частих стоп-слів)
+  if (
+    /[äöüßÄÖÜ]/.test(s) ||
+    /\b(der|die|das|und|ist|wie|viele|bist|heute|kann|konnen|können|schreiben|sie|wir)\b/i.test(s)
+  ) return "de";
 
-  // French accents / words
-  if (/[àâçéèêëîïôûùüÿœÀÂÇÉÈÊËÎÏÔÛÙÜŸŒ]/.test(s) ||
-      /\b(qui|quoi|comment|bonjour|combien|est|tu)\b/i.test(s)) return "fr";
+  // French accents / words — додано безакцентні варіанти і патерни
+  if (
+    /[àâçéèêëîïôûùüÿœÀÂÇÉÈÊËÎÏÔÛÙÜŸŒ]/.test(s) ||
+    /\b(qui|quoi|comment|bonjour|bonsoir|merci|combien|pourquoi|ou|est|tu|vous|je|nous|capitale|de|des|du|le|la|les)\b/i.test(s) ||
+    /\b(?:est-?ce|qu['’e])\b/i.test(s) ||   // est-ce, qu', que
+    /\bde\s+l['’][a-z]/i.test(s)           // de l'
+  ) return "fr";
 
-  // English: latin without umlauts/accents + common words
+  // English: latin without umlauts/accents + fallback
   if (hasLat) return "en";
 
   return null;
