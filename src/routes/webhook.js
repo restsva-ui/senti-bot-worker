@@ -9,13 +9,18 @@ import { think } from "../lib/brain.js";
 import { readStatut } from "../lib/kvChecklist.js";
 import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
 import { json } from "../lib/utils.js";
-import { sendMessage as sendTG } from "../lib/telegram.js";
 
 // Енергія (існуючий модуль)
 import { getEnergy, spendEnergy } from "../lib/energy.js";
 
-// Dialog Memory — НОВИЙ імпорт
+// Dialog Memory — модуль
 import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
+
+// Self-Tune — НОВИЙ модуль
+import { loadSelfTune } from "../lib/selfTune.js";
+
+// Drive-Mode — НОВИЙ модуль
+import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -60,19 +65,6 @@ const inlineOpenDrive = () => ({
 });
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 
-// ── STATE_KV: режим диска ─────────────────────────────────────────────────────
-const DRIVE_MODE_KEY = (uid) => `drive_mode:${uid}`;
-function ensureState(env) {
-  if (!env.STATE_KV) throw new Error("STATE_KV binding missing");
-  return env.STATE_KV;
-}
-async function setDriveMode(env, userId, on) {
-  await ensureState(env).put(DRIVE_MODE_KEY(userId), on ? "1" : "0", { expirationTtl: 3600 });
-}
-async function getDriveMode(env, userId) {
-  return (await ensureState(env).get(DRIVE_MODE_KEY(userId))) === "1";
-}
-
 // Лінки адмін-панелі (використовують WEBHOOK_SECRET)
 function energyLinks(env, userId) {
   const s = env.WEBHOOK_SECRET || "";
@@ -81,37 +73,6 @@ function energyLinks(env, userId) {
     energy: abs(env, `/admin/energy/html?${qs}`),
     checklist: abs(env, `/admin/checklist/html?${qs}`),
   };
-}
-
-// ── Self-Tune ────────────────────────────────────────────────────────────────
-async function loadSelfTune(env, chatId) {
-  try {
-    if (!env.STATE_KV) return null;
-    const raw = await env.STATE_KV.get(`insight:latest:${chatId}`);
-    if (!raw) return null;
-    const obj = JSON.parse(raw);
-    const rules = Array.isArray(obj?.analysis?.rules) ? obj.analysis.rules : [];
-    const tone  = obj?.analysis?.tone ? String(obj.analysis.tone).trim() : "";
-    if (!rules.length && !tone) return null;
-    const lines = [];
-    if (tone) lines.push(`• Тон розмови користувача: ${tone}.`);
-    if (rules.length) {
-      lines.push("• Політики/звички користувача:");
-      for (const r of rules.slice(0, 8)) lines.push(`  – ${r}`);
-    }
-    return lines.join("\n");
-  } catch { return null; }
-}
-
-async function buildSystemHint(env, chatId, userId) {
-  const statut = String((await readStatut(env)) || "").trim();
-  const dlg = await buildDialogHint(env, userId); // ← з нового модуля
-  const tune = await loadSelfTune(env, chatId);
-  const blocks = [];
-  if (statut) blocks.push(`[Статут/чеклист]\n${statut}`);
-  if (tune) blocks.push(`[Self-Tune]\n${tune}`);
-  if (dlg) blocks.push(dlg);
-  return blocks.length ? blocks.join("\n\n") : "";
 }
 
 // ── media helpers ────────────────────────────────────────────────────────────
@@ -175,6 +136,19 @@ async function handleIncomingMedia(env, chatId, userId, msg) {
   const saved = await driveSaveFromUrl(env, userId, url, att.name);
   await sendPlain(env, chatId, `✅ Збережено на твоєму диску: ${saved?.name || att.name}`);
   return true;
+}
+
+// ── SystemHint (Статут + Self-Tune + Dialog Memory) ──────────────────────────
+async function buildSystemHint(env, chatId, userId) {
+  const statut = String((await readStatut(env)) || "").trim();
+  const dlg = await buildDialogHint(env, userId); // з dialogMemory.js
+  const tune = await loadSelfTune(env, chatId);   // з selfTune.js
+
+  const blocks = [];
+  if (statut) blocks.push(`[Статут/чеклист]\n${statut}`);
+  if (tune)   blocks.push(`[Self-Tune]\n${tune}`);
+  if (dlg)    blocks.push(dlg);
+  return blocks.length ? blocks.join("\n\n") : "";
 }
 
 // ── ГОЛОВНИЙ ОБРОБНИК ────────────────────────────────────────────────────────
