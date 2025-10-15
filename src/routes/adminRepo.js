@@ -1,12 +1,13 @@
 // src/routes/adminRepo.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Repo / Архіви: 
+// Repo / Архіви:
 // 1) HTML-UI для редагування репо в KV (list/get/put/delete + live preview)
 // 2) Публічний renderer /repo/render (з контент-тайпами)
 // 3) Завантаження ZIP-архівів + auto-promote після selftest
 // 4) Ручний auto-promote кнопкою
 //
 // Усі адмін-ендпоінти захищені ?s=WEBHOOK_SECRET
+// /repo/render може бути публічним, якщо REPO_PUBLIC="on"
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { saveArchive, listArchives, appendChecklist } from "../lib/kvChecklist.js";
@@ -29,6 +30,12 @@ const H = (html, status = 200) =>
 function ensureSecret(env, url) {
   if (!env.WEBHOOK_SECRET) return true;
   return url.searchParams.get("s") === env.WEBHOOK_SECRET;
+}
+
+// чи можна рендерити без секрету
+function canRender(env, url) {
+  const pub = String(env.REPO_PUBLIC || "off").toLowerCase() === "on";
+  return pub || ensureSecret(env, url);
 }
 
 // встановлення поточного “мозку”
@@ -78,11 +85,15 @@ function guessType(name = "") {
   if (n.endsWith(".html") || n.endsWith(".htm")) return "text/html; charset=utf-8";
   if (n.endsWith(".css")) return "text/css; charset=utf-8";
   if (n.endsWith(".js")) return "application/javascript; charset=utf-8";
+  if (n.endsWith(".mjs")) return "application/javascript; charset=utf-8";
   if (n.endsWith(".json")) return "application/json; charset=utf-8";
   if (n.endsWith(".svg")) return "image/svg+xml";
   if (n.endsWith(".png")) return "image/png";
+  if (n.endsWith(".webp")) return "image/webp";
   if (n.endsWith(".jpg") || n.endsWith(".jpeg")) return "image/jpeg";
   if (n.endsWith(".gif")) return "image/gif";
+  if (n.endsWith(".ico")) return "image/x-icon";
+  if (n.endsWith(".wasm")) return "application/wasm";
   if (n.endsWith(".txt") || n.endsWith(".md")) return "text/plain; charset=utf-8";
   if (n.endsWith(".zip")) return "application/zip";
   return "application/octet-stream";
@@ -100,6 +111,9 @@ function repoUi(url, env) {
     if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
     return u.toString();
   })();
+
+  const healthHref = new URL("/health", url.origin).toString();
+  const versionHref = new URL("/_version", url.origin).toString();
 
   return `<!doctype html>
 <meta charset="utf-8"/>
@@ -119,9 +133,17 @@ function repoUi(url, env) {
   iframe{width:100%;height:60vh;border:1px solid #2a2a2a;border-radius:16px;background:#fff}
   .muted{opacity:.7}
   .badge{background:#111827;border:1px solid #374151;border-radius:10px;padding:6px 10px}
+  .tools{display:flex;gap:8px}
+  a.link{color:#93c5fd;text-decoration:none}
 </style>
 <div class="wrap">
   <h1>📁 Repo Editor <span class="badge" id="nsLabel">${esc(nsName)}</span></h1>
+
+  <div class="row tools">
+    <a class="btn link" href="${versionHref}" target="_blank">ℹ️ Version</a>
+    <a class="btn link" href="${healthHref}" target="_blank">🩺 Health</a>
+    <a class="btn link" href="${archivesHref}">Архіви (ZIP)</a>
+  </div>
 
   <div class="row">
     <label>Namespace:
@@ -130,7 +152,6 @@ function repoUi(url, env) {
     <button class="btn" id="openHere">Відкрити</button>
     <button class="btn" id="btnList">List</button>
     <input id="prefix" placeholder="prefix (напр. code: або code:site/)" style="flex:1;min-width:220px"/>
-    <a class="btn" href="${archivesHref}">Архіви (ZIP)</a>
   </div>
 
   <div class="row">
@@ -296,7 +317,7 @@ export async function handleAdminRepo(req, env, url) {
 
   // ── Repo editor API ──
   if (
-    (p === "/admin/repo/list" || p === "/admin/repo/get") &&
+    (p === "/admin/repo/list" || p === "/admin/repo/get" || p === "/admin/repo/exists") &&
     req.method === "GET"
   ) {
     if (!ensureSecret(env, url)) return J({ ok: false, error: "unauthorized" }, 401);
@@ -322,6 +343,17 @@ export async function handleAdminRepo(req, env, url) {
       const key = normalizeKey(path);
       const value = await store.get(key, "text");
       return J({ ok: true, path, key, value });
+    }
+
+    if (p === "/admin/repo/exists") {
+      const path = url.searchParams.get("path") || "";
+      if (!path) return J({ ok: false, error: "Missing path" }, 400);
+      const k1 = normalizeKey(path);
+      const k2 = path;
+      const v1 = await store.get(k1);
+      if (v1 != null) return J({ ok: true, exists: true, key: k1 });
+      const v2 = await store.get(k2);
+      return J({ ok: true, exists: v2 != null, key: v2 != null ? k2 : k1 });
     }
   }
 
@@ -350,25 +382,44 @@ export async function handleAdminRepo(req, env, url) {
     return J({ ok: true, deleted: key });
   }
 
-  // ── Public renderer (але теж під секретом) ──
-  if (p === "/repo/render" && req.method === "GET") {
-    if (!ensureSecret(env, url)) return J({ ok: false, error: "unauthorized" }, 401);
+  // ── Public renderer (може бути публічним при REPO_PUBLIC="on") ──
+  if (p === "/repo/render" && (req.method === "GET" || req.method === "HEAD")) {
+    if (!canRender(env, url)) return J({ ok: false, error: "unauthorized" }, 401);
+
     const nsName = url.searchParams.get("ns") || "CODE_KV";
     const store = pickNS(env, nsName);
     if (!store) return J({ ok: false, error: `Unknown namespace ${nsName}` }, 400);
+
     const path = url.searchParams.get("path") || "index.html";
-    const key = normalizeKey(path);
     const ct = guessType(path);
 
-    if (ct.startsWith("text/") || ct.includes("javascript") || ct.includes("json") || ct.includes("svg")) {
-      const text = await store.get(key, "text");
-      if (text == null) return J({ ok: false, error: "Not found", key }, 404);
-      return new Response(text, { headers: { "content-type": ct, "cache-control": "no-store" } });
-    } else {
-      const buf = await store.get(key, "arrayBuffer");
-      if (!buf) return J({ ok: false, error: "Not found", key }, 404);
-      return new Response(buf, { headers: { "content-type": ct, "cache-control": "no-store" } });
+    // helper: get either text or binary; try code:<path> then <path>
+    async function getEither() {
+      const k1 = normalizeKey(path);
+      const k2 = path;
+      const isText = ct.startsWith("text/") || ct.includes("javascript") || ct.includes("json") || ct.includes("svg");
+
+      if (isText) {
+        let t = await store.get(k1, "text");
+        if (t == null) t = await store.get(k2, "text");
+        return t == null ? null : new Response(t, { headers: { "content-type": ct, "cache-control": "no-store" } });
+      } else {
+        let b = await store.get(k1, "arrayBuffer");
+        if (!b) b = await store.get(k2, "arrayBuffer");
+        return !b ? null : new Response(b, { headers: { "content-type": ct, "cache-control": "no-store" } });
+      }
     }
+
+    const resp = await getEither();
+    if (resp) return resp;
+
+    // якщо index не знайдено — лаконічна сторінка-заглушка
+    if (path === "index.html" || path.endsWith("/index.html")) {
+      const note = `<h1 style="font-family:sans-serif">Repo: файл не знайдено</h1>
+<p>Шукано <code>code:${esc(path)}</code> або <code>${esc(path)}</code> у ${esc(nsName)}.</p>`;
+      return H(`<!doctype html><meta charset="utf-8"><title>Not found</title>${note}`, 404);
+    }
+    return J({ ok: false, error: "Not found", path }, 404);
   }
 
   // ── Архіви (твоя існуюча логіка) ──
