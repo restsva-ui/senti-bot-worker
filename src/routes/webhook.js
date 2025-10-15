@@ -37,7 +37,7 @@ const BTN_SENTI = "Senti";
 const BTN_ADMIN = "Admin";
 const mainKeyboard = (isAdmin = false) => {
   const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
-  if (isAdmin) rows.push([{ text: BTN_ADMIN }]); // Checklist забрано
+  if (isAdmin) rows.push([{ text: BTN_ADMIN }]); // Checklist — прибрано з головної
   return { keyboard: rows, resize_keyboard: true };
 };
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
@@ -113,6 +113,13 @@ function guessEmoji(text = "") {
   if (t.includes("електр") || t.includes("струм") || t.includes("current")) return "⚡";
   return "💡";
 }
+function looksLikeEmojiStart(s = "") {
+  try {
+    return /^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(String(s));
+  } catch {
+    return false;
+  }
+}
 function tryParseUserNamedAs(text) {
   const s = (text || "").trim();
   const NAME_RX = "([A-Za-zÀ-ÿĀ-žЀ-ӿʼ'`\\-\\s]{2,30})";
@@ -142,7 +149,8 @@ async function rememberNameFromText(env, userId, text) {
 }
 
 // ── Відповідь AI + анти-глітч ───────────────────────────────────────────────
-function limitMsg(s, max = 700) { if (!s) return s; return s.length <= max ? s : s.slice(0, max - 1); }
+// 1 SMS ~ 160–220 символів → візьмемо 220 як межу
+function limitMsg(s, max = 220) { if (!s) return s; return s.length <= max ? s : s.slice(0, max - 1); }
 function chunkText(s, size = 3500) { const out = []; let t = String(s || ""); while (t.length) { out.push(t.slice(0, size)); t = t.slice(size); } return out; }
 
 function looksLikeModelDump(s = "") {
@@ -164,11 +172,18 @@ async function callSmartLLM(env, userText, { lang, name, systemHint, expand }) {
     : await think(env, prompt, { systemHint });
 
   out = (out || "").trim();
-  // 2) анти-глітч: якщо модель почала пояснювати MODEL_ORDER — повторюємо запит без роутера
+  // 2) анти-глітч: якщо модель почала пояснювати MODEL_ORDER — повторити напряму
   if (looksLikeModelDump(out)) {
     out = (await think(env, prompt, { systemHint }))?.trim() || out;
   }
-  const short = expand ? out : limitMsg(out, 700);
+
+  // 3) авто-емодзі, якщо відповідь починається без нього
+  if (!looksLikeEmojiStart(out)) {
+    const em = guessEmoji(userText);
+    out = `${em} ${out}`;
+  }
+
+  const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
 }
 
@@ -242,7 +257,7 @@ export async function handleTelegramWebhook(req, env) {
 
       const systemHint = await buildSystemHint(env, chatId, userId);
       const name = await getPreferredName(env, msg);
-      const expand = /\b(детальн|подроб|more|details|expand)\b/i.test(q);
+      const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(q);
       const { short, full } = await callSmartLLM(env, q, { lang, name, systemHint, expand });
 
       await pushTurn(env, userId, "user", q);
@@ -256,19 +271,21 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Google Drive — лише одна клікабельна кнопка
+  // Google Drive — тільки клікабельна кнопка без зайвого тексту
   if (textRaw === BTN_DRIVE) {
     await safe(async () => {
       const ut = await getUserTokens(env, userId);
       if (!ut?.refresh_token) {
         const authUrl = abs(env, `/auth/start?u=${userId}`);
-        await sendPlain(env, chatId, `${t(lang, "disk_on")}`, {
+        await setDriveMode(env, userId, true);
+        // Порожній текст: телеграм вимагає хоч щось → ставимо нерозривний пробіл
+        await sendPlain(env, chatId, " ", {
           reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: authUrl }]] }
         });
         return;
       }
       await setDriveMode(env, userId, true);
-      await sendPlain(env, chatId, `${t(lang, "disk_on")}`, {
+      await sendPlain(env, chatId, " ", {
         reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: "https://drive.google.com/drive/my-drive" }]] }
       });
     });
@@ -305,7 +322,7 @@ export async function handleTelegramWebhook(req, env) {
 
       const systemHint = await buildSystemHint(env, chatId, userId);
       const name = await getPreferredName(env, msg);
-      const expand = /\b(детальн|подроб|more|details|expand)\b/i.test(textRaw);
+      const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
       const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand });
 
       await pushTurn(env, userId, "user", textRaw);
