@@ -50,25 +50,29 @@ function defaultAiReply() {
   return "Вибач, зараз не готовий відповісти чітко. Спробуй переформулювати або дай більше контексту.";
 }
 
-// ── PATCH: анти-debug фільтр для випадків, коли маршрутизатор повертає
-// "Here's a breakdown of the model ..." замість реальної відповіді.
+// ── PATCH: розширений анти-debug фільтр
 function looksLikeModelOrderExplain(out) {
   if (typeof out !== "string") return false;
   const s = out.toLowerCase();
+  if (s.includes("here's a breakdown")) return true;
+  if (s.includes("configuration list")) return true;
+  if (s.includes("corresponding model id")) return true;
+  if (s.includes("model aliases") || s.includes("model mappings") || s.includes("model identifiers")) return true;
+  if (s.includes("providers:") || s.includes("provider:")) return true;
   return (
-    /breakdown of the model (aliases|mappings|identifiers)/i.test(out) &&
-    (s.includes("gemini") || s.includes("openrouter") || s.includes("cf") || s.includes("meta-llama") || s.includes("deepseek"))
+    (s.includes("gemini") || s.includes("openrouter") || s.includes("meta-llama") || s.includes("deepseek") || s.includes("cf/")) &&
+    (s.includes("alias") || s.includes("identifier") || s.includes("mappings") || s.includes("providers"))
   );
 }
 
 const BTN_DRIVE = "Google Drive";
 const BTN_SENTI = "Senti";
 const BTN_ADMIN = "Admin";
-const BTN_CHECK = "Checklist";
+// прибрали Checklist з головної клавіатури
 
 const mainKeyboard = (isAdmin = false) => {
   const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
-  if (isAdmin) rows.push([{ text: BTN_ADMIN }, { text: BTN_CHECK }]);
+  if (isAdmin) rows.push([{ text: BTN_ADMIN }]); // без окремого Checklist
   return { keyboard: rows, resize_keyboard: true };
 };
 const inlineOpenDrive = () => ({
@@ -84,6 +88,46 @@ function energyLinks(env, userId) {
     energy: abs(env, `/admin/energy/html?${qs}`),
     checklist: abs(env, `/admin/checklist/html?${qs}`),
   };
+}
+
+// універсальний вивід адмін-діагностики (+ інлайн кнопка Checklist)
+async function sendAdminPanel(env, chatId, userId) {
+  const mo = String(env.MODEL_ORDER || "").trim();
+  const hasGemini = !!env.GOOGLE_GEMINI_API_KEY;
+  const hasCF = !!env.CLOUDFLARE_API_TOKEN && !!env.CF_ACCOUNT_ID;
+  const hasOR = !!env.OPENROUTER_API_KEY;
+  const hasFreeBase = !!env.FREE_LLM_BASE_URL;
+  const hasFreeKey = !!env.FREE_LLM_API_KEY;
+
+  const lines = [
+    "Адмін-панель (швидка діагностика):",
+    `MODEL_ORDER: ${mo || "(not set)"}`,
+    `GEMINI key: ${hasGemini ? "✅" : "❌"}`,
+    `Cloudflare (CF_ACCOUNT_ID + CLOUDFLARE_API_TOKEN): ${hasCF ? "✅" : "❌"}`,
+    `OpenRouter key: ${hasOR ? "✅" : "❌"}`,
+    `FreeLLM (BASE_URL + KEY): ${hasFreeBase && hasFreeKey ? "✅" : "❌"}`,
+  ];
+
+  const entries = mo ? mo.split(",").map(s => s.trim()).filter(Boolean) : [];
+  if (entries.length) {
+    const health = await getAiHealthSummary(env, entries);
+    lines.push("\n— Health:");
+    for (const h of health) {
+      const light = h.cool ? "🟥" : (h.slow ? "🟨" : "🟩");
+      const ms = h.ewmaMs ? `${Math.round(h.ewmaMs)}ms` : "n/a";
+      lines.push(`${light} ${h.provider}:${h.model} — ewma ${ms}, fails ${h.failStreak || 0}`);
+    }
+  }
+
+  const links = energyLinks(env, userId);
+  await sendPlain(env, chatId, lines.join("\n"), {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "Відкрити Checklist", url: links.checklist }],
+        [{ text: "Керування енергією", url: links.energy }],
+      ],
+    },
+  });
 }
 
 // ── media helpers ────────────────────────────────────────────────────────────
@@ -195,38 +239,21 @@ export async function handleTelegramWebhook(req, env) {
     }
   };
 
-  // /admin
+  // /admin (команда)
   if (text === "/admin" || text === "/admin@SentiBot") {
     await safe(async () => {
       if (!isAdmin) { await sendPlain(env, chatId, "Доступ заборонено."); return; }
-      const mo = String(env.MODEL_ORDER || "").trim();
-      const hasGemini = !!env.GOOGLE_GEMINI_API_KEY;
-      const hasCF = !!env.CLOUDFLARE_API_TOKEN && !!env.CF_ACCOUNT_ID;
-      const hasOR = !!env.OPENROUTER_API_KEY;
-      const hasFreeBase = !!env.FREE_LLM_BASE_URL;
-      const hasFreeKey = !!env.FREE_LLM_API_KEY;
+      await sendAdminPanel(env, chatId, userId);
+    });
+    return json({ ok: true });
+  }
 
-      const lines = [
-        "Адмін-панель (швидка діагностика):",
-        `MODEL_ORDER: ${mo || "(not set)"}`,
-        `GEMINI key: ${hasGemini ? "✅" : "❌"}`,
-        `Cloudflare (CF_ACCOUNT_ID + CLOUDFLARE_API_TOKEN): ${hasCF ? "✅" : "❌"}`,
-        `OpenRouter key: ${hasOR ? "✅" : "❌"}`,
-        `FreeLLM (BASE_URL + KEY): ${hasFreeBase && hasFreeKey ? "✅" : "❌"}`,
-      ];
-
-      const entries = mo ? mo.split(",").map(s => s.trim()).filter(Boolean) : [];
-      if (entries.length) {
-        const health = await getAiHealthSummary(env, entries);
-        lines.push("\n— Health:");
-        for (const h of health) {
-          const light = h.cool ? "🟥" : (h.slow ? "🟨" : "🟩");
-          const ms = h.ewmaMs ? `${Math.round(h.ewmaMs)}ms` : "n/a";
-          lines.push(`${light} ${h.provider}:${h.model} — ewma ${ms}, fails ${h.failStreak || 0}`);
-        }
-      }
-
-      await sendPlain(env, chatId, lines.join("\n"));
+  // /checklist (нова команда — через адмін)
+  if (text === "/checklist" || text === "/checklist@SentiBot") {
+    await safe(async () => {
+      if (!isAdmin) { await sendPlain(env, chatId, "Доступ заборонено."); return; }
+      const { checklist } = energyLinks(env, userId);
+      await sendPlain(env, chatId, `Відкрити Checklist:\n${checklist}`);
     });
     return json({ ok: true });
   }
@@ -292,9 +319,18 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Інші кнопки — місце для існуючої логіки
-  if (text === BTN_SENTI || text === BTN_ADMIN || text === BTN_CHECK) {
-    // ...
+  // Кнопка Senti — поки без змін (можеш додати власну логіку)
+  if (text === BTN_SENTI) {
+    // ... за бажанням
+  }
+
+  // Кнопка Admin — тепер показує діагностику та інлайн-кнопки
+  if (text === BTN_ADMIN) {
+    await safe(async () => {
+      if (!isAdmin) { await sendPlain(env, chatId, "Доступ заборонено."); return; }
+      await sendAdminPanel(env, chatId, userId);
+    });
+    return json({ ok: true });
   }
 
   // Якщо увімкнено режим диска — перехоплюємо та зберігаємо медіа
@@ -325,7 +361,7 @@ export async function handleTelegramWebhook(req, env) {
         ? await askAnyModel(env, modelOrder, text, { systemHint })
         : await think(env, text, { systemHint });
 
-      // ── PATCH: анти-debug для звичайних текстів (не /ai)
+      // ── PATCH: анти-debug для звичайних текстів
       if (looksLikeModelOrderExplain(out)) {
         out = await think(env, text, { systemHint });
       }
