@@ -86,4 +86,4 @@ id = "5b3d9392b67f46d1b72d52cdd45788a3"
 # ✅ ДОДАНО: сховище коду (створи KV у CF і встав його ID)
 [[kv_namespaces]]
 binding = "CODE_KV"
-id = "REPLACE_WITH_YOUR_CODE_KV_ID"
+id = "663259e3d61340238430fc05050e27d6"
