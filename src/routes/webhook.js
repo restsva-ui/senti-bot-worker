@@ -16,10 +16,10 @@ import { getEnergy, spendEnergy } from "../lib/energy.js";
 // Dialog Memory — модуль
 import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
 
-// Self-Tune — НОВИЙ модуль
+// Self-Tune — модуль
 import { loadSelfTune } from "../lib/selfTune.js";
 
-// Drive-Mode — НОВИЙ модуль
+// Drive-Mode — модуль
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -48,6 +48,17 @@ function parseAiCommand(text = "") {
 }
 function defaultAiReply() {
   return "Вибач, зараз не готовий відповісти чітко. Спробуй переформулювати або дай більше контексту.";
+}
+
+// ── PATCH: анти-debug фільтр для випадків, коли маршрутизатор повертає
+// "Here's a breakdown of the model ..." замість реальної відповіді.
+function looksLikeModelOrderExplain(out) {
+  if (typeof out !== "string") return false;
+  const s = out.toLowerCase();
+  return (
+    /breakdown of the model (aliases|mappings|identifiers)/i.test(out) &&
+    (s.includes("gemini") || s.includes("openrouter") || s.includes("cf") || s.includes("meta-llama") || s.includes("deepseek"))
+  );
 }
 
 const BTN_DRIVE = "Google Drive";
@@ -241,9 +252,14 @@ export async function handleTelegramWebhook(req, env) {
 
       const systemHint = await buildSystemHint(env, chatId, userId);
       const modelOrder = String(env.MODEL_ORDER || "").trim();
-      const out = modelOrder
+      let out = modelOrder
         ? await askAnyModel(env, modelOrder, q, { systemHint })
         : await think(env, q, { systemHint });
+
+      // ── PATCH: якщо маршрутизатор повернув "розбір моделей" — перезапитуємо напряму
+      if (looksLikeModelOrderExplain(out)) {
+        out = await think(env, q, { systemHint });
+      }
 
       await pushTurn(env, userId, "user", q);
       await pushTurn(env, userId, "assistant", out);
@@ -305,9 +321,14 @@ export async function handleTelegramWebhook(req, env) {
 
       const systemHint = await buildSystemHint(env, chatId, userId);
       const modelOrder = String(env.MODEL_ORDER || "").trim();
-      const out = modelOrder
+      let out = modelOrder
         ? await askAnyModel(env, modelOrder, text, { systemHint })
         : await think(env, text, { systemHint });
+
+      // ── PATCH: анти-debug для звичайних текстів (не /ai)
+      if (looksLikeModelOrderExplain(out)) {
+        out = await think(env, text, { systemHint });
+      }
 
       await pushTurn(env, userId, "user", text);
       await pushTurn(env, userId, "assistant", out);
