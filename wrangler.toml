@@ -18,6 +18,9 @@ TIMEZONE = "Europe/Kyiv"
 DIAG_TAGS = "on"
 REPO_PUBLIC = "on"           # ← дозволяє /repo/render без секрету
 
+# --- Порядок для vision-каскаду (щоб не зникав після деплою) ---
+VISION_ORDER = "gemini, openrouter"
+
 # --- Моделі ---
 MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:deepseek/deepseek-chat, free:meta-llama/llama-4-scout:free"
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -35,11 +38,11 @@ SELF_REGULATE      = "on"
 SELF_TUNING_FACTOR = "0.3"
 
 # --- ⚡ Енергія ---
-ENERGY_MAX            = "100"
+ENERGY_MAX             = "100"
 ENERGY_RECOVER_PER_MIN = "1"
-ENERGY_COST_TEXT      = "1"
-ENERGY_COST_IMAGE     = "5"
-ENERGY_LOW_THRESHOLD  = "10"
+ENERGY_COST_TEXT       = "1"
+ENERGY_COST_IMAGE      = "5"
+ENERGY_LOW_THRESHOLD   = "10"
 
 # --- KV bindings ---
 [[kv_namespaces]]
