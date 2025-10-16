@@ -388,6 +388,57 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
+  // --- /vision: опис зображення ---
+  if (/^\/vision(?:@[\w_]+)?/i.test(textRaw)) {
+    await safe(async () => {
+      // 1) Витягаємо фото: або в цьому повідомленні, або у reply
+      const photoNow = pickPhoto(msg);
+      const photoReply = pickPhoto(msg?.reply_to_message);
+      const photo = photoNow || photoReply;
+
+      if (!photo) {
+        await sendPlain(
+          env,
+          chatId,
+          "Надішли фото разом із командою /vision або відповідай /vision на повідомлення з фото."
+        );
+        return;
+      }
+
+      // 2) Перевіряємо енергію (як для image-запиту)
+      const cur = await getEnergy(env, userId);
+      const need = Number(cur.costImage ?? 5);
+      if ((cur.energy ?? 0) < need) {
+        const links = energyLinks(env, userId);
+        await sendPlain(env, chatId, t(lang, "need_energy_media", need, links.energy));
+        return;
+      }
+      await spendEnergy(env, userId, need, "vision");
+
+      // 3) Формуємо підказку (prompt)
+      const prompt = textRaw.replace(/^\/vision(?:@[\w_]+)?/i, "").trim() || "Опиши зображення";
+
+      // 4) Отримуємо пряме посилання на файл
+      const fileUrl = await tgFileUrl(env, photo.file_id);
+
+      // 5) Викликаємо твій API /api/vision
+      const u = new URL(abs(env, "/api/vision"));
+      if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
+
+      const r = await fetch(u.toString(), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt, images: [fileUrl] })
+      });
+
+      const d = await r.json().catch(() => null);
+      const out = d?.result || d?.text || d?.answer || "Не вдалося розпізнати зображення.";
+
+      await sendPlain(env, chatId, out);
+    });
+    return json({ ok: true });
+  }
+
   // Google Drive — лише кнопка (без тексту)
   if (textRaw === BTN_DRIVE) {
     await safe(async () => {
