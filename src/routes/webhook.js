@@ -22,8 +22,13 @@ async function sendPlain(env, chatId, text, extra = {}) {
     disable_web_page_preview: true,
     ...(extra.reply_markup ? { reply_markup: extra.reply_markup } : {})
   };
-  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
+  await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  }).catch(() => {});
 }
+
 function parseAiCommand(text = "") {
   const s = String(text).trim();
   const m = s.match(/^\/ai(?:@[\w_]+)?(?:\s+([\s\S]+))?$/i);
@@ -41,12 +46,14 @@ const mainKeyboard = (isAdmin = false) => {
   return { keyboard: rows, resize_keyboard: true };
 };
 const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
+
 function energyLinks(env, userId) {
   const s = env.WEBHOOK_SECRET || "";
   const qs = `s=${encodeURIComponent(s)}&u=${encodeURIComponent(String(userId || ""))}`;
   return {
     energy: abs(env, `/admin/energy/html?${qs}`),
-    checklist: abs(env, `/admin/checklist/html?${qs}`)
+    // FIX: /admin/checklist/html → /admin/checklist
+    checklist: abs(env, `/admin/checklist?${qs}`)
   };
 }
 
@@ -57,6 +64,7 @@ function pickPhoto(msg) {
   const ph = arr[arr.length - 1];
   return { type: "photo", file_id: ph.file_id, name: `photo_${ph.file_unique_id}.jpg` };
 }
+
 function detectAttachment(msg) {
   if (!msg) return null;
   if (msg.document) {
@@ -81,6 +89,7 @@ function detectAttachment(msg) {
   }
   return pickPhoto(msg);
 }
+
 async function tgFileUrl(env, file_id) {
   const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile`, {
     method: "POST",
@@ -93,9 +102,11 @@ async function tgFileUrl(env, file_id) {
   if (!path) throw new Error("file_path missing");
   return `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${path}`;
 }
+
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
   if (!att) return false;
+
   const cur = await getEnergy(env, userId);
   const need = Number(cur.costImage ?? 5);
   if ((cur.energy ?? 0) < need) {
@@ -104,6 +115,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
     return true;
   }
   await spendEnergy(env, userId, need, "media");
+
   const url = await tgFileUrl(env, att.file_id);
   const saved = await driveSaveFromUrl(env, userId, url, att.name);
   await sendPlain(env, chatId, `✅ ${t(lang, "saved_to_drive")}: ${saved?.name || att.name}`, {
@@ -141,10 +153,12 @@ function guessEmoji(text = "") {
   if (t.includes("електр") || t.includes("струм") || t.includes("current")) return "⚡";
   return "💡";
 }
+
 function looksLikeEmojiStart(s = "") {
   try { return /^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(String(s)); }
   catch { return false; }
 }
+
 function tryParseUserNamedAs(text) {
   const s = (text || "").trim();
   const NAME_RX = "([A-Za-zÀ-ÿĀ-žЀ-ӿʼ'`\\-\\s]{2,30})";
@@ -161,6 +175,7 @@ function tryParseUserNamedAs(text) {
   }
   return null;
 }
+
 const PROFILE_NAME_KEY = (uid) => `profile:name:${uid}`;
 async function getPreferredName(env, msg) {
   const uid = msg?.from?.id;
@@ -170,6 +185,7 @@ async function getPreferredName(env, msg) {
   if (v) return v;
   return msg?.from?.first_name || msg?.from?.username || "друже";
 }
+
 async function rememberNameFromText(env, userId, text) {
   const name = tryParseUserNamedAs(text);
   if (!name) return null;
@@ -190,6 +206,7 @@ function revealsAiSelf(out = "") {
     /je suis (une|un) (ia|mod[èe]le de langue)/i.test(out)
   );
 }
+
 function stripProviderSignature(s = "") {
   return String(s).replace(/^[ \t]*(?:—|--)?\s*via\s+[^\n]*\n?/gim, "").trim();
 }
@@ -302,10 +319,11 @@ async function runVisionOnPhoto(env, chatId, userId, photoMsg, prompt, lang, isA
 
   const fileUrl = await tgFileUrl(env, photo.file_id);
 
-  // 1) Пробуємо твій /api/vision
+  // 1) Пробуємо внутрішній /api/vision
   try {
     const u = new URL(abs(env, "/api/vision"));
     if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
+
     const r = await fetch(u.toString(), {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -318,13 +336,10 @@ async function runVisionOnPhoto(env, chatId, userId, photoMsg, prompt, lang, isA
       const out = d.result || d.text || d.answer || d.description || "(порожня відповідь)";
       await sendPlain(env, chatId, out);
       return;
-    } else {
-      // показати діагноз адмінам
-      if (isAdmin) {
-        const why = d?.error || d?.details?.join(" | ") || `status ${r.status}`;
-        const prov = d?.provider || "unknown";
-        await sendPlain(env, chatId, `❌ Vision API fail (${prov}): ${why}`);
-      }
+    } else if (isAdmin) {
+      const why = d?.error || (Array.isArray(d?.details) ? d.details.join(" | ") : "") || `status ${r.status}`;
+      const prov = d?.provider || "unknown";
+      await sendPlain(env, chatId, `❌ Vision API fail (${prov}): ${why}`);
     }
   } catch (e) {
     if (isAdmin) await sendPlain(env, chatId, `❌ Vision API request error: ${String(e).slice(0,300)}`);
@@ -476,52 +491,62 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Медіа в режимі диска
-  try {
-    if (await getDriveMode(env, userId)) {
-      if (await handleIncomingMedia(env, chatId, userId, msg, lang)) return json({ ok: true });
-    }
-  } catch (e) {
-    await sendPlain(env, chatId, `❌ ${String(e)}`);
+  // Senti (вітання/режим)
+  if (textRaw === BTN_SENTI || /^\/start\b/i.test(textRaw)) {
+    await safe(async () => {
+      const name = msg?.from?.first_name || "друже";
+      const hello = t(lang, "start_hint") || `Use any language — I’ll reply concisely.\nSay “more details” to expand.`;
+      await sendPlain(env, chatId, hello, { reply_markup: mainKeyboard(ADMIN(env, userId)) });
+    });
     return json({ ok: true });
   }
 
-  // Звичайний текст → AI
-  if (textRaw && !textRaw.startsWith("/")) {
-    try {
-      await rememberNameFromText(env, userId, textRaw);
+  // Якщо прийшов медіафайл — збереження у Drive (коли режим увімкнено)
+  if (detectAttachment(msg)) {
+    await safe(async () => {
+      const mode = await getDriveMode(env, userId);
+      if (mode) {
+        await handleIncomingMedia(env, chatId, userId, msg, lang);
+      } else {
+        // підказка ввімкнути Drive-режим
+        await sendPlain(env, chatId, t(lang, "drive_mode_hint") || "Натисни «Google Drive», щоб зберігати файли в Диску.");
+      }
+    });
+    return json({ ok: true });
+  }
 
+  // За замовчуванням — коротка відповідь через LLM (без /ai)
+  if (textRaw) {
+    await safe(async () => {
       const cur = await getEnergy(env, userId);
       const need = Number(cur.costText ?? 1);
       if ((cur.energy ?? 0) < need) {
         const links = energyLinks(env, userId);
         await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
-        return json({ ok: true });
+        return;
       }
       await spendEnergy(env, userId, need, "text");
 
       const systemHint = await buildSystemHint(env, chatId, userId);
       const name = await getPreferredName(env, msg);
-      const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
-      const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand });
+      const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand: false });
 
       await pushTurn(env, userId, "user", textRaw);
       await pushTurn(env, userId, "assistant", full);
 
       const after = (cur.energy - need);
-      if (expand && full.length > short.length) { for (const ch of chunkText(full)) await sendPlain(env, chatId, ch); }
-      else { await sendPlain(env, chatId, short); }
+      await sendPlain(env, chatId, short, { reply_markup: mainKeyboard(ADMIN(env, userId)) });
       if (after <= Number(cur.low ?? 10)) {
         const links = energyLinks(env, userId);
         await sendPlain(env, chatId, t(lang, "low_energy_notice", after, links.energy));
       }
-    } catch {
-      try { await sendPlain(env, chatId, t(lang, "default_reply")); } catch {}
-    }
+
+      // спробувати запам'ятати ім'я
+      await rememberNameFromText(env, userId, textRaw).catch(() => {});
+    });
     return json({ ok: true });
   }
 
-  // Якщо нічого не збіглося
-  await sendPlain(env, chatId, t(lang, "senti_tip"), { reply_markup: mainKeyboard(ADMIN(env, userId)) });
+  // Порожнє оновлення — нічого не робимо
   return json({ ok: true });
 }
