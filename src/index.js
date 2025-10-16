@@ -32,8 +32,8 @@ import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
 import { handleAdminEditor } from "./routes/adminEditor.js";
 // ✅ новий повноцінний KV Editor (UI + API)
 import { handleAdminKv } from "./routes/admin-kv.js";
-// ✅ новий роут Vision API
-import { handleVision } from "./routes/vision.js";
+// ✅ коректний роут Vision API
+import { handleVisionApi } from "./routes/visionApi.js";
 
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
 
@@ -54,10 +54,12 @@ const VERSION = "senti-worker-2025-10-15-21-58+admin-kv+codekv+vision";
 // KV helpers for code storage (read/write/list)
 
 function pickKVByNs(env, ns) {
+  // ns: "STATE" | "CODE" | "ARCHIVE"
   const n = String(ns || "").toUpperCase();
   if (n === "CODE") return env.CODE_KV || null;
   if (n === "ARCHIVE") return env.ARCHIVE_KV || null;
   if (n === "STATE") return env.STATE_KV || null;
+  // default: old behavior (CODE_KV first, then STATE_KV)
   return env.CODE_KV || env.STATE_KV || null;
 }
 
@@ -89,6 +91,7 @@ async function codePut(env, path, content, { ns, raw } = {}) {
 async function codeList(env, { ns, prefix, raw } = {}) {
   const kv = codeKV(env, ns);
   if (!kv?.list) return [];
+  // Якщо не raw — додаємо 'code:' до префікса (для консистентності)
   const pref = prefix ? normalizeCodeKey(prefix, { raw }) : normalizeCodeKey("", { raw });
   const it = await kv.list({ prefix: pref });
   return (it?.keys || []).map((k) => ({
@@ -140,10 +143,9 @@ export default {
       }
 
       // ✅ Vision API (POST /api/vision?s=SECRET)
-      {
-        const r = await handleVision?.(req, env, url);
-        // ВАЖЛИВО: повертаємо лише якщо це НЕ 404, інакше даємо іншим роутам шанс
-        if (r && r.status !== 404) return r;
+      if (p.startsWith("/api/vision")) {
+        const r = await handleVisionApi?.(req, env, url);
+        if (r) return r;
       }
 
       // brain state
@@ -324,9 +326,9 @@ export default {
         if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
           return json({ ok: false, error: "unauthorized" }, 401, CORS);
         }
-        const ns = url.searchParams.get("ns");
+        const ns = url.searchParams.get("ns");           // STATE|CODE|ARCHIVE (опціонально)
         const prefix = url.searchParams.get("prefix") || "";
-        const raw = url.searchParams.get("raw") === "1";
+        const raw = url.searchParams.get("raw") === "1"; // якщо 1 — не додаємо 'code:'
         const items = await codeList(env, { ns, prefix, raw });
         return json({ ok: true, items }, 200, CORS);
       }
