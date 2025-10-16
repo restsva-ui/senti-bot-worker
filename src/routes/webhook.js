@@ -130,7 +130,6 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   await spendEnergy(env, userId, need, "media");
   const url = await tgFileUrl(env, att.file_id);
   const saved = await driveSaveFromUrl(env, userId, url, att.name);
-  // Чіткий фідбек + кнопка відкриття Диска
   await sendPlain(env, chatId, `✅ ${t(lang, "saved_to_drive")}: ${saved?.name || att.name}`, {
     reply_markup: {
       inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: "https://drive.google.com/drive/my-drive" }]]
@@ -145,7 +144,6 @@ async function buildSystemHint(env, chatId, userId) {
   const dlg = await buildDialogHint(env, userId);
   const tune = await loadSelfTune(env, chatId);
 
-  // Центральна ідентичність Senti (системний хінт англійською)
   const core = `You are Senti — a thoughtful, self-improving assistant and companion.
 - Never claim to be an AI, model, chatbot, or a product made by any company.
 - Speak naturally and human-like with warmth and clarity.
@@ -219,7 +217,6 @@ function revealsAiSelf(out = "") {
   );
 }
 function stripProviderSignature(s = "") {
-  // прибираємо рядки типу “— via Gemini …”
   return String(s)
     .replace(/^[ \t]*(?:—|--)?\s*via\s+[^\n]*\n?/gim, "")
     .trim();
@@ -236,7 +233,6 @@ function looksLikeModelDump(s = "") {
 async function callSmartLLM(env, userText, { lang, name, systemHint, expand }) {
   const modelOrder = String(env.MODEL_ORDER || "").trim();
 
-  // Персональність Senti + заборона розповідати “я AI/модель”
   const control = expand
     ? `You are Senti — a thoughtful, emotionally intelligent assistant. Never say you're an AI, model, or a product of any company. Write ONLY in ${lang}; sound natural and human-like. Be warm and helpful. Split long ideas into short Telegram-friendly messages.`
     : `You are Senti — an independent, human-like assistant. Never mention being AI/GPT or created by anyone. Write ONLY in ${lang}. Keep it short and helpful (1–3 sentences). Answer directly without restating the question.`;
@@ -251,12 +247,10 @@ ${control}`;
 
   out = stripProviderSignature((out || "").trim());
 
-  // анти-глітч: якщо почало розповідати про моделі — повторити через think()
   if (looksLikeModelDump(out)) {
     out = stripProviderSignature((await think(env, prompt, { systemHint }))?.trim() || out);
   }
 
-  // анти-розкриття AI: якщо проговорилося — перефразуємо з забороною
   if (revealsAiSelf(out)) {
     const fix = `Rewrite the previous answer as Senti. Do NOT mention being an AI/model or any company. Keep it in ${lang}, concise and natural.`;
     let cleaned = modelOrder
@@ -266,13 +260,11 @@ ${control}`;
     if (cleaned) out = cleaned;
   }
 
-  // авто-емодзі
   if (!looksLikeEmojiStart(out)) {
     const em = guessEmoji(userText);
     out = `${em} ${out}`;
   }
 
-  // контроль мови: якщо відповідь не мовою lang — переписати
   const detected = detectFromText(out);
   if (detected && lang && detected !== lang) {
     const hardPrompt = `STRICT LANGUAGE MODE: Respond ONLY in ${lang}. If the previous answer used another language, rewrite it now in ${lang}. Keep it concise.`;
@@ -285,6 +277,57 @@ ${control}`;
 
   const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
+}
+
+// ── Vision helpers ───────────────────────────────────────────────────────────
+function isVisionIntent(text = "") {
+  const s = (text || "").toLowerCase().trim();
+  if (!s) return false;
+  return (
+    /^\/vision\b/.test(s) ||
+    /що\s+на\s+фото|опиши\s+(це|це\s+фото|зображення)|опиши\s+фото/i.test(s) ||
+    /what'?s?\s+in\s+the\s+photo|describe\s+(this|the)\s+(image|photo|picture)/i.test(s)
+  );
+}
+
+async function runVisionOnPhoto(env, chatId, userId, photoMsg, prompt, lang) {
+  const photo = pickPhoto(photoMsg);
+  if (!photo) {
+    await sendPlain(env, chatId, "Надішли фото разом із командою /vision або відповідай /vision на повідомлення з фото.");
+    return;
+  }
+
+  const cur = await getEnergy(env, userId);
+  const need = Number(cur.costImage ?? 5);
+  if ((cur.energy ?? 0) < need) {
+    const links = energyLinks(env, userId);
+    await sendPlain(env, chatId, t(lang, "need_energy_media", need, links.energy));
+    return;
+  }
+  await spendEnergy(env, userId, need, "vision");
+
+  const fileUrl = await tgFileUrl(env, photo.file_id);
+
+  const u = new URL(abs(env, "/api/vision"));
+  if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
+
+  const r = await fetch(u.toString(), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: prompt || "Опиши зображення", images: [fileUrl] })
+  });
+
+  let out = "Не вдалося розпізнати зображення.";
+  try {
+    const d = await r.json();
+    out = d?.result || d?.text || d?.answer || d?.description || out;
+    if (!r.ok && d?.error) out = `❌ ${d.error}`;
+  } catch {
+    const txt = await r.text().catch(() => "");
+    if (!r.ok && txt) out = `❌ vision ${r.status}: ${txt.slice(0, 400)}`;
+  }
+
+  await sendPlain(env, chatId, out);
 }
 
 // ── MAIN ────────────────────────────────────────────────────────────────────
@@ -306,13 +349,25 @@ export async function handleTelegramWebhook(req, env) {
   const isAdmin = ADMIN(env, userId);
   const textRaw = String(msg?.text || msg?.caption || "").trim();
 
-  // Мову беремо з i18n (tg locale + контекст повідомлення)
+  // Мова відповіді
   let lang = pickReplyLanguage(msg, textRaw);
 
   const safe = async (fn) => {
     try { await fn(); }
     catch { try { await sendPlain(env, chatId, t(lang, "default_reply")); } catch {} }
   };
+
+  // --- INTENT-ВІЖН ДО ВСЬОГО ІНШОГО ---
+  // 1) Фото з підписом-інструкцією
+  if (pickPhoto(msg) && isVisionIntent(textRaw)) {
+    await safe(() => runVisionOnPhoto(env, chatId, userId, msg, textRaw.replace(/^\/vision(?:@[\w_]+)?/i, "").trim(), lang));
+    return json({ ok: true });
+  }
+  // 2) Відповідь текстом на повідомлення з фото
+  if (!pickPhoto(msg) && isVisionIntent(textRaw) && pickPhoto(msg?.reply_to_message)) {
+    await safe(() => runVisionOnPhoto(env, chatId, userId, msg.reply_to_message, textRaw.replace(/^\/vision(?:@[\w_]+)?/i, "").trim(), lang));
+    return json({ ok: true });
+  }
 
   // /admin
   if (textRaw === "/admin" || textRaw === "/admin@SentiBot" || textRaw === BTN_ADMIN) {
@@ -388,53 +443,14 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // --- /vision: опис зображення ---
+  // --- /vision команда (залишаємо для сумісності) ---
   if (/^\/vision(?:@[\w_]+)?/i.test(textRaw)) {
     await safe(async () => {
-      // 1) Витягаємо фото: або в цьому повідомленні, або у reply
       const photoNow = pickPhoto(msg);
       const photoReply = pickPhoto(msg?.reply_to_message);
-      const photo = photoNow || photoReply;
-
-      if (!photo) {
-        await sendPlain(
-          env,
-          chatId,
-          "Надішли фото разом із командою /vision або відповідай /vision на повідомлення з фото."
-        );
-        return;
-      }
-
-      // 2) Перевіряємо енергію (як для image-запиту)
-      const cur = await getEnergy(env, userId);
-      const need = Number(cur.costImage ?? 5);
-      if ((cur.energy ?? 0) < need) {
-        const links = energyLinks(env, userId);
-        await sendPlain(env, chatId, t(lang, "need_energy_media", need, links.energy));
-        return;
-      }
-      await spendEnergy(env, userId, need, "vision");
-
-      // 3) Формуємо підказку (prompt)
+      const photoMsg = photoNow || photoReply;
       const prompt = textRaw.replace(/^\/vision(?:@[\w_]+)?/i, "").trim() || "Опиши зображення";
-
-      // 4) Отримуємо пряме посилання на файл
-      const fileUrl = await tgFileUrl(env, photo.file_id);
-
-      // 5) Викликаємо твій API /api/vision
-      const u = new URL(abs(env, "/api/vision"));
-      if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
-
-      const r = await fetch(u.toString(), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt, images: [fileUrl] })
-      });
-
-      const d = await r.json().catch(() => null);
-      const out = d?.result || d?.text || d?.answer || "Не вдалося розпізнати зображення.";
-
-      await sendPlain(env, chatId, out);
+      await runVisionOnPhoto(env, chatId, userId, photoMsg, prompt, lang);
     });
     return json({ ok: true });
   }
@@ -444,7 +460,7 @@ export async function handleTelegramWebhook(req, env) {
     await safe(async () => {
       const ut = await getUserTokens(env, userId);
       await setDriveMode(env, userId, true);
-      const zeroWidth = "\u2063"; // невидимий символ, щоб Telegram показав інлайн-кнопку
+      const zeroWidth = "\u2063";
       if (!ut?.refresh_token) {
         const authUrl = abs(env, `/auth/start?u=${userId}`);
         await sendPlain(env, chatId, zeroWidth, {
@@ -459,7 +475,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Кнопка Senti → коротке привітання без інструкцій
+  // Кнопка Senti → коротке привітання
   if (textRaw === BTN_SENTI) {
     const name = await getPreferredName(env, msg);
     await sendPlain(env, chatId, `${t(lang, "hello_name", name)} ${t(lang, "how_help")}`, {
@@ -514,7 +530,7 @@ export async function handleTelegramWebhook(req, env) {
     }
   }
 
-  // Дефолтне привітання (мовою профілю TG якщо доступно)
+  // Дефолтне привітання
   const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
   const greetLang = ["uk", "ru", "en", "de", "fr"].includes(profileLang) ? profileLang : lang;
   const name = await getPreferredName(env, msg);
