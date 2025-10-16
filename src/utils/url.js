@@ -1,12 +1,13 @@
 // src/utils/url.js
-
-/**
- * Повертає абсолютний URL для воркера за відносним шляхом.
- * Напр.: abs(env, "/admin/repo/html") ->
- *        https://<SERVICE_HOST>/admin/repo/html
- */
-export function abs(env, path) {
-  if (!env?.SERVICE_HOST) throw new Error("SERVICE_HOST not set");
-  if (!path || typeof path !== "string") throw new Error("path required");
-  return `https://${env.SERVICE_HOST}${path.startsWith("/") ? "" : "/"}${path}`;
+export function abs(env, path = "/") {
+  let host = String(env.SERVICE_HOST || "").trim();
+  if (!host) {
+    // Фолбек (не має сенсу викликати без валідного хоста)
+    return String(path || "/");
+  }
+  // Додаємо протокол, якщо його нема
+  if (!/^https?:\/\//i.test(host)) {
+    host = "https://" + host;
+  }
+  return host.replace(/\/+$/, "") + String(path || "/");
 }
