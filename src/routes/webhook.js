@@ -22,11 +22,7 @@ async function sendPlain(env, chatId, text, extra = {}) {
     disable_web_page_preview: true,
     ...(extra.reply_markup ? { reply_markup: extra.reply_markup } : {})
   };
-  await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
-  }).catch(() => {});
+  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
 }
 function parseAiCommand(text = "") {
   const s = String(text).trim();
@@ -247,7 +243,7 @@ ${control}`;
   return { short, full: out };
 }
 
-// ── Vision helpers ───────────────────────────────────────────────────────────
+// ── Vision intent helpers ───────────────────────────────────────────────────
 function isVisionIntent(text = "") {
   const s = (text || "").toLowerCase().trim();
   if (!s) return false;
@@ -288,7 +284,7 @@ async function callOpenRouterVision(env, prompt, imageUrl) {
   return txt;
 }
 
-async function runVisionOnPhoto(env, chatId, userId, photoMsg, prompt, lang) {
+async function runVisionOnPhoto(env, chatId, userId, photoMsg, prompt, lang, isAdmin = false) {
   const photo = pickPhoto(photoMsg);
   if (!photo) {
     await sendPlain(env, chatId, "Надішли фото разом із командою /vision або відповідай /vision на повідомлення з фото.");
@@ -306,7 +302,7 @@ async function runVisionOnPhoto(env, chatId, userId, photoMsg, prompt, lang) {
 
   const fileUrl = await tgFileUrl(env, photo.file_id);
 
-  // 1) Пробуємо твоє /api/vision
+  // 1) Пробуємо твій /api/vision
   try {
     const u = new URL(abs(env, "/api/vision"));
     if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
@@ -316,17 +312,22 @@ async function runVisionOnPhoto(env, chatId, userId, photoMsg, prompt, lang) {
       body: JSON.stringify({ prompt: prompt || "Опиши зображення", images: [fileUrl] })
     });
 
-    let out = null;
-    try {
-      const d = await r.json();
-      out = d?.result || d?.text || d?.answer || d?.description || (d?.error ? `❌ ${d.error}` : null);
-    } catch {
-      const txt = await r.text().catch(() => "");
-      if (!r.ok && txt) out = `❌ vision ${r.status}: ${txt.slice(0, 300)}`;
+    const isJson = (r.headers.get("content-type") || "").includes("application/json");
+    const d = isJson ? await r.json().catch(() => ({})) : {};
+    if (d?.ok) {
+      const out = d.result || d.text || d.answer || d.description || "(порожня відповідь)";
+      await sendPlain(env, chatId, out);
+      return;
+    } else {
+      // показати діагноз адмінам
+      if (isAdmin) {
+        const why = d?.error || d?.details?.join(" | ") || `status ${r.status}`;
+        const prov = d?.provider || "unknown";
+        await sendPlain(env, chatId, `❌ Vision API fail (${prov}): ${why}`);
+      }
     }
-    if (out) { await sendPlain(env, chatId, out); return; }
   } catch (e) {
-    // падаємо у fallback
+    if (isAdmin) await sendPlain(env, chatId, `❌ Vision API request error: ${String(e).slice(0,300)}`);
   }
 
   // 2) Fallback напряму в OpenRouter Vision
@@ -363,11 +364,11 @@ export async function handleTelegramWebhook(req, env) {
 
   // --- Vision intent ДО всього іншого ---
   if (pickPhoto(msg) && isVisionIntent(textRaw)) {
-    await safe(() => runVisionOnPhoto(env, chatId, userId, msg, textRaw.replace(/^\/vision(?:@[\w_]+)?/i,"").trim(), lang));
+    await safe(() => runVisionOnPhoto(env, chatId, userId, msg, textRaw.replace(/^\/vision(?:@[\w_]+)?/i,"").trim(), lang, isAdmin));
     return json({ ok: true });
   }
   if (!pickPhoto(msg) && isVisionIntent(textRaw) && pickPhoto(msg?.reply_to_message)) {
-    await safe(() => runVisionOnPhoto(env, chatId, userId, msg.reply_to_message, textRaw.replace(/^\/vision(?:@[\w_]+)?/i,"").trim(), lang));
+    await safe(() => runVisionOnPhoto(env, chatId, userId, msg.reply_to_message, textRaw.replace(/^\/vision(?:@[\w_]+)?/i,"").trim(), lang, isAdmin));
     return json({ ok: true });
   }
 
@@ -376,8 +377,8 @@ export async function handleTelegramWebhook(req, env) {
     await safe(async () => {
       if (!isAdmin) { await sendPlain(env, chatId, t(lang, "admin_denied")); return; }
       const mo = String(env.MODEL_ORDER || "").trim();
-      const hasGemini = !!env.GOOGLE_GEMINI_API_KEY;
-      const hasCF = !!env.CLOUDFLARE_API_TOKEN && !!env.CF_ACCOUNT_ID;
+      const hasGemini = !!(env.GOOGLE_GEMINI_API_KEY || env.GEMINI_API_KEY);
+      const hasCF = !!env.CLOUDFLARE_API_TOKEN && !!(env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID);
       const hasOR = !!env.OPENROUTER_API_KEY;
       const hasFreeBase = !!env.FREE_LLM_BASE_URL;
       const hasFreeKey = !!env.FREE_LLM_API_KEY;
@@ -450,7 +451,7 @@ export async function handleTelegramWebhook(req, env) {
       const photoReply = pickPhoto(msg?.reply_to_message);
       const photoMsg = photoNow || photoReply;
       const prompt = textRaw.replace(/^\/vision(?:@[\w_]+)?/i, "").trim() || "Опиши зображення";
-      await runVisionOnPhoto(env, chatId, userId, photoMsg, prompt, lang);
+      await runVisionOnPhoto(env, chatId, userId, photoMsg, prompt, lang, isAdmin);
     });
     return json({ ok: true });
   }
@@ -471,15 +472,6 @@ export async function handleTelegramWebhook(req, env) {
       await sendPlain(env, chatId, zeroWidth, {
         reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: "https://drive.google.com/drive/my-drive" }]] }
       });
-    });
-    return json({ ok: true });
-  }
-
-  // Кнопка Senti
-  if (textRaw === BTN_SENTI) {
-    const name = await getPreferredName(env, msg);
-    await sendPlain(env, chatId, `${t(lang, "hello_name", name)} ${t(lang, "how_help")}`, {
-      reply_markup: mainKeyboard(isAdmin)
     });
     return json({ ok: true });
   }
@@ -523,19 +515,13 @@ export async function handleTelegramWebhook(req, env) {
         const links = energyLinks(env, userId);
         await sendPlain(env, chatId, t(lang, "low_energy_notice", after, links.energy));
       }
-      return json({ ok: true });
     } catch {
-      await sendPlain(env, chatId, t(lang, "default_reply"));
-      return json({ ok: true });
+      try { await sendPlain(env, chatId, t(lang, "default_reply")); } catch {}
     }
+    return json({ ok: true });
   }
 
-  // Дефолтне привітання
-  const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
-  const greetLang = ["uk", "ru", "en", "de", "fr"].includes(profileLang) ? profileLang : lang;
-  const name = await getPreferredName(env, msg);
-  await sendPlain(env, chatId, `${t(greetLang, "hello_name", name)} ${t(greetLang, "how_help")}`, {
-    reply_markup: mainKeyboard(isAdmin)
-  });
+  // Якщо нічого не збіглося
+  await sendPlain(env, chatId, t(lang, "senti_tip"), { reply_markup: mainKeyboard(ADMIN(env, userId)) });
   return json({ ok: true });
 }
