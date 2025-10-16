@@ -73,7 +73,7 @@ async function callOpenRouterVision({ apiKey, model, prompt, imageUrl }) {
     headers: {
       "content-type": "application/json",
       "Authorization": `Bearer ${apiKey}`,
-      "HTTP-Referer": "https://senti-bot-worker", // опціонально
+      "HTTP-Referer": "https://senti-bot-worker",
       "X-Title": "Senti Vision"
     },
     body: JSON.stringify(body)
@@ -87,15 +87,12 @@ async function callOpenRouterVision({ apiKey, model, prompt, imageUrl }) {
   return text.trim();
 }
 
-// (Опціонально) Cloudflare Workers AI — залишив заглушку,
-// бо формати візуалок часто відрізняються між моделями.
-// Якщо захочеш — додамо точну модель і payload під неї.
+// (Опціонально) Cloudflare Workers AI — заглушка на майбутнє
 /*
 async function callCloudflareVision({ accountId, token, model, prompt, imageUrl }) {
   if (!accountId || !token || !model) throw new Error("CF config missing");
   const endpoint = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${encodeURIComponent(model)}`;
   const body = {
-    // найновіший уніфікований формат messages:
     messages: [{
       role: "user",
       content: [
@@ -169,7 +166,7 @@ export async function handleVisionApi(req, env, url) {
       //   const text = await callCloudflareVision({
       //     accountId: env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID,
       //     token: env.CLOUDFLARE_API_TOKEN,
-      //     model: env.CF_VISION, // приклад: "@cf/llama-3.2-11b-vision-instruct"
+      //     model: env.CF_VISION, // наприклад "@cf/llama-3.2-11b-vision-instruct"
       //     prompt, imageUrl
       //   });
       //   return json({ ok: true, provider: "cf", result: text });
@@ -178,7 +175,7 @@ export async function handleVisionApi(req, env, url) {
       errors.push(`${provider}: unsupported`);
     } catch (e) {
       errors.push(`${provider}: ${String(e.message || e)}`);
-      // ідемо далі по каскаду
+      // йдемо далі по каскаду
     }
   }
 
