@@ -60,7 +60,7 @@ export async function runVision(env, { prompt = "Опиши зображення
 
   try {
     if (spec.provider === "gemini") {
-      // Gemini API чекає inline_data (base64). Якщо дали URL — підкачаємо.
+      // Gemini API очікує inline_data (base64). Якщо дали URL — підкачаємо.
       const parts = [{ text: prompt }];
       for (const img of norm) {
         if (img.type === "base64") {
@@ -87,13 +87,12 @@ export async function runVision(env, { prompt = "Опиши зображення
     }
 
     if (spec.provider === "openrouter") {
-      // OpenRouter Vision: дозволяє просто передати image_url
+      // OpenRouter Vision: можна передавати image_url або data: URI
       const content = [{ type: "text", text: prompt }];
       for (const img of norm) {
         if (img.type === "url") {
           content.push({ type: "image_url", image_url: { url: img.value } });
         } else {
-          // inline base64 (data:...) теж дозволено
           const mime = img.mime || "image/jpeg";
           content.push({ type: "image_url", image_url: { url: `data:${mime};base64,${img.value}` } });
         }
