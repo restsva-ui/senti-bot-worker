@@ -32,6 +32,8 @@ import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
 import { handleAdminEditor } from "./routes/adminEditor.js";
 // ✅ новий повноцінний KV Editor (UI + API)
 import { handleAdminKv } from "./routes/admin-kv.js";
+// ✅ новий роут Vision API
+import { handleVision } from "./routes/vision.js";
 
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
 
@@ -46,7 +48,7 @@ import { nightlyAutoImprove } from "./lib/autoImprove.js";
 import { runSelfRegulation } from "./lib/selfRegulate.js";
 import { handleAiImprove } from "./routes/aiImprove.js";
 
-const VERSION = "senti-worker-2025-10-15-21-58+admin-kv+codekv";
+const VERSION = "senti-worker-2025-10-15-21-58+admin-kv+codekv+vision";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // KV helpers for code storage (read/write/list)
@@ -138,6 +140,12 @@ export default {
 
       if (p === "/webhook" && method === "GET") {
         return json({ ok: true, method: "GET", message: "webhook alive" }, 200, CORS);
+      }
+
+      // ✅ Vision API (POST /api/vision?s=SECRET)
+      {
+        const r = await handleVision?.(req, env, url);
+        if (r) return r;
       }
 
       // brain state
@@ -280,7 +288,7 @@ export default {
       if (p.startsWith("/admin/repo") || p.startsWith("/admin/archive")) {
         try {
           const r = await handleAdminRepo?.(req, env, url);
-          if (r && r.status !== 404) return r;
+        if (r && r.status !== 404) return r;
         } catch {}
         return html(`<h3>Repo / Архів</h3><p>Fallback UI.</p>`);
       }
