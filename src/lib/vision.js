@@ -1,134 +1,143 @@
 // src/lib/vision.js
-// Універсальний раннер віжн-запиту з каскадом провайдерів.
-// Повертає { ok, provider, model, text } або { ok:false, error, details[] }.
+// Допоміжні виклики для Vision (можеш використовувати в інших місцях бота)
 
-function toBase64(u8) {
-  let s = "";
-  const CHUNK = 0x8000;
-  for (let i = 0; i < u8.length; i += CHUNK) {
-    s += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
-  }
-  return btoa(s);
-}
+export async function visionByProviders(env, { prompt, images }) {
+  const orderStr =
+    (env.VISION_ORDER || env.MODEL_ORDER || "gemini, openrouter").toLowerCase();
+  const providers = orderStr.split(/[,; ]+/).map((s) => s.trim()).filter(Boolean);
+  const details = [];
 
-async function fetchAsBase64(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`fetch image ${url} -> ${res.status}`);
-  const buf = new Uint8Array(await res.arrayBuffer());
-  const low = url.toLowerCase();
-  let mime = "image/jpeg";
-  if (low.endsWith(".png")) mime = "image/png";
-  else if (low.endsWith(".gif")) mime = "image/gif";
-  else if (low.endsWith(".webp")) mime = "image/webp";
-  else if (low.endsWith(".svg")) mime = "image/svg+xml";
-  return { mime, data: toBase64(buf) };
-}
-
-export async function runVision(env, { prompt = "Опиши зображення", images = [] } = {}) {
-  if (!images || !images.length) {
-    return { ok: false, error: "images array is empty" };
-  }
-
-  // підтримуємо обидві назви кліча
-  const GEMINI_KEY = env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY;
-  const GEMINI_MODEL = env.GEMINI_MODEL || "gemini-2.5-flash";
-
-  // нормалізуємо картинки: {type:"url"|"base64", value:"..."}
-  const norm = [];
-  for (const it of images) {
-    if (typeof it !== "string") continue;
-    if (it.startsWith("http")) {
-      norm.push({ type: "url", value: it });
-    } else if (/^data:image\/.+;base64,/.test(it)) {
-      norm.push({ type: "base64", value: it.split(",")[1], mime: it.slice(5, it.indexOf(";")) }); // image/png
-    } else {
-      norm.push({ type: "url", value: it });
-    }
-  }
-
-  const order = (env.VISION_ORDER || "gemini,openrouter")
-    .split(",")
-    .map(s => s.trim().toLowerCase())
-    .filter(Boolean);
-
-  const errors = [];
-
-  for (const provider of order) {
+  for (const p of providers) {
     try {
-      // ── GEMINI ────────────────────────────────────────────────────────────
-      if (provider === "gemini") {
-        if (!GEMINI_KEY) { errors.push("gemini: key missing"); continue; }
-        if (!(GEMINI_MODEL || "").includes("gemini")) { errors.push("gemini: model missing/invalid"); continue; }
-
-        const parts = [{ text: prompt }];
-        for (const img of norm) {
-          if (img.type === "base64") {
-            parts.push({ inline_data: { mime_type: img.mime || "image/jpeg", data: img.value } });
-          } else {
-            const { mime, data } = await fetchAsBase64(img.value);
-            parts.push({ inline_data: { mime_type: mime, data } });
-          }
-        }
-
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`;
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ contents: [{ role: "user", parts }] }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(`Gemini ${res.status} ${data?.error?.message || ""}`.trim());
-        const text =
-          (data?.candidates?.[0]?.content?.parts || [])
-            .map(p => p?.text)
-            .filter(Boolean)
-            .join("\n")
-            .trim();
-        if (!text) throw new Error("Gemini empty");
-        return { ok: true, provider: "gemini", model: GEMINI_MODEL, text };
-      }
-
-      // ── OPENROUTER ────────────────────────────────────────────────────────
-      if (provider === "openrouter") {
-        const key = env.OPENROUTER_API_KEY;
-        const model = env.OPENROUTER_MODEL_VISION;
-        if (!key) { errors.push("openrouter: key missing"); continue; }
-        if (!model) { errors.push("openrouter: model missing"); continue; }
-
-        const content = [{ type: "text", text: prompt }];
-        for (const img of norm) {
-          if (img.type === "url") {
-            content.push({ type: "image_url", image_url: { url: img.value } });
-          } else {
-            const mime = img.mime || "image/jpeg";
-            content.push({ type: "image_url", image_url: { url: `data:${mime};base64,${img.value}` } });
-          }
-        }
-
-        const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "Authorization": `Bearer ${key}`,
-          },
-          body: JSON.stringify({
-            model,
-            messages: [{ role: "user", content }],
-          }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(`OpenRouter ${res.status} ${data?.error?.message || ""}`.trim());
-        const text = (data?.choices?.[0]?.message?.content || "").trim();
-        if (!text) throw new Error("OpenRouter empty");
-        return { ok: true, provider: "openrouter", model, text };
-      }
-
-      errors.push(`${provider}: unsupported`);
+      if (p === "gemini") return await geminiVision(env, { prompt, images });
+      if (p === "openrouter" || p === "or") return await openrouterVision(env, { prompt, images });
+      if (p === "cf" || p === "cloudflare") return await cloudflareVision(env, { prompt, images });
+      details.push(`${p}: unsupported`);
     } catch (e) {
-      errors.push(`${provider}: ${String(e.message || e)}`);
-      // переходимо до наступного провайдера
+      details.push(`${p}: ${e?.message || String(e)}`);
     }
   }
+  const err = new Error("all_providers_failed");
+  err.details = details;
+  throw err;
+}
 
-  return { ok: false, error: "all providers failed", details: errors };
+async function geminiVision(env, { prompt, images }) {
+  const key = env.GEMINI_API_KEY || env.GOOGLE_API_KEY || env.GEMINI_KEY;
+  const model = env.GEMINI_MODEL || "gemini-2.5-flash";
+  if (!key) throw new Error("gemini: missing GEMINI_API_KEY");
+
+  const url =
+    "https://generativelanguage.googleapis.com/v1beta/models/" +
+    encodeURIComponent(model) +
+    ":generateContent?key=" +
+    encodeURIComponent(key);
+
+  const contents = [
+    {
+      role: "user",
+      parts: [
+        { text: prompt },
+        ...images.map((u) =>
+          typeof u === "string" && u.startsWith("data:image/")
+            ? {
+                inline_data: {
+                  mime_type: (u.match(/^data:(.*?);base64,/) || [])[1] || "image/jpeg",
+                  data: u.split(",", 2)[1] || "",
+                },
+              }
+            : { image_url: { url: u } }
+        ),
+      ],
+    },
+  ];
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ contents, safetySettings: [], generationConfig: { temperature: 0.6 } }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    throw new Error(`gemini ${r.status}: ${d?.error?.message || JSON.stringify(d).slice(0, 400)}`);
+  }
+
+  const text =
+    d?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ||
+    d?.candidates?.[0]?.content?.parts?.[0]?.text ||
+    "";
+  if (!text) throw new Error("gemini: empty_response");
+
+  return { provider: "gemini", text };
+}
+
+async function openrouterVision(env, { prompt, images }) {
+  const key = env.OPENROUTER_API_KEY || env.FREE_API_KEY;
+  const model =
+    env.OPENROUTER_MODEL_VISION || env.OPENROUTER_MODEL || env.FREE_API_MODEL || "meta-llama/llama-4.1-mini";
+  if (!key) throw new Error("openrouter: missing OPENROUTER_API_KEY");
+
+  const endpoint =
+    env.FREE_API_BASE_URL ||
+    "https://openrouter.ai/api" + (env.FREE_API_PATH || "/v1/chat/completions");
+
+  const messages = [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: prompt },
+        ...images.map((u) =>
+          typeof u === "string" && u.startsWith("data:image/")
+            ? { type: "input_image", image: u }
+            : { type: "image_url", image_url: { url: u } }
+        ),
+      ],
+    },
+  ];
+
+  const r = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      Authorization: `Bearer ${key}`,
+      "HTTP-Referer": "https://senti-bot-worker.restsva.workers.dev",
+      "X-Title": "Senti Vision",
+    },
+    body: JSON.stringify({ model, messages, temperature: 0.6 }),
+  });
+
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    throw new Error(`openrouter ${r.status}: ${d?.error?.message || d?.error || JSON.stringify(d).slice(0, 400)}`);
+  }
+
+  const text = d?.choices?.[0]?.message?.content || "";
+  if (!text) throw new Error("openrouter: empty_response");
+  return { provider: "openrouter", text };
+}
+
+async function cloudflareVision(env, { prompt, images }) {
+  const model = env.CF_VISION;
+  if (!env.AI || !model) throw new Error("cloudflare: AI binding or CF_VISION not configured");
+
+  const r = await env.AI.run(model, {
+    messages: [
+      { role: "system", content: "You are a concise visual assistant." },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          ...images.map((u) =>
+            typeof u === "string" && u.startsWith("data:image/")
+              ? { type: "image", image: u }
+              : { type: "image_url", url: u }
+          ),
+        ],
+      },
+    ],
+  });
+
+  const text = r?.response || r?.result || "";
+  if (!text) throw new Error("cloudflare: empty_response");
+  return { provider: "cloudflare", text };
 }
