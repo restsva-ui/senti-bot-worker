@@ -1,4 +1,6 @@
 // src/routes/webhook.js
+// Telegram webhook для Senti: вітання 1 раз при /start, кнопка "Senti" — без вітання,
+// фото віддаємо у Vision API: POST /api/vision?s=WEBHOOK_SECRET
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -11,7 +13,28 @@ import { getEnergy, spendEnergy } from "../lib/energy.js";
 import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
 import { loadSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
-import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
+import { t } from "../lib/i18n.js";
+
+// ── Local language fallbacks (бо у i18n.js може не бути старих експортів) ──
+function detectFromText(s = "") {
+  const x = String(s || "").toLowerCase();
+  if (/[а-яіїєґ]/i.test(s)) {
+    if (/[іїєґ]/i.test(s)) return "uk";
+    return "ru";
+  }
+  if (/[a-z]/i.test(s)) {
+    if (/\b(ich|und|nicht|danke|bitte)\b/i.test(x)) return "de";
+    if (/\b(je|bonjour|merci|avec|pour|pas)\b/i.test(x)) return "fr";
+    return "en";
+  }
+  return null;
+}
+function pickReplyLanguage(msg, text = "") {
+  const lc = String(msg?.from?.language_code || "").slice(0,2).toLowerCase();
+  if (["uk","ru","en","de","fr"].includes(lc)) return lc;
+  const d = detectFromText(text);
+  return d || "uk";
+}
 
 // ── TG helpers ───────────────────────────────────────────────────────────────
 async function sendPlain(env, chatId, text, extra = {}) {
@@ -19,6 +42,7 @@ async function sendPlain(env, chatId, text, extra = {}) {
   const body = {
     chat_id: chatId,
     text,
+    parse_mode: "HTML",
     disable_web_page_preview: true,
     ...(extra.reply_markup ? { reply_markup: extra.reply_markup } : {})
   };
@@ -28,43 +52,45 @@ async function sendPlain(env, chatId, text, extra = {}) {
     body: JSON.stringify(body)
   }).catch(() => {});
 }
-
-function parseAiCommand(text = "") {
-  const s = String(text).trim();
-  const m = s.match(/^\/ai(?:@[\w_]+)?(?:\s+([\s\S]+))?$/i);
-  if (!m) return null;
-  return (m[1] || "").trim();
+async function sendTyping(env, chatId) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendChatAction`;
+  await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, action: "typing" })
+  }).catch(() => {});
 }
 
-// ── UI ───────────────────────────────────────────────────────────────────────
 const BTN_DRIVE = "Google Drive";
 const BTN_SENTI = "Senti";
 const BTN_ADMIN = "Admin";
+const ADMIN = (env, uid) => String(uid) === String(env.TELEGRAM_ADMIN_ID);
 const mainKeyboard = (isAdmin = false) => {
   const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
   if (isAdmin) rows.push([{ text: BTN_ADMIN }]);
   return { keyboard: rows, resize_keyboard: true };
 };
-const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
 
 function energyLinks(env, userId) {
   const s = env.WEBHOOK_SECRET || "";
   const qs = `s=${encodeURIComponent(s)}&u=${encodeURIComponent(String(userId || ""))}`;
   return {
     energy: abs(env, `/admin/energy/html?${qs}`),
-    // FIX: /admin/checklist/html → /admin/checklist
     checklist: abs(env, `/admin/checklist?${qs}`)
   };
 }
 
-// ── Media ────────────────────────────────────────────────────────────────────
+// ── One-time greeting KV ─────────────────────────────────────────────────────
+const FIRST_SEEN_KEY = (uid) => `user:first_seen:${uid}`;
+async function wasFirstSeen(env, uid){ try { return !!(await env.STATE_KV.get(FIRST_SEEN_KEY(uid))); } catch { return false; } }
+async function setFirstSeen(env, uid){ try { await env.STATE_KV.put(FIRST_SEEN_KEY(uid), "1"); } catch {} }
+// ── Media helpers ────────────────────────────────────────────────────────────
 function pickPhoto(msg) {
   const arr = Array.isArray(msg?.photo) ? msg.photo : null;
   if (!arr?.length) return null;
   const ph = arr[arr.length - 1];
   return { type: "photo", file_id: ph.file_id, name: `photo_${ph.file_unique_id}.jpg` };
 }
-
 function detectAttachment(msg) {
   if (!msg) return null;
   if (msg.document) {
@@ -75,6 +101,7 @@ function detectAttachment(msg) {
     const v = msg.video;
     return { type: "video", file_id: v.file_id, name: v.file_name || `video_${v.file_unique_id}.mp4` };
   }
+  if (msg.photo?.length) return pickPhoto(msg);
   if (msg.audio) {
     const a = msg.audio;
     return { type: "audio", file_id: a.file_id, name: a.file_name || `audio_${a.file_unique_id}.mp3` };
@@ -90,12 +117,10 @@ function detectAttachment(msg) {
   return pickPhoto(msg);
 }
 
-async function tgFileUrl(env, file_id) {
-  const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ file_id })
-  });
+async function tgFileUrl(env, fileId) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/getFile?file_id=${encodeURIComponent(fileId)}`;
+  const r = await fetch(url).catch(() => null);
+  if (!r) throw new Error("getFile: fetch failed");
   const data = await r.json().catch(() => null);
   if (!data?.ok) throw new Error("getFile failed");
   const path = data.result?.file_path;
@@ -124,41 +149,19 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   return true;
 }
 
-// ── SystemHint ───────────────────────────────────────────────────────────────
+// ── SystemHint для LLM ───────────────────────────────────────────────────────
 async function buildSystemHint(env, chatId, userId) {
   const statut = String((await readStatut(env)) || "").trim();
-  const dlg = await buildDialogHint(env, userId);
-  const tune = await loadSelfTune(env, chatId);
-
-  const core = `You are Senti — a thoughtful, self-improving assistant and companion.
-- Never claim to be an AI, model, chatbot, or a product made by any company.
-- Speak naturally and human-like with warmth and clarity.
-- Prefer concise, practical answers; expand only when asked.`;
-
-  const blocks = [core];
-  if (statut) blocks.push(`[Статут/чеклист]\n${statut}`);
-  if (tune) blocks.push(`[Self-Tune]\n${tune}`);
-  if (dlg) blocks.push(dlg);
-  return blocks.length ? blocks.join("\n\n") : "";
+  const self = await loadSelfTune(env, userId);
+  const hint = await buildDialogHint(env, userId);
+  const lines = [];
+  if (statut) lines.push(`STATUT:\n${statut}`);
+  if (self) lines.push(`SELF_TUNE:\n${self}`);
+  if (hint) lines.push(`DIALOG_HINT:\n${hint}`);
+  return lines.join("\n\n");
 }
 
-// ── Emoji + ім’я ─────────────────────────────────────────────────────────────
-function guessEmoji(text = "") {
-  const t = text.toLowerCase();
-  if (t.includes("колес") || t.includes("wheel")) return "🛞";
-  if (t.includes("дзеркал") || t.includes("зеркал") || t.includes("mirror")) return "🪞";
-  if (t.includes("машин") || t.includes("авто") || t.includes("car")) return "🚗";
-  if (t.includes("вода") || t.includes("рідина") || t.includes("water")) return "💧";
-  if (t.includes("світл") || t.includes("light") || t.includes("солнц")) return "☀️";
-  if (t.includes("електр") || t.includes("струм") || t.includes("current")) return "⚡";
-  return "💡";
-}
-
-function looksLikeEmojiStart(s = "") {
-  try { return /^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(String(s)); }
-  catch { return false; }
-}
-
+// ── Зберігання імені користувача ────────────────────────────────────────────
 function tryParseUserNamedAs(text) {
   const s = (text || "").trim();
   const NAME_RX = "([A-Za-zÀ-ÿĀ-žЀ-ӿʼ'`\\-\\s]{2,30})";
@@ -175,56 +178,45 @@ function tryParseUserNamedAs(text) {
   }
   return null;
 }
-
 const PROFILE_NAME_KEY = (uid) => `profile:name:${uid}`;
 async function getPreferredName(env, msg) {
   const uid = msg?.from?.id;
-  const kv = env?.STATE_KV;
-  let v = null;
-  try { v = await kv.get(PROFILE_NAME_KEY(uid)); } catch {}
-  if (v) return v;
-  return msg?.from?.first_name || msg?.from?.username || "друже";
+  const stored = uid ? (await env.STATE_KV.get(PROFILE_NAME_KEY(uid))) : null;
+  return stored || msg?.from?.first_name || msg?.from?.username || "друже";
 }
-
-async function rememberNameFromText(env, userId, text) {
-  const name = tryParseUserNamedAs(text);
-  if (!name) return null;
-  try { await env.STATE_KV.put(PROFILE_NAME_KEY(userId), name); } catch {}
-  return name;
+async function rememberNameFromText(env, uid, text) {
+  const nm = tryParseUserNamedAs(text);
+  if (!nm) return;
+  try { await env.STATE_KV.put(PROFILE_NAME_KEY(uid), nm); } catch {}
 }
-
-// ── Анти-розкриття і чистка підписів ────────────────────────────────────────
-function revealsAiSelf(out = "") {
-  const s = out.toLowerCase();
-  return (
-    /(^|\b)as an? (ai|language model)\b/.test(s) ||
-    /\bi am (an|a)? (ai|language model|large language model)\b/.test(s) ||
-    /\bdeveloped by (google|openai|meta|anthropic)\b/.test(s) ||
-    /я\s+(є|—|-)?\s*(штучн|модель|мова)/i.test(out) ||
-    /я\s+(являюсь|есть)\s+(ии|искусственн|языков)/i.test(out) ||
-    /ich bin (ein|eine) (ki|sprachmodell)/i.test(out) ||
-    /je suis (une|un) (ia|mod[èe]le de langue)/i.test(out)
-  );
-}
-
+// ── LLM helpers ──────────────────────────────────────────────────────────────
 function stripProviderSignature(s = "") {
   return String(s).replace(/^[ \t]*(?:—|--)?\s*via\s+[^\n]*\n?/gim, "").trim();
 }
-
-// ── Відповідь AI + захист ───────────────────────────────────────────────────
 function limitMsg(s, max = 220) { if (!s) return s; return s.length <= max ? s : s.slice(0, max - 1); }
 function chunkText(s, size = 3500) { const out = []; let t = String(s || ""); while (t.length) { out.push(t.slice(0, size)); t = t.slice(size); } return out; }
 function looksLikeModelDump(s = "") {
   const x = s.toLowerCase();
-  return /here(?:'|)s a breakdown|model (aliases|mappings|configurations)/i.test(x) || /gemini-?2\.5|openrouter|deepseek|llama/i.test(x);
+  return /here(?:'|)s a breakdown|model (aliases|mappings|configurations)/i.test(x) ||
+         /gemini-?2\.5|openrouter|deepseek|llama/i.test(x);
+}
+function guessEmoji(s = "") {
+  const t = (s || "").toLowerCase();
+  if (t.includes("привіт") || t.includes("hello") || t.includes("bonjour")) return "👋";
+  if (t.includes("дякую") || t.includes("merci") || t.includes("thanks")) return "🙏";
+  if (t.includes("машин") || t.includes("авто") || t.includes("car")) return "🚗";
+  if (t.includes("вода") || t.includes("рідина") || t.includes("water")) return "💧";
+  if (t.includes("світл") || t.includes("light") || t.includes("солнц")) return "☀️";
+  if (t.includes("електр") || t.includes("струм") || t.includes("current")) return "⚡";
+  return "💡";
 }
 
 async function callSmartLLM(env, userText, { lang, name, systemHint, expand }) {
   const modelOrder = String(env.MODEL_ORDER || "").trim();
 
   const control = expand
-    ? `You are Senti — a thoughtful, emotionally intelligent assistant. Never say you're an AI, model, or a product of any company. Write ONLY in ${lang}; sound natural and human-like. Be warm and helpful. Split long ideas into short Telegram-friendly messages.`
-    : `You are Senti — an independent, human-like assistant. Never mention being AI/GPT or created by anyone. Write ONLY in ${lang}. Keep it short and helpful (1–3 sentences). Answer directly without restating the question.`;
+    ? `You are Senti — a thoughtful, emotionally intelligent assistant. Expand ideas but keep them scannable.`
+    : `You are Senti — an independent assistant. Be honest. Keep replies short (2–3 sentences).`;
 
   const prompt = `Add one relevant emoji at the start if natural.
 User (${name}) says: ${userText}
@@ -233,27 +225,18 @@ ${control}`;
   let out = modelOrder ? await askAnyModel(env, modelOrder, prompt, { systemHint })
                        : await think(env, prompt, { systemHint });
 
-  out = stripProviderSignature((out || "").trim());
+  out = stripProviderSignature(String(out || "").trim());
+  if (!/^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(out)) out = `${guessEmoji(userText)} ${out}`;
+  if (looksLikeModelDump(out)) out = "Складні технічні деталі опущено. Постав уточнення, якщо потрібно.";
 
-  if (looksLikeModelDump(out)) {
-    out = stripProviderSignature((await think(env, prompt, { systemHint }))?.trim() || out);
-  }
-  if (revealsAiSelf(out)) {
-    const fix = `Rewrite the previous answer as Senti. Do NOT mention being an AI/model or any company. Keep it in ${lang}, concise and natural.`;
-    let cleaned = modelOrder ? await askAnyModel(env, modelOrder, fix, { systemHint })
-                             : await think(env, fix, { systemHint });
-    cleaned = stripProviderSignature((cleaned || "").trim());
-    if (cleaned) out = cleaned;
-  }
-  if (!looksLikeEmojiStart(out)) out = `${guessEmoji(userText)} ${out}`;
-
+  // Синхронізація мови відповіді
   const detected = detectFromText(out);
   if (detected && lang && detected !== lang) {
-    const hardPrompt = `STRICT LANGUAGE MODE: Respond ONLY in ${lang}. If the previous answer used another language, rewrite it now in ${lang}. Keep it concise.`;
+    const hardPrompt = `STRICT LANGUAGE MODE: Respond ONLY in ${lang}. Rewrite: ${out}`;
     let fixed = modelOrder ? await askAnyModel(env, modelOrder, hardPrompt, { systemHint })
                            : await think(env, hardPrompt, { systemHint });
     fixed = stripProviderSignature((fixed || "").trim());
-    if (fixed) out = looksLikeEmojiStart(fixed) ? fixed : `${guessEmoji(userText)} ${fixed}`;
+    if (fixed) out = /^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(fixed) ? fixed : `${guessEmoji(userText)} ${fixed}`;
   }
 
   const short = expand ? out : limitMsg(out, 220);
@@ -280,33 +263,24 @@ async function callOpenRouterVision(env, prompt, imageUrl) {
     headers: {
       "content-type": "application/json",
       "Authorization": `Bearer ${apiKey}`,
-      "HTTP-Referer": abs(env, "/"),
+      "HTTP-Referer": "https://senti-bot-worker.restsva.workers.dev",
       "X-Title": "Senti Vision"
     },
     body: JSON.stringify({
       model,
-      messages: [{
-        role: "user",
-        content: [
-          { type: "text", text: prompt || "Describe the image" },
-          { type: "image_url", image_url: imageUrl }
-        ]
-      }]
+      messages: [
+        { role: "user", content: [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: imageUrl } }] }
+      ],
+      temperature: 0.6
     })
   });
-  const d = await r.json().catch(() => null);
-  if (!r.ok) throw new Error(`OpenRouter ${r.status}: ${d?.error?.message || d?.error || (await r.text()).slice(0,200)}`);
-  const txt = d?.choices?.[0]?.message?.content?.trim();
-  if (!txt) throw new Error("OpenRouter: empty content");
-  return txt;
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`openrouter ${r.status}: ${d?.error?.message || d?.error || "unknown"}`);
+  return String(d?.choices?.[0]?.message?.content || "").trim();
 }
 
-async function runVisionOnPhoto(env, chatId, userId, photoMsg, prompt, lang, isAdmin = false) {
-  const photo = pickPhoto(photoMsg);
-  if (!photo) {
-    await sendPlain(env, chatId, "Надішли фото разом із командою /vision або відповідай /vision на повідомлення з фото.");
-    return;
-  }
+async function runVisionOnPhoto(env, chatId, userId, photoMsg, prompt, lang, isAdmin) {
+  if (!photoMsg) { await sendPlain(env, chatId, t(lang, "need_photo_hint")); return; }
 
   const cur = await getEnergy(env, userId);
   const need = Number(cur.costImage ?? 5);
@@ -317,19 +291,17 @@ async function runVisionOnPhoto(env, chatId, userId, photoMsg, prompt, lang, isA
   }
   await spendEnergy(env, userId, need, "vision");
 
-  const fileUrl = await tgFileUrl(env, photo.file_id);
+  const fileUrl = await tgFileUrl(env, photoMsg.file_id);
 
-  // 1) Пробуємо внутрішній /api/vision
+  // 1) внутрішній /api/vision
   try {
     const u = new URL(abs(env, "/api/vision"));
     if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
-
     const r = await fetch(u.toString(), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ prompt: prompt || "Опиши зображення", images: [fileUrl] })
     });
-
     const isJson = (r.headers.get("content-type") || "").includes("application/json");
     const d = isJson ? await r.json().catch(() => ({})) : {};
     if (d?.ok) {
@@ -338,30 +310,27 @@ async function runVisionOnPhoto(env, chatId, userId, photoMsg, prompt, lang, isA
       return;
     } else if (isAdmin) {
       const why = d?.error || (Array.isArray(d?.details) ? d.details.join(" | ") : "") || `status ${r.status}`;
-      const prov = d?.provider || "unknown";
-      await sendPlain(env, chatId, `❌ Vision API fail (${prov}): ${why}`);
+      await sendPlain(env, chatId, `Vision API fail: ${why}`);
     }
   } catch (e) {
-    if (isAdmin) await sendPlain(env, chatId, `❌ Vision API request error: ${String(e).slice(0,300)}`);
+    if (isAdmin) await sendPlain(env, chatId, `Vision API error: ${String(e.message || e)}`);
   }
 
-  // 2) Fallback напряму в OpenRouter Vision
+  // 2) фолбек — OpenRouter
   try {
-    const vr = await callOpenRouterVision(env, prompt || "Опиши зображення", fileUrl);
-    await sendPlain(env, chatId, vr);
+    const out = await callOpenRouterVision(env, prompt || "Опиши зображення", fileUrl);
+    await sendPlain(env, chatId, out);
   } catch (e) {
-    await sendPlain(env, chatId, `❌ Vision error: ${String(e).slice(0, 400)}`);
+    await sendPlain(env, chatId, `Vision error: ${String(e.message || e)}`);
   }
 }
-
-// ── MAIN ────────────────────────────────────────────────────────────────────
-export async function handleTelegramWebhook(req, env) {
-  if (req.method === "POST") {
-    const sec = req.headers.get("x-telegram-bot-api-secret-token");
-    if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET)
-      return json({ ok: false, error: "unauthorized" }, { status: 401 });
-  } else {
+// ── Webhook: основна логіка ──────────────────────────────────────────────────
+export async function handleWebhook(req, env, url) {
+  if (req.method === "GET") {
     return json({ ok: true, note: "webhook alive (GET)" });
+  }
+  if (req.method !== "POST") {
+    return new Response("Method Not Allowed", { status: 405 });
   }
 
   let update;
@@ -372,12 +341,11 @@ export async function handleTelegramWebhook(req, env) {
   const userId = msg?.from?.id || update?.callback_query?.from?.id;
   const isAdmin = ADMIN(env, userId);
   const textRaw = String(msg?.text || msg?.caption || "").trim();
-
   let lang = pickReplyLanguage(msg, textRaw);
 
   const safe = async (fn) => { try { await fn(); } catch { try { await sendPlain(env, chatId, t(lang, "default_reply")); } catch {} } };
 
-  // --- Vision intent ДО всього іншого ---
+  // Vision intent ДО всього іншого
   if (pickPhoto(msg) && isVisionIntent(textRaw)) {
     await safe(() => runVisionOnPhoto(env, chatId, userId, msg, textRaw.replace(/^\/vision(?:@[\w_]+)?/i,"").trim(), lang, isAdmin));
     return json({ ok: true });
@@ -391,18 +359,16 @@ export async function handleTelegramWebhook(req, env) {
   if (textRaw === "/admin" || textRaw === "/admin@SentiBot" || textRaw === BTN_ADMIN) {
     await safe(async () => {
       if (!isAdmin) { await sendPlain(env, chatId, t(lang, "admin_denied")); return; }
-      const mo = String(env.MODEL_ORDER || "").trim();
-      const hasGemini = !!(env.GOOGLE_GEMINI_API_KEY || env.GEMINI_API_KEY);
-      const hasCF = !!env.CLOUDFLARE_API_TOKEN && !!(env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID);
-      const hasOR = !!env.OPENROUTER_API_KEY;
-      const hasFreeBase = !!env.FREE_LLM_BASE_URL;
-      const hasFreeKey = !!env.FREE_LLM_API_KEY;
+      const mo = (env.MODEL_ORDER || "").trim();
+      const hasGem = !!env.GEMINI_API_KEY;
+      const hasOR  = !!env.OPENROUTER_API_KEY;
+      const hasFreeBase = !!env.FREE_API_BASE_URL;
+      const hasFreeKey  = !!env.FREE_API_KEY;
       const lines = [
-        t(lang, "admin_header"),
-        `MODEL_ORDER: ${mo || "(not set)"}`,
-        `GEMINI key: ${hasGemini ? "✅" : "❌"}`,
-        `Cloudflare (CF_ACCOUNT_ID + CLOUDFLARE_API_TOKEN): ${hasCF ? "✅" : "❌"}`,
-        `OpenRouter key: ${hasOR ? "✅" : "❌"}`,
+        `Admin OK`,
+        `MODEL_ORDER: ${mo || "(none)"}`,
+        `Gemini: ${hasGem ? "✅" : "❌"}`,
+        `OpenRouter: ${hasOR ? "✅" : "❌"}`,
         `FreeLLM (BASE_URL + KEY): ${hasFreeBase && hasFreeKey ? "✅" : "❌"}`
       ];
       const entries = mo ? mo.split(",").map(s => s.trim()).filter(Boolean) : [];
@@ -425,7 +391,13 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /ai
+  // /ai (розгорнута відповідь)
+  function parseAiCommand(text = "") {
+    const s = String(text).trim();
+    const m = s.match(/^\/ai(?:@[\w_]+)?(?:\s+([\s\S]+))?$/i);
+    if (!m) return null;
+    return (m[1] || "").trim();
+  }
   const aiArg = parseAiCommand(textRaw);
   if (aiArg !== null) {
     await safe(async () => {
@@ -439,41 +411,30 @@ export async function handleTelegramWebhook(req, env) {
         return;
       }
       await spendEnergy(env, userId, need, "text");
-
       const systemHint = await buildSystemHint(env, chatId, userId);
       const name = await getPreferredName(env, msg);
-      const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(q);
-      const { short, full } = await callSmartLLM(env, q, { lang, name, systemHint, expand });
-
+      const { short, full } = await callSmartLLM(env, q, { lang, name, systemHint, expand: true });
+      for (const ch of chunkText(short, 3500)) await sendPlain(env, chatId, ch);
       await pushTurn(env, userId, "user", q);
       await pushTurn(env, userId, "assistant", full);
-
-      const after = (cur.energy - need);
-      if (expand && full.length > short.length) { for (const ch of chunkText(full)) await sendPlain(env, chatId, ch); }
-      else { await sendPlain(env, chatId, short); }
-      if (after <= Number(cur.low ?? 10)) {
-        const links = energyLinks(env, userId);
-        await sendPlain(env, chatId, t(lang, "low_energy_notice", after, links.energy));
-      }
     });
     return json({ ok: true });
   }
-
-  // /vision команда (на випадок явного слеша)
+// /vision команда (явна)
   if (/^\/vision(?:@[\w_]+)?/i.test(textRaw)) {
-    await safe(async () => {
+    await (async () => {
       const photoNow = pickPhoto(msg);
       const photoReply = pickPhoto(msg?.reply_to_message);
       const photoMsg = photoNow || photoReply;
       const prompt = textRaw.replace(/^\/vision(?:@[\w_]+)?/i, "").trim() || "Опиши зображення";
       await runVisionOnPhoto(env, chatId, userId, photoMsg, prompt, lang, isAdmin);
-    });
+    })().catch(async () => { try { await sendPlain(env, chatId, t(lang, "default_reply")); } catch {} });
     return json({ ok: true });
   }
 
   // Google Drive
   if (textRaw === BTN_DRIVE) {
-    await safe(async () => {
+    await (async () => {
       const ut = await getUserTokens(env, userId);
       await setDriveMode(env, userId, true);
       const zeroWidth = "\u2063";
@@ -487,37 +448,44 @@ export async function handleTelegramWebhook(req, env) {
       await sendPlain(env, chatId, zeroWidth, {
         reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: "https://drive.google.com/drive/my-drive" }]] }
       });
-    });
+    })().catch(async () => { try { await sendPlain(env, chatId, t(lang, "default_reply")); } catch {} });
     return json({ ok: true });
   }
 
-  // Senti (вітання/режим)
-  if (textRaw === BTN_SENTI || /^\/start\b/i.test(textRaw)) {
-    await safe(async () => {
-      const name = msg?.from?.first_name || "друже";
-      const hello = t(lang, "start_hint") || `Use any language — I’ll reply concisely.\nSay “more details” to expand.`;
-      await sendPlain(env, chatId, hello, { reply_markup: mainKeyboard(ADMIN(env, userId)) });
-    });
+  // /start — ПРИВІТАННЯ ОДИН РАЗ; кнопка "Senti" — без вітання
+  if (/^\/start\b/i.test(textRaw)) {
+    await (async () => {
+      const kb = { reply_markup: mainKeyboard(ADMIN(env, userId)) };
+      const seen = await wasFirstSeen(env, userId);
+      if (!seen) {
+        const name = msg?.from?.first_name || "друже";
+        const hello = `${t(lang, "hello_name", name)}\n${t(lang,"senti_tip")}`;
+        await sendPlain(env, chatId, hello, kb);
+        await setFirstSeen(env, userId);
+      } else {
+        await sendPlain(env, chatId, t(lang, "how_help") || "Чим допомогти?", kb);
+      }
+    })().catch(async () => { try { await sendPlain(env, chatId, t(lang, "default_reply")); } catch {} });
+    return json({ ok: true });
+  }
+  if (textRaw === BTN_SENTI) {
+    // Тихий перехід у режим без вітання
     return json({ ok: true });
   }
 
   // Якщо прийшов медіафайл — збереження у Drive (коли режим увімкнено)
   if (detectAttachment(msg)) {
-    await safe(async () => {
+    await (async () => {
       const mode = await getDriveMode(env, userId);
-      if (mode) {
-        await handleIncomingMedia(env, chatId, userId, msg, lang);
-      } else {
-        // підказка ввімкнути Drive-режим
-        await sendPlain(env, chatId, t(lang, "drive_mode_hint") || "Натисни «Google Drive», щоб зберігати файли в Диску.");
-      }
-    });
+      if (mode) await handleIncomingMedia(env, chatId, userId, msg, lang);
+      else await sendPlain(env, chatId, t(lang, "drive_hint_enable"));
+    })().catch(async () => { try { await sendPlain(env, chatId, t(lang, "default_reply")); } catch {} });
     return json({ ok: true });
   }
 
   // За замовчуванням — коротка відповідь через LLM (без /ai)
   if (textRaw) {
-    await safe(async () => {
+    await (async () => {
       const cur = await getEnergy(env, userId);
       const need = Number(cur.costText ?? 1);
       if ((cur.energy ?? 0) < need) {
@@ -526,27 +494,23 @@ export async function handleTelegramWebhook(req, env) {
         return;
       }
       await spendEnergy(env, userId, need, "text");
-
       const systemHint = await buildSystemHint(env, chatId, userId);
       const name = await getPreferredName(env, msg);
       const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand: false });
-
       await pushTurn(env, userId, "user", textRaw);
       await pushTurn(env, userId, "assistant", full);
-
-      const after = (cur.energy - need);
       await sendPlain(env, chatId, short, { reply_markup: mainKeyboard(ADMIN(env, userId)) });
-      if (after <= Number(cur.low ?? 10)) {
+      const cur2 = await getEnergy(env, userId);
+      if ((cur2.energy ?? 0) <= Number(cur2.low ?? 10)) {
         const links = energyLinks(env, userId);
-        await sendPlain(env, chatId, t(lang, "low_energy_notice", after, links.energy));
+        await sendPlain(env, chatId, t(lang, "low_energy_notice", cur2.energy, links.energy));
       }
-
-      // спробувати запам'ятати ім'я
       await rememberNameFromText(env, userId, textRaw).catch(() => {});
-    });
+    })().catch(async () => { try { await sendPlain(env, chatId, t(lang, "default_reply")); } catch {} });
     return json({ ok: true });
   }
 
-  // Порожнє оновлення — нічого не робимо
   return json({ ok: true });
 }
+
+export default { handleWebhook };
