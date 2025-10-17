@@ -513,4 +513,7 @@ export async function handleWebhook(req, env, url) {
   return json({ ok: true });
 }
 
-export default { handleWebhook };
+// ⬅️ ДОПОВНЕННЯ: експорт під старий імпорт з index.js
+export const handleTelegramWebhook = handleWebhook;
+
+export default { handleWebhook, handleTelegramWebhook };
