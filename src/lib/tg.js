@@ -27,12 +27,17 @@ export function energyLinks(env, userId) {
   };
 }
 
+/**
+ * Надсилає просте повідомлення в Telegram.
+ * ПІДТРИМУЄ extra.parse_mode ("Markdown" | "HTML") + reply_markup.
+ */
 export async function sendPlain(env, chatId, text, extra = {}) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
   const body = {
     chat_id: chatId,
     text,
     disable_web_page_preview: true,
+    ...(extra.parse_mode ? { parse_mode: extra.parse_mode } : {}),
     ...(extra.reply_markup ? { reply_markup: extra.reply_markup } : {}),
   };
   await fetch(url, {
