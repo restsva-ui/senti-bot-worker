@@ -1,12 +1,11 @@
-# wrangler.toml — Senti Bot Worker
+# wrangler.toml — Senti Bot Worker (v4 ready)
 name = "senti-bot-worker"
 main = "src/index.js"
 compatibility_date = "2024-08-20"
-node_compat = true
+compatibility_flags = ["nodejs_compat"]   # ← заміна node_compat
 workers_dev = true
 
-# ---------- KV namespaces (твоя конфігурація) ----------
-
+# ---------- KV namespaces ----------
 # Дедуплікація апдейтів/подій
 [[kv_namespaces]]
 binding = "DEDUP_KV"
@@ -22,7 +21,7 @@ id = "e2a8d3941b4e41728318781e739a4d47"
 binding = "STATE_KV"
 id = "7b32e2d1f60846ddb1c653eb52180bf7"
 
-# ToDo/Checklist (у тебе одна й та сама namespace використовується і як CHECKLIST_KV, і як TODO_KV)
+# ToDo/Checklist (той самий namespace, що й CHECKLIST_KV)
 [[kv_namespaces]]
 binding = "TODO_KV"
 id = "497eac980691495ea2a0bc8611892d65"
@@ -32,7 +31,7 @@ id = "497eac980691495ea2a0bc8611892d65"
 binding = "USER_OAUTH_KV"
 id = "470d4f5c164a4a828c569eb9a52a5133"
 
-# Checklist / Repo-архіви / утиліти (той самий ID що й у TODO_KV)
+# Checklist / Repo-архіви / утиліти (той самий ID що й TODO_KV)
 [[kv_namespaces]]
 binding = "CHECKLIST_KV"
 id = "497eac980691495ea2a0bc8611892d65"
@@ -52,12 +51,12 @@ id = "9e6f0ed5bf2544a9a63d57455900a844"
 binding = "DIALOG_KV"
 id = "63c0d1e0962a419ca54082893410b28e"
 
-# НОВЕ: черга матеріалів для самонавчання
+# Черга матеріалів для самонавчання
 [[kv_namespaces]]
 binding = "LEARN_QUEUE_KV"
 id = "86a54c59ce674a558780c58bf1a47dfd"
 
-# ---------- ENV змінні (залиш як у тебе, тут — приклад) ----------
+# ---------- ENV змінні ----------
 [vars]
 # Telegram
 BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
