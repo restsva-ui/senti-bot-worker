@@ -4,10 +4,14 @@ import { abs } from "../utils/url.js";
 export const BTN_DRIVE = "Google Drive";
 export const BTN_SENTI = "Senti";
 export const BTN_ADMIN = "Admin";
+export const BTN_LEARN = "learn"; // нова кнопка для адміна
 
 export const mainKeyboard = (isAdmin = false) => {
   const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
-  if (isAdmin) rows.push([{ text: BTN_ADMIN }]);
+  if (isAdmin) {
+    // для адміна додаємо другий рядок: Admin + learn
+    rows.push([{ text: BTN_ADMIN }, { text: BTN_LEARN }]);
+  }
   return { keyboard: rows, resize_keyboard: true };
 };
 
@@ -27,6 +31,11 @@ export function energyLinks(env, userId) {
   };
 }
 
+/**
+ * Відправка простого тексту в ТГ.
+ * - прев’ю посилань вимкнене (тільки клікабельна стрілка ↗︎)
+ * - якщо явно не вказали parse_mode, авто-детектимо Markdown-лінки
+ */
 export async function sendPlain(env, chatId, text, extra = {}) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
   const body = {
@@ -35,8 +44,17 @@ export async function sendPlain(env, chatId, text, extra = {}) {
     // попередній перегляд вимкнено (посилання стрілкою без прев’ю)
     disable_web_page_preview: true,
   };
-  if (extra.parse_mode) body.parse_mode = extra.parse_mode; // <— ВАЖЛИВО
+
   if (extra.reply_markup) body.reply_markup = extra.reply_markup;
+
+  if (extra.parse_mode) {
+    body.parse_mode = extra.parse_mode;
+  } else {
+    // якщо є Markdown-посилання — вмикаємо Markdown
+    if (/\[[^\]]+\]\(https?:\/\/[^\s)]+?\)/.test(String(text))) {
+      body.parse_mode = "Markdown";
+    }
+  }
 
   await fetch(url, {
     method: "POST",
@@ -56,6 +74,7 @@ export const TG = {
   BTN_DRIVE,
   BTN_SENTI,
   BTN_ADMIN,
+  BTN_LEARN,
   mainKeyboard,
   ADMIN,
   energyLinks,
