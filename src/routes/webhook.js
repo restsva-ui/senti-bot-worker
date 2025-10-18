@@ -14,11 +14,17 @@ import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
 
+// 🔹 нове: зовнішній API погоди
+import {
+  weatherIntent,
+  weatherSummaryByPlace,
+  weatherSummaryByCoords
+} from "../apis/weather.js";
+
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
 const { BTN_DRIVE, BTN_SENTI, BTN_ADMIN, mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand } = TG;
 
 // ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
-// Мінімальний клієнт до Cloudflare AI: @cf/llama-3.2-11b-vision-instruct
 async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
   if (!env.CLOUDFLARE_API_TOKEN || !env.CF_ACCOUNT_ID) {
     throw new Error("CF credentials missing");
@@ -50,7 +56,6 @@ async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
     const msg = data?.errors?.[0]?.message || `CF vision failed (HTTP ${r.status})`;
     throw new Error(msg);
   }
-  // Формати CF можуть відрізнятися; стандартизуймо поле відповіді:
   const result = data.result?.response || data.result?.output_text || data.result?.text || "";
   return String(result || "").trim();
 }
@@ -139,10 +144,8 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const prompt = caption || "Опиши, що на зображенні, коротко і по суті.";
   try {
     const resp = await cfVisionDescribe(env, url, prompt, lang);
-    const emoji = "🖼️";
-    await sendPlain(env, chatId, `${emoji} ${resp}`);
+    await sendPlain(env, chatId, `🖼️ ${resp}`);
   } catch (e) {
-    // коротка діагностика лише адмінам
     if (ADMIN(env, userId)) {
       await sendPlain(env, chatId, `❌ Vision error: ${String(e.message || e).slice(0, 180)}`);
     } else {
@@ -259,7 +262,6 @@ ${control}`;
       ? await askAnyModel(env, modelOrder, prompt, { systemHint })
       : await think(env, prompt, { systemHint });
   } catch (e) {
-    // віддаємо діагностику адмінам
     if (adminDiag) throw e;
     throw new Error("LLM call failed");
   }
@@ -282,7 +284,6 @@ ${control}`;
     out = `${em} ${out}`;
   }
 
-  // контроль мови
   const detected = detectFromText(out);
   if (detected && lang && detected !== lang) {
     const hardPrompt = `STRICT LANGUAGE MODE: Respond ONLY in ${lang}. If the previous answer used another language, rewrite it now in ${lang}. Keep it concise.`;
@@ -318,7 +319,6 @@ export async function handleTelegramWebhook(req, env) {
   const isAdmin = ADMIN(env, userId);
   const textRaw = String(msg?.text || msg?.caption || "").trim();
 
-  // Мова відповіді
   let lang = pickReplyLanguage(msg, textRaw);
 
   const safe = async (fn) => {
@@ -426,11 +426,45 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Кнопка Senti → НЕ вітатися; просто вимкнути Drive-режим і показати клавіатуру
+  // Кнопка Senti → вимкнути Drive-режим і показати клавіатуру
   if (textRaw === BTN_SENTI) {
     await setDriveMode(env, userId, false);
     const zeroWidth = "\u2063";
     await sendPlain(env, chatId, zeroWidth, { reply_markup: mainKeyboard(isAdmin) });
+    return json({ ok: true });
+  }
+
+  // 🔹 Намір "погода" — до будь-якого LLM
+  const wIntent = weatherIntent(textRaw);
+  if (wIntent || msg?.location) {
+    await safe(async () => {
+      const cur = await getEnergy(env, userId);
+      const need = Number(cur.costText ?? 1);
+      if ((cur.energy ?? 0) < need) {
+        const links = energyLinks(env, userId);
+        await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
+        return;
+      }
+      await spendEnergy(env, userId, need, "weather");
+
+      if (msg?.location?.latitude && msg?.location?.longitude) {
+        const lat = msg.location.latitude;
+        const lon = msg.location.longitude;
+        const summary = await weatherSummaryByCoords({ lat, lon, label: t(lang, "your_location") || "your location", lang });
+        if (summary) { await sendPlain(env, chatId, `🌤️ ${summary}`); return; }
+      }
+
+      if (wIntent?.place) {
+        const summary = await weatherSummaryByPlace(wIntent.place, lang);
+        if (summary) { await sendPlain(env, chatId, `🌤️ ${summary}`); return; }
+        await sendPlain(env, chatId, "❌ Не знайшов такого міста. Надішли геолокацію або спробуй іншу назву.");
+        return;
+      }
+
+      await sendPlain(env, chatId, "📍 Надішли геолокацію або напиши: `/weather Київ`", {
+        reply_markup: { inline_keyboard: [[{ text: "Надіслати геолокацію", request_location: true }]] }
+      });
+    });
     return json({ ok: true });
   }
 
