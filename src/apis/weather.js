@@ -1,10 +1,10 @@
 // src/apis/weather.js
-// Open-Meteo + Nominatim: без ключів, з локальною таймзоною міста
+// OpenStreetMap Nominatim + Open-Meteo: без ключів, локальна таймзона локації
 
 const NOMINATIM = "https://nominatim.openstreetmap.org/search";
 const OPEN_METEO = "https://api.open-meteo.com/v1/forecast";
 
-// простий геокодер міста → { name, lat, lon, country }
+// ── Геокодинг міста → { name, lat, lon, country } ───────────────────────────
 export async function geocodeCity(city, lang = "uk") {
   const url = `${NOMINATIM}?format=json&q=${encodeURIComponent(city)}&addressdetails=1&limit=1&accept-language=${lang}&namedetails=1`;
   const r = await fetch(url, { headers: { "User-Agent": "senti-bot" } });
@@ -19,7 +19,32 @@ export async function geocodeCity(city, lang = "uk") {
   return { name, lat, lon, country };
 }
 
-// код → текст (мінімальний набір достатній для коротких відповідей)
+// ── Розпізнавання запиту про погоду → {city|null} ────────────────────────────
+// Підтримує uk/ru/en/de/fr. Приклади:
+// "яка погода у києві", "погода в львові", "weather in kyiv",
+// "what's the weather in Berlin", "wie ist das Wetter in München", "météo à Paris"
+export function parseWeatherQuery(text = "") {
+  const s = String(text || "").trim();
+  if (!s) return null;
+
+  if (!/(погода|weather|météo|wetter)/i.test(s)) return null;
+
+  // місто після в/у/in/à/en/bei/...
+  const cityRx = /(?:в|у|у\s+місті|в\s+городе|in|at|à|en|bei|in der|in dem)\s+([\p{L}\-\.\'\s]{2,50})/iu;
+  const m = s.match(cityRx);
+  if (m && m[1]) {
+    const city = m[1].replace(/[\?\.\!,:;]/g, "").trim();
+    return city || null;
+  }
+
+  // "weather kyiv" / "погода львів"
+  const alt = s.match(/(?:weather|погода|météo|wetter)\s+([\p{L}\-\.\'\s]{2,50})/iu);
+  if (alt && alt[1]) return alt[1].trim();
+
+  return null;
+}
+
+// ── Переклад коду WMO у короткий опис українською ───────────────────────────
 const WMO = {
   0: "ясно",
   1: "переважно ясно",
@@ -42,11 +67,12 @@ const WMO = {
   95: "гроза"
 };
 
+// ── Поточна погода за координатами ──────────────────────────────────────────
 export async function weatherSummaryByLatLon(lat, lon, lang = "uk") {
   const url = `${OPEN_METEO}?latitude=${lat}&longitude=${lon}`
     + `&current=temperature_2m,weather_code,wind_speed_10m,precipitation`
     + `&hourly=temperature_2m,precipitation_probability`
-    + `&timezone=auto`; // головне — локальний час локації
+    + `&timezone=auto`; // локальний час локації
 
   const r = await fetch(url);
   if (!r.ok) throw new Error(`weather http ${r.status}`);
@@ -70,7 +96,7 @@ export async function weatherSummaryByLatLon(lat, lon, lang = "uk") {
   return { text, timezone: tz };
 }
 
-// зручна обгортка: місто → короткий рядок + tz
+// ── Обгортка: місто → короткий рядок + tz ───────────────────────────────────
 export async function weatherByCity(city, lang = "uk") {
   const geo = await geocodeCity(city, lang);
   if (!geo) return null;
