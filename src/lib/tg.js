@@ -4,13 +4,11 @@ import { abs } from "../utils/url.js";
 export const BTN_DRIVE = "Google Drive";
 export const BTN_SENTI = "Senti";
 export const BTN_ADMIN = "Admin";
-export const BTN_LEARN = "Learn";              // ← нова адмін-кнопка
+export const BTN_LEARN = "Learn"; // нова адмін-кнопка
 
 export const mainKeyboard = (isAdmin = false) => {
   const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
-  if (isAdmin) {
-    rows.push([{ text: BTN_ADMIN }, { text: BTN_LEARN }]); // ← додаємо Learn тільки адміну
-  }
+  if (isAdmin) rows.push([{ text: BTN_ADMIN }, { text: BTN_LEARN }]); // Learn тільки адміну
   return { keyboard: rows, resize_keyboard: true };
 };
 
@@ -36,10 +34,9 @@ export async function sendPlain(env, chatId, text, extra = {}) {
   const body = {
     chat_id: chatId,
     text,
-    // без прев’ю (посилання зі стрілкою не «розкриваються»)
-    disable_web_page_preview: true,
+    disable_web_page_preview: true, // посилання-стрілка ↗︎ без прев’ю
   };
-  if (extra.parse_mode) body.parse_mode = extra.parse_mode;         // ВАЖЛИВО для ↗︎
+  if (extra.parse_mode) body.parse_mode = extra.parse_mode; // ВАЖЛИВО для Markdown
   if (extra.reply_markup) body.reply_markup = extra.reply_markup;
 
   await fetch(url, {
