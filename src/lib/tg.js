@@ -15,9 +15,13 @@ export const mainKeyboard = (isAdmin = false) => {
 export const ADMIN = (env, userId) =>
   String(userId) === String(env.TELEGRAM_ADMIN_ID);
 
-/** ── Швидкі лінки в адмінку/енергію ──────────────────────────────────────── */
+/** ── Адмін-лінки ─────────────────────────────────────────────────────────── */
 export function energyLinks(env, userId) {
-  const s = env.WEBHOOK_SECRET || "";
+  const s =
+    env.WEBHOOK_SECRET ||
+    env.TELEGRAM_SECRET_TOKEN ||
+    env.TG_WEBHOOK_SECRET ||
+    "";
   const qs = `s=${encodeURIComponent(s)}&u=${encodeURIComponent(String(userId || ""))}`;
   return {
     energy: abs(env, `/admin/energy/html?${qs}`),
@@ -25,7 +29,7 @@ export function energyLinks(env, userId) {
   };
 }
 
-/** ── Надсилання простого повідомлення в TG ───────────────────────────────── */
+/** ── Надсилання простого повідомлення ────────────────────────────────────── */
 export async function sendPlain(env, chatId, text, extra = {}) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
   const body = {
@@ -48,3 +52,15 @@ export function parseAiCommand(text = "") {
   if (!m) return null;
   return (m[1] || "").trim();
 }
+
+/** ── Сумісність з існуючим імпортом у src/index.js ───────────────────────── */
+export const TG = {
+  BTN_DRIVE,
+  BTN_SENTI,
+  BTN_ADMIN,
+  mainKeyboard,
+  ADMIN,
+  energyLinks,
+  sendPlain,
+  parseAiCommand,
+};
