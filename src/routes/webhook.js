@@ -13,57 +13,24 @@ import { loadSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 
-// ── TG helpers ───────────────────────────────────────────────────────────────
-async function sendPlain(env, chatId, text, extra = {}) {
-  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
-  const body = {
-    chat_id: chatId,
-    text,
-    disable_web_page_preview: true,
-    ...(extra.reply_markup ? { reply_markup: extra.reply_markup } : {})
-  };
-  await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
-  }).catch(() => {});
-}
-function parseAiCommand(text = "") {
-  const s = String(text).trim();
-  const m = s.match(/^\/ai(?:@[\w_]+)?(?:\s+([\s\S]+))?$/i);
-  if (!m) return null;
-  return (m[1] || "").trim();
-}
-
-// ── UI ───────────────────────────────────────────────────────────────────────
-const BTN_DRIVE = "Google Drive";
-const BTN_SENTI = "Senti";
-const BTN_ADMIN = "Admin";
-const mainKeyboard = (isAdmin = false) => {
-  const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
-  if (isAdmin) rows.push([{ text: BTN_ADMIN }]); // Checklist прибрано
-  return { keyboard: rows, resize_keyboard: true };
-};
-const ADMIN = (env, userId) => String(userId) === String(env.TELEGRAM_ADMIN_ID);
-function energyLinks(env, userId) {
-  const s = env.WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || env.TG_WEBHOOK_SECRET || "";
-  const qs = `s=${encodeURIComponent(s)}&u=${encodeURIComponent(String(userId || ""))}`;
-  return {
-    energy: abs(env, `/admin/energy/html?${qs}`),
-    checklist: abs(env, `/admin/checklist/html?${qs}`)
-  };
-}
+// імпортуємо TG-хелпери з модуля (прибираємо дублювання)
+import {
+  BTN_DRIVE,
+  BTN_SENTI,
+  BTN_ADMIN,
+  mainKeyboard,
+  ADMIN,
+  energyLinks,
+  sendPlain,
+  parseAiCommand,
+} from "../lib/tg.js";
 
 // ── Media ────────────────────────────────────────────────────────────────────
 function pickPhoto(msg) {
   const arr = Array.isArray(msg?.photo) ? msg.photo : null;
   if (!arr?.length) return null;
   const ph = arr[arr.length - 1];
-  return {
-    type: "photo",
-    file_id: ph.file_id,
-    name: `photo_${ph.file_unique_id}.jpg`
-  };
+  return { type: "photo", file_id: ph.file_id, name: `photo_${ph.file_unique_id}.jpg` };
 }
 function detectAttachment(msg) {
   if (!msg) return null;
@@ -93,7 +60,7 @@ async function tgFileUrl(env, file_id) {
   const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ file_id })
+    body: JSON.stringify({ file_id }),
   });
   const data = await r.json().catch(() => null);
   if (!data?.ok) throw new Error("getFile failed");
@@ -115,9 +82,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const url = await tgFileUrl(env, att.file_id);
   const saved = await driveSaveFromUrl(env, userId, url, att.name);
   await sendPlain(env, chatId, `✅ ${t(lang, "saved_to_drive")}: ${saved?.name || att.name}`, {
-    reply_markup: {
-      inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: "https://drive.google.com/drive/my-drive" }]]
-    }
+    reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: "https://drive.google.com/drive/my-drive" }]] },
   });
   return true;
 }
@@ -163,7 +128,7 @@ function tryParseUserNamedAs(text) {
     new RegExp(`\\bменя\\s+зовут\\s+${NAME_RX}`, "iu"),
     new RegExp(`\\bmy\\s+name\\s+is\\s+${NAME_RX}`, "iu"),
     new RegExp(`\\bich\\s+hei(?:s|ß)e\\s+${NAME_RX}`, "iu"),
-    new RegExp(`\\bje\\s+m'?appelle\\s+${NAME_RX}`, "iu")
+    new RegExp(`\\bje\\s+m'?appelle\\s+${NAME_RX}`, "iu"),
   ];
   for (const r of patterns) {
     const m = s.match(r);
@@ -187,7 +152,7 @@ async function rememberNameFromText(env, userId, text) {
   return name;
 }
 
-// ── Анти-розкриття “я AI/LLM” та чистка підписів ────────────────────────────
+// ── Анти-”я AI/LLM” + чистка підписів ───────────────────────────────────────
 function revealsAiSelf(out = "") {
   const s = out.toLowerCase();
   return (
@@ -310,7 +275,7 @@ export async function handleTelegramWebhook(req, env) {
         `GEMINI key: ${hasGemini ? "✅" : "❌"}`,
         `Cloudflare (CF_ACCOUNT_ID + CLOUDFLARE_API_TOKEN): ${hasCF ? "✅" : "❌"}`,
         `OpenRouter key: ${hasOR ? "✅" : "❌"}`,
-        `FreeLLM (BASE_URL + KEY): ${hasFreeBase && hasFreeKey ? "✅" : "❌"}`
+        `FreeLLM (BASE_URL + KEY): ${hasFreeBase && hasFreeKey ? "✅" : "❌"}`,
       ];
       const entries = mo ? mo.split(",").map(s => s.trim()).filter(Boolean) : [];
       if (entries.length) {
@@ -326,8 +291,8 @@ export async function handleTelegramWebhook(req, env) {
       const markup = {
         inline_keyboard: [
           [{ text: "Відкрити Checklist", url: links.checklist }],
-          [{ text: "Керування енергією", url: links.energy }]
-        ]
+          [{ text: "Керування енергією", url: links.energy }],
+        ],
       };
       await sendPlain(env, chatId, lines.join("\n"), { reply_markup: markup });
     });
@@ -373,16 +338,16 @@ export async function handleTelegramWebhook(req, env) {
     await safe(async () => {
       const ut = await getUserTokens(env, userId);
       await setDriveMode(env, userId, true);
-      const zeroWidth = "\u2063"; // невидимий символ, щоб Telegram показав інлайн-кнопку
+      const zeroWidth = "\u2063";
       if (!ut?.refresh_token) {
         const authUrl = abs(env, `/auth/start?u=${userId}`);
         await sendPlain(env, chatId, zeroWidth, {
-          reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: authUrl }]] }
+          reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: authUrl }]] },
         });
         return;
       }
       await sendPlain(env, chatId, zeroWidth, {
-        reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: "https://drive.google.com/drive/my-drive" }]] }
+        reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: "https://drive.google.com/drive/my-drive" }]] },
       });
     });
     return json({ ok: true });
@@ -442,12 +407,12 @@ export async function handleTelegramWebhook(req, env) {
     }
   }
 
-  // Дефолтне привітання (мовою профілю TG якщо доступно)
+  // Дефолтне привітання
   const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
   const greetLang = ["uk", "ru", "en", "de", "fr"].includes(profileLang) ? profileLang : lang;
   const name = await getPreferredName(env, msg);
   await sendPlain(env, chatId, `${t(greetLang, "hello_name", name)} ${t(greetLang, "how_help")}`, {
-    reply_markup: mainKeyboard(isAdmin)
+    reply_markup: mainKeyboard(isAdmin),
   });
   return json({ ok: true });
 }
