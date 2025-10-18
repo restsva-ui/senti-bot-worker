@@ -1,133 +1,208 @@
 // src/apis/time.js
 
-// Невелика мапа міст -> IANA таймзона (можеш розширювати за потребою)
-const CITY_TZ = {
-  // Україна
-  "київ": "Europe/Kyiv",
-  "kyiv": "Europe/Kyiv",
-  "kiev": "Europe/Kyiv",
-  "львів": "Europe/Kyiv",
-  "lviv": "Europe/Kyiv",
-  "харків": "Europe/Kyiv",
-  "kharkiv": "Europe/Kyiv",
+// ---------- утиліти часу/дати ----------
+const DEFAULT_TZ = "Europe/Kyiv";
 
-  // Європа
-  "warsaw": "Europe/Warsaw",
-  "berlin": "Europe/Berlin",
-  "paris": "Europe/Paris",
-  "madrid": "Europe/Madrid",
-  "rome": "Europe/Rome",
-  "london": "Europe/London",
+export function resolveTz(env, fallback = DEFAULT_TZ) {
+  const tz =
+    env?.TIMEZONE ||
+    env?.DEFAULT_TIMEZONE ||
+    fallback;
+  return tz || DEFAULT_TZ;
+}
 
-  // США
-  "new york": "America/New_York",
-  "los angeles": "America/Los_Angeles",
-  "san francisco": "America/Los_Angeles",
-  "chicago": "America/Chicago",
+function nowParts(tz) {
+  const d = new Date();
+  // беремо “частини” через Intl, щоб коректно для будь-якої TZ
+  const fmt = new Intl.DateTimeFormat("en-GB", {
+    timeZone: tz,
+    year: "numeric",
+    month: "long",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(d).map(p => [p.type, p.value]));
+  return {
+    year: Number(parts.year),
+    monthName: parts.month,        // англ. назва місяця (en-GB)
+    day: parts.day,
+    time: `${parts.hour}:${parts.minute}`,
+    date: new Date(d.toLocaleString("en-US", { timeZone: tz })) // “локалізований” Date
+  };
+}
 
-  // Інше
-  "istanbul": "Europe/Istanbul",
-  "dubai": "Asia/Dubai",
-  "tokyo": "Asia/Tokyo",
-};
+function monthUk(m) {
+  // перетворимо en-GB month → українську назву в родовому відмінку
+  const map = {
+    January: "січня",
+    February: "лютого",
+    March: "березня",
+    April: "квітня",
+    May: "травня",
+    June: "червня",
+    July: "липня",
+    August: "серпня",
+    September: "вересня",
+    October: "жовтня",
+    November: "листопада",
+    December: "грудня",
+  };
+  return map[m] || m;
+}
 
-/**
- * Дуже простий детектор наміру "яка сьогодні дата?"
- * Працює для укр/рос/англ/фр/нім. За потреби додай фрази.
- */
+function monthRu(m) {
+  const map = {
+    January: "января",
+    February: "февраля",
+    March: "марта",
+    April: "апреля",
+    May: "мая",
+    June: "июня",
+    July: "июля",
+    August: "августа",
+    September: "сентября",
+    October: "октября",
+    November: "ноября",
+    December: "декабря",
+  };
+  return map[m] || m;
+}
+
+function monthDe(m) {
+  const map = {
+    January: "Januar",
+    February: "Februar",
+    March: "März",
+    April: "April",
+    May: "Mai",
+    June: "Juni",
+    July: "Juli",
+    August: "August",
+    September: "September",
+    October: "Oktober",
+    November: "November",
+    December: "Dezember",
+  };
+  return map[m] || m;
+}
+
+function monthFr(m) {
+  const map = {
+    January: "janvier",
+    February: "février",
+    March: "mars",
+    April: "avril",
+    May: "mai",
+    June: "juin",
+    July: "juillet",
+    August: "août",
+    September: "septembre",
+    October: "octobre",
+    November: "novembre",
+    December: "décembre",
+  };
+  return map[m] || m;
+}
+
+function formatDateLang(parts, lang = "uk") {
+  const d = parts.day;
+  const y = parts.year;
+  const m = parts.monthName;
+
+  switch ((lang || "uk").slice(0, 2)) {
+    case "uk":
+      return `${Number(d)} ${monthUk(m)} ${y} року`;
+    case "ru":
+      return `${Number(d)} ${monthRu(m)} ${y} года`;
+    case "de":
+      return `${Number(d)}. ${monthDe(m)} ${y}`;
+    case "fr":
+      return `${Number(d)} ${monthFr(m)} ${y}`;
+    default:
+      // en
+      return `${m} ${Number(d)}, ${y}`;
+  }
+}
+
+function phraseToday(lang = "uk") {
+  switch ((lang || "uk").slice(0, 2)) {
+    case "uk": return "Сьогодні";
+    case "ru": return "Сегодня";
+    case "de": return "Heute";
+    case "fr": return "Aujourd’hui";
+    default:   return "Today";
+  }
+}
+
+function phraseNow(lang = "uk") {
+  switch ((lang || "uk").slice(0, 2)) {
+    case "uk": return "Зараз";
+    case "ru": return "Сейчас";
+    case "de": return "Jetzt";
+    case "fr": return "Maintenant";
+    default:   return "Now";
+  }
+}
+
+// ---------- інтенти ----------
 export function dateIntent(text = "") {
   const s = String(text).trim().toLowerCase();
   if (!s) return false;
+
+  // будь-яка комбінація “сьогодні” + “дата/день”
+  if (s.includes("сьогодні") && (s.includes("дата") || s.includes("день"))) return true;
+
   const phrases = [
     // uk
-    "яка сьогодні дата", "яка сьогодні дата?", "яка сьогодні дата?",
-    "сьогоднішня дата", "який сьогодні день", "який сьогодні день?",
-
+    "яка сьогодні дата", "сьогоднішня дата", "який сьогодні день",
     // ru
-    "какая сегодня дата", "какая сегодня дата?", "какой сегодня день", "какой сегодня день?",
-
+    "какая сегодня дата", "какой сегодня день",
     // en
     "what is the date", "what is the date today", "what's the date", "date today",
-
     // de
     "welches datum", "welches datum ist heute",
-
     // fr
-    "quelle est la date", "c'est quelle date", "quelle date sommes-nous",
+    "quelle est la date", "quelle date sommes-nous"
   ];
   return phrases.some(p => s.includes(p));
 }
 
-/**
- * Детектор наміру "котра година?"
- */
 export function timeIntent(text = "") {
   const s = String(text).trim().toLowerCase();
   if (!s) return false;
-  const phrases = [
-    // uk
-    "котра година", "який зараз час", "скільки зараз часу",
 
-    // ru
-    "который час", "сколько времени", "сколько сейчас времени",
+  // широка логіка: ключові слова про час
+  const hasCore =
+    s.includes("котра година") ||
+    s.includes("скільки час") ||
+    s.includes("котрий час") ||
+    s.includes("который час") ||
+    s.includes("сколько времени") ||
+    s.includes("time is it") ||
+    s.includes("what time") ||
+    s.includes("time now") ||
+    s === "час" || s === "время";
 
-    // en
-    "what time is it", "current time", "time now",
-
-    // de
-    "wie spät ist es",
-
-    // fr
-    "quelle heure est-il",
-  ];
-  return phrases.some(p => s.includes(p));
+  return hasCore;
 }
 
-/**
- * Спроба витягнути місто з тексту та повернути IANA таймзону.
- * Якщо місто не знайдено — беремо env.TIMEZONE, інакше UTC.
- */
-export function pickTimezone(env = {}, text = "") {
-  const fallback = env.TIMEZONE || "UTC";
-  const s = String(text || "").toLowerCase();
-
-  // Шукаємо точні збіги ключових міст (без regex-екзотики)
-  for (const key of Object.keys(CITY_TZ)) {
-    if (s.includes(key)) return CITY_TZ[key];
-  }
-  return fallback;
+// ---------- відповіді ----------
+export function replyCurrentDate(env, lang = "uk") {
+  const tz = resolveTz(env);
+  const parts = nowParts(tz);
+  const dateText = formatDateLang(parts, lang);
+  const prefix = phraseToday(lang);
+  const calEmoji = "🗓️";
+  return `${calEmoji} ${prefix} ${dateText}.`;
 }
 
-/**
- * Повертає поточну дату/час у вибраній таймзоні.
- * result.text — “10 червня 2024 року, 18:45”
- * result.dateText — тільки дата
- * result.timeText — тільки час
- * result.timezone — назва таймзони
- * result.iso — ISO рядок у цій TZ (для логів)
- */
-export function nowInTZ(timezone = "UTC") {
-  const now = new Date();
-
-  const dateText = new Intl.DateTimeFormat("uk-UA", {
-    timeZone: timezone,
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  }).format(now);
-
-  const timeText = new Intl.DateTimeFormat("uk-UA", {
-    timeZone: timezone,
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(now);
-
-  // загальний рядок
-  const text = `${dateText}`;
-
-  // ISO приблизно в TZ (для логів/діагностики)
-  // Примітка: у JS Date немає "локального ISO для TZ", тож залишимо стандартний ISO.
-  const iso = now.toISOString();
-
-  return { text, dateText, timeText, timezone, iso, date: now };
+export function replyCurrentTime(env, lang = "uk") {
+  const tz = resolveTz(env);
+  const parts = nowParts(tz);
+  const clockEmoji = "🕒";
+  const nowWord = phraseNow(lang);
+  // додамо позначку TZ в дужках, щоб було зрозуміло
+  return `${clockEmoji} ${nowWord} ${parts.time} (${tz}).`;
 }
