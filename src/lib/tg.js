@@ -27,24 +27,17 @@ export function energyLinks(env, userId) {
   };
 }
 
-// Одноразова кнопка «Надіслати локацію»
-export function askLocationKeyboard() {
-  return {
-    keyboard: [[{ text: "Надіслати локацію", request_location: true }]],
-    resize_keyboard: true,
-    one_time_keyboard: true,
-  };
-}
-
 export async function sendPlain(env, chatId, text, extra = {}) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
   const body = {
     chat_id: chatId,
     text,
+    // попередній перегляд вимкнено (посилання стрілкою без прев’ю)
     disable_web_page_preview: true,
-    ...(extra.parse_mode ? { parse_mode: extra.parse_mode } : {}),
-    ...(extra.reply_markup ? { reply_markup: extra.reply_markup } : {}),
   };
+  if (extra.parse_mode) body.parse_mode = extra.parse_mode; // <— ВАЖЛИВО
+  if (extra.reply_markup) body.reply_markup = extra.reply_markup;
+
   await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -66,7 +59,6 @@ export const TG = {
   mainKeyboard,
   ADMIN,
   energyLinks,
-  askLocationKeyboard,
   sendPlain,
   parseAiCommand,
 };
