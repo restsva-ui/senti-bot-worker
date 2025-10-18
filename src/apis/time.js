@@ -205,4 +205,4 @@ export function replyCurrentTime(env, lang = "uk") {
   const nowWord = phraseNow(lang);
   // додамо позначку TZ в дужках, щоб було зрозуміло
   return `${clockEmoji} ${nowWord} ${parts.time} (${tz}).`;
-} 
+}
