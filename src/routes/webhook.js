@@ -20,8 +20,9 @@ import {
 } from "../lib/tg.js";
 import { buildSystemHint } from "../lib/systemHint.js";
 import { handleIncomingMedia } from "../lib/media.js";
+import { getPreferredName, rememberNameFromText } from "../lib/profile.js";
 
-// ── Emoji + ім’я ─────────────────────────────────────────────────────────────
+// ── Emoji ────────────────────────────────────────────────────────────────────
 function guessEmoji(text = "") {
   const tt = text.toLowerCase();
   if (tt.includes("колес") || tt.includes("wheel")) return "🛞";
@@ -35,37 +36,6 @@ function guessEmoji(text = "") {
 function looksLikeEmojiStart(s = "") {
   try { return /^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(String(s)); }
   catch { return false; }
-}
-function tryParseUserNamedAs(text) {
-  const s = (text || "").trim();
-  const NAME_RX = "([A-Za-zÀ-ÿĀ-žЀ-ӿʼ'`\\-\\s]{2,30})";
-  const patterns = [
-    new RegExp(`\\bмене\\s+звати\\s+${NAME_RX}`, "iu"),
-    new RegExp(`\\bменя\\s+зовут\\s+${NAME_RX}`, "iu"),
-    new RegExp(`\\bmy\\s+name\\s+is\\s+${NAME_RX}`, "iu"),
-    new RegExp(`\\bich\\s+hei(?:s|ß)e\\s+${NAME_RX}`, "iu"),
-    new RegExp(`\\bje\\s+m'?appelle\\s+${NAME_RX}`, "iu"),
-  ];
-  for (const r of patterns) {
-    const m = s.match(r);
-    if (m?.[1]) return m[1].trim();
-  }
-  return null;
-}
-const PROFILE_NAME_KEY = (uid) => `profile:name:${uid}`;
-async function getPreferredName(env, msg) {
-  const uid = msg?.from?.id;
-  const kv = env?.STATE_KV;
-  let v = null;
-  try { v = await kv.get(PROFILE_NAME_KEY(uid)); } catch {}
-  if (v) return v;
-  return msg?.from?.first_name || msg?.from?.username || "друже";
-}
-async function rememberNameFromText(env, userId, text) {
-  const name = tryParseUserNamedAs(text);
-  if (!name) return null;
-  try { await env.STATE_KV.put(PROFILE_NAME_KEY(userId), name); } catch {}
-  return name;
 }
 
 // ── Анти-розкриття “я AI/LLM” та чистка підписів ────────────────────────────
@@ -182,7 +152,7 @@ export async function handleTelegramWebhook(req, env) {
       const mo = String(env.MODEL_ORDER || "").trim();
       const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY);
       const hasCF = !!(env.CLOUDFLARE_API_TOKEN && env.CF_ACCOUNT_ID);
-      const hasOR = !!env.OPENROUTER_API_KEY;
+      const hasOR = !!(env.OPENROUTER_API_KEY);
       const hasFreeBase = !!(env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL);
       const hasFreeKey = !!(env.FREE_LLM_API_KEY || env.FREE_API_KEY);
       const lines = [
