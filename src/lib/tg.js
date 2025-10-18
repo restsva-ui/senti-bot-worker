@@ -4,12 +4,20 @@ import { abs } from "../utils/url.js";
 export const BTN_DRIVE = "Google Drive";
 export const BTN_SENTI = "Senti";
 export const BTN_ADMIN = "Admin";
+export const BTN_LOCATION = "📍 Надіслати локацію";
 
 export const mainKeyboard = (isAdmin = false) => {
   const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
   if (isAdmin) rows.push([{ text: BTN_ADMIN }]);
   return { keyboard: rows, resize_keyboard: true };
 };
+
+// Одноразова клавіатура саме для запиту локації
+export const askLocationKeyboard = () => ({
+  keyboard: [[{ text: BTN_LOCATION, request_location: true }]],
+  resize_keyboard: true,
+  one_time_keyboard: true,
+});
 
 export const ADMIN = (env, userId) =>
   String(userId) === String(env.TELEGRAM_ADMIN_ID);
@@ -27,17 +35,12 @@ export function energyLinks(env, userId) {
   };
 }
 
-/**
- * Надсилає просте повідомлення в Telegram.
- * ПІДТРИМУЄ extra.parse_mode ("Markdown" | "HTML") + reply_markup.
- */
 export async function sendPlain(env, chatId, text, extra = {}) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
   const body = {
     chat_id: chatId,
     text,
     disable_web_page_preview: true,
-    ...(extra.parse_mode ? { parse_mode: extra.parse_mode } : {}),
     ...(extra.reply_markup ? { reply_markup: extra.reply_markup } : {}),
   };
   await fetch(url, {
@@ -58,7 +61,9 @@ export const TG = {
   BTN_DRIVE,
   BTN_SENTI,
   BTN_ADMIN,
+  BTN_LOCATION,
   mainKeyboard,
+  askLocationKeyboard,
   ADMIN,
   energyLinks,
   sendPlain,
