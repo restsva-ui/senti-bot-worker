@@ -40,7 +40,6 @@ const {
 } = TG;
 
 // ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
-// Мінімальний клієнт до Cloudflare AI: @cf/llama-3.2-11b-vision-instruct
 async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
   if (!env.CLOUDFLARE_API_TOKEN || !env.CF_ACCOUNT_ID) {
     throw new Error("CF credentials missing");
@@ -357,7 +356,7 @@ export async function handleTelegramWebhook(req, env) {
       const mo = String(env.MODEL_ORDER || "").trim();
       const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY);
       const hasCF = !!(env.CLOUDFLARE_API_TOKEN && env.CF_ACCOUNT_ID);
-      const hasOR = !!env.OPENROUTER_API_KEY;
+      const hasOR = !!(env.OPENROUTER_API_KEY);
       const hasFreeBase = !!(env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL);
       const hasFreeKey = !!(env.FREE_LLM_API_KEY || env.FREE_API_KEY);
       const lines = [
@@ -445,7 +444,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Кнопка Senti → НЕ вітатися; просто вимкнути Drive-режим і показати клавіатуру
+  // Кнопка Senti → вимкнути Drive-режим і показати клавіатуру
   if (textRaw === BTN_SENTI) {
     await setDriveMode(env, userId, false);
     const zeroWidth = "\u2063";
@@ -453,7 +452,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Медіа: якщо режим Drive УВІМКНЕНО → зберегти; інакше → Vision-опис
+  // Медіа: Drive або Vision
   try {
     const driveOn = await getDriveMode(env, userId);
     if (driveOn) {
@@ -467,43 +466,38 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // ── ШВИДКІ ІНТЕНТИ: дата/час/погода ───────────────────────────────────────
+  // ── ІНТЕНТИ: дата/час/погода (комбінована логіка) ─────────────────────────
   if (textRaw && !textRaw.startsWith("/")) {
-    // дата «сьогодні»
-    if (dateIntent(textRaw)) {
-      await sendPlain(env, chatId, replyCurrentDate(env, lang));
-      return json({ ok: true });
-    }
-    // дата «завтра» / «вчора»
-    if (tomorrowDateIntent(textRaw)) {
-      await sendPlain(env, chatId, replyTomorrowDate(env, lang));
-      return json({ ok: true });
-    }
-    if (yesterdayDateIntent(textRaw)) {
-      await sendPlain(env, chatId, replyYesterdayDate(env, lang));
-      return json({ ok: true });
-    }
-    // поточний час
-    if (timeIntent(textRaw)) {
-      await sendPlain(env, chatId, replyCurrentTime(env, lang));
-      return json({ ok: true });
-    }
-    // погода (простий інтерсептор)
-    if (weatherIntent(textRaw)) {
-      await safe(async () => {
-        const cur = await getEnergy(env, userId);
-        const need = Number(cur.costText ?? 1);
-        if ((cur.energy ?? 0) < need) {
-          const links = energyLinks(env, userId);
-          await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
-          return;
-        }
-        await spendEnergy(env, userId, need, "text");
+    const wantsDateToday = dateIntent(textRaw);
+    const wantsTomorrow  = tomorrowDateIntent(textRaw);
+    const wantsYesterday = yesterdayDateIntent(textRaw);
+    const wantsTimeNow   = timeIntent(textRaw);
+    const wantsWeather   = weatherIntent(textRaw);
 
-        // Спробуємо «по фразі». Якщо не знайдено міста — відповість відповідний текст із weather.js
-        const w = await weatherSummaryByPlace(env, textRaw, lang);
-        await sendPlain(env, chatId, w.text);
-      });
+    // Якщо у фразі є кілька інтендів — віддаємо всі, в логічному порядку:
+    if (wantsDateToday || wantsTomorrow || wantsYesterday || wantsTimeNow || wantsWeather) {
+      // 1) Дата/час — безкоштовно
+      if (wantsDateToday)  await sendPlain(env, chatId, replyCurrentDate(env, lang));
+      if (wantsTomorrow)   await sendPlain(env, chatId, replyTomorrowDate(env, lang));
+      if (wantsYesterday)  await sendPlain(env, chatId, replyYesterdayDate(env, lang));
+      if (wantsTimeNow)    await sendPlain(env, chatId, replyCurrentTime(env, lang));
+
+      // 2) Погода — з урахуванням енергії
+      if (wantsWeather) {
+        await safe(async () => {
+          const cur = await getEnergy(env, userId);
+          const need = Number(cur.costText ?? 1);
+          if ((cur.energy ?? 0) < need) {
+            const links = energyLinks(env, userId);
+            await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
+            return;
+          }
+          await spendEnergy(env, userId, need, "text");
+
+          const w = await weatherSummaryByPlace(env, textRaw, lang);
+          await sendPlain(env, chatId, w.text);
+        });
+      }
       return json({ ok: true });
     }
   }
