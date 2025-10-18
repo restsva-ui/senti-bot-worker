@@ -1,7 +1,7 @@
 // src/apis/weather.js
 //
 // Open-Meteo + розумний парсер міста.
-// Тепер БЕЗ клікабельного посилання: у кінці лише символ стрілочки ↗︎ (plain-text).
+// Відповідь містить короткий текст і мінімалістичну клікабельну стрілку ↗︎ (HTML).
 
 const OM_GEOCODE = "https://geocoding-api.open-meteo.com/v1/search";
 const OM_FORECAST = "https://api.open-meteo.com/v1/forecast";
@@ -11,7 +11,7 @@ function normalizePlace(raw = "") {
   let s = String(raw || "").trim();
 
   // прибираємо лапки/зайві пробіли/хвостову пунктуацію
-  s = s.replace(/[«»“”"’']/g, "").replace(/\s+/g, " ").replace(/[.,;:!?]$/g, "");
+  s = s.replace(/[«»“”"']/g, "").replace(/\s+/g, " ").replace(/[.,;:!?]$/g, "");
 
   // прибираємо початкові прийменники: "в/у/у місті/in/at/en/bei/à/au/aux/..."
   s = s.replace(/^(?:в|у|у\s+місті|в\s+місті|в\s+городе|у\s+городі|in|at|en|bei|in der|im|à|au|aux)\s+/iu, "");
@@ -33,35 +33,34 @@ function normalizePlace(raw = "") {
   return s;
 }
 
-/** Витягнути місто з фрази (багатомовно, бере «останній сегмент після in/в/у» і ріже слова типу today/heute/сьогодні) */
+/** Витягнути місто з фрази (багатомовно, бере «останній сегмент після in/в/у/à/…» і ріже слова типу today/heute/сьогодні/demain) */
 function parsePlaceFromText(text = "") {
-  let s = String(text || "").trim();
+  const s = String(text || "").trim();
 
-  // загальний хук на "погода/weather/wetter/météo" — якщо є, беремо все після неї
-  const m = s.match(/(?:погода|погоду|погоди|weather|wetter|météo)\s+(.*)$/i);
+  // загальний хук на "погода/weather/wetter/météo/meteo/temps"
+  const m = s.match(/(?:погода|погоду|погоди|weather|wetter|m[ée]t[ée]o|meteo|temps)\s+(.*)$/i);
   let chunk = m?.[1] || s;
 
-  // якщо є " in/в/у " — беремо частину ПІСЛЯ останнього входження
+  // якщо є " in/в/у/à/au/en/bei " — беремо частину ПІСЛЯ останнього входження
   const split = chunk.split(/\s(?:in|at|en|bei|à|au|aux|в|у)\s/i);
   if (split.length > 1) chunk = split[split.length - 1];
 
   // прибираємо слова часу
   chunk = chunk
-    .replace(/\b(сьогодні|сегодня|today|heute|aujourd'hui|oggi|now|jetzt|maintenant)\b/ig, "")
+    .replace(/\b(сьогодні|сегодня|today|heute|aujourd'?hui|oggi|demain|tomorrow|morgen)\b/ig, "")
     .trim();
-
-  // прибираємо залишкові знаки/лапки
-  chunk = chunk.replace(/[«»“”"’']/g, "").replace(/[.,;:!?]$/g, "");
 
   return chunk ? normalizePlace(chunk) : null;
 }
 
 /** Intent на погоду */
 export function weatherIntent(text = "") {
-  return /(погод|weather|wetter|météo)/i.test(String(text || "").toLowerCase());
+  const s = String(text || "").toLowerCase();
+  // ширший набір ключових слів, включно з FR "temps" і "meteo"
+  return /(погод|weather|wetter|météo|meteo|temps)/i.test(s);
 }
 
-/** Геокодер Open-Meteо */
+/** Геокодер Open-Meteo */
 async function geocode(place, lang = "uk") {
   const url = `${OM_GEOCODE}?name=${encodeURIComponent(place)}&count=5&language=${encodeURIComponent(lang)}&format=json`;
   const r = await fetch(url);
@@ -97,12 +96,12 @@ function summarizeWeather(json, lang = "uk") {
   let icon = "🌤️";
   let desc = { uk: "хмарно з проясненнями", ru: "переменная облачность", en: "partly cloudy", de: "wolkig", fr: "nuageux" };
   const W = Number(code);
-  if ([0].includes(W))                   { icon = "☀️"; desc = {uk:"сонячно",ru:"солнечно",en:"sunny",de:"sonnig",fr:"ensoleillé"}; }
-  else if ([45,48].includes(W))          { icon = "🌫️"; desc = {uk:"туман",ru:"туман",en:"fog",de:"Nebel",fr:"brouillard"}; }
-  else if ([51,53,55,56,57].includes(W)) { icon = "🌦️"; desc = {uk:"мряка/дощ",ru:"морось/дождь",en:"drizzle/rain",de:"Niesel/Regen",fr:"bruine/pluie"}; }
+  if ([0].includes(W))                 { icon = "☀️"; desc = {uk:"сонячно",ru:"солнечно",en:"sunny",de:"sonnig",fr:"ensoleillé"}; }
+  else if ([45,48].includes(W))        { icon = "🌫️"; desc = {uk:"туман",ru:"туман",en:"fog",de:"Nebel",fr:"brouillard"}; }
+  else if ([51,53,55,56,57].includes(W)){ icon = "🌦️"; desc = {uk:"мряка/дощ",ru:"морось/дождь",en:"drizzle/rain",de:"Niesel/regen",fr:"bruine/pluie"}; }
   else if ([61,63,65,80,81,82].includes(W)){ icon = "🌧️"; desc = {uk:"дощ",ru:"дождь",en:"rain",de:"Regen",fr:"pluie"}; }
   else if ([71,73,75,77,85,86].includes(W)){ icon = "❄️"; desc = {uk:"сніг",ru:"снег",en:"snow",de:"Schnee",fr:"neige"}; }
-  else if ([95,96,99].includes(W))       { icon = "⛈️"; desc = {uk:"гроза",ru:"гроза",en:"thunderstorm",de:"Gewitter",fr:"orage"}; }
+  else if ([95,96,99].includes(W))     { icon = "⛈️"; desc = {uk:"гроза",ru:"гроза",en:"thunderstorm",de:"Gewitter",fr:"orage"}; }
 
   const d = (m) => (desc[m] || desc.uk);
   return `${icon} ${d(lang.slice(0,2)) || d("uk")}. Температура близько ${Math.round(curT)}°C. Вітер ${Math.round(wind)} м/с.`;
@@ -119,9 +118,10 @@ export async function weatherSummaryByCoords(lat, lon, lang = "uk") {
 
   const text = summarizeWeather(data, lang);
 
-  // Тільки символ стрілочки без жодного посилання
-  const arrow = "↗︎";
-  return { text: `${text}\n${arrow}`, mode: null, timezone: data.timezone || "UTC" };
+  // Надійне посилання на погодний сайт (не карти). Meteoblue за координатами.
+  const wx = `https://www.meteoblue.com/en/weather/week/coordinates?lat=${lat}&lon=${lon}`;
+  const arrow = `<a href="${wx}">↗︎</a>`;   // мінімалістична клікабельна стрілка
+  return { text: `${text}\n${arrow}`, mode: "HTML", timezone: data.timezone || "UTC" };
 }
 
 /** Прогноз за назвою міста (витягуємо з фрази) */
@@ -136,10 +136,8 @@ export async function weatherSummaryByPlace(env, userText, lang = "uk") {
   const { latitude: lat, longitude: lon, name } = best;
 
   const out = await weatherSummaryByCoords(lat, lon, lang);
-  // природне введення міста: "У Києві: ..."
-  const pre = { uk: "У", ru: "В", en: "In", de: "In", fr: "À" }[(lang || "uk").slice(0,2)] || "У";
-  const header = `${pre} ${name}:`;
-  return { text: `${header} ${out.text}`, mode: out.mode, timezone: out.timezone };
+  const pre = { uk: "У", ru: "В", en: "In", de: "In", fr: "À" }[lang.slice(0,2)] || "У";
+  return { text: out.text.replace(/^([^\s]+)/, `$1 ${pre} ${name}`), mode: out.mode, timezone: out.timezone };
 }
 
 export default {
