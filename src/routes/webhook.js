@@ -2,18 +2,13 @@
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
-import { abs } from "../utils/url.js";
 import { think } from "../lib/brain.js";
-import { readStatut } from "../lib/kvChecklist.js";
 import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
 import { json } from "../lib/utils.js";
 import { getEnergy, spendEnergy } from "../lib/energy.js";
-import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
-import { loadSelfTune } from "../lib/selfTune.js";
+import { pushTurn } from "../lib/dialogMemory.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
-
-// імпортуємо TG-хелпери з модуля (прибираємо дублювання)
 import {
   BTN_DRIVE,
   BTN_SENTI,
@@ -24,6 +19,7 @@ import {
   sendPlain,
   parseAiCommand,
 } from "../lib/tg.js";
+import { buildSystemHint } from "../lib/systemHint.js";
 
 // ── Media ────────────────────────────────────────────────────────────────────
 function pickPhoto(msg) {
@@ -82,38 +78,22 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const url = await tgFileUrl(env, att.file_id);
   const saved = await driveSaveFromUrl(env, userId, url, att.name);
   await sendPlain(env, chatId, `✅ ${t(lang, "saved_to_drive")}: ${saved?.name || att.name}`, {
-    reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: "https://drive.google.com/drive/my-drive" }]] },
+    reply_markup: {
+      inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: "https://drive.google.com/drive/my-drive" }]],
+    },
   });
   return true;
 }
 
-// ── SystemHint ───────────────────────────────────────────────────────────────
-async function buildSystemHint(env, chatId, userId) {
-  const statut = String((await readStatut(env)) || "").trim();
-  const dlg = await buildDialogHint(env, userId);
-  const tune = await loadSelfTune(env, chatId);
-
-  const core = `You are Senti — a thoughtful, self-improving assistant and companion.
-- Never claim to be an AI, model, chatbot, or a product made by any company.
-- Speak naturally and human-like with warmth and clarity.
-- Prefer concise, practical answers; expand only when asked.`;
-
-  const blocks = [core];
-  if (statut) blocks.push(`[Статут/чеклист]\n${statut}`);
-  if (tune) blocks.push(`[Self-Tune]\n${tune}`);
-  if (dlg) blocks.push(dlg);
-  return blocks.length ? blocks.join("\n\n") : "";
-}
-
 // ── Emoji + ім’я ─────────────────────────────────────────────────────────────
 function guessEmoji(text = "") {
-  const t = text.toLowerCase();
-  if (t.includes("колес") || t.includes("wheel")) return "🛞";
-  if (t.includes("дзеркал") || t.includes("зеркал") || t.includes("mirror")) return "🪞";
-  if (t.includes("машин") || t.includes("авто") || t.includes("car")) return "🚗";
-  if (t.includes("вода") || t.includes("рідина") || t.includes("water")) return "💧";
-  if (t.includes("світл") || t.includes("light") || t.includes("солнц")) return "☀️";
-  if (t.includes("електр") || t.includes("струм") || t.includes("current")) return "⚡";
+  const tt = text.toLowerCase();
+  if (tt.includes("колес") || tt.includes("wheel")) return "🛞";
+  if (tt.includes("дзеркал") || tt.includes("зеркал") || tt.includes("mirror")) return "🪞";
+  if (tt.includes("машин") || tt.includes("авто") || tt.includes("car")) return "🚗";
+  if (tt.includes("вода") || tt.includes("рідина") || tt.includes("water")) return "💧";
+  if (tt.includes("світл") || tt.includes("light") || tt.includes("солнц")) return "☀️";
+  if (tt.includes("електр") || tt.includes("струм") || tt.includes("current")) return "⚡";
   return "💡";
 }
 function looksLikeEmojiStart(s = "") {
@@ -152,7 +132,7 @@ async function rememberNameFromText(env, userId, text) {
   return name;
 }
 
-// ── Анти-”я AI/LLM” + чистка підписів ───────────────────────────────────────
+// ── Анти-розкриття “я AI/LLM” та чистка підписів ────────────────────────────
 function revealsAiSelf(out = "") {
   const s = out.toLowerCase();
   return (
@@ -338,9 +318,9 @@ export async function handleTelegramWebhook(req, env) {
     await safe(async () => {
       const ut = await getUserTokens(env, userId);
       await setDriveMode(env, userId, true);
-      const zeroWidth = "\u2063";
+      const zeroWidth = "\u2063"; // невидимий символ
       if (!ut?.refresh_token) {
-        const authUrl = abs(env, `/auth/start?u=${userId}`);
+        const authUrl = `${env.__ABS__ || ""}/auth/start?u=${userId}`; // fallback якщо abs у tg.js
         await sendPlain(env, chatId, zeroWidth, {
           reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: authUrl }]] },
         });
