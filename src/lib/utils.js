@@ -1,52 +1,41 @@
+// src/lib/utils.js
+
+/** JSON-відповідь (з правильним content-type) */
 export function json(data, init = {}) {
-  return new Response(JSON.stringify(data), {
-    headers: { "content-type": "application/json; charset=utf-8" },
-    ...init,
-  });
+  const body = typeof data === "string" ? data : JSON.stringify(data);
+  const headers = new Headers(init.headers || {});
+  if (!headers.has("content-type")) {
+    headers.set("content-type", "application/json; charset=utf-8");
+  }
+  return new Response(body, { ...init, headers });
 }
 
-export async function sendMessage(env, chatId, text, extra = {}) {
-  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
-  const body = { chat_id: chatId, text, parse_mode: "Markdown", disable_web_page_preview: true, ...extra };
-  try {
-    await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  } catch (_) {}
+/** Текстова відповідь */
+export function text(str, init = {}) {
+  const headers = new Headers(init.headers || {});
+  if (!headers.has("content-type")) {
+    headers.set("content-type", "text/plain; charset=utf-8");
+  }
+  return new Response(String(str), { ...init, headers });
 }
 
-export async function logReply(env, chatId) {
-  try {
-    await env.STATE_KV.put(`last-reply:${chatId}`, new Date().toISOString(), { expirationTtl: 60 * 60 * 24 });
-  } catch (_) {}
+/** Обгортка з таймаутом для будь-якого проміса */
+export function withTimeout(promise, ms = 8000) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout exceeded")), ms)),
+  ]);
 }
 
-export async function isOwner(env, fromId) {
+/** Безпечний fetch з таймаутом; при збої повертає null */
+export async function safeFetch(input, init = {}, ms = 8000) {
   try {
-    const raw = String(env.OWNER_ID ?? "").trim();
-    if (!raw) return false;
-    const list = raw.split(",").map((s) => s.trim()).filter(Boolean);
-    return list.includes(String(fromId).trim());
+    return await withTimeout(fetch(input, init), ms);
   } catch {
-    return false;
+    return null;
   }
 }
 
-// автологування прапорець у STATE_KV
-const AUTOLOG_KEY = "autolog:enabled";
-
-export async function getAutolog(env) {
-  try {
-    const v = await env.STATE_KV.get(AUTOLOG_KEY);
-    return v === "1";
-  } catch {
-    return false;
-  }
-}
-
-export async function setAutolog(env, on) {
-  try {
-    await env.STATE_KV.put(AUTOLOG_KEY, on ? "1" : "0", { expirationTtl: 60 * 60 * 24 * 365 });
-    return true;
-  } catch {
-    return false;
-  }
-}
+export const ok = (data) => json({ ok: true, ...data });
+export const err = (message = "error", code = 500) =>
+  json({ ok: false, error: String(message) }, { status: code });
