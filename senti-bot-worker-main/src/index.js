@@ -27,79 +27,32 @@ import { handleBrainApi } from "./routes/brainApi.js";
 import { handleAiTrain } from "./routes/aiTrain.js";
 import { handleAiEvolve } from "./routes/aiEvolve.js";
 import { handleBrainPromote } from "./routes/brainPromote.js";
-import { handleAdminEnergy } from "./routes/adminEnergy.js";
-import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
-import { handleAdminEditor } from "./routes/adminEditor.js";
-// ✅ новий повноцінний KV Editor (UI + API)
-import { handleAdminKv } from "./routes/admin-kv.js";
-// ✅ коректний роут Vision API
-import { handleVisionApi } from "./routes/visionApi.js";
+import { handleAdminEnergy } from "./routes/adminEnergy.js"; // energy UI/API
+import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js"; // ← ДОДАНО
 
+// ✅ локальний selftest
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
 
+// ✅ фолбеки /api/brain/*
 import {
   fallbackBrainCurrent,
   fallbackBrainList,
   fallbackBrainGet,
 } from "./routes/brainFallbacks.js";
 
+// home
 import { home } from "./ui/home.js";
+
+// ✅ нічні авто-поліпшення (CRON-варіант)
 import { nightlyAutoImprove } from "./lib/autoImprove.js";
+
+// ✅ self-regulation
 import { runSelfRegulation } from "./lib/selfRegulate.js";
+
+// ✅ HTTP-роутер нічного агента + debug (/ai/improve*, /debug/*)
 import { handleAiImprove } from "./routes/aiImprove.js";
 
-const VERSION = "senti-worker-2025-10-15-21-58+admin-kv+codekv+vision";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// KV helpers for code storage (read/write/list)
-
-function pickKVByNs(env, ns) {
-  // ns: "STATE" | "CODE" | "ARCHIVE"
-  const n = String(ns || "").toUpperCase();
-  if (n === "CODE") return env.CODE_KV || null;
-  if (n === "ARCHIVE") return env.ARCHIVE_KV || null;
-  if (n === "STATE") return env.STATE_KV || null;
-  // default: old behavior (CODE_KV first, then STATE_KV)
-  return env.CODE_KV || env.STATE_KV || null;
-}
-
-function codeKV(env, nsParam) {
-  return pickKVByNs(env, nsParam) || env.CODE_KV || env.STATE_KV;
-}
-
-function normalizeCodeKey(path, { raw = false } = {}) {
-  const p = String(path || "");
-  if (raw) return p;
-  return p.startsWith("code:") ? p : `code:${p}`;
-}
-
-async function codeGet(env, path, { ns, raw } = {}) {
-  const kv = codeKV(env, ns);
-  if (!kv) return null;
-  const key = normalizeCodeKey(path, { raw });
-  return await kv.get(key, "text");
-}
-
-async function codePut(env, path, content, { ns, raw } = {}) {
-  const kv = codeKV(env, ns);
-  if (!kv) throw new Error("KV not configured");
-  const key = normalizeCodeKey(path, { raw });
-  await kv.put(key, content, { metadata: { path, ts: Date.now() } });
-  return true;
-}
-
-async function codeList(env, { ns, prefix, raw } = {}) {
-  const kv = codeKV(env, ns);
-  if (!kv?.list) return [];
-  // Якщо не raw — додаємо 'code:' до префікса (для консистентності)
-  const pref = prefix ? normalizeCodeKey(prefix, { raw }) : normalizeCodeKey("", { raw });
-  const it = await kv.list({ prefix: pref });
-  return (it?.keys || []).map((k) => ({
-    key: k.name,
-    ts: k?.metadata?.ts || null,
-  }));
-}
-// ─────────────────────────────────────────────────────────────────────────────
+const VERSION = "senti-worker-2025-10-12-00-59+aiimprove-router";
 
 export default {
   async fetch(req, env) {
@@ -113,6 +66,7 @@ export default {
       return preflight();
     }
 
+    // version beacon
     if (p === "/_version") {
       return json({ ok: true, version: VERSION, entry: "src/index.js" }, 200, CORS);
     }
@@ -140,12 +94,6 @@ export default {
 
       if (p === "/webhook" && method === "GET") {
         return json({ ok: true, method: "GET", message: "webhook alive" }, 200, CORS);
-      }
-
-      // ✅ Vision API (POST /api/vision?s=SECRET)
-      if (p.startsWith("/api/vision")) {
-        const r = await handleVisionApi?.(req, env, url);
-        if (r) return r;
       }
 
       // brain state
@@ -191,7 +139,7 @@ export default {
         return json(res, 200, CORS);
       }
 
-      // cron evolve
+      // cron evolve (manual trigger)
       if (p === "/cron/evolve") {
         if (req.method !== "GET" && req.method !== "POST") {
           return json({ ok: false, error: "method not allowed" }, 405, CORS);
@@ -207,7 +155,7 @@ export default {
         return json({ ok: true, note: "evolve triggered" }, 200, CORS);
       }
 
-      // cron auto-improve
+      // cron auto-improve (CRON path keeps lib variant)
       if (p === "/cron/auto-improve") {
         if (req.method !== "GET" && req.method !== "POST") {
           return json({ ok: false, error: "method not allowed" }, 405, CORS);
@@ -222,14 +170,14 @@ export default {
         return json({ ok: true, ...res }, 200, CORS);
       }
 
-      // /ai/improve* і /debug/*
+      // ✅ /ai/improve* та ✅ /debug/* — віддаємо у routes/aiImprove.js
       if (p.startsWith("/ai/improve") || p.startsWith("/debug/")) {
         const r = await handleAiImprove?.(req, env, url);
         if (r) return r;
         return json({ ok: false, error: "aiImprove router missing" }, 500, CORS);
       }
 
-      // on-demand self-regulation
+      // on-demand self-regulation (без аналізу)
       if (p === "/ai/self-regulate") {
         if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
           return json({ ok: false, error: "unauthorized" }, 401, CORS);
@@ -253,21 +201,8 @@ export default {
       }
 
       // --- ADMIN ---
-
-      // ✅ 0) Новий KV Editor (повноцінний UI + API)
-      if (p.startsWith("/admin/kv")) {
-        const r = await handleAdminKv?.(req, env, url);
-        if (r && r.status !== 404) return r;
-      }
-
-      // 0.1) Старий /admin/editor (залишаємо як опціональний)
-      if (p.startsWith("/admin/editor")) {
-        const r = await handleAdminEditor?.(req, env, url);
-        if (r && r.status !== 404) return r;
-      }
-
-      // 1) Checklist + Energy
-      if (p.startsWith("/admin/checklist/with-energy")) {
+      // 1) Комбінована сторінка: Checklist + Energy (ifrаme)
+      if (p.startsWith("/admin/checklist/with-energy")) { // ← ДОДАНО
         try {
           const r = await handleAdminChecklistWithEnergy?.(req, env, url);
           if (r && r.status !== 404) return r;
@@ -275,7 +210,7 @@ export default {
         return html("<h3>Checklist + Energy</h3><p>Fallback UI.</p>");
       }
 
-      // 2) Checklist
+      // 2) Звичайний Checklist
       if (p.startsWith("/admin/checklist")) {
         try {
           const r = await handleAdminChecklist?.(req, env, url);
@@ -306,7 +241,7 @@ export default {
       if (p.startsWith("/admin/brain")) {
         try {
           const r = await handleAdminBrain?.(req, env, url);
-          if (r && r.status !== 404) return r;
+          if (r && r.status !== 404) return r; // ← виправлено (було кириличне 'р')
         } catch {}
         return json({ ok: true, note: "admin brain fallback" }, 200, CORS);
       }
@@ -319,51 +254,6 @@ export default {
         } catch {}
         return json({ ok: true, note: "admin energy fallback" }, 200, CORS);
       }
-
-      // ────────────────────────────────────────────────────────────────────
-      // Simple KV-backed code repo API (list/get/put)
-      if (p === "/admin/api/list") {
-        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
-          return json({ ok: false, error: "unauthorized" }, 401, CORS);
-        }
-        const ns = url.searchParams.get("ns");           // STATE|CODE|ARCHIVE (опціонально)
-        const prefix = url.searchParams.get("prefix") || "";
-        const raw = url.searchParams.get("raw") === "1"; // якщо 1 — не додаємо 'code:'
-        const items = await codeList(env, { ns, prefix, raw });
-        return json({ ok: true, items }, 200, CORS);
-      }
-
-      if (p === "/admin/api/get") {
-        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
-          return json({ ok: false, error: "unauthorized" }, 401, CORS);
-        }
-        const ns = url.searchParams.get("ns");
-        const raw = url.searchParams.get("raw") === "1";
-        const path = url.searchParams.get("path") || "";
-        if (!path) return json({ ok: false, error: "path required" }, 400, CORS);
-        const value = await codeGet(env, path, { ns, raw });
-        return json({ ok: true, path, value }, 200, CORS);
-      }
-
-      if (p === "/admin/api/put") {
-        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
-          return json({ ok: false, error: "unauthorized" }, 401, CORS);
-        }
-        if (method !== "POST") {
-          return json({ ok: false, error: "method not allowed" }, 405, CORS);
-        }
-        const ns = url.searchParams.get("ns");
-        const raw = url.searchParams.get("raw") === "1";
-        const path = url.searchParams.get("path") || "";
-        if (!path) return json({ ok: false, error: "path required" }, 400, CORS);
-        const bodyText = await req.text();
-        if (!bodyText?.length) {
-          return json({ ok: false, error: "empty body" }, 400, CORS);
-        }
-        await codePut(env, path, bodyText, { ns, raw });
-        return json({ ok: true, saved: true, path, bytes: bodyText.length }, 200, CORS);
-      }
-      // ────────────────────────────────────────────────────────────────────
 
       // webhook POST
       if (p === "/webhook" && req.method === "POST") {
@@ -381,18 +271,24 @@ export default {
       // tg helpers
       if (p === "/tg/get-webhook") {
         const r = await TG.getWebhook(env.BOT_TOKEN);
-        return new Response(await r.text(), { headers: { "content-type": "application/json" } });
+        return new Response(await r.text(), {
+          headers: { "content-type": "application/json" },
+        });
       }
       if (p === "/tg/set-webhook") {
         const target = abs(env, "/webhook");
         const r = await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
-        return new Response(await r.text(), { headers: { "content-type": "application/json" } });
+        return new Response(await r.text(), {
+          headers: { "content-type": "application/json" },
+        });
       }
       if (p === "/tg/del-webhook") {
         const r =
           (await TG.deleteWebhook?.(env.BOT_TOKEN)) ||
           (await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteWebhook`));
-        return new Response(await r.text(), { headers: { "content-type": "application/json" } });
+        return new Response(await r.text(), {
+          headers: { "content-type": "application/json" },
+        });
       }
 
       // ci deploy
@@ -443,12 +339,17 @@ export default {
           expiry: Math.floor(Date.now() / 1000) + (d.expires_in || 3600) - 60,
         };
         await putUserTokens(env, state.u, tokens);
-        return html(`<h3>✅ Готово</h3><p>Тепер повернись у Telegram і натисни <b>Google Drive</b> ще раз.</p>`);
+        return html(
+          `<h3>✅ Готово</h3><p>Тепер повернись у Telegram і натисни <b>Google Drive</b> ще раз.</p>`
+        );
       }
 
       // not found
       try {
-        await appendChecklist(env, `[miss] ${new Date().toISOString()} ${req.method} ${p}${url.search}`);
+        await appendChecklist(
+          env,
+          `[miss] ${new Date().toISOString()} ${req.method} ${p}${url.search}`
+        );
       } catch {}
       return json({ ok: false, error: "Not found", path: p }, 404, CORS);
     } catch (e) {
@@ -468,24 +369,33 @@ export default {
         await handleAiEvolve?.(req, env, u);
       }
     } catch (e) {
-      await appendChecklist(env, `[${new Date().toISOString()}] evolve_auto:error ${String(e)}`);
+      await appendChecklist(
+        env,
+        `[${new Date().toISOString()}] evolve_auto:error ${String(e)}`
+      );
     }
 
     // 2) Нічні авто-поліпшення + self-regulation
     try {
       const hour = new Date().getUTCHours();
-      const targetHour = Number(env.NIGHTLY_UTC_HOUR ?? 2);
+      const targetHour = Number(env.NIGHTLY_UTC_HOUR ?? 2); // дефолт 02:00 UTC
       const runByCron = event && event.cron === "10 2 * * *";
       const runByHour = hour === targetHour;
 
-      if (String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" && (runByCron || runByHour)) {
+      if (
+        String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" &&
+        (runByCron || runByHour)
+      ) {
         const res = await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
         if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
           await runSelfRegulation(env, res?.insights || null).catch(() => {});
         }
       }
     } catch (e) {
-      await appendChecklist(env, `[${new Date().toISOString()}] auto_improve:error ${String(e)}`);
+      await appendChecklist(
+        env,
+        `[${new Date().toISOString()}] auto_improve:error ${String(e)}`
+      );
     }
   },
 };
