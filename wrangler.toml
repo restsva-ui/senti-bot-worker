@@ -5,61 +5,69 @@ compatibility_date = "2024-08-20"
 node_compat = true
 workers_dev = true
 
-# ---------- KV namespaces ----------
-# ⚠️ Підстав свої ID з Cloudflare Dashboard (Workers → KV → Namespace → "View bindings/ID").
+# ---------- KV namespaces (твоя конфігурація) ----------
 
+# Дедуплікація апдейтів/подій
 [[kv_namespaces]]
 binding = "DEDUP_KV"
-id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"        # <-- твій ID
+id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
 
+# OAuth технічне сховище (сервісне)
 [[kv_namespaces]]
 binding = "OAUTH_KV"
-id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"        # <-- твій ID
+id = "e2a8d3941b4e41728318781e739a4d47"
 
+# Стейт користувачів/сесій
 [[kv_namespaces]]
 binding = "STATE_KV"
-id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"        # <-- твій ID
+id = "7b32e2d1f60846ddb1c653eb52180bf7"
 
+# ToDo/Checklist (у тебе одна й та сама namespace використовується і як CHECKLIST_KV, і як TODO_KV)
 [[kv_namespaces]]
 binding = "TODO_KV"
-id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"        # <-- твій ID
+id = "497eac980691495ea2a0bc8611892d65"
 
+# Персональні OAuth токени користувачів
 [[kv_namespaces]]
 binding = "USER_OAUTH_KV"
-id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"        # <-- твій ID
+id = "470d4f5c164a4a828c569eb9a52a5133"
 
+# Checklist / Repo-архіви / утиліти (той самий ID що й у TODO_KV)
 [[kv_namespaces]]
 binding = "CHECKLIST_KV"
-id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"        # <-- твій ID
+id = "497eac980691495ea2a0bc8611892d65"
 
+# Лайки/реакції
 [[kv_namespaces]]
 binding = "LIKES_KV"
-id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"        # <-- твій ID
+id = "f7d480c281ad47d2bdf270fadf4de021"
 
+# Логи енергії
 [[kv_namespaces]]
 binding = "ENERGY_LOG_KV"
-id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"        # <-- твій ID
+id = "9e6f0ed5bf2544a9a63d57455900a844"
 
+# Діалоги (історія)
 [[kv_namespaces]]
 binding = "DIALOG_KV"
-id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"        # <-- твій ID
+id = "63c0d1e0962a419ca54082893410b28e"
 
-# ✅ НОВЕ: черга матеріалів для самонавчання
+# НОВЕ: черга матеріалів для самонавчання
 [[kv_namespaces]]
 binding = "LEARN_QUEUE_KV"
-id = "86a54c59ce674a558780c58bf1a47dfd"        # <-- твій новий ID (знімок екрана)
+id = "86a54c59ce674a558780c58bf1a47dfd"
 
-# ---------- Environment variables ----------
+# ---------- ENV змінні (залиш як у тебе, тут — приклад) ----------
 [vars]
 # Telegram
 BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
 TELEGRAM_ADMIN_ID = "784869835"
-WEBHOOK_SECRET = "****"
+WEBHOOK_SECRET = "***"
 
-# Локаль/час
+# Час/мова за замовчуванням
 TIMEZONE = "Europe/Kyiv"
 
-# Діагностика/маршрутизація моделей
+# Маршрутизація моделей
 DIAG_TAGS = "on"
 MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -68,9 +76,9 @@ FREE_API_BASE_URL = "https://openrouter.ai/api"
 FREE_API_MODEL = "meta-llama/llama-4-scout:free"
 FREE_API_PATH = "/v1/chat/completions"
 
-# Самоудосконалення/нічні задачі
+# Нічні/фонові задачі
 AUTO_IMPROVE = "on"
-NIGHTLY_UTC_HOUR = "23"          # коли запускати нічного агента (UTC)
+NIGHTLY_UTC_HOUR = "23"
 SELF_REGULATE = "on"
 SELF_TUNING_FACTOR = "0.3"
 
@@ -81,15 +89,10 @@ ENERGY_COST_TEXT = "1"
 ENERGY_COST_IMAGE = "5"
 ENERGY_LOW_THRESHOLD = "10"
 
-# Cloudflare AI (якщо використовуєш)
+# (опційно) CF AI
 CF_ACCOUNT_ID = "YOUR_CF_ACCOUNT_ID"
 CLOUDFLARE_API_TOKEN = "YOUR_CF_AI_TOKEN"
 
-# ---------- Triggers (нічний агент) ----------
+# ---------- Крон для нічного агента ----------
 [triggers]
-crons = ["0 23 * * *"]  # кожного дня о 23:00 UTC
-
-# ---------- Dev/Prod секції (за бажанням) ----------
-# [env.dev.vars]
-# [env.production.vars]
-# Можеш дублювати змінні, якщо треба різні значення для середовищ.
+crons = ["0 23 * * *"]
