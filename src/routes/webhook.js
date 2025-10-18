@@ -15,14 +15,13 @@ import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
 
 // 🔹 нове: зовнішній API погоди
-import {
-  weatherIntent,
-  weatherSummaryByPlace,
-  weatherSummaryByCoords
-} from "../apis/weather.js";
+import { parseWeatherQuery, weatherByCity } from "../apis/weather.js";
 
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
 const { BTN_DRIVE, BTN_SENTI, BTN_ADMIN, mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand } = TG;
+
+// За замовчуванням — коректна IANA таймзона Києва (автоматично враховує UTC+2/UTC+3)
+const DEFAULT_TZ = "Europe/Kyiv";
 
 // ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
 async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
@@ -154,7 +153,6 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   }
   return true;
 }
-
 // ── SystemHint ───────────────────────────────────────────────────────────────
 async function buildSystemHint(env, chatId, userId) {
   const statut = String((await readStatut(env)) || "").trim();
@@ -297,7 +295,6 @@ ${control}`;
   const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
 }
-
 // ── MAIN ────────────────────────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "POST") {
@@ -338,7 +335,7 @@ export async function handleTelegramWebhook(req, env) {
       const mo = String(env.MODEL_ORDER || "").trim();
       const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY);
       const hasCF = !!(env.CLOUDFLARE_API_TOKEN && env.CF_ACCOUNT_ID);
-      const hasOR = !!env.OPENROUTER_API_KEY;
+      const hasOR = !!(env.OPENROUTER_API_KEY);
       const hasFreeBase = !!(env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL);
       const hasFreeKey = !!(env.FREE_LLM_API_KEY || env.FREE_API_KEY);
       const lines = [
@@ -434,9 +431,9 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // 🔹 Намір "погода" — до будь-якого LLM
-  const wIntent = weatherIntent(textRaw);
-  if (wIntent || msg?.location) {
+  // 🔹 РАННІЙ ХЕНДЛЕР ПОГОДИ (багатомовний, з енергетикою)
+  const askedCity = parseWeatherQuery(textRaw);
+  if (askedCity) {
     await safe(async () => {
       const cur = await getEnergy(env, userId);
       const need = Number(cur.costText ?? 1);
@@ -447,28 +444,15 @@ export async function handleTelegramWebhook(req, env) {
       }
       await spendEnergy(env, userId, need, "weather");
 
-      if (msg?.location?.latitude && msg?.location?.longitude) {
-        const lat = msg.location.latitude;
-        const lon = msg.location.longitude;
-        const summary = await weatherSummaryByCoords({ lat, lon, label: t(lang, "your_location") || "your location", lang });
-        if (summary) { await sendPlain(env, chatId, `🌤️ ${summary}`); return; }
-      }
-
-      if (wIntent?.place) {
-        const summary = await weatherSummaryByPlace(wIntent.place, lang);
-        if (summary) { await sendPlain(env, chatId, `🌤️ ${summary}`); return; }
-        await sendPlain(env, chatId, "❌ Не знайшов такого міста. Надішли геолокацію або спробуй іншу назву.");
-        return;
-      }
-
-      await sendPlain(env, chatId, "📍 Надішли геолокацію або напиши: `/weather Київ`", {
-        reply_markup: { inline_keyboard: [[{ text: "Надіслати геолокацію", request_location: true }]] }
-      });
+      const city = askedCity || env.DEFAULT_CITY || "Kyiv";
+      const res = await weatherByCity(city, lang);
+      if (!res) { await sendPlain(env, chatId, "❌ Не знайшов такого міста."); return; }
+      const localDate = new Intl.DateTimeFormat(lang, { timeZone: res.timezone, dateStyle: "long" }).format(new Date());
+      await sendPlain(env, chatId, `☀️ ${res.city}: ${res.text}\n🗓 ${localDate} (${res.timezone})`);
     });
     return json({ ok: true });
   }
-
-  // Медіа: якщо режим Drive УВІМКНЕНО → зберегти; інакше → Vision-опис
+// Медіа: якщо режим Drive УВІМКНЕНО → зберегти; інакше → Vision-опис
   try {
     const driveOn = await getDriveMode(env, userId);
     if (driveOn) {
