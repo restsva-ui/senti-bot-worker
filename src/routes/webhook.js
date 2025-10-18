@@ -1,53 +1,45 @@
 // src/routes/webhook.js
+// Telegram webhook: дата/час, погода (місто або геолокація), Learn-черга.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
-import { abs } from "../utils/url.js";
-import { think } from "../lib/brain.js";
-import { readStatut } from "../lib/kvChecklist.js";
-import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
+import { askAnyModel } from "../lib/modelRouter.js";
 import { json, withTimeout } from "../lib/utils.js";
 import { getEnergy, spendEnergy } from "../lib/energy.js";
 import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
-import { loadSelfTune } from "../lib/selfTune.js";
-import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
-import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
-import { TG, sendPlain, mainKeyboard, ADMIN, BTN_LEARN } from "../lib/tg.js";
-import { weatherIntent, weatherSummaryByPlace, weatherSummaryByCoords } from "../apis/weather.js";
-import { replyCurrentDate, replyCurrentTime, dateIntent, timeIntent, resolveTz } from "../apis/time.js";
+import { t, pickReplyLanguage } from "../lib/i18n.js";
+import { sendPlain, mainKeyboard, ADMIN, BTN_LEARN } from "../lib/tg.js";
+import {
+  weatherIntent,
+  weatherSummaryByPlace,
+  weatherSummaryByCoords,
+} from "../apis/weather.js";
+import {
+  replyCurrentDate,
+  replyCurrentTime,
+  dateIntent,
+  timeIntent,
+} from "../apis/time.js";
 
-// KV bindings
-const LEARN_QUEUE_KV = globalThis.LEARN_QUEUE_KV; // має бути прив'язаний у wrangler.toml
+// KV binding (має бути в wrangler.toml як LEARN_QUEUE_KV)
+const LEARN_QUEUE_KV = globalThis.LEARN_QUEUE_KV;
 
-// ——— допоміжні ————————————————————————————————————————————
-const MD = {
-  esc(s = "") {
-    // екрануємо Markdown V2 «проблемні» символи, але ↗︎ та URL не чіпаємо
-    return String(s).replace(/[_*[\]()~`>#+\-=|{}.!]/g, "\\$&");
-  }
-};
-
+// ——— утиліти ————————————————————————————————————————
 function extractFirstUrl(text = "") {
   const m = String(text).match(/https?:\/\/[^\s)]+/i);
   return m ? m[0] : null;
 }
 
-async function queueLearnItem(env, userId, sourceText) {
+async function queueLearnItem(userId, sourceText) {
   const url = extractFirstUrl(sourceText);
   if (!url) return false;
   const ts = Date.now();
   const key = `learn:queue:${userId}:${ts}`;
-  const value = JSON.stringify({
-    userId,
-    url,
-    note: sourceText.slice(0, 2000),
-    ts,
-  });
+  const value = JSON.stringify({ userId, url, note: sourceText.slice(0, 2000), ts });
   await LEARN_QUEUE_KV.put(key, value);
   return true;
 }
 
-// ── Media helpers ───────────────────────────────────────────────────────────
 function pickPhoto(msg) {
   const arr = Array.isArray(msg?.photo) ? msg.photo : null;
   if (!arr?.length) return null;
@@ -66,8 +58,9 @@ function detectAttachment(msg) {
   if (msg.video) return { type: "video", file_id: msg.video.file_id, name: "video.mp4" };
   return null;
 }
-// ——— основний хендлер Telegram update —————————————————————
-export default async function webhook(env, req) {
+
+// ——— основний обробник ——————————————————————————————————
+async function webhookImpl(env, req) {
   const update = await req.json().catch(() => ({}));
   const msg = update?.message || update?.edited_message || null;
   const chatId = msg?.chat?.id;
@@ -76,76 +69,66 @@ export default async function webhook(env, req) {
 
   const isAdmin = ADMIN(env, userId);
   const lang = pickReplyLanguage(msg?.from?.language_code);
+  const text = String(msg?.text || "").trim();
 
-  // Кнопка Learn у клавіатурі (для адміна)
-  if (msg?.text && msg.text.trim() === BTN_LEARN) {
-    await sendPlain(env, chatId,
-      "Надішли посилання або повідомлення з посиланнями, які треба додати у чергу самонавчання.",
+  // Learn кнопка
+  if (text === BTN_LEARN) {
+    await sendPlain(
+      env,
+      chatId,
+      "Надішли посилання або повідомлення з посиланнями — додам у чергу самонавчання.",
       { reply_markup: mainKeyboard(isAdmin) }
     );
     return json({ ok: true });
   }
-
-  // Якщо від користувача прийшов текст, що містить URL → кладемо в чергу (якщо натискали Learn або просто дозволяємо завжди адміну)
-  if (msg?.text && isAdmin && /https?:\/\//i.test(msg.text)) {
-    const ok = await queueLearnItem(env, userId, msg.text);
+  // URL → у чергу (адміну)
+  if (text && isAdmin && /https?:\/\//i.test(text)) {
+    const ok = await queueLearnItem(userId, text);
     await sendPlain(env, chatId, ok ? "✅ Додав у чергу Learn." : "⚠️ Не знайшов коректного посилання.");
     return json({ ok: true });
   }
 
-  // Обробка локації з Telegram
+  // Геолокація → погода
   if (msg?.location) {
     const { latitude, longitude } = msg.location;
     try {
-      const out = await withTimeout(
-        weatherSummaryByCoords(latitude, longitude, lang),
-        8000
-      );
-      // важливо вказати Markdown, інакше ↗︎ не буде клікабельною
-      await sendPlain(env, chatId, out.text, { parse_mode: "Markdown" });
+      const out = await withTimeout(weatherSummaryByCoords(latitude, longitude, lang), 8000);
+      await sendPlain(env, chatId, out.text, { parse_mode: "Markdown" }); // стрілка ↗︎ клікабельна
     } catch {
       await sendPlain(env, chatId, "Не вдалося отримати погоду за локацією.");
     }
     return json({ ok: true });
   }
 
-  // Текстові інтенти
-  const text = String(msg?.text || "").trim();
-
   if (text) {
-    // Дата/час
+    // Дата / час
     if (dateIntent(text)) {
-      const reply = replyCurrentDate(env, lang);
-      await sendPlain(env, chatId, reply);
+      await sendPlain(env, chatId, replyCurrentDate(env, lang));
       return json({ ok: true });
     }
     if (timeIntent(text)) {
-      const reply = replyCurrentTime(env, lang);
-      await sendPlain(env, chatId, reply);
+      await sendPlain(env, chatId, replyCurrentTime(env, lang));
       return json({ ok: true });
     }
 
-    // Погода
+    // Погода з фрази
     if (weatherIntent(text)) {
       try {
-        const out = await withTimeout(
-          weatherSummaryByPlace(env, text, lang),
-          8000
-        );
+        const out = await withTimeout(weatherSummaryByPlace(env, text, lang), 8000);
         await sendPlain(env, chatId, out.text, { parse_mode: "Markdown" });
-      } catch (e) {
+      } catch {
         await sendPlain(env, chatId, "Не вдалося отримати прогноз погоди.");
       }
       return json({ ok: true });
     }
   }
 
-  // Файли/медіа → збереження у Drive (як і було)
+  // Файли/медіа → Google Drive
   const att = detectAttachment(msg);
   if (att) {
     const tokens = await getUserTokens(env, userId).catch(() => null);
     if (!tokens?.access_token) {
-      await sendPlain(env, chatId, "Перш ніж зберігати у Drive, треба підключити Google Drive в меню Senti.");
+      await sendPlain(env, chatId, "Спочатку підключи Google Drive в меню Senti.");
       return json({ ok: true });
     }
     try {
@@ -156,32 +139,43 @@ export default async function webhook(env, req) {
     }
     return json({ ok: true });
   }
-// Енергетика та дефолтні відповіді (коротко, без змін твоєї логіки)
+
+  // Енергія
   const energy = await getEnergy(env, userId).catch(() => ({ left: 100 }));
   if (energy.left <= 0) {
     await sendPlain(env, chatId, "Енергія вичерпана. Спробуй пізніше.");
     return json({ ok: true });
   }
 
-  // Якщо не розпізнали наміри — просте вітання/допомога
+  // Якщо нічого не збіглося → AI або підказка
   if (!text) {
-    const greetLang = lang;
-    await sendPlain(env, chatId, `${t(greetLang, "hello_name", "друже")} ${t(greetLang, "how_help")}`, {
-      reply_markup: mainKeyboard(isAdmin)
-    });
+    await sendPlain(
+      env,
+      chatId,
+      `${t(lang, "hello_name", "друже")} ${t(lang, "how_help")}`,
+      { reply_markup: mainKeyboard(isAdmin) }
+    );
     return json({ ok: true });
   }
 
-  // Інакше — передаємо в AI (як було), але з екрануванням Markdown у разі потреби:
   try {
     const hint = await buildDialogHint(env, userId);
     const answer = await askAnyModel(env, { prompt: text, hint, lang });
     await pushTurn(env, userId, { q: text, a: answer });
     await spendEnergy(env, userId, 1).catch(() => {});
-    // За замовчуванням без Markdown, бо відповідь моделі може містити спецсимволи
-    await sendPlain(env, chatId, answer);
+    await sendPlain(env, chatId, answer); // без Markdown — щоб не ламався текст моделі
   } catch {
     await sendPlain(env, chatId, "⚠️ Щось пішло не так. Спробуй ще раз.");
   }
   return json({ ok: true });
+}
+
+// ——— Експорти —————————————————————————————————————————————
+// named export (саме його імпортує src/index.js)
+export async function handleTelegramWebhook(req, env) {
+  return webhookImpl(env, req);
+}
+// default — на випадок прямого імпорту за замовчуванням
+export default async function webhook(env, req) {
+  return webhookImpl(env, req);
 }
