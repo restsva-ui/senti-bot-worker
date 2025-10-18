@@ -11,7 +11,7 @@ function normalizePlace(raw = "") {
   let s = String(raw || "").trim();
 
   // прибираємо лапки/зайві пробіли/хвостову пунктуацію
-  s = s.replace(/[«»“”"']/g, "").replace(/\s+/g, " ").replace(/[.,;:!?]$/g, "");
+  s = s.replace(/[«»“”"’']/g, "").replace(/\s+/g, " ").replace(/[.,;:!?]$/g, "");
 
   // прибираємо початкові прийменники: "в/у/у місті/in/at/en/bei/à/au/aux/..."
   s = s.replace(/^(?:в|у|у\s+місті|в\s+місті|в\s+городе|у\s+городі|in|at|en|bei|in der|im|à|au|aux)\s+/iu, "");
@@ -35,9 +35,9 @@ function normalizePlace(raw = "") {
 
 /** Витягнути місто з фрази (багатомовно, бере «останній сегмент після in/в/у» і ріже слова типу today/heute/сьогодні) */
 function parsePlaceFromText(text = "") {
-  const s = String(text || "").trim();
+  let s = String(text || "").trim();
 
-  // загальний хук на "погода/weather/wetter/météo"
+  // загальний хук на "погода/weather/wetter/météo" — якщо є, беремо все після неї
   const m = s.match(/(?:погода|погоду|погоди|weather|wetter|météo)\s+(.*)$/i);
   let chunk = m?.[1] || s;
 
@@ -47,8 +47,11 @@ function parsePlaceFromText(text = "") {
 
   // прибираємо слова часу
   chunk = chunk
-    .replace(/\b(сьогодні|сегодня|today|heute|aujourd'hui|oggi)\b/ig, "")
+    .replace(/\b(сьогодні|сегодня|today|heute|aujourd'hui|oggi|now|jetzt|maintenant)\b/ig, "")
     .trim();
+
+  // прибираємо залишкові знаки/лапки
+  chunk = chunk.replace(/[«»“”"’']/g, "").replace(/[.,;:!?]$/g, "");
 
   return chunk ? normalizePlace(chunk) : null;
 }
@@ -94,12 +97,12 @@ function summarizeWeather(json, lang = "uk") {
   let icon = "🌤️";
   let desc = { uk: "хмарно з проясненнями", ru: "переменная облачность", en: "partly cloudy", de: "wolkig", fr: "nuageux" };
   const W = Number(code);
-  if ([0].includes(W))                 { icon = "☀️"; desc = {uk:"сонячно",ru:"солнечно",en:"sunny",de:"sonnig",fr:"ensoleillé"}; }
-  else if ([45,48].includes(W))        { icon = "🌫️"; desc = {uk:"туман",ru:"туман",en:"fog",de:"Nebel",fr:"brouillard"}; }
-  else if ([51,53,55,56,57].includes(W)){ icon = "🌦️"; desc = {uk:"мряка/дощ",ru:"морось/дождь",en:"drizzle/rain",de:"Niesel/regen",fr:"bruine/pluie"}; }
+  if ([0].includes(W))                   { icon = "☀️"; desc = {uk:"сонячно",ru:"солнечно",en:"sunny",de:"sonnig",fr:"ensoleillé"}; }
+  else if ([45,48].includes(W))          { icon = "🌫️"; desc = {uk:"туман",ru:"туман",en:"fog",de:"Nebel",fr:"brouillard"}; }
+  else if ([51,53,55,56,57].includes(W)) { icon = "🌦️"; desc = {uk:"мряка/дощ",ru:"морось/дождь",en:"drizzle/rain",de:"Niesel/Regen",fr:"bruine/pluie"}; }
   else if ([61,63,65,80,81,82].includes(W)){ icon = "🌧️"; desc = {uk:"дощ",ru:"дождь",en:"rain",de:"Regen",fr:"pluie"}; }
   else if ([71,73,75,77,85,86].includes(W)){ icon = "❄️"; desc = {uk:"сніг",ru:"снег",en:"snow",de:"Schnee",fr:"neige"}; }
-  else if ([95,96,99].includes(W))     { icon = "⛈️"; desc = {uk:"гроза",ru:"гроза",en:"thunderstorm",de:"Gewitter",fr:"orage"}; }
+  else if ([95,96,99].includes(W))       { icon = "⛈️"; desc = {uk:"гроза",ru:"гроза",en:"thunderstorm",de:"Gewitter",fr:"orage"}; }
 
   const d = (m) => (desc[m] || desc.uk);
   return `${icon} ${d(lang.slice(0,2)) || d("uk")}. Температура близько ${Math.round(curT)}°C. Вітер ${Math.round(wind)} м/с.`;
@@ -116,9 +119,9 @@ export async function weatherSummaryByCoords(lat, lon, lang = "uk") {
 
   const text = summarizeWeather(data, lang);
 
-  // Надійне посилання: відкриє карту з точкою (не 404)
+  // Надійне посилання: відкриє карту з точкою (без 404)
   const maps = `https://maps.google.com/?q=${lat},${lon}`;
-  const arrow = `[↗︎](${maps})`;          // мінімалістична клікабельна стрілка
+  const arrow = `[↗︎](${maps})`;   // мінімалістична клікабельна стрілка
   return { text: `${text}\n${arrow}`, mode: "Markdown", timezone: data.timezone || "UTC" };
 }
 
@@ -134,8 +137,10 @@ export async function weatherSummaryByPlace(env, userText, lang = "uk") {
   const { latitude: lat, longitude: lon, name } = best;
 
   const out = await weatherSummaryByCoords(lat, lon, lang);
-  const pre = { uk: "У", ru: "В", en: "In", de: "In", fr: "À" }[lang.slice(0,2)] || "У";
-  return { text: out.text.replace(/^([^\s]+)/, `$1 ${pre} ${name}`), mode: out.mode, timezone: out.timezone };
+  // природне введення міста: "У Києві: ..." (без намагання відмінювати)
+  const pre = { uk: "У", ru: "В", en: "In", de: "In", fr: "À" }[(lang || "uk").slice(0,2)] || "У";
+  const header = `${pre} ${name}:`;
+  return { text: `${header} ${out.text}`, mode: out.mode, timezone: out.timezone };
 }
 
 export default {
