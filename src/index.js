@@ -1,7 +1,7 @@
 // src/index.js
 // export const compatibilityDate = "2024-09-25";
 
-import { TG } from "./lib/tg.js";
+// import { TG } from "./lib/tg.js"; // більше не потрібно
 import { putUserTokens } from "./lib/userDrive.js";
 import {
   checklistHtml,
@@ -268,27 +268,29 @@ export default {
         return json({ ok: true, note: "fallback webhook POST" }, 200, CORS);
       }
 
-      // tg helpers
+      // tg helpers (прямі виклики Telegram API без TG.*)
       if (p === "/tg/get-webhook") {
-        const r = await TG.getWebhook(env.BOT_TOKEN);
-        return new Response(await r.text(), {
-          headers: { "content-type": "application/json" },
-        });
+        const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getWebhookInfo`);
+        return new Response(await r.text(), { headers: { "content-type": "application/json" } });
       }
       if (p === "/tg/set-webhook") {
         const target = abs(env, "/webhook");
-        const r = await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
-        return new Response(await r.text(), {
+        const payload = {
+          url: target,
+          ...(env.TG_WEBHOOK_SECRET ? { secret_token: env.TG_WEBHOOK_SECRET } : {}),
+        };
+        const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setWebhook`, {
+          method: "POST",
           headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
         });
+        return new Response(await r.text(), { headers: { "content-type": "application/json" } });
       }
       if (p === "/tg/del-webhook") {
-        const r =
-          (await TG.deleteWebhook?.(env.BOT_TOKEN)) ||
-          (await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteWebhook`));
-        return new Response(await r.text(), {
-          headers: { "content-type": "application/json" },
+        const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteWebhook`, {
+          method: "POST",
         });
+        return new Response(await r.text(), { headers: { "content-type": "application/json" } });
       }
 
       // ci deploy
