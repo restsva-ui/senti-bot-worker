@@ -337,7 +337,7 @@ export async function handleTelegramWebhook(req, env) {
       const mo = String(env.MODEL_ORDER || "").trim();
       const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY);
       const hasCF = !!(env.CLOUDFLARE_API_TOKEN && env.CF_ACCOUNT_ID);
-      const hasOR = !!env.OPENROUTER_API_KEY;
+      const hasOR = !!(env.OPENROUTER_API_KEY);
       const hasFreeBase = !!(env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL);
       const hasFreeKey = !!(env.FREE_LLM_API_KEY || env.FREE_API_KEY);
       const lines = [
@@ -461,13 +461,15 @@ export async function handleTelegramWebhook(req, env) {
           const byPlace = await weatherSummaryByPlace(env, textRaw, lang);
           const notFound = /Не вдалося знайти такий населений пункт\./.test(byPlace.text);
           if (!notFound) {
-            await sendPlain(env, chatId, byPlace.text, byPlace.mode ? { parse_mode: byPlace.mode } : {});
+            // ⬇︎ БЕЗ parse_mode (стрілка тепер не-лінк)
+            await sendPlain(env, chatId, byPlace.text);
           } else {
             // 2) fallback: спробуємо координати користувача (якщо раніше надіслав)
             const geo = await getUserLocation(env, userId);
             if (geo?.lat && geo?.lon) {
               const byCoords = await weatherSummaryByCoords(geo.lat, geo.lon, lang);
-              await sendPlain(env, chatId, byCoords.text, byCoords.mode ? { parse_mode: byCoords.mode } : {});
+              // ⬇︎ БЕЗ parse_mode (стрілка тепер не-лінк)
+              await sendPlain(env, chatId, byCoords.text);
             } else {
               // 3) попросимо надіслати локацію одноразовою кнопкою
               const askMap = {
