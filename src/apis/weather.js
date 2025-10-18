@@ -1,7 +1,7 @@
 // src/apis/weather.js
 //
 // Open-Meteo + розумний парсер міста.
-// Відповідь містить короткий текст і мінімалістичну клікабельну стрілку ↗︎ (Markdown).
+// Тепер БЕЗ клікабельного посилання: у кінці лише символ стрілочки ↗︎ (plain-text).
 
 const OM_GEOCODE = "https://geocoding-api.open-meteo.com/v1/search";
 const OM_FORECAST = "https://api.open-meteo.com/v1/forecast";
@@ -119,10 +119,9 @@ export async function weatherSummaryByCoords(lat, lon, lang = "uk") {
 
   const text = summarizeWeather(data, lang);
 
-  // Надійне посилання: відкриє карту з точкою (без 404)
-  const maps = `https://maps.google.com/?q=${lat},${lon}`;
-  const arrow = `[↗︎](${maps})`;   // мінімалістична клікабельна стрілка
-  return { text: `${text}\n${arrow}`, mode: "Markdown", timezone: data.timezone || "UTC" };
+  // Тільки символ стрілочки без жодного посилання
+  const arrow = "↗︎";
+  return { text: `${text}\n${arrow}`, mode: null, timezone: data.timezone || "UTC" };
 }
 
 /** Прогноз за назвою міста (витягуємо з фрази) */
@@ -137,7 +136,7 @@ export async function weatherSummaryByPlace(env, userText, lang = "uk") {
   const { latitude: lat, longitude: lon, name } = best;
 
   const out = await weatherSummaryByCoords(lat, lon, lang);
-  // природне введення міста: "У Києві: ..." (без намагання відмінювати)
+  // природне введення міста: "У Києві: ..."
   const pre = { uk: "У", ru: "В", en: "In", de: "In", fr: "À" }[(lang || "uk").slice(0,2)] || "У";
   const header = `${pre} ${name}:`;
   return { text: `${header} ${out.text}`, mode: out.mode, timezone: out.timezone };
