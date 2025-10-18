@@ -1,143 +1,66 @@
 // src/apis/weather.js
-//
-// Open-Meteo based weather helper.
-// Фокусується на "зараз", коректному TZ і акуратному геокодуванні.
+// Open-Meteo weather API — актуальна температура + підтримка кирилиці
 
 const UA_CODE = "UA";
 const DEFAULT_TZ = "Europe/Kyiv";
 
-// -----------------------------
-// Intent + парсер міста з тексту
-// -----------------------------
 export function weatherIntent(text = "") {
   const s = String(text || "").toLowerCase();
-  if (!s) return false;
-  // дуже прості тригери
-  return (
-    /погода|weather|дощ|опад|вітер|ветер|температур/i.test(s) ||
-    /^яка.*погода\b/i.test(s)
-  );
+  return /погода|weather|дощ|опад|вітер|температур/i.test(s);
 }
 
-// Витягаємо назву населеного пункту з фраз типу:
-// "погода у Києві", "погода в Вінниці", "погода у Lviv", "погода в Warsaw" тощо.
 export function parsePlaceFromText(text = "") {
   const s = String(text || "");
-  // Підтримка кількох мовних конструкцій "у/в/в місті/in/bei/in der"
-  // Назва: дозволяємо літери, дефіс, крапку, апостроф та пробіли (2..50 символів)
   const re =
-    /(?:\bв|у|у\s+місті|в\s+місті|in|at|à|en|bei|in der|in dem)\s+([\p{L}\-.\' ]{2,50})/iu;
+    /(?:\bв|у|в\s+місті|у\s+місті|in|at|à|en|bei|in der|in dem)\s+([\p{L}\-.' ]{2,50})/iu;
   const m = s.match(re);
-  if (m?.[1]) {
-    return m[1].trim().replace(/\s+/g, " ");
-  }
-  // fallback: якщо просто одне слово після "погода"
-  const fallback = s.match(/погода\s+(?:в|у)\s+([\p{L}\-.\' ]{2,50})/iu);
-  if (fallback?.[1]) return fallback[1].trim();
-  return null;
+  if (m?.[1]) return m[1].trim();
+  const fb = s.match(/погода\s+(?:в|у)\s+([\p{L}\-.' ]{2,50})/iu);
+  return fb?.[1]?.trim() || null;
 }
 
-// -----------------------------
-// Геокодування через Open-Meteo
-// -----------------------------
-async function geocodeOpenMeteo(name, { preferUA = true, lang = "uk" } = {}) {
+async function geocode(name, { lang = "uk" } = {}) {
   const url =
     "https://geocoding-api.open-meteo.com/v1/search?" +
     new URLSearchParams({
-      name: String(name || ""),
-      count: "8",
+      name,
+      count: "5",
       language: lang,
       format: "json",
     }).toString();
 
   const r = await fetch(url);
-  if (!r.ok) throw new Error("geocoding failed");
   const data = await r.json().catch(() => null);
-  const results = Array.isArray(data?.results) ? data.results : [];
+  const list = Array.isArray(data?.results) ? data.results : [];
+  if (!list.length) return null;
 
-  if (!results.length) return null;
-
-  // 1) Першочергово — міста України
-  let list = results;
-  if (preferUA) {
-    const ua = results.filter((x) => x.country_code === UA_CODE);
-    if (ua.length) list = ua;
-  }
-
-  // 2) В пріоритеті населені пункти (feature_class 'P')
-  list.sort((a, b) => {
-    const aIsP = (a.feature_class || "").toUpperCase() === "P";
-    const bIsP = (b.feature_class || "").toUpperCase() === "P";
-    if (aIsP && !bIsP) return -1;
-    if (!aIsP && bIsP) return 1;
-    // ближче до центру країни не перевіряємо — беремо перший підходящий
-    return 0;
-  });
-
-  const best = list[0];
-  return best
-    ? {
-        name: best.name,
-        lat: best.latitude,
-        lon: best.longitude,
-        country_code: best.country_code,
-        admin1: best.admin1 || "",
-      }
+  const ua = list.find((x) => x.country_code === UA_CODE) || list[0];
+  return ua
+    ? { lat: ua.latitude, lon: ua.longitude, name: ua.name, country: ua.country_code }
     : null;
 }
 
-// -----------------------------
-// Запит погоди (поточні значення)
-// -----------------------------
-async function fetchCurrentWeather(lat, lon, tz = DEFAULT_TZ) {
-  // Беремо тільки поточні значення: температура, вітер, опади + weather_code
+async function fetchCurrent(lat, lon, tz = DEFAULT_TZ) {
   const url =
     "https://api.open-meteo.com/v1/forecast?" +
     new URLSearchParams({
-      latitude: String(lat),
-      longitude: String(lon),
-      current:
-        "temperature_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m",
-      hourly: "precipitation_probability,temperature_2m",
-      timezone: tz || DEFAULT_TZ, // фіксований TZ
-      forecast_days: "1",
+      latitude: lat,
+      longitude: lon,
+      current: "temperature_2m,weather_code,wind_speed_10m",
+      timezone: tz,
     }).toString();
 
   const r = await fetch(url);
-  if (!r.ok) throw new Error(`weather http ${r.status}`);
   const data = await r.json().catch(() => null);
-
   const cur = data?.current || {};
-  const hourly = data?.hourly || {};
-  const nowTime = cur?.time;
-  let precipProb = null;
-
-  if (nowTime && Array.isArray(hourly?.time)) {
-    const idx = hourly.time.indexOf(nowTime);
-    if (idx >= 0 && Array.isArray(hourly.precipitation_probability)) {
-      precipProb = hourly.precipitation_probability[idx];
-    }
-  }
-
   return {
-    temperature: toNumber(cur.temperature_2m),
-    feels: toNumber(cur.apparent_temperature),
-    wind: toNumber(cur.wind_speed_10m),
-    precipitation: toNumber(cur.precipitation),
+    temp: cur.temperature_2m,
+    wind: cur.wind_speed_10m,
     code: cur.weather_code,
-    precipProb: toNumber(precipProb),
-    time: nowTime,
-    tz: data?.timezone || tz || DEFAULT_TZ,
   };
 }
 
-function toNumber(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-function weatherEmoji(code) {
-  // Мінімальна мапа іконок за weather_code
+function emoji(code) {
   if (code === 0) return "☀️";
   if ([1, 2, 3].includes(code)) return "🌤️";
   if ([45, 48].includes(code)) return "🌫️";
@@ -148,61 +71,73 @@ function weatherEmoji(code) {
   return "🌡️";
 }
 
-function fmtTemp(t) {
-  if (t == null) return "";
-  const v = Math.round(t);
-  return `${v}°C`;
+export async function weatherSummaryByCoords(env, lang, { lat, lon }) {
+  const cur = await fetchCurrent(lat, lon);
+  const em = emoji(cur.code);
+  return `${em} Зараз близько ${Math.round(cur.temp)}°C, вітер ${Math.round(
+    cur.wind
+  )} м/с.`;
 }
 
-function sentence(text) {
-  let s = String(text || "").trim();
-  if (!s) return s;
-  s = s[0].toUpperCase() + s.slice(1);
-  if (!/[.!?…]$/.test(s)) s += ".";
-  return s;
+export async function weatherSummaryByPlace(env, lang, text) {
+  let place = parsePlaceFromText(text) || "Київ";
+
+  // 1-ша спроба кирилицею
+  let g = await geocode(place, { lang: "uk" });
+
+  // fallback: латинка
+  if (!g && /[А-Яа-яЇїІіЄє]/.test(place)) {
+    const latin = translitUAToLatin(place);
+    g = await geocode(latin, { lang: "en" });
+  }
+
+  if (!g) return "Не вдалося знайти такий населений пункт.";
+
+  const cur = await fetchCurrent(g.lat, g.lon);
+  const em = emoji(cur.code);
+  return `${em} У ${g.name} зараз близько ${Math.round(
+    cur.temp
+  )}°C, вітер ${Math.round(cur.wind)} м/с.`;
 }
 
-// -----------------------------
-// Публічні фасади
-// -----------------------------
-export async function weatherSummaryByCoords(lat, lon, { tz = DEFAULT_TZ, lang = "uk" } = {}) {
-  const cur = await fetchCurrentWeather(lat, lon, tz);
-  const em = weatherEmoji(cur.code);
-  const parts = [];
-
-  // Базовий текст
-  let main = `Зараз ${fmtTemp(cur.temperature)}`;
-  // feels like
-  if (cur.feels != null && Math.abs(cur.feels - cur.temperature) >= 2) {
-    main += ` (відчувається як ${fmtTemp(cur.feels)})`;
-  }
-  parts.push(main);
-
-  // опади
-  if (cur.precipitation != null && cur.precipitation > 0) {
-    parts.push("йде дощ");
-  } else if (cur.precipProb != null) {
-    if (cur.precipProb >= 60) parts.push("вірогідні опади");
-    else if (cur.precipProb >= 30) parts.push("можливі короткочасні опади");
-    else parts.push("опадів не очікується");
-  }
-
-  // вітер
-  if (cur.wind != null) {
-    if (cur.wind < 4) parts.push("вітер слабкий");
-    else if (cur.wind < 9) parts.push("вітер помірний");
-    else parts.push("вітер поривчастий");
-  }
-
-  const text = `${em} ${sentence(parts.join(", "))}`;
-  return { text, timezone: cur.tz || tz || DEFAULT_TZ, raw: cur };
-}
-
-export async function weatherSummaryByPlace(place, { lang = "uk", preferUA = true, tz = DEFAULT_TZ } = {}) {
-  const g = await geocodeOpenMeteo(place, { preferUA, lang });
-  if (!g) return { text: "Не вдалося знайти такий населений пункт.", timezone: tz };
-
-  // Якщо Open-Meteо повернув свій TZ — використовуємо його; інакше фолбек
-  const out = await weatherSummaryByCoords(g.lat, g.lon, { tz, lang });
-  return out;
+// спрощена транслітерація UA→EN
+function translitUAToLatin(str = "") {
+  const map = {
+    а: "a",
+    б: "b",
+    в: "v",
+    г: "h",
+    ґ: "g",
+    д: "d",
+    е: "e",
+    є: "ye",
+    ж: "zh",
+    з: "z",
+    и: "y",
+    і: "i",
+    ї: "yi",
+    й: "i",
+    к: "k",
+    л: "l",
+    м: "m",
+    н: "n",
+    о: "o",
+    п: "p",
+    р: "r",
+    с: "s",
+    т: "t",
+    у: "u",
+    ф: "f",
+    х: "kh",
+    ц: "ts",
+    ч: "ch",
+    ш: "sh",
+    щ: "shch",
+    ю: "yu",
+    я: "ya",
+  };
+  return str
+    .split("")
+    .map((c) => map[c.toLowerCase()] || c)
+    .join("");
 }
