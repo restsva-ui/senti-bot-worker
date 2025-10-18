@@ -14,29 +14,14 @@ import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
 
-// ── апі: погода + час/дата ──────────────────────────────────────────────────
-import {
-  weatherIntent,
-  weatherSummaryByPlace,
-  weatherSummaryByCoords
-} from "../apis/weather.js";
-
-import {
-  dateIntent,
-  timeIntent,
-  tomorrowDateIntent,
-  yesterdayDateIntent,
-  replyCurrentDate,
-  replyCurrentTime,
-  replyTomorrowDate,
-  replyYesterdayDate,
-} from "../apis/time.js";
+// APIs
+import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from "../apis/time.js";
+import { weatherIntent, weatherSummaryByPlace } from "../apis/weather.js";
 
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
 const {
   BTN_DRIVE, BTN_SENTI, BTN_ADMIN,
-  mainKeyboard, ADMIN, energyLinks,
-  sendPlain, parseAiCommand
+  mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand
 } = TG;
 
 // ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
@@ -47,22 +32,17 @@ async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
   const model = "@cf/llama-3.2-11b-vision-instruct";
   const url = `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/ai/run/${model}`;
 
-  const messages = [
-    {
-      role: "user",
-      content: [
-        { type: "input_text", text: `${userPrompt || "Describe the image briefly."} Reply in ${lang}.` },
-        { type: "input_image", image_url: imageUrl }
-      ]
-    }
-  ];
+  const messages = [{
+    role: "user",
+    content: [
+      { type: "input_text", text: `${userPrompt || "Describe the image briefly."} Reply in ${lang}.` },
+      { type: "input_image", image_url: imageUrl }
+    ]
+  }];
 
   const r = await fetch(url, {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
-      "Content-Type": "application/json"
-    },
+    headers: { "Authorization": `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({ messages })
   });
 
@@ -108,9 +88,7 @@ function detectAttachment(msg) {
 }
 async function tgFileUrl(env, file_id) {
   const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ file_id })
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file_id })
   });
   const data = await r.json().catch(() => null);
   if (!data?.ok) throw new Error("getFile failed");
@@ -119,7 +97,7 @@ async function tgFileUrl(env, file_id) {
   return `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${path}`;
 }
 
-// Drive-режим: приймаємо файл і зберігаємо на Диск
+// Drive-режим
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
   if (!att) return false;
@@ -141,7 +119,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   return true;
 }
 
-// Vision-режим: фото → опис через CF
+// Vision-режим
 async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const att = pickPhoto(msg);
   if (!att) return false;
@@ -159,18 +137,13 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const prompt = caption || "Опиши, що на зображенні, коротко і по суті.";
   try {
     const resp = await cfVisionDescribe(env, url, prompt, lang);
-    const emoji = "🖼️";
-    await sendPlain(env, chatId, `${emoji} ${resp}`);
+    await sendPlain(env, chatId, `🖼️ ${resp}`);
   } catch (e) {
-    if (ADMIN(env, userId)) {
-      await sendPlain(env, chatId, `❌ Vision error: ${String(e.message || e).slice(0, 180)}`);
-    } else {
-      await sendPlain(env, chatId, t(lang, "default_reply"));
-    }
+    if (ADMIN(env, userId)) { await sendPlain(env, chatId, `❌ Vision error: ${String(e.message || e).slice(0, 180)}`); }
+    else { await sendPlain(env, chatId, t(lang, "default_reply")); }
   }
   return true;
 }
-
 // ── SystemHint ───────────────────────────────────────────────────────────────
 async function buildSystemHint(env, chatId, userId) {
   const statut = String((await readStatut(env)) || "").trim();
@@ -186,7 +159,7 @@ async function buildSystemHint(env, chatId, userId) {
   if (statut) blocks.push(`[Статут/чеклист]\n${statut}`);
   if (tune) blocks.push(`[Self-Tune]\n${tune}`);
   if (dlg) blocks.push(dlg);
-  return blocks.length ? blocks.join("\n\n") : "";
+  return blocks.join("\n\n");
 }
 
 // ── Emoji + ім’я ─────────────────────────────────────────────────────────────
@@ -200,10 +173,7 @@ function guessEmoji(text = "") {
   if (tt.includes("електр") || tt.includes("струм") || tt.includes("current")) return "⚡";
   return "💡";
 }
-function looksLikeEmojiStart(s = "") {
-  try { return /^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(String(s)); }
-  catch { return false; }
-}
+function looksLikeEmojiStart(s = "") { try { return /^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(String(s)); } catch { return false; } }
 function tryParseUserNamedAs(text) {
   const s = (text || "").trim();
   const NAME_RX = "([A-Za-zÀ-ÿĀ-žЀ-ӿʼ'`\\-\\s]{2,30})";
@@ -214,10 +184,7 @@ function tryParseUserNamedAs(text) {
     new RegExp(`\\bich\\s+hei(?:s|ß)e\\s+${NAME_RX}`, "iu"),
     new RegExp(`\\bje\\s+m'?appelle\\s+${NAME_RX}`, "iu")
   ];
-  for (const r of patterns) {
-    const m = s.match(r);
-    if (m?.[1]) return m[1].trim();
-  }
+  for (const r of patterns) { const m = s.match(r); if (m?.[1]) return m[1].trim(); }
   return null;
 }
 const PROFILE_NAME_KEY = (uid) => `profile:name:${uid}`;
@@ -300,7 +267,6 @@ ${control}`;
     out = `${em} ${out}`;
   }
 
-  // контроль мови
   const detected = detectFromText(out);
   if (detected && lang && detected !== lang) {
     const hardPrompt = `STRICT LANGUAGE MODE: Respond ONLY in ${lang}. If the previous answer used another language, rewrite it now in ${lang}. Keep it concise.`;
@@ -314,7 +280,6 @@ ${control}`;
   const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
 }
-
 // ── MAIN ────────────────────────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "POST") {
@@ -342,11 +307,8 @@ export async function handleTelegramWebhook(req, env) {
   const safe = async (fn) => {
     try { await fn(); }
     catch (e) {
-      if (isAdmin) {
-        await sendPlain(env, chatId, `❌ Error: ${String(e?.message || e).slice(0, 200)}`);
-      } else {
-        try { await sendPlain(env, chatId, t(lang, "default_reply")); } catch {}
-      }
+      if (isAdmin) await sendPlain(env, chatId, `❌ Error: ${String(e?.message || e).slice(0, 200)}`);
+      else try { await sendPlain(env, chatId, t(lang, "default_reply")); } catch {}
     }
   };
 
@@ -356,7 +318,7 @@ export async function handleTelegramWebhook(req, env) {
       const mo = String(env.MODEL_ORDER || "").trim();
       const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY);
       const hasCF = !!(env.CLOUDFLARE_API_TOKEN && env.CF_ACCOUNT_ID);
-      const hasOR = !!(env.OPENROUTER_API_KEY);
+      const hasOR = !!env.OPENROUTER_API_KEY;
       const hasFreeBase = !!(env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL);
       const hasFreeKey = !!(env.FREE_LLM_API_KEY || env.FREE_API_KEY);
       const lines = [
@@ -378,12 +340,10 @@ export async function handleTelegramWebhook(req, env) {
         }
       }
       const links = energyLinks(env, userId);
-      const markup = {
-        inline_keyboard: [
-          [{ text: "Відкрити Checklist", url: links.checklist }],
-          [{ text: "Керування енергією", url: links.energy }]
-        ]
-      };
+      const markup = { inline_keyboard: [
+        [{ text: "Відкрити Checklist", url: links.checklist }],
+        [{ text: "Керування енергією", url: links.energy }]
+      ]};
       await sendPlain(env, chatId, lines.join("\n"), { reply_markup: markup });
     });
     return json({ ok: true });
@@ -424,7 +384,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Google Drive — лише кнопка (без тексту)
+  // Google Drive кнопка
   if (textRaw === BTN_DRIVE) {
     await safe(async () => {
       const ut = await getUserTokens(env, userId);
@@ -444,7 +404,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Кнопка Senti → вимкнути Drive-режим і показати клавіатуру
+  // Кнопка Senti
   if (textRaw === BTN_SENTI) {
     await setDriveMode(env, userId, false);
     const zeroWidth = "\u2063";
@@ -466,38 +426,21 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // ── ІНТЕНТИ: дата/час/погода (комбінована логіка) ─────────────────────────
-  if (textRaw && !textRaw.startsWith("/")) {
-    const wantsDateToday = dateIntent(textRaw);
-    const wantsTomorrow  = tomorrowDateIntent(textRaw);
-    const wantsYesterday = yesterdayDateIntent(textRaw);
-    const wantsTimeNow   = timeIntent(textRaw);
-    const wantsWeather   = weatherIntent(textRaw);
+  // ✦ Локальні інтенти: дата/час/погода (може бути комбінація)
+  if (textRaw) {
+    const wantsDate = dateIntent(textRaw);
+    const wantsTime = timeIntent(textRaw);
+    const wantsWeather = weatherIntent(textRaw);
 
-    // Якщо у фразі є кілька інтендів — віддаємо всі, в логічному порядку:
-    if (wantsDateToday || wantsTomorrow || wantsYesterday || wantsTimeNow || wantsWeather) {
-      // 1) Дата/час — безкоштовно
-      if (wantsDateToday)  await sendPlain(env, chatId, replyCurrentDate(env, lang));
-      if (wantsTomorrow)   await sendPlain(env, chatId, replyTomorrowDate(env, lang));
-      if (wantsYesterday)  await sendPlain(env, chatId, replyYesterdayDate(env, lang));
-      if (wantsTimeNow)    await sendPlain(env, chatId, replyCurrentTime(env, lang));
-
-      // 2) Погода — з урахуванням енергії
-      if (wantsWeather) {
-        await safe(async () => {
-          const cur = await getEnergy(env, userId);
-          const need = Number(cur.costText ?? 1);
-          if ((cur.energy ?? 0) < need) {
-            const links = energyLinks(env, userId);
-            await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
-            return;
-          }
-          await spendEnergy(env, userId, need, "text");
-
+    if (wantsDate || wantsTime || wantsWeather) {
+      await safe(async () => {
+        if (wantsDate) await sendPlain(env, chatId, replyCurrentDate(env, lang));
+        if (wantsTime) await sendPlain(env, chatId, replyCurrentTime(env, lang));
+        if (wantsWeather) {
           const w = await weatherSummaryByPlace(env, textRaw, lang);
-          await sendPlain(env, chatId, w.text);
-        });
-      }
+          await sendPlain(env, chatId, w.text, { parse_mode: w.mode || undefined });
+        }
+      });
       return json({ ok: true });
     }
   }
