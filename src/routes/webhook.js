@@ -14,7 +14,7 @@ import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
 
-// APIs (локальні інтенти + погода)
+// APIs
 import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from "../apis/time.js";
 import { weatherIntent, weatherSummaryByPlace, weatherSummaryByCoords } from "../apis/weather.js";
 
@@ -30,9 +30,7 @@ const {
 
 // ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
 async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
-  if (!env.CLOUDFLARE_API_TOKEN || !env.CF_ACCOUNT_ID) {
-    throw new Error("CF credentials missing");
-  }
+  if (!env.CLOUDFLARE_API_TOKEN || !env.CF_ACCOUNT_ID) throw new Error("CF credentials missing");
   const model = "@cf/llama-3.2-11b-vision-instruct";
   const url = `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/ai/run/${model}`;
 
@@ -305,7 +303,6 @@ export async function handleTelegramWebhook(req, env) {
   const isAdmin = ADMIN(env, userId);
   const textRaw = String(msg?.text || msg?.caption || "").trim();
 
-  // Мова відповіді
   let lang = pickReplyLanguage(msg, textRaw);
 
   const safe = async (fn) => {
@@ -316,7 +313,7 @@ export async function handleTelegramWebhook(req, env) {
     }
   };
 
-  // ✦ Якщо користувач надіслав геолокацію — збережемо у KV (30 днів) і підтвердимо
+  // збереження геолокації
   if (msg?.location && userId && chatId) {
     await setUserLocation(env, userId, msg.location);
     const okMap = {
@@ -445,7 +442,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // ✦ Локальні інтенти: дата/час/погода (може бути комбінація в одному повідомленні)
+  // Локальні інтенти: дата/час/погода
   if (textRaw) {
     const wantsDate = dateIntent(textRaw);
     const wantsTime = timeIntent(textRaw);
@@ -457,21 +454,16 @@ export async function handleTelegramWebhook(req, env) {
         if (wantsTime) await sendPlain(env, chatId, replyCurrentTime(env, lang));
 
         if (wantsWeather) {
-          // 1) спробуємо місто з фрази
           const byPlace = await weatherSummaryByPlace(env, textRaw, lang);
           const notFound = /Не вдалося знайти такий населений пункт\./.test(byPlace.text);
           if (!notFound) {
-            // ⬇︎ БЕЗ parse_mode (стрілка тепер не-лінк)
-            await sendPlain(env, chatId, byPlace.text);
+            await sendPlain(env, chatId, byPlace.text, { parse_mode: byPlace.mode || undefined });
           } else {
-            // 2) fallback: спробуємо координати користувача (якщо раніше надіслав)
             const geo = await getUserLocation(env, userId);
             if (geo?.lat && geo?.lon) {
               const byCoords = await weatherSummaryByCoords(geo.lat, geo.lon, lang);
-              // ⬇︎ БЕЗ parse_mode (стрілка тепер не-лінк)
-              await sendPlain(env, chatId, byCoords.text);
+              await sendPlain(env, chatId, byCoords.text, { parse_mode: byCoords.mode || undefined });
             } else {
-              // 3) попросимо надіслати локацію одноразовою кнопкою
               const askMap = {
                 uk: "Будь ласка, надішліть вашу локацію кнопкою нижче — і я покажу погоду для вашого місця.",
                 ru: "Пожалуйста, отправьте вашу локацию кнопкой ниже — и я покажу погоду для вашего места.",
