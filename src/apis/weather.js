@@ -56,11 +56,10 @@ function parsePlaceFromText(text = "") {
 /** Intent на погоду */
 export function weatherIntent(text = "") {
   const s = String(text || "").toLowerCase();
-  // ширший набір ключових слів, включно з FR "temps" і "meteo"
   return /(погод|weather|wetter|météo|meteo|temps)/i.test(s);
 }
 
-/** Геокодер Open-Meteo */
+/** Геокодер Open-Meteо */
 async function geocode(place, lang = "uk") {
   const url = `${OM_GEOCODE}?name=${encodeURIComponent(place)}&count=5&language=${encodeURIComponent(lang)}&format=json`;
   const r = await fetch(url);
@@ -107,6 +106,15 @@ function summarizeWeather(json, lang = "uk") {
   return `${icon} ${d(lang.slice(0,2)) || d("uk")}. Температура близько ${Math.round(curT)}°C. Вітер ${Math.round(wind)} м/с.`;
 }
 
+/** Допоміжне: стабільне погодне посилання */
+function weatherDeepLink(lat, lon) {
+  // Windy: стабільний формат "?lat,lon,zoom"
+  const windy = `https://www.windy.com/?${lat},${lon},8`;
+  // Якщо схочеш Ventusky — просто заміни на:
+  // const ventusky = `https://www.ventusky.com/?p=${lat};${lon};8`;
+  return windy;
+}
+
 /** Прогноз за координатами */
 export async function weatherSummaryByCoords(lat, lon, lang = "uk") {
   const url = `${OM_FORECAST}?latitude=${lat}&longitude=${lon}` +
@@ -118,8 +126,7 @@ export async function weatherSummaryByCoords(lat, lon, lang = "uk") {
 
   const text = summarizeWeather(data, lang);
 
-  // Надійне посилання на погодний сайт (не карти). Meteoblue за координатами.
-  const wx = `https://www.meteoblue.com/en/weather/week/coordinates?lat=${lat}&lon=${lon}`;
+  const wx = weatherDeepLink(lat, lon);
   const arrow = `<a href="${wx}">↗︎</a>`;   // мінімалістична клікабельна стрілка
   return { text: `${text}\n${arrow}`, mode: "HTML", timezone: data.timezone || "UTC" };
 }
