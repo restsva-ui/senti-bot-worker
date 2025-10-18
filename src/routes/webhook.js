@@ -23,7 +23,7 @@ import { setUserLocation, getUserLocation } from "../lib/geo.js";
 
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
 const {
-  BTN_DRIVE, BTN_SENTI, BTN_ADMIN,
+  BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_LEARN,        // ⟵ додали BTN_LEARN
   mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand,
   askLocationKeyboard
 } = TG;
@@ -425,6 +425,21 @@ export async function handleTelegramWebhook(req, env) {
     await setDriveMode(env, userId, false);
     const zeroWidth = "\u2063";
     await sendPlain(env, chatId, zeroWidth, { reply_markup: mainKeyboard(isAdmin) });
+    return json({ ok: true });
+  }
+
+  // Кнопка Learn — перший мікрокрок (лише інструкція)
+  if (textRaw === BTN_LEARN) {
+    const L = (lang || "uk").slice(0, 2);
+    const messages = {
+      uk: "🧠 Режим навчання.\nНадішли мені *посилання* на статтю/відео або *файл* (PDF, DOCX, TXT). Я додам це в чергу і вивчу матеріал у фоновому режимі. Після навчання зможу стисло переказати та відповідати по темі.",
+      ru: "🧠 Режим обучения.\nПришли *ссылку* на статью/видео или *файл* (PDF, DOCX, TXT). Я добавлю это в очередь и изучу материал в фоне. После — смогу кратко пересказать и отвечать по теме.",
+      en: "🧠 Learning mode.\nSend me a *link* to an article/video or a *file* (PDF, DOCX, TXT). I’ll queue it for background learning and later summarize and answer questions on it.",
+      de: "🧠 Lernmodus.\nSchicke mir einen *Link* (Artikel/Video) oder eine *Datei* (PDF, DOCX, TXT). Ich lege es in die Warteschlange, lerne im Hintergrund und kann danach zusammenfassen und Fragen beantworten.",
+      fr: "🧠 Mode apprentissage.\nEnvoie-moi un *lien* (article/vidéo) ou un *fichier* (PDF, DOCX, TXT). Je l’ajoute à la file, l’étudierai en arrière-plan et pourrai ensuite résumer et répondre aux questions."
+    };
+    const hint = messages[L] || messages.uk;
+    await sendPlain(env, chatId, hint, { parse_mode: "Markdown", reply_markup: mainKeyboard(isAdmin) });
     return json({ ok: true });
   }
 
