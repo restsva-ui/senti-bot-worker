@@ -14,14 +14,24 @@ import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
 
-// 🔹 нове: зовнішній API погоди
-import { parseWeatherQuery, weatherByCity } from "../apis/weather.js";
+// зовнішні API
+import {
+  weatherIntent,
+  weatherSummaryByPlace,
+  weatherSummaryByCoords
+} from "../apis/weather.js";
 
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
-const { BTN_DRIVE, BTN_SENTI, BTN_ADMIN, mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand } = TG;
-
-// За замовчуванням — коректна IANA таймзона Києва (автоматично враховує UTC+2/UTC+3)
-const DEFAULT_TZ = "Europe/Kyiv";
+const {
+  BTN_DRIVE,
+  BTN_SENTI,
+  BTN_ADMIN,
+  mainKeyboard,
+  ADMIN,
+  energyLinks,
+  sendPlain,
+  parseAiCommand
+} = TG;
 
 // ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
 async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
@@ -153,6 +163,7 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   }
   return true;
 }
+
 // ── SystemHint ───────────────────────────────────────────────────────────────
 async function buildSystemHint(env, chatId, userId) {
   const statut = String((await readStatut(env)) || "").trim();
@@ -282,6 +293,7 @@ ${control}`;
     out = `${em} ${out}`;
   }
 
+  // контроль мови
   const detected = detectFromText(out);
   if (detected && lang && detected !== lang) {
     const hardPrompt = `STRICT LANGUAGE MODE: Respond ONLY in ${lang}. If the previous answer used another language, rewrite it now in ${lang}. Keep it concise.`;
@@ -295,6 +307,7 @@ ${control}`;
   const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
 }
+
 // ── MAIN ────────────────────────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "POST") {
@@ -315,17 +328,13 @@ export async function handleTelegramWebhook(req, env) {
   const userId = msg?.from?.id || update?.callback_query?.from?.id;
   const isAdmin = ADMIN(env, userId);
   const textRaw = String(msg?.text || msg?.caption || "").trim();
-
   let lang = pickReplyLanguage(msg, textRaw);
 
   const safe = async (fn) => {
     try { await fn(); }
     catch (e) {
-      if (isAdmin) {
-        await sendPlain(env, chatId, `❌ Error: ${String(e?.message || e).slice(0, 200)}`);
-      } else {
-        try { await sendPlain(env, chatId, t(lang, "default_reply")); } catch {}
-      }
+      if (isAdmin) { await sendPlain(env, chatId, `❌ Error: ${String(e?.message || e).slice(0, 200)}`); }
+      else { try { await sendPlain(env, chatId, t(lang, "default_reply")); } catch {} }
     }
   };
 
@@ -335,7 +344,7 @@ export async function handleTelegramWebhook(req, env) {
       const mo = String(env.MODEL_ORDER || "").trim();
       const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY);
       const hasCF = !!(env.CLOUDFLARE_API_TOKEN && env.CF_ACCOUNT_ID);
-      const hasOR = !!(env.OPENROUTER_API_KEY);
+      const hasOR = !!env.OPENROUTER_API_KEY;
       const hasFreeBase = !!(env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL);
       const hasFreeKey = !!(env.FREE_LLM_API_KEY || env.FREE_API_KEY);
       const lines = [
@@ -364,6 +373,32 @@ export async function handleTelegramWebhook(req, env) {
         ]
       };
       await sendPlain(env, chatId, lines.join("\n"), { reply_markup: markup });
+    });
+    return json({ ok: true });
+  }
+
+  // 1) Намір «погода …»
+  const w = weatherIntent(textRaw);
+  if (w) {
+    await safe(async () => {
+      const cur = await getEnergy(env, userId);
+      const need = Number(cur.costText ?? 1);
+      if ((cur.energy ?? 0) < need) {
+        const links = energyLinks(env, userId);
+        await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
+        return;
+      }
+      await spendEnergy(env, userId, need, "weather");
+
+      let reply;
+      if (w.place) {
+        reply = await weatherSummaryByPlace(env, w.place, lang);
+      } else if (w.lat != null && w.lon != null) {
+        reply = await weatherSummaryByCoords(env, w.lat, w.lon, lang);
+      } else {
+        reply = t(lang, "weather_need_place");
+      }
+      await sendPlain(env, chatId, reply);
     });
     return json({ ok: true });
   }
@@ -403,7 +438,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Google Drive — лише кнопка (без тексту)
+  // Google Drive — лише кнопка
   if (textRaw === BTN_DRIVE) {
     await safe(async () => {
       const ut = await getUserTokens(env, userId);
@@ -431,28 +466,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // 🔹 РАННІЙ ХЕНДЛЕР ПОГОДИ (багатомовний, з енергетикою)
-  const askedCity = parseWeatherQuery(textRaw);
-  if (askedCity) {
-    await safe(async () => {
-      const cur = await getEnergy(env, userId);
-      const need = Number(cur.costText ?? 1);
-      if ((cur.energy ?? 0) < need) {
-        const links = energyLinks(env, userId);
-        await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
-        return;
-      }
-      await spendEnergy(env, userId, need, "weather");
-
-      const city = askedCity || env.DEFAULT_CITY || "Kyiv";
-      const res = await weatherByCity(city, lang);
-      if (!res) { await sendPlain(env, chatId, "❌ Не знайшов такого міста."); return; }
-      const localDate = new Intl.DateTimeFormat(lang, { timeZone: res.timezone, dateStyle: "long" }).format(new Date());
-      await sendPlain(env, chatId, `☀️ ${res.city}: ${res.text}\n🗓 ${localDate} (${res.timezone})`);
-    });
-    return json({ ok: true });
-  }
-// Медіа: якщо режим Drive УВІМКНЕНО → зберегти; інакше → Vision-опис
+  // Медіа: якщо Drive УВІМКНЕНО → зберегти; інакше → Vision-опис
   try {
     const driveOn = await getDriveMode(env, userId);
     if (driveOn) {
@@ -499,7 +513,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Дефолтне привітання
+  // Дефолтне привітання (мовою профілю TG якщо доступно)
   const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
   const greetLang = ["uk", "ru", "en", "de", "fr"].includes(profileLang) ? profileLang : lang;
   const name = await getPreferredName(env, msg);
