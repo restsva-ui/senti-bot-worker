@@ -3,10 +3,12 @@ import { abs } from "../utils/url.js";
 
 export const BTN_DRIVE = "Google Drive";
 export const BTN_SENTI = "Senti";
+export const BTN_LEARN = "Learn";   // ⬅️ нова кнопка
 export const BTN_ADMIN = "Admin";
 
 export const mainKeyboard = (isAdmin = false) => {
-  const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }]];
+  // Додаємо Learn у перший ряд
+  const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }, { text: BTN_LEARN }]];
   if (isAdmin) rows.push([{ text: BTN_ADMIN }]);
   return { keyboard: rows, resize_keyboard: true };
 };
@@ -55,6 +57,7 @@ export function parseAiCommand(text = "") {
 export const TG = {
   BTN_DRIVE,
   BTN_SENTI,
+  BTN_LEARN,
   BTN_ADMIN,
   mainKeyboard,
   ADMIN,
