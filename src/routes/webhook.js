@@ -14,14 +14,18 @@ import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
 
-// APIs
+// APIs (локальні інтенти + погода)
 import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from "../apis/time.js";
-import { weatherIntent, weatherSummaryByPlace } from "../apis/weather.js";
+import { weatherIntent, weatherSummaryByPlace, weatherSummaryByCoords } from "../apis/weather.js";
+
+// Геолокація користувача (KV)
+import { setUserLocation, getUserLocation } from "../lib/geo.js";
 
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
 const {
   BTN_DRIVE, BTN_SENTI, BTN_ADMIN,
-  mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand
+  mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand,
+  askLocationKeyboard
 } = TG;
 
 // ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
@@ -312,6 +316,21 @@ export async function handleTelegramWebhook(req, env) {
     }
   };
 
+  // ✦ Якщо користувач надіслав геолокацію — збережемо у KV (30 днів) і підтвердимо
+  if (msg?.location && userId && chatId) {
+    await setUserLocation(env, userId, msg.location);
+    const okMap = {
+      uk: "✅ Локацію збережено. Тепер я можу показувати погоду для вашого місця.",
+      ru: "✅ Локация сохранена. Теперь я смогу показывать погоду для вашего места.",
+      en: "✅ Location saved. I can now show weather for your area.",
+      de: "✅ Standort gespeichert. Ich kann dir jetzt Wetter für deinen Ort zeigen.",
+      fr: "✅ Position enregistrée. Je peux maintenant afficher la météo pour ta zone.",
+    };
+    const ok = okMap[(msg?.from?.language_code || lang || "uk").slice(0,2)] || okMap.uk;
+    await sendPlain(env, chatId, ok, { reply_markup: mainKeyboard(isAdmin) });
+    return json({ ok: true });
+  }
+
   // /admin
   if (textRaw === "/admin" || textRaw === "/admin@SentiBot" || textRaw === BTN_ADMIN) {
     await safe(async () => {
@@ -426,7 +445,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // ✦ Локальні інтенти: дата/час/погода (може бути комбінація)
+  // ✦ Локальні інтенти: дата/час/погода (може бути комбінація в одному повідомленні)
   if (textRaw) {
     const wantsDate = dateIntent(textRaw);
     const wantsTime = timeIntent(textRaw);
@@ -436,9 +455,32 @@ export async function handleTelegramWebhook(req, env) {
       await safe(async () => {
         if (wantsDate) await sendPlain(env, chatId, replyCurrentDate(env, lang));
         if (wantsTime) await sendPlain(env, chatId, replyCurrentTime(env, lang));
+
         if (wantsWeather) {
-          const w = await weatherSummaryByPlace(env, textRaw, lang);
-          await sendPlain(env, chatId, w.text, { parse_mode: w.mode || undefined });
+          // 1) спробуємо місто з фрази
+          const byPlace = await weatherSummaryByPlace(env, textRaw, lang);
+          const notFound = /Не вдалося знайти такий населений пункт\./.test(byPlace.text);
+          if (!notFound) {
+            await sendPlain(env, chatId, byPlace.text, byPlace.mode ? { parse_mode: byPlace.mode } : {});
+          } else {
+            // 2) fallback: спробуємо координати користувача (якщо раніше надіслав)
+            const geo = await getUserLocation(env, userId);
+            if (geo?.lat && geo?.lon) {
+              const byCoords = await weatherSummaryByCoords(geo.lat, geo.lon, lang);
+              await sendPlain(env, chatId, byCoords.text, byCoords.mode ? { parse_mode: byCoords.mode } : {});
+            } else {
+              // 3) попросимо надіслати локацію одноразовою кнопкою
+              const askMap = {
+                uk: "Будь ласка, надішліть вашу локацію кнопкою нижче — і я покажу погоду для вашого місця.",
+                ru: "Пожалуйста, отправьте вашу локацию кнопкой ниже — и я покажу погоду для вашего места.",
+                en: "Please share your location using the button below — I’ll show the weather for your area.",
+                de: "Bitte teile deinen Standort über die Schaltfläche unten – dann zeige ich dir das Wetter für deinen Ort.",
+                fr: "Merci d’envoyer ta position via le bouton ci-dessous — je te montrerai la météo pour ta zone.",
+              };
+              const ask = askMap[lang.slice(0,2)] || askMap.uk;
+              await sendPlain(env, chatId, ask, { reply_markup: askLocationKeyboard() });
+            }
+          }
         }
       });
       return json({ ok: true });
