@@ -1,167 +1,170 @@
 // src/apis/weather.js
+//
+// Open-Meteo: https://open-meteo.com/
+// Ми робимо: (1) простий intent, (2) парсинг місця з тексту,
+// (3) геокодинг -> прогноз -> короткий підсумок,
+// (4) лінк на детальний прогноз.
 
-// Невеличкі допоміжні локалізації
-const L = {
-  now: { uk: "Зараз", ru: "Сейчас", en: "Now", de: "Jetzt", fr: "Maintenant" },
-  in:  { uk: "У",    ru: "В",       en: "In",  de: "In",   fr: "À" },
-  wind:{ uk: "Вітер", ru: "Ветер",  en: "Wind",de: "Wind", fr: "Vent" },
-  none:{ uk: "без опадів", ru: "без осадков", en: "no precipitation", de:"kein Niederschlag", fr:"pas de précipitations" },
-  light:{ uk: "легкий", ru:"легкий", en:"light", de:"leicht", fr:"léger" },
-  errorNotFound: {
-    uk: "Не вдалося знайти такий населений пункт.",
-    ru: "Не удалось найти такой населённый пункт.",
-    en: "Could not find that place.",
-    de: "Dieser Ort wurde nicht gefunden.",
-    fr: "Impossible de trouver ce lieu."
-  }
-};
+const OM_GEOCODE = "https://geocoding-api.open-meteo.com/v1/search";
+const OM_FORECAST = "https://api.open-meteo.com/v1/forecast";
 
-// ---- мапа кодів погоди Open-Meteo (скорочено, достатньо для стислого опису)
-const WMO = (code, lang="uk") => {
-  const map = {
-    0:{ uk:"ясно", ru:"ясно", en:"clear", de:"klar", fr:"dégagé" },
-    1:{ uk:"переважно ясно", ru:"в основном ясно", en:"mostly clear", de:"meist klar", fr:"plutôt dégagé" },
-    2:{ uk:"хмарно з проясненнями", ru:"переменная облачность", en:"partly cloudy", de:"wolkig", fr:"partiellement nuageux" },
-    3:{ uk:"хмарно", ru:"облачно", en:"overcast", de:"bewölkt", fr:"couvert" },
-    45:{ uk:"туман", ru:"туман", en:"fog", de:"Nebel", fr:"brouillard" },
-    48:{ uk:"туман з інеєм", ru:"изморозь, туман", en:"depositing rime fog", de:"Reifnebel", fr:"brouillard givrant" },
-    51:{ uk:"дрібний дощ", ru:"слабая морось", en:"light drizzle", de:"leichter Nieselregen", fr:"bruine faible" },
-    53:{ uk:"мряка", ru:"морось", en:"drizzle", de:"Nieselregen", fr:"bruine" },
-    55:{ uk:"сильна мряка", ru:"сильная морось", en:"dense drizzle", de:"starker Niesel", fr:"bruine forte" },
-    61:{ uk:"легкий дощ", ru:"слабый дождь", en:"light rain", de:"leichter Regen", fr:"pluie faible" },
-    63:{ uk:"дощ", ru:"дождь", en:"rain", de:"Regen", fr:"pluie" },
-    65:{ uk:"сильний дощ", ru:"сильный дождь", en:"heavy rain", de:"starker Regen", fr:"pluie forte" },
-    71:{ uk:"легкий сніг", ru:"слабый снег", en:"light snow", de:"leichter Schnee", fr:"neige faible" },
-    73:{ uk:"сніг", ru:"снег", en:"snow", de:"Schnee", fr:"neige" },
-    75:{ uk:"сильний сніг", ru:"сильный снег", en:"heavy snow", de:"starker Schnee", fr:"fortes chutes de neige" },
-    80:{ uk:"короткочасні дощі", ru:"ливни", en:"rain showers", de:"Regenschauer", fr:"averses" },
-    95:{ uk:"гроза", ru:"гроза", en:"thunderstorm", de:"Gewitter", fr:"orage" }
-  };
-  return (map[code]?.[lang.slice(0,2)] || map[2]?.[lang.slice(0,2)]); // за замовчуванням "partly cloudy"
-};
+/** ----- НОРМАЛІЗАЦІЯ ТОПОНІМІВ (укр./ru/en/de/fr) ----- */
+function normalizePlace(raw = "") {
+  let s = String(raw || "").trim();
 
-// ---- Витягнути місто з тексту (простий, але стійкий варіант)
-function extractPlace(text = "") {
-  const s = String(text).trim();
+  // прибираємо лапки, зайві пробіли
+  s = s.replace(/[«»“”"']/g, "").replace(/\s+/g, " ");
 
-  // приклади: "у Києві", "в Львові", "в городе Одесса", "in New York", "bei Berlin"
-  const m = s.match(
-    /(?:у|в|в\sмісті|в\sгороде|in|at|en|bei|à|au|aux|nach|für)\s+([A-Za-z\u00C0-\u024F\u0400-\u04FF'’\-\. ]{2,50})/iu
+  // прибираємо початкові прийменники типу "в/у/у місті/in/at/en/bei/in der ..."
+  // (декілька мов і форм, без жодних небезпечних екранувань)
+  s = s.replace(
+    /^(?:в|у|у\s+місті|в\s+місті|в\s+городе|у\s+городі|in|at|en|bei|in der|im|à|au|aux)\s+/iu,
+    ""
   );
-  if (m?.[1]) return m[1].trim();
 
-  // запасний: якщо просто одне-дві слова після слова "погода"
-  const m2 = s.match(/погода\s+(?:в|у)?\s*([A-Za-z\u00C0-\u024F\u0400-\u04FF'’\-\. ]{2,50})/iu);
-  if (m2?.[1]) return m2[1].trim();
+  // дуже часті українські місцеві відмінки:
+  // Львові -> Львів, Харкові -> Харків, Києві -> Київ, Вінниці -> Вінниця, Полтаві -> Полтава тощо
+  const uaCases = [
+    [/(єві)$/i, "їв"],      // Києві -> Київ
+    [/(ові)$/i, "ів"],      // Львові/Харкові -> Львів/Харків
+    [/ниці$/i, "ниця"],     // Вінниці -> Вінниця
+    [/ті$/i, "та"],         // Полтаві -> Полтава (працює і для багатьох ін.)
+    [/ді$/i, "да"],         // Кременчуці -> Кременчук (частково)
+  ];
+  for (const [rx, rep] of uaCases) {
+    if (rx.test(s)) {
+      s = s.replace(rx, rep);
+      break;
+    }
+  }
 
-  return null;
+  // спеціальні/нестандартні винятки
+  const SPECIAL = {
+    "києві": "київ",
+    "львові": "львів",
+    "харкові": "харків",
+    "дніпрі": "дніпро",
+    "одесі": "одеса",
+  };
+  if (SPECIAL[s.toLowerCase()]) s = SPECIAL[s.toLowerCase()];
+
+  // обрізаємо лишні коми/крапки в хвості
+  s = s.replace(/[.,;:!?]$/g, "");
+
+  return s;
 }
 
-// ---- Чи це інтенд погоди (стійко до комбінацій з "дата/час")
+/** Витягнути назву населеного пункту з тексту (кілька мов) */
+function parsePlaceFromText(text = "") {
+  const s = String(text || "").trim();
+
+  // приклади: "погода у Києві", "погода в Львові", "weather in New York today", "Wetter heute in Wien"
+  const rx =
+    /(?:погода|погоду|погоди|weather|wetter|météo)\s+(?:на|в|у|in|at|en|bei|à|au|aux)?\s*(.+)$/i;
+  const m = s.match(rx);
+  return m?.[1] ? normalizePlace(m[1]) : null;
+}
+
+/** Простий intent на "погоду" (будь-якою мовою) */
 export function weatherIntent(text = "") {
-  const s = String(text).trim().toLowerCase();
-  if (!s) return false;
-
-  const hasWeatherWord =
-    s.includes("погода") || s.includes("weather") || s.includes("wetter") || s.includes("météo");
-
-  const hasCombo =
-    /(?:погода|weather|wetter|météo)\s*(?:і|та|и|and|und|et)\s*(?:дата|час|time|date)/i.test(s) ||
-    /(?:дата|час|time|date)\s*(?:і|та|и|and|und|et)\s*(?:погода|weather|wetter|météo)/i.test(s);
-
-  const hasPlace =
-    /(?:у|в|in|bei|à|au|aux|nach|für)\s+[A-Za-z\u00C0-\u024F\u0400-\u04FF]/i.test(s);
-
-  return hasWeatherWord || hasCombo || hasPlace;
+  const s = String(text || "").toLowerCase();
+  return /(погод|weather|wetter|météo)/i.test(s);
 }
 
-// ---- Геокодинг через Open-Meteo
-async function geocodePlace(place, lang = "uk") {
-  const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(place)}&count=1&language=${encodeURIComponent(lang)}&format=json`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error("geocoding failed");
-  const data = await r.json();
-  const item = data?.results?.[0];
-  if (!item) return null;
-  return {
-    name: item.name,
-    country: item.country,
-    lat: item.latitude,
-    lon: item.longitude
-  };
-}
-
-// ---- Отримати “зараз” по координатах
-async function getCurrentWeather(lat, lon) {
+/** Геокодинг Open-Meteo */
+async function geocode(place, lang = "uk") {
   const url =
-    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
-    `&current=temperature_2m,precipitation,wind_speed_10m,weather_code` +
-    `&timezone=auto`;
+    `${OM_GEOCODE}?name=${encodeURIComponent(place)}&count=5&language=${encodeURIComponent(lang)}&format=json`;
   const r = await fetch(url);
-  if (!r.ok) throw new Error("weather failed");
-  const data = await r.json();
-  return {
-    tz: data?.timezone || "UTC",
-    t: data?.current?.temperature_2m,
-    p: data?.current?.precipitation,
-    w: data?.current?.wind_speed_10m,
-    code: data?.current?.weather_code
-  };
+  const data = await r.json().catch(() => null);
+  const results = Array.isArray(data?.results) ? data.results : [];
+  return results;
 }
 
-// ---- Форматування відповіді
-function makeWeatherText({ placeLabel, t, p, w, code, lang="uk" }) {
-  const flag = "🌤️";
-  const cc = WMO(Number(code || 2), lang);
-  const unitT = "°C";
-  const windLabel = L.wind[lang.slice(0,2)] || L.wind.uk;
+/** Якщо геокодинг нічого не дав — пробуємо ще раз з «підправленим» словом */
+async function smartGeocode(place, lang = "uk") {
+  let res = await geocode(place, lang);
+  if (res.length) return res;
 
-  // опади: якщо p дуже малі — вкажемо “без опадів”
-  let precipText;
-  if (p == null) precipText = "";
-  else if (Number(p) < 0.2) precipText = L.none[lang.slice(0,2)] || L.none.uk;
-  else precipText = `${p} mm`;
+  // пробуємо додаткові підстановки для укр. локативів
+  const tries = [];
+  if (/(єві)$/i.test(place)) tries.push(place.replace(/єві$/i, "їв"));
+  if (/(ові)$/i.test(place)) tries.push(place.replace(/ові$/i, "ів"));
+  if (/ниці$/i.test(place))  tries.push(place.replace(/ниці$/i, "ниця"));
 
-  const bits = [];
-  bits.push(`${flag} ${L.in[lang.slice(0,2)] || L.in.uk} ${placeLabel} ${cc}.`);
-  if (t != null) bits.push(`Температура близько ${Math.round(t)}${unitT}.`);
-  if (w != null) bits.push(`${windLabel} ${Math.round(w)} м/с${precipText ? "," : "."}`);
-  if (precipText) bits.push(`${precipText}.`);
-
-  // з’єднаємо у два-три простих речення
-  return bits.join(" ");
+  for (const t of tries) {
+    res = await geocode(t, lang);
+    if (res.length) return res;
+  }
+  return [];
 }
 
-// ---- Публічні API: за місцем
-export async function weatherSummaryByPlace(textOrPlace, lang = "uk") {
-  const place = extractPlace(textOrPlace) || String(textOrPlace).trim();
+/** Короткий текст-підсумок з відповіді OM */
+function summarizeWeather(json, lang = "uk") {
+  const curT = json?.current?.temperature_2m;
+  const code = json?.current?.weather_code;
+  const wind = json?.current?.wind_speed_10m;
+
+  // дуже прості описи за кодом погоди
+  let icon = "🌤️";
+  let desc = "";
+  const W = Number(code);
+  if ([0].includes(W))                 { icon = "☀️"; desc = {uk:"сонячно", ru:"солнечно", en:"sunny", de:"sonnig", fr:"ensoleillé"}; }
+  else if ([1,2,3].includes(W))        { icon = "🌤️"; desc = {uk:"хмарно з проясненнями", ru:"переменная облачность", en:"partly cloudy", de:"wolkig", fr:"nuageux"}; }
+  else if ([45,48].includes(W))        { icon = "🌫️"; desc = {uk:"туман", ru:"туман", en:"fog", de:"Nebel", fr:"brouillard"}; }
+  else if ([51,53,55,56,57].includes(W)){ icon = "🌦️"; desc = {uk:"мряка/дощ", ru:"морось/дождь", en:"drizzle/rain", de:"Niesel/regen", fr:"bruine/pluie"}; }
+  else if ([61,63,65,80,81,82].includes(W)){ icon = "🌧️"; desc = {uk:"дощ", ru:"дождь", en:"rain", de:"Regen", fr:"pluie"}; }
+  else if ([71,73,75,77,85,86].includes(W)){ icon = "❄️"; desc = {uk:"сніг", ru:"снег", en:"snow", de:"Schnee", fr:"neige"}; }
+  else if ([95,96,99].includes(W))     { icon = "⛈️"; desc = {uk:"гроза", ru:"гроза", en:"thunderstorm", de:"Gewitter", fr:"orage"}; }
+
+  const d = (m) => (desc[m] || desc.uk);
+  const text = `${icon} ${d(lang.slice(0,2)) || d("uk")}. Температура близько ${Math.round(curT)}°C. Вітер ${Math.round(wind)} м/с.`;
+  return text;
+}
+
+/** Підсумок погоди за координатами */
+export async function weatherSummaryByCoords(lat, lon, lang = "uk") {
+  const url = `${OM_FORECAST}?latitude=${lat}&longitude=${lon}`
+    + `&current=temperature_2m,weather_code,wind_speed_10m`
+    + `&timezone=auto`;
+  const r = await fetch(url);
+  const data = await r.json().catch(() => null);
+  if (!data) return { text: "⚠️ Weather API error." };
+
+  const text = summarizeWeather(data, lang);
+  const link = `https://open-meteo.com/en/#location=${lat},${lon}`;
+  return { text: `${text}\n🔗 ${link}`, timezone: data.timezone || "UTC" };
+}
+
+/** Підсумок погоди за текстом-запитом (місто з фрази) */
+export async function weatherSummaryByPlace(env, userText, lang = "uk") {
+  let place = parsePlaceFromText(userText);
   if (!place) {
-    return { text: L.errorNotFound[lang.slice(0,2)] || L.errorNotFound.uk, timezone: "UTC" };
+    // якщо користувач запитав тільки «яка погода?», пробуємо місто з профілю / або кидаємо помилку
+    return { text: "Не вдалося знайти такий населений пункт." };
   }
 
-  const geo = await geocodePlace(place, lang);
-  if (!geo) {
-    return { text: L.errorNotFound[lang.slice(0,2)] || L.errorNotFound.uk, timezone: "UTC" };
+  // геокодимо з розумними підстановками
+  let results = await smartGeocode(place, lang);
+  if (!results.length) {
+    // остання спроба — без мови (іноді OM краще матчить англ.)
+    results = await geocode(place, "en");
   }
+  if (!results.length) return { text: "Не вдалося знайти такий населений пункт." };
 
-  const cur = await getCurrentWeather(geo.lat, geo.lon);
-  const label = geo.country ? `${geo.name}, ${geo.country}` : geo.name;
+  const best = results[0];
+  const lat = best.latitude;
+  const lon = best.longitude;
+  const cityName = best.name;
 
-  return {
-    text: makeWeatherText({
-      placeLabel: label,
-      t: cur.t, p: cur.p, w: cur.w, code: cur.code, lang
-    }),
-    timezone: cur.tz
-  };
+  const { text, timezone } = await weatherSummaryByCoords(lat, lon, lang);
+  // робимо підпис «у <місто>»
+  const pre = { uk: "У", ru: "В", en: "In", de: "In", fr: "À" }[lang.slice(0,2)] || "У";
+  return { text: text.replace(/^([^\s]+)/, `$1 ${pre} ${cityName}`), timezone };
 }
 
-// ---- Публічні API: за координатами
-export async function weatherSummaryByCoords(lat, lon, lang = "uk", placeLabel = "") {
-  const cur = await getCurrentWeather(lat, lon);
-  const text = makeWeatherText({
-    placeLabel: placeLabel || "вашій локації",
-    t: cur.t, p: cur.p, w: cur.w, code: cur.code, lang
-  });
-  return { text, timezone: cur.tz };
-}
+export default {
+  weatherIntent,
+  weatherSummaryByPlace,
+  weatherSummaryByCoords,
+};
