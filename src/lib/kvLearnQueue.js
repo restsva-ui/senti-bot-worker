@@ -1,61 +1,108 @@
 // src/lib/kvLearnQueue.js
-// Проста черга для навчання в KV
+const PREFIX = "learn";
+const keyUser = (uid) => `${PREFIX}:user:${uid}`;
+const keySys  = () => `${PREFIX}:sys`;
+const keyUsers = () => `${PREFIX}:users`;
 
-const KEY = (uid) => `learn:queue:${uid}`;
-const SYSKEY = `learn:queue:system`;
-
-function normalizeItem(src = {}) {
-  const id = src.id || crypto.randomUUID();
-  const url = (src.url || "").trim();
-  const name = (src.name || "").trim() || url || `item_${id}`;
-  const when = src.when || Date.now();
-  const type = src.type || (url ? "url" : "file");
-  const status = src.status || "queued"; // queued | done | fail
-  return { id, url, name, when, type, status };
+async function readJSON(KV, key, def) {
+  const v = await KV.get(key);
+  if (!v) return def;
+  try { return JSON.parse(v); } catch { return def; }
+}
+async function writeJSON(KV, key, val) {
+  await KV.put(key, JSON.stringify(val));
 }
 
-export async function enqueueLearn(env, userId, item) {
-  const kv = env?.LEARN_QUEUE_KV;
-  if (!kv) throw new Error("LEARN_QUEUE_KV is not bound");
-  const key = KEY(userId);
-  let arr = [];
-  try {
-    const raw = await kv.get(key);
-    if (raw) arr = JSON.parse(raw);
-  } catch {}
-  arr.push(normalizeItem(item));
-  await kv.put(key, JSON.stringify(arr));
-  return arr.length;
+function makeItem({ url, name, type = "url" }) {
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    type, url,
+    name: name || url,
+    when: Date.now(),
+    status: "queued",
+  };
 }
 
-export async function listLearn(env, userId) {
-  const kv = env?.LEARN_QUEUE_KV;
-  if (!kv) throw new Error("LEARN_QUEUE_KV is not bound");
-  const raw = await kv.get(KEY(userId));
-  if (!raw) return [];
-  try { return JSON.parse(raw) || []; } catch { return []; }
+// ---- API ----
+export async function enqueueLearn(env, userId, { url, name, type = "url" }) {
+  const k = keyUser(userId);
+  const arr = await readJSON(env.STATE_KV, k, []);
+  arr.push(makeItem({ url, name, type }));
+  await writeJSON(env.STATE_KV, k, arr);
+
+  const uk = keyUsers();
+  const users = await readJSON(env.STATE_KV, uk, []);
+  const uid = String(userId);
+  if (!users.includes(uid)) {
+    users.push(uid);
+    await writeJSON(env.STATE_KV, uk, users);
+  }
+}
+export async function enqueueSystemLearn(env, { url, name, type = "url" }) {
+  const k = keySys();
+  const arr = await readJSON(env.STATE_KV, k, []);
+  arr.push(makeItem({ url, name, type }));
+  await writeJSON(env.STATE_KV, k, arr);
+}
+export async function listLearn(env, userId) { return await readJSON(env.STATE_KV, keyUser(userId), []); }
+export async function listSystemLearn(env) { return await readJSON(env.STATE_KV, keySys(), []); }
+export async function clearLearn(env, userId) { await writeJSON(env.STATE_KV, keyUser(userId), []); }
+
+export async function markAsProcessing(env, scope, id) {
+  const key = scope === "sys" ? keySys() : keyUser(scope.replace("user:", ""));
+  const arr = await readJSON(env.STATE_KV, key, []);
+  const i = arr.findIndex(x => x.id === id);
+  if (i >= 0) {
+    arr[i].status = "processing";
+    await writeJSON(env.STATE_KV, key, arr);
+    return arr[i];
+  }
+  return null;
+}
+export async function markAsDone(env, scope, id, report = null, ok = true) {
+  const key = scope === "sys" ? keySys() : keyUser(scope.replace("user:", ""));
+  const arr = await readJSON(env.STATE_KV, key, []);
+  const i = arr.findIndex(x => x.id === id);
+  if (i >= 0) {
+    arr[i].status = ok ? "done" : "failed";
+    if (report) arr[i].report = report;
+    await writeJSON(env.STATE_KV, key, arr);
+    return arr[i];
+  }
+  return null;
 }
 
-export async function clearLearn(env, userId) {
-  const kv = env?.LEARN_QUEUE_KV;
-  if (!kv) throw new Error("LEARN_QUEUE_KV is not bound");
-  await kv.put(KEY(userId), JSON.stringify([]));
+// Заглушка обробки елемента (підключіть свою реальну логіку).
+async function processItem(env, item) {
+  return { summary: "Processed item", title: item.name, url: item.url, words: 0 };
 }
 
-export async function enqueueSystemLearn(env, item) {
-  const kv = env?.LEARN_QUEUE_KV;
-  if (!kv) throw new Error("LEARN_QUEUE_KV is not bound");
-  let arr = [];
-  try { const raw = await kv.get(SYSKEY); if (raw) arr = JSON.parse(raw); } catch {}
-  arr.push(normalizeItem(item));
-  await kv.put(SYSKEY, JSON.stringify(arr));
-  return arr.length;
-}
+// Одноразовий прогін усієї черги
+export async function runLearnOnce(env, { userId = null } = {}) {
+  const processed = [];
 
-export async function listSystemLearn(env) {
-  const kv = env?.LEARN_QUEUE_KV;
-  if (!kv) throw new Error("LEARN_QUEUE_KV is not bound");
-  const raw = await kv.get(SYSKEY);
-  if (!raw) return [];
-  try { return JSON.parse(raw) || []; } catch { return []; }
+  // системна
+  for (const it of await listSystemLearn(env)) {
+    if (it.status !== "queued") continue;
+    await markAsProcessing(env, "sys", it.id);
+    const rep = await processItem(env, it).catch(e => ({ error: String(e) }));
+    await markAsDone(env, "sys", it.id, rep, !rep?.error);
+    processed.push({ scope: "sys", id: it.id, ok: !rep?.error });
+  }
+
+  // користувачі
+  const users = userId
+    ? [String(userId)]
+    : await readJSON(env.STATE_KV, keyUsers(), []);
+  for (const uid of users) {
+    for (const it of await listLearn(env, uid)) {
+      if (it.status !== "queued") continue;
+      await markAsProcessing(env, `user:${uid}`, it.id);
+      const rep = await processItem(env, it).catch(e => ({ error: String(e) }));
+      await markAsDone(env, `user:${uid}`, it.id, rep, !rep?.error);
+      processed.push({ scope: `user:${uid}`, id: it.id, ok: !rep?.error });
+    }
+  }
+
+  return { ok: true, processed };
 }
