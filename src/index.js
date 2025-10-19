@@ -27,8 +27,9 @@ import { handleBrainApi } from "./routes/brainApi.js";
 import { handleAiTrain } from "./routes/aiTrain.js";
 import { handleAiEvolve } from "./routes/aiEvolve.js";
 import { handleBrainPromote } from "./routes/brainPromote.js";
-import { handleAdminEnergy } from "./routes/adminEnergy.js"; // energy UI/API
-import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js"; // ← ДОДАНО
+import { handleAdminEnergy } from "./routes/adminEnergy.js";
+import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
+import { handleAdminLearn } from "./routes/adminLearn.js"; // ← ДОДАНО
 
 // ✅ локальний selftest
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
@@ -52,17 +53,7 @@ import { runSelfRegulation } from "./lib/selfRegulate.js";
 // ✅ HTTP-роутер нічного агента + debug (/ai/improve*, /debug/*)
 import { handleAiImprove } from "./routes/aiImprove.js";
 
-const VERSION = "senti-worker-2025-10-12-00-59+aiimprove-router";
-
-// спільна перевірка секрету для Telegram webhook
-function getExpectedWebhookSecret(env) {
-  return (
-    env.TG_WEBHOOK_SECRET ||
-    env.TELEGRAM_SECRET_TOKEN ||
-    env.WEBHOOK_SECRET ||
-    ""
-  );
-}
+const VERSION = "senti-worker-2025-10-19-00-40+learn-ui+tg-alias";
 
 export default {
   async fetch(req, env) {
@@ -102,46 +93,15 @@ export default {
         );
       }
 
-      // ---- Telegram webhook (новий шлях) -----------------------------------
-      if (p === "/tg/webhook" && method === "GET") {
-        return json({ ok: true, method: "GET", message: "tg webhook alive" }, 200, CORS);
-      }
-      if (p === "/tg/webhook" && method === "POST") {
-        try {
-          const sec = req.headers.get("x-telegram-bot-api-secret-token");
-          const expected = getExpectedWebhookSecret(env);
-          if (expected && sec !== expected) {
-            return json({ ok: false, error: "unauthorized" }, 401, CORS);
-          }
-          const r = await handleTelegramWebhook?.(req, env, url);
-          if (r) return r;
-        } catch {}
-        return json({ ok: true, note: "fallback tg webhook POST" }, 200, CORS);
-      }
-
-      // ---- Telegram webhook (зворотна сумісність зі старим шляхом) ---------
-      if (p === "/webhook" && method === "GET") {
+      if ((p === "/webhook" || p === "/tg/webhook") && method === "GET") {
         return json({ ok: true, method: "GET", message: "webhook alive" }, 200, CORS);
       }
-      if (p === "/webhook" && method === "POST") {
-        try {
-          const sec = req.headers.get("x-telegram-bot-api-secret-token");
-          const expected = getExpectedWebhookSecret(env);
-          if (expected && sec !== expected) {
-            return json({ ok: false, error: "unauthorized" }, 401, CORS);
-          }
-          const r = await handleTelegramWebhook?.(req, env, url);
-          if (r) return r;
-        } catch {}
-        return json({ ok: true, note: "fallback webhook POST" }, 200, CORS);
-      }
-      // ----------------------------------------------------------------------
 
       // brain state
       if (p === "/brain/state") {
         try {
           const r = await handleBrainState?.(req, env, url);
-          if (r && r.status !== 404) return r;
+        if (r && r.status !== 404) return r;
         } catch {}
         return json({ ok: true, state: "available" }, 200, CORS);
       }
@@ -242,8 +202,15 @@ export default {
       }
 
       // --- ADMIN ---
+      // 0) Learn (адмін)
+      if (p.startsWith("/admin/learn")) {
+        const r = await handleAdminLearn?.(req, env, url);
+        if (r) return r;
+        return html("<h3>Learn (admin)</h3><p>Handler missing</p>");
+      }
+
       // 1) Комбінована сторінка: Checklist + Energy (ifrаme)
-      if (p.startsWith("/admin/checklist/with-energy")) { // ← ДОДАНО
+      if (p.startsWith("/admin/checklist/with-energy")) {
         try {
           const r = await handleAdminChecklistWithEnergy?.(req, env, url);
           if (r && r.status !== 404) return r;
@@ -282,7 +249,7 @@ export default {
       if (p.startsWith("/admin/brain")) {
         try {
           const r = await handleAdminBrain?.(req, env, url);
-          if (r && r.status !== 404) return r; // ← виправлено (було кириличне 'р')
+          if (r && r.status !== 404) return r;
         } catch {}
         return json({ ok: true, note: "admin brain fallback" }, 200, CORS);
       }
@@ -291,9 +258,22 @@ export default {
       if (p.startsWith("/admin/energy")) {
         try {
           const r = await handleAdminEnergy?.(req, env, url);
-        if (r && r.status !== 404) return r;
+          if (r && r.status !== 404) return r;
         } catch {}
         return json({ ok: true, note: "admin energy fallback" }, 200, CORS);
+      }
+
+      // webhook POST (і alias /tg/webhook)
+      if ((p === "/webhook" || p === "/tg/webhook") && req.method === "POST") {
+        try {
+          const sec = req.headers.get("x-telegram-bot-api-secret-token");
+          if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
+            return json({ ok: false, error: "unauthorized" }, 401, CORS);
+          }
+          const r = await handleTelegramWebhook?.(req, env, url);
+          if (r) return r;
+        } catch {}
+        return json({ ok: true, note: "fallback webhook POST" }, 200, CORS);
       }
 
       // tg helpers
@@ -304,8 +284,8 @@ export default {
         });
       }
       if (p === "/tg/set-webhook") {
-        const target = abs(env, "/tg/webhook"); // ← було "/webhook"
-        const r = await TG.setWebhook(env.BOT_TOKEN, target, getExpectedWebhookSecret(env));
+        const target = abs(env, "/tg/webhook"); // ← використовуємо alias
+        const r = await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
         return new Response(await r.text(), {
           headers: { "content-type": "application/json" },
         });
