@@ -1,114 +1,132 @@
-// src/lib/learnQueue.js
-import { askAnyModel } from "./modelRouter.js";
-import { think } from "./brain.js";
-import { appendChecklist } from "./kvChecklist.js";
+// src/lib/kvLearnQueue.js
+// Зберігаємо черги в STATE_KV під префіксом learn:*
+// - learn:users -> ["784869835", ...] — довідник користувачів, що колись додавали елементи
+// - learn:user:<id> -> [{ id, type, url, name, when, status, report? }, ...]
+// - learn:sys -> [{ id, type, url, name, when, status, report? }, ...]
 
-const KEY_USER_PREFIX = (u) => `user:${u}:queue`;
-const KEY_SYSTEM = "system:queue";
+const PREFIX = "learn";
+const keyUser = (uid) => `${PREFIX}:user:${uid}`;
+const keySys = () => `${PREFIX}:sys`;
+const keyUsers = () => `${PREFIX}:users`;
 
-// зберігаємо масив об'єктів: {id, ts, type, url|name, by}
-function nowISO(){return new Date().toISOString();}
-
-export async function listUser(env, uid){
-  const raw = await env.LEARN_QUEUE_KV.get(KEY_USER_PREFIX(uid));
-  return raw ? JSON.parse(raw) : [];
+async function readJSON(KV, key, def) {
+  const v = await KV.get(key);
+  if (!v) return def;
+  try { return JSON.parse(v); } catch { return def; }
 }
-export async function saveUser(env, uid, arr){
-  await env.LEARN_QUEUE_KV.put(KEY_USER_PREFIX(uid), JSON.stringify(arr));
-}
-export async function clearUser(env, uid){
-  await env.LEARN_QUEUE_KV.delete(KEY_USER_PREFIX(uid));
+async function writeJSON(KV, key, val) {
+  await KV.put(key, JSON.stringify(val));
 }
 
-export async function listSystem(env){
-  const raw = await env.LEARN_QUEUE_KV.get(KEY_SYSTEM);
-  return raw ? JSON.parse(raw) : [];
-}
-export async function saveSystem(env, arr){
-  await env.LEARN_QUEUE_KV.put(KEY_SYSTEM, JSON.stringify(arr));
-}
-
-export async function enqueueUrl(env, uid, url){
-  const it = { id: crypto.randomUUID(), ts: nowISO(), type:"url", url, by: uid };
-  const user = await listUser(env, uid);
-  user.push(it);
-  await saveUser(env, uid, user);
-  return it;
-}
-export async function enqueueFile(env, uid, name, tempUrl){
-  const it = { id: crypto.randomUUID(), ts: nowISO(), type:"file", name, url: tempUrl, by: uid };
-  const user = await listUser(env, uid);
-  user.push(it);
-  await saveUser(env, uid, user);
-  return it;
+function makeItem({ url, name, type = "url" }) {
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    type,
+    url,
+    name: name || url,
+    when: Date.now(),
+    status: "queued",
+  };
 }
 
-// Перенести з користувацьких до системної (для фонової обробки)
-export async function promoteUserItems(env, uid){
-  const user = await listUser(env, uid);
-  if (!user.length) return 0;
-  const sys = await listSystem(env);
-  const moved = user.splice(0, user.length);
-  await saveUser(env, uid, user);
-  await saveSystem(env, sys.concat(moved));
-  return moved.length;
+// ---------- public API ----------
+
+export async function enqueueLearn(env, userId, { url, name, type = "url" }) {
+  const key = keyUser(userId);
+  const arr = await readJSON(env.STATE_KV, key, []);
+  arr.push(makeItem({ url, name, type }));
+  await writeJSON(env.STATE_KV, key, arr);
+
+  // пам'ятаємо користувача
+  const ukey = keyUsers();
+  const users = await readJSON(env.STATE_KV, ukey, []);
+  if (!users.includes(String(userId))) {
+    users.push(String(userId));
+    await writeJSON(env.STATE_KV, ukey, users);
+  }
 }
 
-export async function processOne(env, modelOrder){
-  const sys = await listSystem(env);
-  if (!sys.length) return {done:false};
-  const item = sys.shift();
-  await saveSystem(env, sys);
+export async function enqueueSystemLearn(env, { url, name, type = "url" }) {
+  const key = keySys();
+  const arr = await readJSON(env.STATE_KV, key, []);
+  arr.push(makeItem({ url, name, type }));
+  await writeJSON(env.STATE_KV, key, arr);
+}
 
-  // ледь-полегшений підхід: для URL просимо модель витягти корисне і стиснути
-  const model = modelOrder || env.MODEL_ORDER || "";
-  const systemHint = "You are Senti. Read the provided resource and produce a compact knowledge memo: 3–6 bullets with key takeaways and 1–2 suggested questions to ask next time. Keep it neutral and helpful.";
-  let prompt;
+export async function listLearn(env, userId) {
+  return await readJSON(env.STATE_KV, keyUser(userId), []);
+}
 
-  if (item.type === "url"){
-    prompt = `Study this URL and summarize:\n${item.url}\n\nReturn:\n- 3–6 bullets of key points\n- 1–2 suggested next questions`;
-  } else {
-    prompt = `Study this content (temporary URL):\n${item.url}\nName: ${item.name}\n\nReturn:\n- 3–6 bullets of key points\n- 1–2 suggested next questions`;
+export async function listSystemLearn(env) {
+  return await readJSON(env.STATE_KV, keySys(), []);
+}
+
+export async function clearLearn(env, userId) {
+  await writeJSON(env.STATE_KV, keyUser(userId), []);
+}
+
+export async function markAsProcessing(env, scope, id) {
+  const key = scope === "sys" ? keySys() : keyUser(scope.replace("user:", ""));
+  const arr = await readJSON(env.STATE_KV, key, []);
+  const i = arr.findIndex((x) => x.id === id);
+  if (i >= 0) {
+    arr[i].status = "processing";
+    await writeJSON(env.STATE_KV, key, arr);
+    return arr[i];
+  }
+  return null;
+}
+
+export async function markAsDone(env, scope, id, report = null, ok = true) {
+  const key = scope === "sys" ? keySys() : keyUser(scope.replace("user:", ""));
+  const arr = await readJSON(env.STATE_KV, key, []);
+  const i = arr.findIndex((x) => x.id === id);
+  if (i >= 0) {
+    arr[i].status = ok ? "done" : "failed";
+    if (report) arr[i].report = report;
+    await writeJSON(env.STATE_KV, key, arr);
+    return arr[i];
+  }
+  return null;
+}
+
+// простий обробник черги (заглушка; інтегруйте свою логіку "читання/векторизації" тут)
+async function processItem(env, item) {
+  // TODO: тут можна підтягнути сторінку/текст, скласти короткий звіт, записати у LIKES_KV або DIALOG_KV
+  return {
+    summary: "Processed item",
+    title: item.name,
+    url: item.url,
+    words: 0,
+  };
+}
+
+export async function runLearnOnce(env, { userId = null } = {}) {
+  let processed = [];
+
+  // 1) системна черга
+  const sys = await listSystemLearn(env);
+  for (const it of sys.filter((x) => x.status === "queued")) {
+    await markAsProcessing(env, "sys", it.id);
+    const rep = await processItem(env, it).catch((e) => ({ error: String(e) }));
+    await markAsDone(env, "sys", it.id, rep, !rep?.error);
+    processed.push({ scope: "sys", id: it.id, ok: !rep?.error });
   }
 
-  let out;
-  try{
-    out = model ? await askAnyModel(env, model, prompt, { systemHint })
-                : await think(env, prompt, { systemHint });
-  }catch(e){
-    await appendChecklist(env, `learn:fail ${item.type}:${item.url||item.name} — ${String(e).slice(0,140)}`);
-    return {done:true, item, ok:false, error:String(e)};
+  // 2) користувацькі (або конкретний userId, або всі)
+  const users = userId
+    ? [String(userId)]
+    : await readJSON(env.STATE_KV, keyUsers(), []);
+
+  for (const uid of users) {
+    const items = await listLearn(env, uid);
+    for (const it of items.filter((x) => x.status === "queued")) {
+      await markAsProcessing(env, `user:${uid}`, it.id);
+      const rep = await processItem(env, it).catch((e) => ({ error: String(e) }));
+      await markAsDone(env, `user:${uid}`, it.id, rep, !rep?.error);
+      processed.push({ scope: `user:${uid}`, id: it.id, ok: !rep?.error });
+    }
   }
 
-  const summary = String(out||"").trim();
-  await env.LEARN_QUEUE_KV.put(`summary:${item.id}`, JSON.stringify({
-    ts: nowISO(),
-    by: item.by,
-    type: item.type,
-    url: item.url || null,
-    name: item.name || null,
-    summary
-  }));
-  await appendChecklist(env, `🧠 learn:ok ${item.type}:${item.url||item.name}`);
-
-  return {done:true, ok:true, item, summary};
-}
-
-export async function latestSummaries(env, limit=5){
-  // дуже просто: KV list не доступний, тож зберігаємо останній індекс
-  const idx = Number((await env.LEARN_QUEUE_KV.get("summary:index"))||"0");
-  const arr = [];
-  for (let i=idx;i>0 && arr.length<limit;i--){
-    const raw = await env.LEARN_QUEUE_KV.get(`summary-id:${i}`);
-    if (!raw) continue;
-    arr.push(JSON.parse(raw));
-  }
-  return arr;
-}
-
-// допоміжна функція для запису з автоінкрементом у «історію»
-export async function storeSummaryRolling(env, payload){
-  const idx = Number((await env.LEARN_QUEUE_KV.get("summary:index"))||"0")+1;
-  await env.LEARN_QUEUE_KV.put(`summary-id:${idx}`, JSON.stringify(payload));
-  await env.LEARN_QUEUE_KV.put("summary:index", String(idx));
+  return { ok: true, processed };
 }
