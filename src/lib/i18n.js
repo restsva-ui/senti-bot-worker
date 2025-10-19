@@ -75,4 +75,4 @@ export function detectFromText(text = "") {
   if (/[а-яё]/.test(s)) return "ru";
   if (/[a-z]/.test(s)) return "en";
   return "en";
-}
+} 
