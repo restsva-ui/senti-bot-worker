@@ -100,4 +100,4 @@ export function detectFromText(out = "") {
   if (/[äöüß]/.test(s)) return "de";
   if (/[àâçéèêëîïôûùüÿœ]/.test(s)) return "fr";
   return "en";
-}
+} 
