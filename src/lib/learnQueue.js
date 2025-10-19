@@ -1,240 +1,114 @@
-// Lightweight learning queue for Senti
-// Stores items in KV and lets nightly agent consume them later.
-// It prefers LEARN_QUEUE_KV but gracefully falls back to TODO_KV or STATE_KV.
+// src/lib/learnQueue.js
+import { askAnyModel } from "./modelRouter.js";
+import { think } from "./brain.js";
+import { appendChecklist } from "./kvChecklist.js";
 
-const PREFIX = "q:learn:item:";   // items
-const META_PREFIX = "q:learn:meta:"; // optional per-id meta
+const KEY_USER_PREFIX = (u) => `user:${u}:queue`;
+const KEY_SYSTEM = "system:queue";
 
-function getKV(env) {
-  const kv =
-    env.LEARN_QUEUE_KV ||
-    env.TODO_KV ||
-    env.STATE_KV;
-  if (!kv) throw new Error("No KV binding for learn queue (expected LEARN_QUEUE_KV / TODO_KV / STATE_KV).");
-  return kv;
+// зберігаємо масив об'єктів: {id, ts, type, url|name, by}
+function nowISO(){return new Date().toISOString();}
+
+export async function listUser(env, uid){
+  const raw = await env.LEARN_QUEUE_KV.get(KEY_USER_PREFIX(uid));
+  return raw ? JSON.parse(raw) : [];
+}
+export async function saveUser(env, uid, arr){
+  await env.LEARN_QUEUE_KV.put(KEY_USER_PREFIX(uid), JSON.stringify(arr));
+}
+export async function clearUser(env, uid){
+  await env.LEARN_QUEUE_KV.delete(KEY_USER_PREFIX(uid));
 }
 
-function nowTs() {
-  return Date.now();
+export async function listSystem(env){
+  const raw = await env.LEARN_QUEUE_KV.get(KEY_SYSTEM);
+  return raw ? JSON.parse(raw) : [];
+}
+export async function saveSystem(env, arr){
+  await env.LEARN_QUEUE_KV.put(KEY_SYSTEM, JSON.stringify(arr));
 }
 
-function rand4() {
-  return Math.random().toString(16).slice(2, 6);
+export async function enqueueUrl(env, uid, url){
+  const it = { id: crypto.randomUUID(), ts: nowISO(), type:"url", url, by: uid };
+  const user = await listUser(env, uid);
+  user.push(it);
+  await saveUser(env, uid, user);
+  return it;
+}
+export async function enqueueFile(env, uid, name, tempUrl){
+  const it = { id: crypto.randomUUID(), ts: nowISO(), type:"file", name, url: tempUrl, by: uid };
+  const user = await listUser(env, uid);
+  user.push(it);
+  await saveUser(env, uid, user);
+  return it;
 }
 
-function makeId() {
-  // time-first so KV.list(prefix) returns items in chronological order
-  const ts = nowTs();
-  return `${ts}-${rand4()}${rand4()}`;
+// Перенести з користувацьких до системної (для фонової обробки)
+export async function promoteUserItems(env, uid){
+  const user = await listUser(env, uid);
+  if (!user.length) return 0;
+  const sys = await listSystem(env);
+  const moved = user.splice(0, user.length);
+  await saveUser(env, uid, user);
+  await saveSystem(env, sys.concat(moved));
+  return moved.length;
 }
 
-function isUrl(s = "") {
-  try {
-    const u = new URL(String(s));
-    return u.protocol === "http:" || u.protocol === "https:";
-  } catch {
-    return false;
+export async function processOne(env, modelOrder){
+  const sys = await listSystem(env);
+  if (!sys.length) return {done:false};
+  const item = sys.shift();
+  await saveSystem(env, sys);
+
+  // ледь-полегшений підхід: для URL просимо модель витягти корисне і стиснути
+  const model = modelOrder || env.MODEL_ORDER || "";
+  const systemHint = "You are Senti. Read the provided resource and produce a compact knowledge memo: 3–6 bullets with key takeaways and 1–2 suggested questions to ask next time. Keep it neutral and helpful.";
+  let prompt;
+
+  if (item.type === "url"){
+    prompt = `Study this URL and summarize:\n${item.url}\n\nReturn:\n- 3–6 bullets of key points\n- 1–2 suggested next questions`;
+  } else {
+    prompt = `Study this content (temporary URL):\n${item.url}\nName: ${item.name}\n\nReturn:\n- 3–6 bullets of key points\n- 1–2 suggested next questions`;
   }
-}
 
-function sanitizeStr(x, max = 4000) {
-  if (x == null) return "";
-  let s = String(x);
-  if (s.length > max) s = s.slice(0, max);
-  return s;
-}
-
-/**
- * Normalizes raw input to a queue item payload.
- * Accepts:
- *  - string URL
- *  - string text (non-URL)
- *  - { type, url, name } for files/links
- */
-function normalizeInput(input) {
-  // URL string
-  if (typeof input === "string" && isUrl(input)) {
-    return { kind: "url", url: sanitizeStr(input, 2048) };
+  let out;
+  try{
+    out = model ? await askAnyModel(env, model, prompt, { systemHint })
+                : await think(env, prompt, { systemHint });
+  }catch(e){
+    await appendChecklist(env, `learn:fail ${item.type}:${item.url||item.name} — ${String(e).slice(0,140)}`);
+    return {done:true, item, ok:false, error:String(e)};
   }
-  // Text string
-  if (typeof input === "string") {
-    return { kind: "text", text: sanitizeStr(input, 4000) };
-  }
-  // Object {type,url/name/text}
-  if (input && typeof input === "object") {
-    const kind = input.kind || input.type || (input.url ? "url" : (input.text ? "text" : "unknown"));
-    const out = { kind: String(kind || "unknown") };
-    if (input.url) out.url = sanitizeStr(input.url, 2048);
-    if (input.text) out.text = sanitizeStr(input.text, 4000);
-    if (input.name) out.name = sanitizeStr(input.name, 256);
-    if (input.mime) out.mime = sanitizeStr(input.mime, 128);
-    if (input.size) out.size = Number(input.size) || undefined;
-    return out;
-  }
-  // Fallback
-  return { kind: "unknown", text: sanitizeStr(String(input)) };
+
+  const summary = String(out||"").trim();
+  await env.LEARN_QUEUE_KV.put(`summary:${item.id}`, JSON.stringify({
+    ts: nowISO(),
+    by: item.by,
+    type: item.type,
+    url: item.url || null,
+    name: item.name || null,
+    summary
+  }));
+  await appendChecklist(env, `🧠 learn:ok ${item.type}:${item.url||item.name}`);
+
+  return {done:true, ok:true, item, summary};
 }
 
-/**
- * Enqueue a learning item.
- * @param {Env} env
- * @param {string|number} userId
- * @param {string|object} input - url/text/file descriptor
- * @param {object} [opts] - { note, priority }
- * @returns {Promise<object>} stored item
- */
-export async function enqueueLearnItem(env, userId, input, opts = {}) {
-  const kv = getKV(env);
-  const id = makeId();
-  const payload = normalizeInput(input);
-
-  const item = {
-    id,
-    ts: nowTs(),
-    userId: String(userId || ""),
-    status: "queued",            // queued | processing | done | error
-    tries: 0,
-    lastError: null,
-    priority: Number(opts.priority || 0),
-    payload,                     // { kind, url|text|name|... }
-    note: sanitizeStr(opts.note || "", 512),
-    // reserved fields for future: tags, source, lang, checksum
-  };
-
-  // KV write
-  await kv.put(PREFIX + id, JSON.stringify(item), { expirationTtl: 60 * 60 * 24 * 30 }); // 30d TTL
-
-  // Optional meta (small)
-  try {
-    const meta = {
-      brief:
-        payload.kind === "url"
-          ? `url:${(payload.url || "").slice(0, 120)}`
-          : payload.kind === "text"
-          ? `text:${(payload.text || "").slice(0, 120)}`
-          : payload.kind,
-      userId: item.userId,
-      ts: item.ts,
-    };
-    await kv.put(META_PREFIX + id, JSON.stringify(meta), { expirationTtl: 60 * 60 * 24 * 30 });
-  } catch {}
-
-  return item;
-}
-
-/**
- * List queued items (lightweight).
- * @param {Env} env
- * @param {number} limit
- * @returns {Promise<object[]>}
- */
-export async function listLearnQueue(env, limit = 20) {
-  const kv = getKV(env);
-  const list = await kv.list({ prefix: PREFIX, limit });
-  const out = [];
-  for (const k of list.keys || []) {
-    const v = await kv.get(k.name);
-    if (!v) continue;
-    try {
-      out.push(JSON.parse(v));
-    } catch {}
-  }
-  // Sort by timestamp asc (KV.list is already lexicographic by key with ts first, but re-check)
-  out.sort((a, b) => (a.ts || 0) - (b.ts || 0));
-  return out;
-}
-
-/**
- * Get the next item (and optionally mark as processing).
- */
-export async function dequeueNext(env, { lock = true } = {}) {
-  const kv = getKV(env);
-  const list = await kv.list({ prefix: PREFIX, limit: 10 });
-  for (const k of list.keys || []) {
-    const raw = await kv.get(k.name);
+export async function latestSummaries(env, limit=5){
+  // дуже просто: KV list не доступний, тож зберігаємо останній індекс
+  const idx = Number((await env.LEARN_QUEUE_KV.get("summary:index"))||"0");
+  const arr = [];
+  for (let i=idx;i>0 && arr.length<limit;i--){
+    const raw = await env.LEARN_QUEUE_KV.get(`summary-id:${i}`);
     if (!raw) continue;
-    let item;
-    try { item = JSON.parse(raw); } catch { continue; }
-    if (item.status !== "queued") continue;
-
-    if (!lock) return item;
-
-    item.status = "processing";
-    item.tries = (item.tries || 0) + 1;
-    await kv.put(k.name, JSON.stringify(item), { expirationTtl: 60 * 60 * 24 * 30 });
-    return item;
+    arr.push(JSON.parse(raw));
   }
-  return null;
+  return arr;
 }
 
-/**
- * Mark item as done and optionally attach summary.
- */
-export async function markDone(env, id, result = {}) {
-  const kv = getKV(env);
-  const key = PREFIX + id;
-  const raw = await kv.get(key);
-  if (!raw) return false;
-  let item;
-  try { item = JSON.parse(raw); } catch { return false; }
-  item.status = "done";
-  item.result = result || null;
-  item.doneTs = nowTs();
-  await kv.put(key, JSON.stringify(item), { expirationTtl: 60 * 60 * 24 * 30 });
-  return true;
-}
-
-/**
- * Mark item as error (keeps it for later inspection).
- */
-export async function markError(env, id, err) {
-  const kv = getKV(env);
-  const key = PREFIX + id;
-  const raw = await kv.get(key);
-  if (!raw) return false;
-  let item;
-  try { item = JSON.parse(raw); } catch { return false; }
-  item.status = "error";
-  item.lastError = String(err?.message || err).slice(0, 500);
-  item.errorTs = nowTs();
-  await kv.put(key, JSON.stringify(item), { expirationTtl: 60 * 60 * 24 * 30 });
-  return true;
-}
-
-/**
- * Peek single item by id.
- */
-export async function getItem(env, id) {
-  const kv = getKV(env);
-  const raw = await kv.get(PREFIX + id);
-  if (!raw) return null;
-  try { return JSON.parse(raw); } catch { return null; }
-}
-
-/**
- * Soft delete (cleanup).
- */
-export async function removeItem(env, id) {
-  const kv = getKV(env);
-  await kv.delete(PREFIX + id).catch(() => {});
-  await kv.delete(META_PREFIX + id).catch(() => {});
-  return true;
-}
-
-/**
- * Count (approx) queued items — shallow scan (cheap).
- */
-export async function countQueued(env, sample = 100) {
-  const kv = getKV(env);
-  const list = await kv.list({ prefix: PREFIX, limit: sample });
-  let n = 0;
-  for (const k of list.keys || []) {
-    const v = await kv.get(k.name);
-    if (!v) continue;
-    try {
-      const it = JSON.parse(v);
-      if (it.status === "queued") n++;
-    } catch {}
-  }
-  return { approx: n, scanned: (list.keys || []).length };
+// допоміжна функція для запису з автоінкрементом у «історію»
+export async function storeSummaryRolling(env, payload){
+  const idx = Number((await env.LEARN_QUEUE_KV.get("summary:index"))||"0")+1;
+  await env.LEARN_QUEUE_KV.put(`summary-id:${idx}`, JSON.stringify(payload));
+  await env.LEARN_QUEUE_KV.put("summary:index", String(idx));
 }
