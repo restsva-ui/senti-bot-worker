@@ -1,21 +1,36 @@
 // src/routes/adminLearn.js
-import { html, json } from "../utils/http.js";
+import { html, json } from "../lib/utils.js";
 import {
   enqueueSystemLearn,
   listLearn,
   listSystemLearn,
   clearLearn,
   markAsProcessing,
-  markAsDone
+  markAsDone,
 } from "../lib/kvLearnQueue.js";
 import { appendChecklist } from "../lib/kvChecklist.js";
 
-// ———————————————————————————————————————————————————————————
-// Допоміжний “легкий” раннер процесингу (плейсхолдер).
-// Він проходить по чергах, помічає елементи як processing → done
-// і пише короткий звіт у Checklist. Реальний “скрепінг/індексацію”
-// можна під’єднати сюди пізніше (модуль розширюється без зміни UI).
-// ———————————————————————————————————————————————————————————
+// ────────────────────────────────────────────────────────────────────────────
+// helpers
+// ────────────────────────────────────────────────────────────────────────────
+const esc = (s = "") =>
+  String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+/** формуємо URL з параметрами, коректно ставлячи ? / & */
+function makeUrl(path, params = {}) {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === "") continue;
+    sp.set(k, String(v));
+  }
+  const qs = sp.toString();
+  return qs ? `${path}?${qs}` : path;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Легкий процесор черг (плейсхолдер). Під реальний індексер/скрепер
+// сюди під’єднаємо виклик у майбутньому.
+// ────────────────────────────────────────────────────────────────────────────
 async function processLearnQueues(env, { limit = 5 } = {}) {
   const sys = await listSystemLearn(env);
   let processed = 0;
@@ -23,7 +38,7 @@ async function processLearnQueues(env, { limit = 5 } = {}) {
   for (const it of sys.slice(0, limit)) {
     if (it.status === "done") continue;
     await markAsProcessing(env, it.owner || "system", it.id);
-    // TODO: під’єднати реальну обробку (витяг тексту/транскрипції тощо)
+    // TODO: реальна обробка (витяг контенту/індексація)
     await markAsDone(env, it.owner || "system", it.id, {
       summary: `Indexed: ${it.name || it.url}`.slice(0, 140),
     });
@@ -32,18 +47,15 @@ async function processLearnQueues(env, { limit = 5 } = {}) {
 
   if (processed > 0) {
     try {
-      await appendChecklist(
-        env,
-        `🧠 learn: processed ${processed} item(s) (manual run)`
-      );
+      await appendChecklist(env, `🧠 learn: processed ${processed} item(s) (manual run)`);
     } catch {}
   }
   return { ok: true, processed };
 }
 
-const esc = (s = "") =>
-  String(s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
-
+// ────────────────────────────────────────────────────────────────────────────
+// HTML
+// ────────────────────────────────────────────────────────────────────────────
 const page = (env, userId, userItems = [], sysItems = [], lastResult = "") => {
   const fmt = (ts) =>
     ts
@@ -55,8 +67,8 @@ const page = (env, userId, userItems = [], sysItems = [], lastResult = "") => {
   const rows =
     userItems
       .map(
-        (i) =>
-          `<tr>
+        (i) => `
+          <tr>
             <td>${esc(i.name || i.url)}</td>
             <td>${esc(i.type || "url")}</td>
             <td>${fmt(i.when)}</td>
@@ -68,8 +80,8 @@ const page = (env, userId, userItems = [], sysItems = [], lastResult = "") => {
   const srows =
     sysItems
       .map(
-        (i) =>
-          `<tr>
+        (i) => `
+          <tr>
             <td>${esc(i.name || i.url)}</td>
             <td>${esc(i.type || "url")}</td>
             <td>${fmt(i.when)}</td>
@@ -78,7 +90,11 @@ const page = (env, userId, userItems = [], sysItems = [], lastResult = "") => {
       )
       .join("") || `<tr><td colspan="4">— немає записів —</td></tr>`;
 
-  const sec = env.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
+  const secParam = env.WEBHOOK_SECRET ? { s: env.WEBHOOK_SECRET } : {};
+  const backHref = makeUrl("/admin/learn/html", secParam);
+  const refreshHref = backHref;
+  const runHref = makeUrl("/admin/learn/run", secParam);
+  const clearHref = makeUrl("/admin/learn/clear", { ...secParam, u: userId || "" });
 
   return `
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -88,7 +104,7 @@ const page = (env, userId, userItems = [], sysItems = [], lastResult = "") => {
       --btn:#1f2a36;--btn2:#2a3a4c;--ok:#22c55e;--warn:#f59e0b;
     }
     *{box-sizing:border-box}
-    body{font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;color:var(--txt);background:var(--bg);margin:0;padding:16px}
+    body{font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--txt);background:var(--bg);margin:0;padding:16px}
     h1{margin:0 0 12px}
     section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin:0 0 12px}
     .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
@@ -106,15 +122,15 @@ const page = (env, userId, userItems = [], sysItems = [], lastResult = "") => {
   <h1>🧠 Learn (admin)</h1>
 
   <section>
-    <div class="row">
-      <form method="GET" action="/admin/learn/add" class="row" style="flex:1">
-        <input type="hidden" name="s" value="${env.WEBHOOK_SECRET || ""}">
+    <div class="row" style="gap:10px">
+      <form method="GET" action="/admin/learn/add" class="row" style="flex:1;gap:8px">
+        <input type="hidden" name="s" value="${esc(env.WEBHOOK_SECRET || "")}">
         <input type="text" name="url" placeholder="https:// (стаття / відео / файл)" required />
         <button class="btn" type="submit">Додати в системну чергу</button>
       </form>
 
-      <a class="btn" href="/admin/learn/html${sec}">Оновити</a>
-      <a class="btn btn--ok" href="/admin/learn/run${sec}">▶️ Запустити навчання зараз</a>
+      <a class="btn" href="${refreshHref}">Оновити</a>
+      <a class="btn btn--ok" href="${runHref}">▶️ Запустити навчання зараз</a>
     </div>
     <p class="note">Автоматичне фонове навчання запускає нічний агент (див. <code>wrangler.toml [triggers]</code>).</p>
     ${lastResult ? `<div class="result">${esc(lastResult)}</div>` : ""}
@@ -122,47 +138,51 @@ const page = (env, userId, userItems = [], sysItems = [], lastResult = "") => {
 
   <section>
     <h2>Твоя черга</h2>
-    <table><thead><tr><th>Назва/URL</th><th>Тип</th><th>Коли</th><th>Статус</th></tr></thead>
-    <tbody>${rows}</tbody></table>
-    <p><a class="btn btn--warn" href="/admin/learn/clear${sec}&u=${encodeURIComponent(userId || "")}">🧹 Очистити мою чергу</a>
-       <span class="note">userId=${esc(userId || "(not set)")}</span>
+    <table>
+      <thead><tr><th>Назва/URL</th><th>Тип</th><th>Коли</th><th>Статус</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <p>
+      <a class="btn btn--warn" href="${clearHref}">🧹 Очистити мою чергу</a>
+      <span class="note">userId=${esc(userId || "(not set)")}</span>
     </p>
   </section>
 
   <section>
     <h2>Системна черга</h2>
-    <table><thead><tr><th>Назва/URL</th><th>Тип</th><th>Коли</th><th>Статус</th></tr></thead>
-    <tbody>${srows}</tbody></table>
+    <table>
+      <thead><tr><th>Назва/URL</th><th>Тип</th><th>Коли</th><th>Статус</th></tr></thead>
+      <tbody>${srows}</tbody>
+    </table>
   </section>
   `;
 };
 
+// ────────────────────────────────────────────────────────────────────────────
+// ROUTE
+// ────────────────────────────────────────────────────────────────────────────
 export async function handleAdminLearn(req, env, url) {
   const p = url.pathname;
 
-  // Авторизація як і в інших адмін-ендпоінтах
+  // Авторизація
   if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
-    return json({ ok: false, error: "unauthorized" }, 401);
+    return json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
   if (p.startsWith("/admin/learn/add")) {
     const itemUrl = (url.searchParams.get("url") || "").trim();
-    if (!itemUrl) return json({ ok: false, error: "url required" }, 400);
+    if (!itemUrl) return json({ ok: false, error: "url required" }, { status: 400 });
     await enqueueSystemLearn(env, { url: itemUrl, name: itemUrl });
-    return html(
-      `<p>✅ Додано: ${esc(itemUrl)}</p>
-       <p><a href="/admin/learn/html${env.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : ""}">Назад</a></p>`
-    );
+    const back = makeUrl("/admin/learn/html", env.WEBHOOK_SECRET ? { s: env.WEBHOOK_SECRET } : {});
+    return html(`<p>✅ Додано: ${esc(itemUrl)}</p><p><a href="${back}">Назад</a></p>`);
   }
 
   if (p.startsWith("/admin/learn/clear")) {
     const u = url.searchParams.get("u");
-    if (!u) return json({ ok: false, error: "u required" }, 400);
+    if (!u) return json({ ok: false, error: "u required" }, { status: 400 });
     await clearLearn(env, u);
-    return html(
-      `<p>🧹 Очищено чергу користувача: ${esc(u)}</p>
-       <p><a href="/admin/learn/html${env.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : ""}">Назад</a></p>`
-    );
+    const back = makeUrl("/admin/learn/html", env.WEBHOOK_SECRET ? { s: env.WEBHOOK_SECRET } : {});
+    return html(`<p>🧹 Очищено чергу користувача: ${esc(u)}</p><p><a href="${back}">Назад</a></p>`);
   }
 
   if (p.startsWith("/admin/learn/run")) {
