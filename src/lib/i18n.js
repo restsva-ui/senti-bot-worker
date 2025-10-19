@@ -44,15 +44,35 @@ const DICTS = {
 
 export function pickLang(code) {
   const c = String(code || "").toLowerCase();
-  if (c.startsWith("uk") || c === "ru-UA".toLowerCase()) return "uk";
-  if (c.startsWith("en")) return "en";
+  if (c.startsWith("uk")) return "uk";
   if (c.startsWith("ru")) return "ru";
   if (c.startsWith("de")) return "de";
+  if (c.startsWith("en")) return "en";
   return "en";
 }
 
 export function t(lang, key, ...args) {
   const L = DICTS[lang] || DICTS.en;
-  const msg = L[key] ?? DICTS.en[key] ?? key;
-  return typeof msg === "function" ? msg(...args) : msg;
+  const val = L[key] ?? DICTS.en[key] ?? key;
+  return typeof val === "function" ? val(...args) : val;
+}
+
+/* ---- Сумісність з вашими імпортами ----
+   У коді зустрічаються імпорти pickReplyLanguage/detectFromText.
+   Додаємо їх як аліаси, щоб деплой не ламався. */
+export function pickReplyLanguage(update) {
+  const code =
+    update?.message?.from?.language_code ||
+    update?.callback_query?.from?.language_code ||
+    "en";
+  return pickLang(code);
+}
+
+// Дуже проста детекція за текстом (fallback). За потреби замініть на реальну.
+export function detectFromText(text = "") {
+  const s = (text || "").toLowerCase();
+  if (/[а-яіїєґ]/.test(s)) return "uk";
+  if (/[а-яё]/.test(s)) return "ru";
+  if (/[a-z]/.test(s)) return "en";
+  return "en";
 }
