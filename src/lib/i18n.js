@@ -1,103 +1,58 @@
 // src/lib/i18n.js
-
-// мінімальний набір фраз (залишаю твої ключі; доповни за потреби)
-const DICT = {
-  hello_name: {
-    uk: (name) => `Привіт, ${name}!`,
-    ru: (name) => `Привет, ${name}!`,
-    en: (name) => `Hi, ${name}!`,
-    de: (name) => `Hallo, ${name}!`,
-    fr: (name) => `Salut, ${name}!`,
+const DICTS = {
+  uk: {
+    hello: (name) => `Привіт${name ? `, ${name}` : ""}! Чим можу допомогти?`,
+    whoami: "✨ Я існую як незалежний помічник. Моя мета — надавати вам інформацію та допомогу.",
+    learn_hint: "🧠 Режим навчання.\nНадішліть мені посилання на статтю/відео або файл (PDF, DOCX, TXT) — додам у чергу навчання.",
+    learn_added: "✅ Додано в чергу навчання. Опрацюю у фоні та буду готовий відповідати на запитання.",
+    admin_header: "Admin panel (quick diagnostics):",
+    btn_open_checklist: "Відкрити Checklist",
+    btn_energy: "Керування енергією",
+    btn_learn: "Навчання (Learn)",
   },
-  how_help: {
-    uk: "Чим можу допомогти?",
-    ru: "Чем могу помочь?",
-    en: "How can I help?",
-    de: "Womit kann ich helfen?",
-    fr: "Comment puis-je aider ?",
+  en: {
+    hello: (name) => `Hi${name ? `, ${name}` : ""}! How can I help?`,
+    whoami: "✨ I am an independent assistant. My purpose is to help you with information and tasks.",
+    learn_hint: "🧠 Learning mode.\nSend me a link to an article/video or a file (PDF, DOCX, TXT). I’ll queue it for learning.",
+    learn_added: "✅ Added to learning queue. I’ll process it in the background and be ready to answer questions.",
+    admin_header: "Admin panel (quick diagnostics):",
+    btn_open_checklist: "Open Checklist",
+    btn_energy: "Energy controls",
+    btn_learn: "Learning (Learn)",
   },
-  default_reply: {
-    uk: "Спробуй переформулювати, будь ласка.",
-    ru: "Попробуй переформулировать, пожалуйста.",
-    en: "Please try to rephrase.",
-    de: "Bitte formuliere es um.",
-    fr: "Essaie de reformuler, s’il te plaît.",
+  ru: {
+    hello: (name) => `Привет${name ? `, ${name}` : ""}! Чем могу помочь?`,
+    whoami: "✨ Я независимый помощник. Моя цель — помогать вам с информацией и задачами.",
+    learn_hint: "🧠 Режим обучения.\nПришлите ссылку на статью/видео или файл (PDF, DOCX, TXT) — добавлю в очередь обучения.",
+    learn_added: "✅ Добавлено в очередь обучения. Обработаю в фоне и буду готов отвечать на вопросы.",
+    admin_header: "Admin panel (quick diagnostics):",
+    btn_open_checklist: "Открыть Checklist",
+    btn_energy: "Управление энергией",
+    btn_learn: "Обучение (Learn)",
   },
-  senti_tip: {
-    uk: "Надішли /ai і запит.",
-    ru: "Отправь /ai и запрос.",
-    en: "Send /ai and your query.",
-    de: "Sende /ai und deine Frage.",
-    fr: "Envoie /ai et ta question.",
-  },
-  need_energy_text: {
-    uk: (need, url) => `Потрібно ${need} енергії. Керувати: ${url}`,
-    ru: (need, url) => `Нужно ${need} энергии. Управление: ${url}`,
-    en: (need, url) => `Need ${need} energy. Manage: ${url}`,
-    de: (need, url) => `${need} Energie benötigt. Verwalten: ${url}`,
-    fr: (need, url) => `Besoin de ${need} énergie. Gérer : ${url}`,
-  },
-  need_energy_media: {
-    uk: (need, url) => `Для медіа потрібно ${need} енергії. Керувати: ${url}`,
-    ru: (need, url) => `Для медиа нужно ${need} энергии. Управление: ${url}`,
-    en: (need, url) => `Media needs ${need} energy. Manage: ${url}`,
-    de: (need, url) => `Für Medien sind ${need} Energie nötig. Verwalten: ${url}`,
-    fr: (need, url) => `Les médias nécessitent ${need} énergie. Gérer : ${url}`,
-  },
-  open_drive_btn: {
-    uk: "Відкрити Google Drive",
-    ru: "Открыть Google Drive",
-    en: "Open Google Drive",
-    de: "Google Drive öffnen",
-    fr: "Ouvrir Google Drive",
-  },
-  low_energy_notice: {
-    uk: (left, url) => `Залишилось ${left} енергії. Керування: ${url}`,
-    ru: (left, url) => `Осталось ${left} энергии. Управление: ${url}`,
-    en: (left, url) => `${left} energy left. Manage: ${url}`,
-    de: (left, url) => `${left} Energie übrig. Verwalten: ${url}`,
-    fr: (left, url) => `Il reste ${left} d’énergie. Gérer : ${url}`,
+  de: {
+    hello: (name) => `Hallo${name ? `, ${name}` : ""}! Wobei kann ich helfen?`,
+    whoami: "✨ Ich bin ein unabhängiger Assistent. Mein Ziel ist, mit Information und Aufgaben zu helfen.",
+    learn_hint: "🧠 Lernmodus.\nSende mir einen Link (Artikel/Video) oder eine Datei (PDF, DOCX, TXT). Ich stelle es in die Lernwarteschlange.",
+    learn_added: "✅ Zur Lernwarteschlange hinzugefügt. Ich verarbeite es im Hintergrund und beantworte später Fragen.",
+    admin_header: "Admin panel (quick diagnostics):",
+    btn_open_checklist: "Checklist öffnen",
+    btn_energy: "Energieverwaltung",
+    btn_learn: "Lernen (Learn)",
   },
 };
 
-export function t(lang, key, ...args) {
-  const L = (lang || "uk").slice(0,2);
-  const entry = DICT[key];
-  if (!entry) return key;
-  const f = entry[L] || entry.uk || Object.values(entry)[0];
-  return typeof f === "function" ? f(...args) : f;
-}
-
-/**
- * pickReplyLanguage
- * 1) якщо є msg.from.language_code → беремо його
- * 2) якщо в тексті явно інша мова (детектор) — віддаємо її
- * 3) fallback: uk
- */
-export function pickReplyLanguage(msg, text) {
-  const from = (msg?.from?.language_code || "").slice(0,2).toLowerCase();
-  // if telegram profile has known language — prefer it
-  if (["uk","ru","en","de","fr"].includes(from)) return from;
-
-  // else detect from text (дуже грубо)
-  const s = String(text || "").toLowerCase();
-  if (/[a-z]/.test(s) && /\b(the|and|what|how|please)\b/.test(s)) return "en";
-  if (/[а-яё]/.test(s) && /\b(привет|пожалуйста|спасибо)\b/.test(s)) return "ru";
-  if (/[a-zäöüß]/.test(s) && /\b(und|wie|bitte|danke)\b/.test(s)) return "de";
-  if (/[a-zàâçéèêëîïôûùüÿœ]/.test(s) && /\b(merci|s'il vous plaît|comment)\b/.test(s)) return "fr";
-
-  return "uk";
-}
-
-// максимально проста «детекція» мови готової відповіді (щоб не ламати тобі існуючу логіку)
-export function detectFromText(out = "") {
-  const s = String(out || "").toLowerCase();
-  if (/[а-яёіїєґ]/.test(s)) {
-    // спробуємо розрізнити укр/ру
-    if (/[іїєґ]/.test(s)) return "uk";
-    return "ru";
-  }
-  if (/[äöüß]/.test(s)) return "de";
-  if (/[àâçéèêëîïôûùüÿœ]/.test(s)) return "fr";
+export function pickLang(code) {
+  const c = String(code || "").toLowerCase();
+  if (c.startsWith("uk") || c === "ru-UA".toLowerCase()) return "uk";
+  if (c.startsWith("en")) return "en";
+  if (c.startsWith("ru")) return "ru";
+  if (c.startsWith("de")) return "de";
   return "en";
-} 
+}
+
+export function t(lang, key, ...args) {
+  const L = DICTS[lang] || DICTS.en;
+  const msg = L[key] ?? DICTS.en[key] ?? key;
+  return typeof msg === "function" ? msg(...args) : msg;
+}
