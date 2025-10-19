@@ -1,142 +1,104 @@
-const SUP = ["uk", "ru", "en", "de", "fr"];
+// src/lib/i18n.js
+// ⬇️ короткий, самодостатній i18n (залишив існуючі ключі; додав потрібні)
 
-// —————— language detection ——————
-function detectFromText(text = "") {
-  const s = String(text).trim();
-  if (!s) return null;
-
-  // Cyrillic vs Latin
-  const hasCyr = /[А-Яа-яЁёЇїІіЄєҐґ]/.test(s);
-  const hasLat = /[A-Za-z]/.test(s);
-
-  if (hasCyr) {
-    // RU markers
-    if (/[ыэёъ]/i.test(s)) return "ru";
-    // UK markers
-    if (/[іїєґ]/i.test(s)) return "uk";
-    // Heuristic by common words
-    if (/\b(що|який|скільки|будь ласка|привіт)\b/i.test(s)) return "uk";
-    if (/\b(что|какой|сколько|пожалуйста|привет)\b/i.test(s)) return "ru";
-    return "uk"; // default for cyrillic
-  }
-
-  // German accents / words (додав кілька частих стоп-слів)
-  if (
-    /[äöüßÄÖÜ]/.test(s) ||
-    /\b(der|die|das|und|ist|wie|viele|bist|heute|kann|konnen|können|schreiben|sie|wir)\b/i.test(s)
-  ) return "de";
-
-  // French accents / words — додано безакцентні варіанти і патерни
-  if (
-    /[àâçéèêëîïôûùüÿœÀÂÇÉÈÊËÎÏÔÛÙÜŸŒ]/.test(s) ||
-    /\b(qui|quoi|comment|bonjour|bonsoir|merci|combien|pourquoi|ou|est|tu|vous|je|nous|capitale|de|des|du|le|la|les)\b/i.test(s) ||
-    /\b(?:est-?ce|qu['’e])\b/i.test(s) ||   // est-ce, qu', que
-    /\bde\s+l['’][a-z]/i.test(s)           // de l'
-  ) return "fr";
-
-  // English: latin without umlauts/accents + fallback
-  if (hasLat) return "en";
-
-  return null;
-}
-
-export function pickReplyLanguage(msg, text = "") {
-  const fromText = detectFromText(text);
-  if (fromText && SUP.includes(fromText)) return fromText;
-
-  const code = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
-  if (SUP.includes(code)) return code;
-
-  // Chat-language fallback (for groups/clients that send chat language)
-  const chatCode = (msg?.language_code || "").slice(0, 2).toLowerCase();
-  if (SUP.includes(chatCode)) return chatCode;
-
-  return "uk"; // final fallback
-}
-
-const L = {
+const DICT = {
   uk: {
-    default_reply: "Вибач, я не зрозумів. Спробуєш інакше?",
-    admin_denied: "Немає доступу.",
-    admin_header: "Адмін-панель (швидка діагностика):",
-    disk_on: "Режим диска: ON",
-    open_drive_btn: "Відкрити Диск",
     hello_name: (n) => `Привіт, ${n}!`,
-    how_help: "Як я можу допомогти?",
-    senti_tip: "Пиши будь-якою мовою — відповім стисло. Скажеш «детальніше» — розгорну.",
-    need_energy_text: (need, url) => `Бракує енергії (${need}). Поповнити: ${url}`,
-    need_energy_media: (need, url) => `Для файлів бракує енергії (${need}). Поповнення: ${url}`,
-    low_energy_notice: (left, url) => `Низький рівень енергії (${left}). Керування: ${url}`,
-    saved_to_drive: "Збережено на Диск"
-  },
-  ru: {
-    default_reply: "Извини, я не понял. Попробуешь иначе?",
-    admin_denied: "Доступ запрещён.",
-    admin_header: "Админ-панель (быстрая диагностика):",
-    disk_on: "Режим диска: ON",
-    open_drive_btn: "Открыть Диск",
-    hello_name: (n) => `Привет, ${n}!`,
-    how_help: "Как могу помочь?",
-    senti_tip: "Пиши на любом языке — отвечу кратко. Скажи «подробнее» — разверну.",
-    need_energy_text: (need, url) => `Не хватает энергии (${need}). Пополнить: ${url}`,
-    need_energy_media: (need, url) => `Для файлов не хватает энергии (${need}). Пополнение: ${url}`,
-    low_energy_notice: (left, url) => `Низкий уровень энергии (${left}). Управление: ${url}`,
-    saved_to_drive: "Сохранено на Диск"
+    how_help: "Чим можу допомогти?",
+    default_reply: "Вибач, сталася помилка. Спробуй ще раз.",
+    senti_tip: "Напиши запит після /ai або просто текстом.",
+    open_drive_btn: "Відкрити Drive",
+    saved_to_drive: "Збережено в Google Drive",
+    need_energy_text: (need, url) => `Потрібно ${need} ⚡ для відповіді. Поповнити: ${url}`,
+    need_energy_media: (need, url) => `Потрібно ${need} ⚡ для збереження/аналізу медіа. Поповнити: ${url}`,
+    low_energy_notice: (left, url) => `Залишилось ${left} ⚡. Керувати: ${url}`,
+    admin_header: "Admin panel (quick diagnostics):",
+    learn_mode_hint: "🧠 Режим навчання. Надішли посилання на статтю/відео або файл (PDF, DOCX, TXT) — додам у чергу навчання.",
+    learn_enqueued: (n) => `✅ Додано ${n} матеріал(и) до черги навчання.`,
   },
   en: {
-    default_reply: "Sorry, I didn’t get that. Could you rephrase?",
-    admin_denied: "Access denied.",
-    admin_header: "Admin panel (quick diagnostics):",
-    disk_on: "Drive mode: ON",
-    open_drive_btn: "Open Drive",
     hello_name: (n) => `Hi, ${n}!`,
     how_help: "How can I help?",
-    senti_tip: "Use any language — I’ll reply concisely. Say “more details” to expand.",
-    need_energy_text: (need, url) => `Not enough energy (${need}). Top up: ${url}`,
-    need_energy_media: (need, url) => `Not enough energy for files (${need}). Top up: ${url}`,
-    low_energy_notice: (left, url) => `Low energy (${left}). Manage: ${url}`,
-    saved_to_drive: "Saved to Drive"
+    default_reply: "Sorry, something went wrong. Please try again.",
+    senti_tip: "Send a prompt after /ai or just type your message.",
+    open_drive_btn: "Open Drive",
+    saved_to_drive: "Saved to Google Drive",
+    need_energy_text: (need, url) => `Need ${need} ⚡ to answer. Refill: ${url}`,
+    need_energy_media: (need, url) => `Need ${need} ⚡ to save/analyze media. Refill: ${url}`,
+    low_energy_notice: (left, url) => `Left ${left} ⚡. Manage: ${url}`,
+    admin_header: "Admin panel (quick diagnostics):",
+    learn_mode_hint: "🧠 Learning mode. Send me a link to an article/video or attach a file (PDF, DOCX, TXT) — I’ll queue it for learning.",
+    learn_enqueued: (n) => `✅ Added ${n} item(s) to learning queue.`,
+  },
+  ru: {
+    hello_name: (n) => `Привет, ${n}!`,
+    how_help: "Чем могу помочь?",
+    default_reply: "Извини, возникла ошибка. Попробуй ещё раз.",
+    senti_tip: "Напиши вопрос после /ai или просто текстом.",
+    open_drive_btn: "Открыть Drive",
+    saved_to_drive: "Сохранено в Google Drive",
+    need_energy_text: (need, url) => `Нужно ${need} ⚡ для ответа. Пополнить: ${url}`,
+    need_energy_media: (need, url) => `Нужно ${need} ⚡ для сохранения/анализа медиа. Пополнить: ${url}`,
+    low_energy_notice: (left, url) => `Осталось ${left} ⚡. Управление: ${url}`,
+    admin_header: "Admin panel (quick diagnostics):",
+    learn_mode_hint: "🧠 Режим обучения. Пришли ссылку на статью/видео или файл (PDF, DOCX, TXT) — добавлю в очередь обучения.",
+    learn_enqueued: (n) => `✅ Добавлено ${n} материал(ов) в очередь обучения.`,
   },
   de: {
-    default_reply: "Sorry, das habe ich nicht verstanden. Bitte anders formulieren?",
-    admin_denied: "Zugriff verweigert.",
-    admin_header: "Adminbereich (Schnelldiagnose):",
-    disk_on: "Drive-Modus: AN",
-    open_drive_btn: "Drive öffnen",
     hello_name: (n) => `Hallo, ${n}!`,
-    how_help: "Womit kann ich helfen?",
-    senti_tip: "Schreibe in jeder Sprache — ich antworte kurz. Mit „mehr Details“ erweitere ich.",
-    need_energy_text: (need, url) => `Nicht genug Energie (${need}). Aufladen: ${url}`,
-    need_energy_media: (need, url) => `Für Dateien fehlt Energie (${need}). Aufladen: ${url}`,
-    low_energy_notice: (left, url) => `Wenig Energie (${left}). Verwalten: ${url}`,
-    saved_to_drive: "Auf Drive gespeichert"
+    how_help: "Wobei kann ich helfen?",
+    default_reply: "Entschuldige, etwas ist schiefgelaufen. Bitte erneut versuchen.",
+    senti_tip: "Schreibe nach /ai oder direkt deine Nachricht.",
+    open_drive_btn: "Drive öffnen",
+    saved_to_drive: "In Google Drive gespeichert",
+    need_energy_text: (need, url) => `Benötigt ${need} ⚡. Aufladen: ${url}`,
+    need_energy_media: (need, url) => `Benötigt ${need} ⚡ für Medien. Aufladen: ${url}`,
+    low_energy_notice: (left, url) => `Verbleiben ${left} ⚡. Verwalten: ${url}`,
+    admin_header: "Admin panel (quick diagnostics):",
+    learn_mode_hint: "🧠 Lernmodus. Sende einen Link zu Artikel/Video oder eine Datei (PDF, DOCX, TXT) – ich stelle es in die Lernwarteschlange.",
+    learn_enqueued: (n) => `✅ ${n} Element(e) zur Lernwarteschlange hinzugefügt.`,
   },
   fr: {
-    default_reply: "Désolé, je n’ai pas compris. Reformulez, svp.",
-    admin_denied: "Accès refusé.",
-    admin_header: "Panneau d’admin (diagnostic rapide) :",
-    disk_on: "Mode Drive : ON",
-    open_drive_btn: "Ouvrir Drive",
     hello_name: (n) => `Salut, ${n} !`,
     how_help: "Comment puis-je aider ?",
-    senti_tip: "Écrivez dans n’importe quelle langue — je réponds brièvement. Dites « plus de détails » pour développer.",
-    need_energy_text: (need, url) => `Énergie insuffisante (${need}). Recharger : ${url}`,
-    need_energy_media: (need, url) => `Pas assez d’énergie pour les fichiers (${need}). Recharger : ${url}`,
-    low_energy_notice: (left, url) => `Énergie faible (${left}). Gérer : ${url}`,
-    saved_to_drive: "Enregistré sur Drive"
+    default_reply: "Désolé, un souci est survenu. Réessaie.",
+    senti_tip: "Écris après /ai ou envoie ton message.",
+    open_drive_btn: "Ouvrir Drive",
+    saved_to_drive: "Enregistré dans Google Drive",
+    need_energy_text: (need, url) => `Il faut ${need} ⚡ pour répondre. Recharger : ${url}`,
+    need_energy_media: (need, url) => `Il faut ${need} ⚡ pour enregistrer/analyser un média. Recharger : ${url}`,
+    low_energy_notice: (left, url) => `Il reste ${left} ⚡. Gérer : ${url}`,
+    admin_header: "Admin panel (quick diagnostics):",
+    learn_mode_hint: "🧠 Mode apprentissage. Envoie un lien vers un article/une vidéo ou un fichier (PDF, DOCX, TXT) – je l’ajoute à la file d’apprentissage.",
+    learn_enqueued: (n) => `✅ ${n} élément(s) ajouté(s) à la file d’apprentissage.`,
   }
 };
 
 export function t(lang, key, ...args) {
-  const d = L[lang] || L.uk;
-  const val = d[key] ?? L.uk[key] ?? key;
-  if (typeof val === "function") return val(...args);
-  if (!args.length) return val;
-  // simple interpolation for two args max
-  return String(val)
-    .replace("%1", args[0] ?? "")
-    .replace("%2", args[1] ?? "");
+  const L = (DICT[lang] && DICT[lang][key]) || (DICT.uk && DICT.uk[key]) || key;
+  return (typeof L === "function") ? L(...args) : L;
 }
 
-// also export detector for response-language check in webhook
-export { detectFromText };
+// Визначення мови відповіді:
+//   1) мова профілю Telegram
+//   2) детект з тексту (якщо явно інша)
+//   3) дефолт — uk
+export function pickReplyLanguage(msg, rawText = "") {
+  const prof = (msg?.from?.language_code || "").slice(0,2).toLowerCase();
+  const fromProf = ["uk","ru","en","de","fr"].includes(prof) ? prof : null;
+
+  const alt = detectFromText(rawText);
+  if (alt && alt !== fromProf) return alt;
+  return fromProf || "uk";
+}
+
+// Дуже легкий детект
+export function detectFromText(s="") {
+  const x = s.toLowerCase();
+  if (/[а-яёїієґ]/i.test(x) && /[ыэёъ]/.test(x) === false) return "uk";
+  if (/[а-яё]/i.test(x)) return "ru";
+  if (/[a-z]/i.test(x)) return "en";
+  if (/[äöüß]/i.test(x)) return "de";
+  if (/[éèàùçôî]/i.test(x)) return "fr";
+  return null;
+}
