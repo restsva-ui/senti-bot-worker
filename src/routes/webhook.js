@@ -23,10 +23,32 @@ import { setUserLocation, getUserLocation } from "../lib/geo.js";
 
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
 const {
-  BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_LEARN,        // ⟵ додали BTN_LEARN
+  BTN_DRIVE, BTN_SENTI, BTN_LEARN, BTN_ADMIN,
   mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand,
   askLocationKeyboard
 } = TG;
+
+// ── Константи Learn ─────────────────────────────────────────────────────────
+const LEARN_MODE_KEY = (uid) => `learn:mode:${uid}`;
+const LEARN_ITEM_KEY = (uid, ts) => `learnq:${uid}:${ts}`;
+
+// Увімк/вимк навчальний режим
+async function setLearnMode(env, userId, on = true) {
+  try { await env.STATE_KV.put(LEARN_MODE_KEY(userId), on ? "1" : "0", { expirationTtl: 60 * 60 * 24 * 7 }); } catch {}
+}
+async function getLearnMode(env, userId) {
+  try { return (await env.STATE_KV.get(LEARN_MODE_KEY(userId))) === "1"; } catch { return false; }
+}
+
+// Черга навчання
+async function enqueueLearnItem(env, userId, item) {
+  // item: {type: 'url'|'file', url, title?, name?, source: 'user', lang, ts}
+  const ts = Date.now();
+  const key = LEARN_ITEM_KEY(userId, ts);
+  const safe = { ...item, ts, userId, status: "queued", v: 1 };
+  await env.LEARN_QUEUE_KV.put(key, JSON.stringify(safe));
+  return { key, ts };
+}
 
 // ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
 async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
@@ -146,6 +168,7 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   }
   return true;
 }
+
 // ── SystemHint ───────────────────────────────────────────────────────────────
 async function buildSystemHint(env, chatId, userId) {
   const statut = String((await readStatut(env)) || "").trim();
@@ -282,6 +305,13 @@ ${control}`;
   const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
 }
+
+// ── Допоміжне: URL-парсер для Learn ─────────────────────────────────────────
+const URL_RX = /\bhttps?:\/\/[^\s<>\u00A0]+/gi;
+function extractUrls(text = "") {
+  return Array.from(new Set((text.match(URL_RX) || []).map(u => u.replace(/[)\],.]+$/g, ""))));
+}
+
 // ── MAIN ────────────────────────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "POST") {
@@ -365,6 +395,14 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
+  // /learn toggle (командою)
+  if (textRaw === "/learn" || textRaw === "/learn@SentiBot") {
+    await setLearnMode(env, userId, true);
+    const line = "🧠 Learning mode.\nSend me a link to an article/video or a file (PDF, DOCX, TXT). I’ll queue it for background learning and later summarize and answer questions on it.";
+    await sendPlain(env, chatId, line, { reply_markup: mainKeyboard(isAdmin) });
+    return json({ ok: true });
+  }
+
   // /ai
   const aiArg = parseAiCommand(textRaw);
   if (aiArg !== null) {
@@ -405,6 +443,7 @@ export async function handleTelegramWebhook(req, env) {
     await safe(async () => {
       const ut = await getUserTokens(env, userId);
       await setDriveMode(env, userId, true);
+      await setLearnMode(env, userId, false); // виходимо з Learn
       const zeroWidth = "\u2063";
       if (!ut?.refresh_token) {
         const authUrl = abs(env, `/auth/start?u=${userId}`);
@@ -420,30 +459,79 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Кнопка Senti
+  // Кнопка Senti — вимкнути спец-режими
   if (textRaw === BTN_SENTI) {
     await setDriveMode(env, userId, false);
+    await setLearnMode(env, userId, false);
     const zeroWidth = "\u2063";
     await sendPlain(env, chatId, zeroWidth, { reply_markup: mainKeyboard(isAdmin) });
     return json({ ok: true });
   }
 
-  // Кнопка Learn — перший мікрокрок (лише інструкція)
+  // Кнопка Learn — увімкнути Learning Mode
   if (textRaw === BTN_LEARN) {
-    const L = (lang || "uk").slice(0, 2);
-    const messages = {
-      uk: "🧠 Режим навчання.\nНадішли мені *посилання* на статтю/відео або *файл* (PDF, DOCX, TXT). Я додам це в чергу і вивчу матеріал у фоновому режимі. Після навчання зможу стисло переказати та відповідати по темі.",
-      ru: "🧠 Режим обучения.\nПришли *ссылку* на статью/видео или *файл* (PDF, DOCX, TXT). Я добавлю это в очередь и изучу материал в фоне. После — смогу кратко пересказать и отвечать по теме.",
-      en: "🧠 Learning mode.\nSend me a *link* to an article/video or a *file* (PDF, DOCX, TXT). I’ll queue it for background learning and later summarize and answer questions on it.",
-      de: "🧠 Lernmodus.\nSchicke mir einen *Link* (Artikel/Video) oder eine *Datei* (PDF, DOCX, TXT). Ich lege es in die Warteschlange, lerne im Hintergrund und kann danach zusammenfassen und Fragen beantworten.",
-      fr: "🧠 Mode apprentissage.\nEnvoie-moi un *lien* (article/vidéo) ou un *fichier* (PDF, DOCX, TXT). Je l’ajoute à la file, l’étudierai en arrière-plan et pourrai ensuite résumer et répondre aux questions."
-    };
-    const hint = messages[L] || messages.uk;
-    await sendPlain(env, chatId, hint, { parse_mode: "Markdown", reply_markup: mainKeyboard(isAdmin) });
+    await setDriveMode(env, userId, false);
+    await setLearnMode(env, userId, true);
+    const tip = "🧠 Learning mode.\nSend me a link to an article/video or a file (PDF, DOCX, TXT). I’ll queue it for background learning and later summarize and answer questions on it.";
+    await sendPlain(env, chatId, tip, { reply_markup: mainKeyboard(isAdmin) });
     return json({ ok: true });
   }
 
-  // Медіа: Drive або Vision
+  // Якщо увімкнений Learn → пробуємо поставити у чергу
+  if (await getLearnMode(env, userId)) {
+    await safe(async () => {
+      const urls = extractUrls(textRaw);
+      let queued = 0;
+
+      // 1) Посилання з тексту
+      for (const u of urls) {
+        await enqueueLearnItem(env, userId, {
+          type: "url",
+          url: u,
+          source: "telegram",
+          lang,
+        });
+        queued++;
+      }
+
+      // 2) Файли з повідомлення
+      const att = detectAttachment(msg);
+      if (att?.file_id) {
+        const fUrl = await tgFileUrl(env, att.file_id);
+        await enqueueLearnItem(env, userId, {
+          type: "file",
+          url: fUrl,
+          name: att.name,
+          source: "telegram",
+          lang,
+        });
+        queued++;
+      }
+
+      // 3) Фото теж як файл (можна OCR/vision у майбутньому)
+      if (!att && pickPhoto(msg)) {
+        const ph = pickPhoto(msg);
+        const pUrl = await tgFileUrl(env, ph.file_id);
+        await enqueueLearnItem(env, userId, {
+          type: "file",
+          url: pUrl,
+          name: ph.name,
+          source: "telegram",
+          lang,
+        });
+        queued++;
+      }
+
+      if (queued > 0) {
+        await sendPlain(env, chatId, `✅ Added ${queued} item(s) to learning queue. I’ll read it in the background and be ready to answer questions about it.`);
+      } else {
+        await sendPlain(env, chatId, "ℹ️ Send a link to an article/video or attach a file (PDF, DOCX, TXT). I’ll queue it for learning.");
+      }
+    });
+    return json({ ok: true });
+  }
+
+  // Медіа: Drive або Vision (коли Learn не увімкнено)
   try {
     const driveOn = await getDriveMode(env, userId);
     if (driveOn) {
@@ -452,7 +540,7 @@ export async function handleTelegramWebhook(req, env) {
       if (await handleVisionMedia(env, chatId, userId, msg, lang, msg?.caption)) return json({ ok: true });
     }
   } catch (e) {
-    if (isAdmin) await sendPlain(env, chatId, `❌ Media error: ${String(e).slice(0, 180)}`);
+    if (isAdmin) await sendPlain(env, chatId, `❌ Media error: ${String(e).slice[0, 180]}`);
     else await sendPlain(env, chatId, t(lang, "default_reply"));
     return json({ ok: true });
   }
