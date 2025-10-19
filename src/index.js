@@ -29,7 +29,9 @@ import { handleAiEvolve } from "./routes/aiEvolve.js";
 import { handleBrainPromote } from "./routes/brainPromote.js";
 import { handleAdminEnergy } from "./routes/adminEnergy.js";
 import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
-import { handleAdminLearn } from "./routes/adminLearn.js"; // ← ДОДАНО
+
+// ✅ нове: Learn admin-сторінка
+import { handleAdminLearn } from "./routes/adminLearn.js";
 
 // ✅ локальний selftest
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
@@ -53,7 +55,7 @@ import { runSelfRegulation } from "./lib/selfRegulate.js";
 // ✅ HTTP-роутер нічного агента + debug (/ai/improve*, /debug/*)
 import { handleAiImprove } from "./routes/aiImprove.js";
 
-const VERSION = "senti-worker-2025-10-19-00-40+learn-ui+tg-alias";
+const VERSION = "senti-worker-2025-10-19-12-40+learn-admin-run";
 
 export default {
   async fetch(req, env) {
@@ -93,7 +95,8 @@ export default {
         );
       }
 
-      if ((p === "/webhook" || p === "/tg/webhook") && method === "GET") {
+      // простий ping вебхука GET
+      if (p === "/webhook" && method === "GET") {
         return json({ ok: true, method: "GET", message: "webhook alive" }, 200, CORS);
       }
 
@@ -101,7 +104,7 @@ export default {
       if (p === "/brain/state") {
         try {
           const r = await handleBrainState?.(req, env, url);
-        if (r && r.status !== 404) return r;
+          if (r && r.status !== 404) return r;
         } catch {}
         return json({ ok: true, state: "available" }, 200, CORS);
       }
@@ -139,6 +142,8 @@ export default {
         const res = await runSelfTestLocalDirect(env);
         return json(res, 200, CORS);
       }
+
+      // ---- CRON і ручні тригери еволюції/нічного ----
 
       // cron evolve (manual trigger)
       if (p === "/cron/evolve") {
@@ -202,14 +207,16 @@ export default {
       }
 
       // --- ADMIN ---
-      // 0) Learn (адмін)
+      // 0) Learn (нова адмінка з чергами і ручним запуском)
       if (p.startsWith("/admin/learn")) {
-        const r = await handleAdminLearn?.(req, env, url);
-        if (r) return r;
-        return html("<h3>Learn (admin)</h3><p>Handler missing</p>");
+        try {
+          const r = await handleAdminLearn?.(req, env, url);
+          if (r && r.status !== 404) return r;
+        } catch {}
+        return html("<h3>Learn</h3><p>Fallback UI.</p>");
       }
 
-      // 1) Комбінована сторінка: Checklist + Energy (ifrаme)
+      // 1) Комбінована сторінка: Checklist + Energy (iframe)
       if (p.startsWith("/admin/checklist/with-energy")) {
         try {
           const r = await handleAdminChecklistWithEnergy?.(req, env, url);
@@ -249,6 +256,7 @@ export default {
       if (p.startsWith("/admin/brain")) {
         try {
           const r = await handleAdminBrain?.(req, env, url);
+        // виправлено кириличну 'р' у попередніх комітах
           if (r && r.status !== 404) return r;
         } catch {}
         return json({ ok: true, note: "admin brain fallback" }, 200, CORS);
@@ -263,8 +271,8 @@ export default {
         return json({ ok: true, note: "admin energy fallback" }, 200, CORS);
       }
 
-      // webhook POST (і alias /tg/webhook)
-      if ((p === "/webhook" || p === "/tg/webhook") && req.method === "POST") {
+      // webhook POST (Telegram)
+      if (p === "/webhook" && req.method === "POST") {
         try {
           const sec = req.headers.get("x-telegram-bot-api-secret-token");
           if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
@@ -284,7 +292,7 @@ export default {
         });
       }
       if (p === "/tg/set-webhook") {
-        const target = abs(env, "/tg/webhook"); // ← використовуємо alias
+        const target = abs(env, "/webhook");
         const r = await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
         return new Response(await r.text(), {
           headers: { "content-type": "application/json" },
@@ -308,7 +316,7 @@ export default {
         return json({ ok: true }, 200, CORS);
       }
 
-      // oauth
+      // OAuth — Google Drive
       if (p === "/auth/start") {
         const u = url.searchParams.get("u");
         const state = btoa(JSON.stringify({ u }));
