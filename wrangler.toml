@@ -16,10 +16,11 @@ SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
 DRIVE_FOLDER_ID = "root"
 TELEGRAM_ADMIN_ID = "784869835"
 DEPLOY_ID = "local-dev"
-LEARN_ENABLED = "on"                # ✅ додано: вмикає/вимикає Learn
+LEARN_ENABLED = "on"                # вмикає/вимикає Learn
+CF_ACCOUNT_ID = "2cf6e316af8623546c95c0354bc3aa00"   # ✅ для CF Vision SDK/запитів
 
 # Секрети для наших HTTP-ендпойнтів і вебхука TG
-WEBHOOK_SECRET   = "senti1984"      # використовується у /admin/*, /cron/*
+WEBHOOK_SECRET    = "senti1984"     # використовується у /admin/*, /cron/*
 TG_WEBHOOK_SECRET = "senti1984"     # використовується у /tg/webhook (Telegram secret token)
 
 # Локальна таймзона для UI/логів/дебагу часу
@@ -102,3 +103,9 @@ id = "63c0d1e0962a419ca54082893410b28e"
 [[kv_namespaces]]
 binding = "LEARN_QUEUE_KV"
 id = "86a54c59ce674a558780c58bf1a47dfd"
+
+# --- R2 buckets (для upload файлів у Learn) ---
+[[r2_buckets]]
+binding = "LEARN_BUCKET"           # ім'я, яке використовуватимеш у коді: env.LEARN_BUCKET
+bucket_name = "senti-learn"        # створи bucket у R2 Dashboard з такою назвою
+# preview_bucket_name = "senti-learn-preview"  # (необов'язково)
