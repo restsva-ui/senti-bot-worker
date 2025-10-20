@@ -1,7 +1,7 @@
 // src/routes/adminLearn.js
 import { enqueueLearn, listQueued, runLearnOnce, getLastSummary } from "../lib/kvLearnQueue.js";
 import { abs } from "../utils/url.js";
-import { uploadFromFormData, readObjectResponse } from "../lib/r2.js"; // ✅ R2
+import { uploadFromFormData, readObjectResponse } from "../lib/r2.js";
 
 // ——— Заголовки/утиліти ————————————————————————————————————————————————————
 const HTML = { "content-type": "text/html; charset=utf-8" };
@@ -29,11 +29,86 @@ function esc(s) {
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+/**
+ * Спроба зробити коротке «людське» резюме з сирого логу агента.
+ * Якщо агент коли-небудь почне віддавати окремо digest/learnings — UI їх підхопить (див. /summary.json нижче).
+ */
+function makeBriefSummary(raw = "") {
+  const txt = String(raw || "").trim();
+  if (!txt) return "";
+
+  // 1) забираємо технічний шум
+  const dropLine = (line) => {
+    const l = line.toLowerCase();
+    return (
+      /^ok[:=]/.test(l) ||
+      /^processed[:=]|^опрацьовано[:=]/.test(l) ||
+      /^(class|bucket|ewma|fails|kv|queue|r2|key|id|size|bytes)\b/.test(l) ||
+      /новий матеріал[:=]/i.test(l)
+    );
+  };
+
+  // 2) виймаємо «підказки змісту»: імена файлів, заголовки, домени
+  const urlRe = /https?:\/\/[^\s)]+/ig;
+  const filenameFromUrl = (u) => {
+    try {
+      const { pathname, hostname } = new URL(u);
+      const base = pathname.split("/").filter(Boolean).pop() || hostname;
+      return base.replace(/[_-]+/g, " ").replace(/\.(pdf|docx?|pptx?|zip|rar|7z|mp4|mp3|mov|webm|txt|md|html?)$/i, "")
+        .slice(0, 80);
+    } catch { return ""; }
+  };
+
+  const lines = txt.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const cleaned = [];
+
+  for (let line of lines) {
+    if (dropLine(line)) continue;
+
+    // заміняємо URL на читабельні назви
+    const urls = line.match(urlRe);
+    if (urls) {
+      for (const u of urls) {
+        const nice = filenameFromUrl(u) || new URL(u).hostname;
+        line = line.replace(u, nice);
+      }
+    }
+    // прибираємо голі «схожі на id» токени
+    line = line.replace(/\b[a-z0-9]{10,}\b/ig, "").replace(/\s{2,}/g, " ").trim();
+    if (line) cleaned.push(line);
+  }
+
+  // 3) якщо в логу є булети — беремо до 5; інакше формуємо самі
+  const bullets = cleaned.filter(l => /^[•\-—*]\s/.test(l));
+  const chosen = (bullets.length ? bullets : cleaned).slice(0, 5);
+
+  // підфарбовуємо перші слова для зрозумілості
+  const friendly = chosen.map(l => {
+    if (/висновк|тези|підсум/iu.test(l)) return `• ${l}`;
+    if (/додано|добавлено|added/i.test(l)) return `• Додано: ${l.replace(/^[•\-—*]\s*/,'')}`;
+    if (/вивчен|learned|прочитан/i.test(l)) return `• ${l}`;
+    // fallback: якщо рядок виглядає як назва
+    if (l.length < 120) return `• Вивчено: ${l}`;
+    return `• ${l}`;
+  });
+
+  return friendly.join("\n") || "Черга порожня — немає нових матеріалів.";
+}
+
+/** Спроба витягнути digest/learnings з JSON, якщо агент їх віддає */
+function chooseSummaryPieces({ summary, digest, learnings } = {}) {
+  const short = (learnings && Array.isArray(learnings) && learnings.length)
+    ? learnings.slice(0, 5).map(x => `• ${String(x).trim()}`).join("\n")
+    : (digest ? String(digest).trim() : makeBriefSummary(summary || ""));
+
+  return { summary: String(summary || "").trim(), summary_short: short || "—" };
+}
+
 function pageHtml(env, url, { canWrite, lastSummary }) {
   const self = abs(env, "/admin/learn/html");
   const secQS = canWrite ? `?s=${encodeURIComponent(secretFromEnv(env))}` : "";
   const enqueueUrl = abs(env, `/admin/learn/enqueue${secQS}`);
-  const uploadUrl = abs(env, `/admin/learn/upload${secQS}`); // ✅ upload
+  const uploadUrl = abs(env, `/admin/learn/upload${secQS}`);
   const runUrl = abs(env, `/admin/learn/run${secQS}`);
   const queueJson = abs(env, `/admin/learn/queue.json${secQS}`);
   const summaryJson = abs(env, `/admin/learn/summary.json${secQS}`);
@@ -64,12 +139,13 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
   .grid { display:grid; gap:8px; }
   .item { padding:10px; border:1px solid #1b1f24; border-radius:10px; background:#0e1116; }
   .muted { color:var(--muted); }
-  .ok { color:var(--ok); } .warn{ color:var(--warn);} .err{ color:var(--err); }
   .hint { font-size:13px; color:var(--muted); }
   .row-actions { display:flex; gap:8px; flex-wrap:wrap; }
   .link { color:#93c5fd; text-decoration:none; }
   .two { display:grid; gap:16px; grid-template-columns:1fr; }
   @media(min-width:720px){ .two{ grid-template-columns:1fr 1fr; } }
+  .toggle { cursor:pointer; font-size:13px; color:#93c5fd; user-select:none; }
+  .summary-box { white-space:pre-wrap; }
 </style>
 </head>
 <body>
@@ -83,7 +159,6 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
   <section class="card">
     <h2>Додати матеріали</h2>
     <div class="two">
-      <!-- URL/Note enqueue -->
       <div>
         <p class="hint">Встав посилання на статтю/відео/файл/архів (Google Drive, Dropbox, пряма URL). У Telegram можна надсилати і самі файли — вони також летять у чергу.</p>
         <form id="f-enq" method="post" action="${enqueueUrl}">
@@ -92,7 +167,7 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
             <textarea name="note" placeholder="Короткий опис (опц.)" ${canWrite ? "" : "disabled"}></textarea>
             <div class="row row-actions">
               <button ${canWrite ? "" : "disabled"}>Додати у чергу</button>
-              <button type="button" id="btn-run" class="secondary" ${canWrite ? "" : "disabled"}>Запустити зараз</button>
+              <button type="button" id="btn-run" class="secondary" ${canWrite ? "" : "disabled"}>🧠 Прокачай мозок</button>
               <a class="link" href="${self}">Оновити сторінку</a>
             </div>
           </div>
@@ -100,7 +175,6 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
         <div id="enq-status" class="hint"></div>
       </div>
 
-      <!-- R2 Upload -->
       <div>
         <p class="hint">Або завантаж файли безпосередньо (збережуться у R2 і одразу додадуться у чергу).</p>
         <form id="f-up" method="post" action="${uploadUrl}" enctype="multipart/form-data">
@@ -118,7 +192,9 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
 
   <section class="card">
     <h2>Останній звіт</h2>
-    <pre id="summary" class="item" style="white-space:pre-wrap">${esc(lastSummary || "—")}</pre>
+    <div id="summary-brief" class="item summary-box">—</div>
+    <div class="hint"><span id="toggle-log" class="toggle">показати повний лог</span></div>
+    <pre id="summary" class="item summary-box" style="display:none">${esc(lastSummary || "—")}</pre>
   </section>
 
   <section class="card">
@@ -129,10 +205,14 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
 
 <script>
 async function fetchJSON(u){ const r = await fetch(u, { cache:"no-store" }); return r.json(); }
+function setBrief(txt){ document.getElementById("summary-brief").textContent = txt || "—"; }
+
 async function reloadSummary(){ try{
   const d = await fetchJSON("${summaryJson}");
+  setBrief(d?.summary_short || d?.summary || "—");
   document.getElementById("summary").textContent = d?.summary || "—";
 }catch{}}
+
 async function reloadQueue(){ try{
   const d = await fetchJSON("${queueJson}");
   const list = Array.isArray(d?.items) ? d.items : [];
@@ -148,12 +228,21 @@ async function reloadQueue(){ try{
   }
 }catch{}}
 
+document.getElementById("toggle-log")?.addEventListener("click", ()=>{
+  const pre = document.getElementById("summary");
+  const tgl = document.getElementById("toggle-log");
+  const show = pre.style.display === "none";
+  pre.style.display = show ? "block" : "none";
+  tgl.textContent = show ? "сховати повний лог" : "показати повний лог";
+});
+
 document.getElementById("btn-run")?.addEventListener("click", async ()=>{
   try{
-    document.getElementById("btn-run").disabled = true;
+    const btn = document.getElementById("btn-run");
+    btn.disabled = true;
     const r = await fetch("${runUrl}", { method:"POST" });
     const d = await r.json().catch(()=>null);
-    document.getElementById("enq-status").textContent = d?.summary || (d?.ok ? "OK" : "Помилка");
+    setBrief(d?.summary_short || d?.summary || (d?.ok ? "OK" : "Помилка"));
     await reloadSummary(); await reloadQueue();
   }finally{
     document.getElementById("btn-run").disabled = false;
@@ -220,10 +309,11 @@ export async function handleAdminLearn(req, env, url) {
     return await readObjectResponse(env, key);
   }
 
-  // API: summary.json
+  // API: summary.json — тут формуємо і коротку версію
   if (p === "/admin/learn/summary.json") {
     const summary = await getLastSummary(env).catch(() => "");
-    return okJson({ ok: true, summary });
+    const pieces = chooseSummaryPieces({ summary });
+    return okJson({ ok: true, ...pieces });
   }
 
   // API: queue.json
@@ -283,7 +373,8 @@ export async function handleAdminLearn(req, env, url) {
     if (!["POST", "GET"].includes(method)) return bad("method not allowed", 405);
     try {
       const res = await runLearnOnce(env, {});
-      return okJson({ ok: true, ...res });
+      const pieces = chooseSummaryPieces(res); // підхоплює digest/learnings якщо є
+      return okJson({ ok: true, ...res, ...pieces });
     } catch (e) {
       return bad(String(e?.message || e), 500);
     }
