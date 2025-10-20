@@ -268,7 +268,6 @@ export async function handleAdminLearn(req, env, url) {
 
       const enq = [];
       for (const f of uploaded) {
-        // у payload кладемо і url (через воркер), і r2Key для внутрішнього використання
         const r = await enqueueLearn(env, String(userId), { url: f.workerUrl, r2Key: f.key, name: f.name });
         enq.push(r);
       }
