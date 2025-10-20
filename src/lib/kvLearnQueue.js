@@ -1,18 +1,16 @@
 // src/lib/kvLearnQueue.js
 
 /**
- * Minimal Learn queue on KV.
+ * Minimal Learn queue on KV + real memory hook (Vectorize).
  * Keys:
  *   - learn:q:<ts>:<rand> -> JSON item { id, userId, kind, payload, at, status }
- *   - learn:last_summary  -> short text summary of last run (string)
+ *   - learn:last_summary  -> short text summary of last run
  *
  * Feature flag:
  *   - env.LEARN_ENABLED ("on" / "off")
- *
- * На виході runLearnOnce тепер також повертає:
- *   - digest      -> короткий дайджест булетами (для UI)
- *   - learnings   -> масив тез (якщо є)
  */
+
+import { processMaterialForMemory } from "./learnMemory.js";
 
 const Q_PREFIX = "learn:q:";
 const K_LAST_SUMMARY = "learn:last_summary";
@@ -54,7 +52,7 @@ export async function enqueueLearn(env, userId, payload) {
 function detectKind(payload) {
   // Very light heuristic: url / file / text
   if (payload?.url) return "url";
-  if (payload?.file || payload?.blob || payload?.name?.match?.(/\.(zip|rar|7z|pdf|docx?|pptx?|txt|md|csv|mp4|mov|webm|mp3)$/i)) return "file";
+  if (payload?.file || payload?.blob || payload?.r2Key || payload?.name?.match?.(/\.(zip|rar|7z|pdf|docx|txt|md|csv)$/i)) return "file";
   return "unknown";
 }
 
@@ -116,114 +114,63 @@ export async function runLearnOnce(env, { maxItems = 10 } = {}) {
     }
   }
 
-  // Текстовий (докладний) лог
   const summary = makeSummary(results);
-
-  // Короткий дайджест і «learnings» для UI
-  const ok = results.filter(r => r.ok);
-  const learnings = ok.flatMap(r => r.learnings || []).slice(0, 10);
-  const digest = ok
-    .slice(0, 6)
-    .map(r => `• ${r.title || r.insight}${r.type ? ` (${r.type})` : ""}`)
-    .join("\n");
-
   await saveLastSummary(env, summary);
 
   return {
     ok: true,
     processed: results.length,
     results,
-    summary,     // повний лог (рядки)
-    digest,      // короткий підсумок булетами
-    learnings,   // тези (за наявності)
+    summary,
   };
 }
 
-// ────────────────────── Heuristics & helpers ────────────────────────────────
-function tryGuessTitleFromUrl(u) {
-  try {
-    const url = new URL(u);
-    // якщо є ?title=… — візьми його
-    const t = url.searchParams.get("title");
-    if (t) return decodeURIComponent(t).slice(0, 140);
-
-    // watch?v=... → «YouTube відео <id>»
-    if (/^(www\.)?youtube\.com$/i.test(url.hostname) || /youtu\.be$/i.test(url.hostname)) {
-      const id = url.searchParams.get("v") || url.pathname.split("/").pop();
-      return `YouTube відео ${id || ""}`.trim();
-    }
-
-    const last = url.pathname.split("/").filter(Boolean).pop() || url.hostname;
-    return decodeURIComponent(last).replace(/[_-]+/g, " ").slice(0, 140);
-  } catch { return "link"; }
-}
-
-function humanTypeFromUrlOrName(uOrName = "") {
-  const s = String(uOrName).toLowerCase();
-
-  // за хостом
-  try {
-    if (s.startsWith("http")) {
-      const u = new URL(s);
-      const host = u.hostname.toLowerCase();
-      if (host.includes("youtube") || host.endsWith("youtu.be")) return "відео (YouTube)";
-      if (host.includes("drive.google.")) return "файл (Google Drive)";
-      if (host.includes("dropbox")) return "файл (Dropbox)";
-      if (host.includes("github")) return "репозиторій/файл (GitHub)";
-    }
-  } catch {}
-
-  // за розширенням
-  if (/\.(pdf)$/.test(s)) return "PDF";
-  if (/\.(docx?|odt)$/.test(s)) return "документ";
-  if (/\.(pptx?|key)$/.test(s)) return "презентація";
-  if (/\.(zip|rar|7z|tar\.gz)$/.test(s)) return "архів";
-  if (/\.(mp4|mov|webm)$/.test(s)) return "відео";
-  if (/\.(mp3|wav|m4a|ogg)$/.test(s)) return "аудіо";
-  if (/\.(md|txt|csv)$/.test(s)) return "текст";
-  return "посилання/файл";
-}
-
-/** Simulated learn step; plug real embedding/summarization later */
+/** Learn step: normalize descriptor + store memory via Vectorize */
 async function learnItem(env, item) {
-  // Minimal “learning”: нормалізуємо джерело й створюємо зрозумілий підсумок.
   const { kind, payload } = item;
   let title = "";
   let src = "";
-  let type = "";
 
   if (kind === "url" && typeof payload?.url === "string") {
     src = payload.url;
-    title = payload?.name || tryGuessTitleFromUrl(payload.url);
-    type = humanTypeFromUrlOrName(payload.url);
+    title = tryGuessTitleFromUrl(payload.url);
   } else if (kind === "file") {
-    src = payload?.name || "file";
+    src = payload?.r2Key ? `r2:${payload.r2Key}` : (payload?.name || "file");
     title = payload?.name || "file";
-    type = humanTypeFromUrlOrName(title);
   } else {
     src = payload?.name || "unknown";
-    title = payload?.name || "матеріал";
-    type = "матеріал";
+    title = "material";
   }
 
-  // Зараз тут може з’явитися виклик LLM, який зробить реальні тези.
-  // Поки що — робимо маленький корисний «стаб».
-  const insight = `Вивчено: ${title}`;
-  const learnings = [
-    `Додано новий матеріал: ${title}`,
-    `Тип джерела: ${type}`,
-    `Матеріал враховано для подальших відповідей`,
-  ];
+  // ► реальна пам’ять
+  let memory = { stored: false, reason: "skip" };
+  try {
+    if (env.VEC && env.AI) {
+      memory = await processMaterialForMemory(env, item);
+    }
+  } catch {}
+
+  const okTag = memory.stored ? "Вивчено" : "Новий матеріал";
+  const originHint = (kind === "url" && /youtu\.?be/i.test(src)) ? " (відео (YouTube))" :
+                     (kind === "url" ? " (посилання)" :
+                     (String(src).startsWith("r2:") ? " (файл R2)" : ""));
+
+  const insight = `${okTag}: ${title}${originHint}`;
 
   return {
     kind,
     src,
-    title,
-    type,
-    learned: true,
+    learned: !!memory.stored,
     insight,
-    learnings,
   };
+}
+
+function tryGuessTitleFromUrl(u) {
+  try {
+    const url = new URL(u);
+    const last = url.pathname.split("/").filter(Boolean).pop() || url.hostname;
+    return decodeURIComponent(last).slice(0, 120);
+  } catch { return "link"; }
 }
 
 function makeSummary(results) {
@@ -232,19 +179,19 @@ function makeSummary(results) {
   const fail = results.filter(r => !r.ok);
   const lines = [];
   if (ok.length) {
-    lines.push(`✅ Опрацьовано: ${ok.length}`);
+    const learned = ok.filter(r => r.learned);
+    lines.push(`• Вивчено: ${learned.length}  ✅ Опрацьовано: ${ok.length}`);
     ok.slice(0, 5).forEach((r, i) => {
-      const addType = r.type ? ` (${r.type})` : "";
-      lines.push(`  ${i + 1}) ${r.insight}${addType}`);
+      lines.push(`• ${i + 1}) ${r.insight}`);
     });
-    if (ok.length > 5) lines.push(`  ... та ще ${ok.length - 5}`);
+    if (ok.length > 5) lines.push(`  … та ще ${ok.length - 5}`);
   }
   if (fail.length) {
     lines.push(`⚠️ З помилками: ${fail.length}`);
     fail.slice(0, 3).forEach((r, i) => {
       lines.push(`  - ${i + 1}) ${r.error}`);
     });
-    if (fail.length > 3) lines.push(`  ... та ще ${fail.length - 3}`);
+    if (fail.length > 3) lines.push(`  … та ще ${fail.length - 3}`);
   }
   return lines.join("\n");
 }
