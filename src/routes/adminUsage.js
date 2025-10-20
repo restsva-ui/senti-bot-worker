@@ -2,7 +2,7 @@
 import { abs } from "../utils/url.js";
 
 const JSONH = { "content-type": "application/json; charset=utf-8" };
-const HTML = { "content-type": "text/html; charset=utf-8" };
+const HTML  = { "content-type": "text/html; charset=utf-8" };
 
 function secretFromEnv(env) {
   return env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_WEBHOOK_SECRET || "";
@@ -20,24 +20,29 @@ function bad(msg = "bad request", status = 400) {
 }
 
 async function r2Totals(env) {
-  if (!env?.R2) return { bytes: 0, count: 0 };
-  let cursor = undefined;
+  // ✅ використовуємо правильний біндинг R2 з wrangler.toml: LEARN_BUCKET
+  const bucket = env?.LEARN_BUCKET;
+  if (!bucket) return { bytes: 0, count: 0 };
+
+  let cursor;
   let bytes = 0, count = 0;
   do {
-    const list = await env.R2.list({ cursor, limit: 1000 });
-    for (const obj of list.objects || []) {
+    const page = await bucket.list({ cursor, limit: 1000 });
+    for (const obj of page.objects || []) {
       bytes += obj.size || 0;
       count += 1;
     }
-    cursor = list.truncated ? list.cursor : undefined;
+    cursor = page.truncated ? page.cursor : undefined;
   } while (cursor);
+
   return { bytes, count };
 }
 
 async function kvLearnTotals(env) {
   const kv = env?.LEARN_QUEUE_KV;
   if (!kv) return { bytes: 0, count: 0 };
-  let cursor = undefined;
+
+  let cursor;
   let bytes = 0, count = 0;
 
   // learn:q:* — черга
@@ -47,10 +52,10 @@ async function kvLearnTotals(env) {
       const v = await kv.get(k.name);
       if (v) { bytes += new Blob([v]).size; count += 1; }
     }
-    cursor = page.list_complete ? undefined : page.cursor; // API сумісність
+    cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
 
-  // last summary
+  // learn:last_summary — останній короткий підсумок
   const last = await kv.get("learn:last_summary");
   if (last) bytes += new Blob([last]).size;
 
@@ -81,15 +86,21 @@ export async function handleAdminUsage(req, env, url) {
     });
   }
 
-  // короткий HTML
+  // Легкий HTML огляд
   const jsonUrl = abs(env, "/admin/usage/json?s=" + encodeURIComponent(secretFromEnv(env)));
   const html = `<!doctype html><meta charset="utf-8">
   <title>Storage usage</title>
-  <style>body{font:14px system-ui;background:#0b0d10;color:#e6e9ee;padding:16px}</style>
-  <h1>Storage usage</h1>
-  <pre id="out">Loading…</pre>
-  <script>fetch(${JSON.stringify(jsonUrl)}).then(r=>r.json()).then(d=>{
-    document.getElementById('out').textContent = JSON.stringify(d,null,2);
-  }).catch(e=>{document.getElementById('out').textContent=String(e)})</script>`;
+  <style>
+    body{font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;background:#0b0d10;color:#e6e9ee;margin:0;padding:16px}
+    .muted{color:#9aa3af}
+    .card{background:#111418;border:1px solid #1b1f24;border-radius:12px;padding:16px;max-width:880px}
+  </style>
+  <h1>Storage usage <span class="muted">(R2 + KV)</span></h1>
+  <div class="card"><pre id="out">Loading…</pre></div>
+  <script>
+    fetch(${JSON.stringify(jsonUrl)}).then(r=>r.json()).then(d=>{
+      document.getElementById('out').textContent = JSON.stringify(d,null,2);
+    }).catch(e=>{document.getElementById('out').textContent=String(e)});
+  </script>`;
   return new Response(html, { headers: HTML });
 }
