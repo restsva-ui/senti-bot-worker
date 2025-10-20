@@ -13,6 +13,7 @@ import { loadSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
+import { enqueueLearn } from "../lib/kvLearnQueue.js"; // ✅ додано
 
 // APIs
 import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from "../apis/time.js";
@@ -23,7 +24,7 @@ import { setUserLocation, getUserLocation } from "../lib/geo.js";
 
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
 const {
-  BTN_DRIVE, BTN_SENTI, BTN_ADMIN,
+  BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_LEARN, // ✅ BTN_LEARN
   mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand,
   askLocationKeyboard
 } = TG;
@@ -89,14 +90,26 @@ function detectAttachment(msg) {
   return pickPhoto(msg);
 }
 async function tgFileUrl(env, file_id) {
-  const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile`, {
+  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN; // ✅ сумісність
+  const r = await fetch(`https://api.telegram.org/bot${token}/getFile`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file_id })
   });
   const data = await r.json().catch(() => null);
   if (!data?.ok) throw new Error("getFile failed");
   const path = data.result?.file_path;
   if (!path) throw new Error("file_path missing");
-  return `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${path}`;
+  return `https://api.telegram.org/file/bot${token}/${path}`;
+}
+
+// Learn helpers
+function extractFirstUrl(text = "") {
+  const m = String(text || "").match(/https?:\/\/\S+/i);
+  return m ? m[0] : null;
+}
+function isLearnIntent(text = "") {
+  const s = String(text).toLowerCase();
+  // маркери: слово learn або локалізовані форми
+  return /\blearn\b|навч|обуч/i.test(s);
 }
 
 // Drive-режим
@@ -358,9 +371,26 @@ export async function handleTelegramWebhook(req, env) {
       const links = energyLinks(env, userId);
       const markup = { inline_keyboard: [
         [{ text: "Відкрити Checklist", url: links.checklist }],
-        [{ text: "Керування енергією", url: links.energy }]
+        [{ text: "Керування енергією", url: links.energy }],
+        [{ text: "Open Learn", url: links.learn }], // ✅ кнопка Learn у адмінці
       ]};
       await sendPlain(env, chatId, lines.join("\n"), { reply_markup: markup });
+    });
+    return json({ ok: true });
+  }
+
+  // Кнопка LEARN — підказка + лінк на HTML
+  if (textRaw === BTN_LEARN) {
+    await safe(async () => {
+      const links = energyLinks(env, userId);
+      const hint = t(lang, "learn_hint");
+      const markup = {
+        inline_keyboard: [
+          [{ text: t(lang, "learn_open_html_btn"), url: links.learn }],
+          [{ text: t(lang, "learn_run_now_btn"), url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }],
+        ],
+      };
+      await sendPlain(env, chatId, hint, { reply_markup: markup });
     });
     return json({ ok: true });
   }
@@ -428,7 +458,28 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Медіа: Drive або Vision
+  // ===== Learn enqueue з повідомлень (URL/файли/архіви) =====
+  // 1) URL у тексті або підписі
+  const urlInText = extractFirstUrl(textRaw);
+  if (urlInText) {
+    await safe(async () => {
+      await enqueueLearn(env, String(userId), { url: urlInText, name: urlInText });
+      await sendPlain(env, chatId, t(lang, "learn_added"), { reply_markup: mainKeyboard(isAdmin) });
+    });
+    return json({ ok: true });
+  }
+  // 2) Будь-який файл/медіа — беремо файл-URL TG і ставимо у чергу
+  const anyAtt = detectAttachment(msg);
+  if (anyAtt?.file_id) {
+    await safe(async () => {
+      const fUrl = await tgFileUrl(env, anyAtt.file_id);
+      await enqueueLearn(env, String(userId), { url: fUrl, name: anyAtt.name || "file" });
+      await sendPlain(env, chatId, t(lang, "learn_added"), { reply_markup: mainKeyboard(isAdmin) });
+    });
+    return json({ ok: true });
+  }
+
+  // Медіа: Drive або Vision (як і було)
   try {
     const driveOn = await getDriveMode(env, userId);
     if (driveOn) {
@@ -437,7 +488,8 @@ export async function handleTelegramWebhook(req, env) {
       if (await handleVisionMedia(env, chatId, userId, msg, lang, msg?.caption)) return json({ ok: true });
     }
   } catch (e) {
-    if (isAdmin) await sendPlain(env, chatId, `❌ Media error: ${String(e).slice(0, 180)}`);
+    const isAdm = ADMIN(env, userId);
+    if (isAdm) await sendPlain(env, chatId, `❌ Media error: ${String(e).slice(0, 180)}`);
     else await sendPlain(env, chatId, t(lang, "default_reply"));
     return json({ ok: true });
   }
