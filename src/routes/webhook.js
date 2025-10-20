@@ -13,7 +13,7 @@ import { loadSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
-import { enqueueLearn } from "../lib/kvLearnQueue.js"; // адмiн-черга Learn
+import { enqueueLearn, listQueued, getRecentInsights } from "../lib/kvLearnQueue.js"; // Learn + інсайти
 
 // APIs
 import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from "../apis/time.js";
@@ -26,17 +26,8 @@ import { setUserLocation, getUserLocation } from "../lib/geo.js";
 const {
   BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_LEARN,
   mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand,
-  askLocationKeyboard: askLocationKeyboardMaybe
+  askLocationKeyboard
 } = TG;
-
-// Локальний безпечний fallback, якщо в TG.askLocationKeyboard відсутній
-const askLocationKeyboard = (typeof askLocationKeyboardMaybe === "function")
-  ? askLocationKeyboardMaybe
-  : () => ({
-      keyboard: [[{ text: "📍 Надіслати локацію", request_location: true }]],
-      resize_keyboard: true,
-      one_time_keyboard: true
-    });
 
 // ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
 async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
@@ -175,9 +166,20 @@ async function buildSystemHint(env, chatId, userId) {
 - Speak naturally and human-like with warmth and clarity.
 - Prefer concise, practical answers; expand only when asked.`;
 
+  // 👇 додамо останні інсайти з Learn
+  let insightsBlock = "";
+  try {
+    const insights = await getRecentInsights(env, { limit: 5 });
+    if (insights?.length) {
+      const lines = insights.map(i => `• ${i.insight}${i.r2Key ? " [R2]" : ""}`);
+      insightsBlock = `[Нещодавні знання]\n${lines.join("\n")}`;
+    }
+  } catch {}
+
   const blocks = [core];
   if (statut) blocks.push(`[Статут/чеклист]\n${statut}`);
   if (tune) blocks.push(`[Self-Tune]\n${tune}`);
+  if (insightsBlock) blocks.push(insightsBlock);
   if (dlg) blocks.push(dlg);
   return blocks.join("\n\n");
 }
@@ -377,28 +379,34 @@ export async function handleTelegramWebhook(req, env) {
       const links = energyLinks(env, userId);
       const markup = { inline_keyboard: [
         [{ text: "📋 Відкрити Checklist", url: links.checklist }],
-        [{ text: "🧠 Відкрити Learn", url: links.learn }], // укр мова
+        [{ text: "🧠 Open Learn", url: links.learn }],
       ]};
       await sendPlain(env, chatId, lines.join("\n"), { reply_markup: markup });
     });
     return json({ ok: true });
   }
 
-  // Кнопка LEARN — тільки для адміна (звичайним не показуємо функцію)
+  // Кнопка LEARN — лише адмін
   if (textRaw === (BTN_LEARN || "Learn")) {
     if (!isAdmin) {
-      // Для не-адміна — без згадок про Learn
       await sendPlain(env, chatId, t(lang, "how_help"), { reply_markup: mainKeyboard(false) });
       return json({ ok: true });
     }
     await safe(async () => {
+      let hasQueue = false;
+      try {
+        const r = await listQueued(env, { limit: 1 });
+        hasQueue = Array.isArray(r) ? r.length > 0 : Array.isArray(r?.items) ? r.items.length > 0 : false;
+      } catch {}
       const links = energyLinks(env, userId);
       const hint =
-        "🧠 Режим Learn.\n" +
-        "Тут можна надсилати *посилання* або *файли/архіви* (pdf, docx, txt, md, zip тощо) — я додам їх у чергу на опрацювання. " +
-        "Щоб бачити чергу, підсумки та **прокачати мозок**, відкрий HTML-інтерфейс.";
+        "🧠 Режим Learn.\nНадсилай посилання, файли або архіви — я додам у чергу. " +
+        "В HTML-інтерфейсі можна переглянути чергу й підсумки, а також запустити обробку.";
       const keyboard = [[{ text: "🧠 Відкрити Learn HTML", url: links.learn }]];
-      await sendPlain(env, chatId, hint, { reply_markup: { inline_keyboard: keyboard }, parse_mode: "Markdown" });
+      if (hasQueue) {
+        keyboard.push([{ text: "▶️ Запустити обробку зараз", url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }]);
+      }
+      await sendPlain(env, chatId, hint, { reply_markup: { inline_keyboard: keyboard } });
     });
     return json({ ok: true });
   }
@@ -466,9 +474,8 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // ===== Learn enqueue з повідомлень — ТІЛЬКИ ДЛЯ АДМІНА =====
+  // ===== Learn enqueue (адмін) =====
   if (isAdmin) {
-    // 1) URL у тексті або підписі
     const urlInText = extractFirstUrl(textRaw);
     if (urlInText) {
       await safe(async () => {
@@ -477,7 +484,6 @@ export async function handleTelegramWebhook(req, env) {
       });
       return json({ ok: true });
     }
-    // 2) Будь-який файл/медіа — TG file URL → черга
     const anyAtt = detectAttachment(msg);
     if (anyAtt?.file_id) {
       await safe(async () => {
