@@ -13,7 +13,7 @@ import { loadSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
-import { enqueueLearn, listQueued } from "../lib/kvLearnQueue.js"; // адмін-тільки Learn
+import { enqueueLearn } from "../lib/kvLearnQueue.js"; // адмiн-черга Learn
 
 // APIs
 import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from "../apis/time.js";
@@ -26,8 +26,17 @@ import { setUserLocation, getUserLocation } from "../lib/geo.js";
 const {
   BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_LEARN,
   mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand,
-  askLocationKeyboard
+  askLocationKeyboard: askLocationKeyboardMaybe
 } = TG;
+
+// Локальний безпечний fallback, якщо в TG.askLocationKeyboard відсутній
+const askLocationKeyboard = (typeof askLocationKeyboardMaybe === "function")
+  ? askLocationKeyboardMaybe
+  : () => ({
+      keyboard: [[{ text: "📍 Надіслати локацію", request_location: true }]],
+      resize_keyboard: true,
+      one_time_keyboard: true
+    });
 
 // ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
 async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
@@ -368,8 +377,7 @@ export async function handleTelegramWebhook(req, env) {
       const links = energyLinks(env, userId);
       const markup = { inline_keyboard: [
         [{ text: "📋 Відкрити Checklist", url: links.checklist }],
-        // Прибрано кнопку "Керування енергією"
-        [{ text: "🧠 Open Learn", url: links.learn }], // Learn — у адмін-панелі
+        [{ text: "🧠 Відкрити Learn", url: links.learn }], // укр мова
       ]};
       await sendPlain(env, chatId, lines.join("\n"), { reply_markup: markup });
     });
@@ -384,23 +392,13 @@ export async function handleTelegramWebhook(req, env) {
       return json({ ok: true });
     }
     await safe(async () => {
-      // Легка перевірка: чи є щось у черзі (для показу кнопки "Run now")
-      let hasQueue = false;
-      try {
-        const r = await listQueued(env, { limit: 1 });
-        hasQueue = Array.isArray(r) ? r.length > 0 : Array.isArray(r?.items) ? r.items.length > 0 : false;
-      } catch {}
       const links = energyLinks(env, userId);
       const hint =
-        "🧠 Режим Learn.\nНадсилай посилання, файли або архіви — я додам у чергу. " +
-        "В HTML-інтерфейсі можна переглянути чергу й підсумки, а також запустити обробку.";
+        "🧠 Режим Learn.\n" +
+        "Тут можна надсилати *посилання* або *файли/архіви* (pdf, docx, txt, md, zip тощо) — я додам їх у чергу на опрацювання. " +
+        "Щоб бачити чергу, підсумки та **прокачати мозок**, відкрий HTML-інтерфейс.";
       const keyboard = [[{ text: "🧠 Відкрити Learn HTML", url: links.learn }]];
-      if (hasQueue) {
-        keyboard.push([
-          { text: "▶️ Запустити обробку зараз", url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }
-        ]);
-      }
-      await sendPlain(env, chatId, hint, { reply_markup: { inline_keyboard: keyboard } });
+      await sendPlain(env, chatId, hint, { reply_markup: { inline_keyboard: keyboard }, parse_mode: "Markdown" });
     });
     return json({ ok: true });
   }
