@@ -9,20 +9,38 @@ import {
   mainKeyboard,
   ADMIN,
   sendPlain,
-  energyLinks, // щоб не тягнути двічі
+  energyLinks,
 } from "../lib/tg.js";
 import { pickLang, t } from "../lib/i18n.js";
 import { enqueueLearn } from "../lib/kvLearnQueue.js";
 
-// ————— helpers —————
-function getLangFromUpdate(update) {
-  // Визначаємо бажану мову з Telegram-профілю користувача.
-  // Якщо її немає — fallback на en, далі i18n сам дасть текст потрібною мовою.
-  return pickLang(
+/* ---------------- helpers ---------------- */
+
+// Проста евристика визначення мови за текстом (не ламає i18n, лише підказує)
+function detectLangFromText(s = "") {
+  const txt = String(s || "");
+  if (!txt) return null;
+  // українська: специфічні літери
+  if (/[ґҐєЄіІїЇ]/.test(txt)) return "uk";
+  // кирилиця без укр-спецсимволів -> лишаємо на розсуд i18n (може бути ru)
+  if (/[А-Яа-яЁёЪъЫыЭэ]/.test(txt)) return "uk";
+  // німецька (дуже грубо)
+  if (/[äöüßÄÖÜ]/.test(txt)) return "de";
+  // англійська за відсутністю кирилиці
+  if (/[A-Za-z]/.test(txt)) return "en";
+  return null;
+}
+
+// Вибір мови: TG-профіль -> авто по тексту (якщо є) -> en
+function getLangFromUpdate(update, textSample = "") {
+  const base =
     update?.message?.from?.language_code ||
-      update?.callback_query?.from?.language_code ||
-      "en"
-  );
+    update?.callback_query?.from?.language_code ||
+    "en";
+  const picked = pickLang(base);
+  const auto = detectLangFromText(textSample);
+  // якщо автодетектор дав щось відмінне — повертаємо його, інакше picked
+  return pickLang(auto || picked || "en");
 }
 
 function getName(update) {
@@ -33,7 +51,26 @@ function getName(update) {
   );
 }
 
-// ————— main handler —————
+// Безпечний переклад із підстраховками: lang -> uk -> en -> key
+function tt(lang, key, ...args) {
+  const v1 = t(lang, key, ...args);
+  if (v1 && v1 !== key) return v1;
+  const v2 = t("uk", key, ...args);
+  if (v2 && v2 !== key) return v2;
+  const v3 = t("en", key, ...args);
+  if (v3 && v3 !== key) return v3;
+  return key;
+}
+
+// Підчищаємо "голий" URL у тексті (без крапок/дужок у кінці)
+function extractUrl(s = "") {
+  const m = String(s).match(/\bhttps?:\/\/[^\s<>]+/i);
+  if (!m) return null;
+  return m[0].replace(/[)\].,]+$/g, "");
+}
+
+/* ---------------- main handler ---------------- */
+
 export async function handleTelegramWebhook(req, env) {
   const update = await req.json().catch(() => ({}));
 
@@ -46,46 +83,42 @@ export async function handleTelegramWebhook(req, env) {
   const userId =
     update?.message?.from?.id ?? update?.callback_query?.from?.id ?? "";
 
-  const lang = getLangFromUpdate(update);
+  const rawText = (update?.message?.text || "").trim();
+  const lang = getLangFromUpdate(update, rawText);
   const name = getName(update);
-  const text = (update?.message?.text || "").trim();
 
-  // /start — привітання на мові акаунта TG
-  if (/^\/start\b/i.test(text)) {
-    await sendPlain(env, chatId, t(lang, "hello", name), {
+  // /start — привітання на мові акаунта/тексту
+  if (/^\/start\b/i.test(rawText)) {
+    await sendPlain(env, chatId, tt(lang, "hello", name), {
       reply_markup: mainKeyboard(ADMIN(env, userId)),
     });
     return json({ ok: true });
   }
 
   // ——— Кнопки клавіатури ———
-  if (text === BTN_SENTI) {
-    await sendPlain(env, chatId, t(lang, "whoami"), {
+  if (rawText === BTN_SENTI) {
+    await sendPlain(env, chatId, tt(lang, "whoami"), {
       reply_markup: mainKeyboard(ADMIN(env, userId)),
     });
     return json({ ok: true });
   }
 
-  if (text === BTN_LEARN) {
-    // Подказка про режим навчання відповідною мовою
-    await sendPlain(env, chatId, t(lang, "learn_hint"), {
+  if (rawText === BTN_LEARN) {
+    await sendPlain(env, chatId, tt(lang, "learn_hint"), {
       reply_markup: mainKeyboard(ADMIN(env, userId)),
     });
     return json({ ok: true });
   }
 
-  if (text === BTN_DRIVE) {
-    // Делегуємо існуючому flow авторизації Google Drive
+  if (rawText === BTN_DRIVE) {
     const host = env.SERVICE_HOST || `${env.name}.workers.dev`;
     const link = `https://${host}/auth/start?u=${encodeURIComponent(
       String(userId)
     )}`;
-
-    // Виводимо як Markdown-посилання без прев’ю
     await sendPlain(
       env,
       chatId,
-      `[↗️ ${t(lang, "btn_open_drive") || "Open Drive"}](${link})`,
+      `[↗️ ${tt(lang, "btn_open_drive") || "Open Drive"}](${link})`,
       {
         parse_mode: "Markdown",
         reply_markup: mainKeyboard(ADMIN(env, userId)),
@@ -95,7 +128,7 @@ export async function handleTelegramWebhook(req, env) {
   }
 
   // ——— Адмінка ———
-  if (text === BTN_ADMIN && ADMIN(env, userId)) {
+  if (rawText === BTN_ADMIN && ADMIN(env, userId)) {
     const { energy, checklist } = energyLinks(env, userId);
     const learnUrl = `https://${
       env.SERVICE_HOST || `${env.name}.workers.dev`
@@ -109,16 +142,16 @@ export async function handleTelegramWebhook(req, env) {
 
     const kb = {
       inline_keyboard: [
-        [{ text: t(lang, "btn_open_checklist"), url: checklist }],
-        [{ text: t(lang, "btn_energy"), url: energy }],
-        [{ text: t(lang, "btn_learn"), url: learnUrl }],
+        [{ text: tt(lang, "btn_open_checklist"), url: checklist }],
+        [{ text: tt(lang, "btn_energy"), url: energy }],
+        [{ text: tt(lang, "btn_learn"), url: learnUrl }],
       ],
     };
 
     await sendPlain(
       env,
       chatId,
-      `${t(lang, "admin_header")}\nMODEL_ORDER: ${
+      `${tt(lang, "admin_header")}\nMODEL_ORDER: ${
         env.MODEL_ORDER || "(not set)"
       }`,
       {
@@ -129,19 +162,18 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // ——— Якщо користувач надіслав “голий” URL — додаємо у його чергу навчання ———
-  const urlMatch = text.match(/\bhttps?:\/\/\S+/i);
-  if (urlMatch) {
-    const url = urlMatch[0];
+  // ——— Якщо користувач надіслав URL — додаємо у чергу навчання ———
+  const url = extractUrl(rawText);
+  if (url) {
     await enqueueLearn(env, String(userId), { url, name: url });
-    await sendPlain(env, chatId, t(lang, "learn_added"), {
+    await sendPlain(env, chatId, tt(lang, "learn_added"), {
       reply_markup: mainKeyboard(ADMIN(env, userId)),
     });
     return json({ ok: true });
   }
 
-  // ——— Фолбек — повторюємо підказку про Learn відповідною мовою ———
-  await sendPlain(env, chatId, t(lang, "learn_hint"), {
+  // ——— Фолбек — підказка про Learn ———
+  await sendPlain(env, chatId, tt(lang, "learn_hint"), {
     reply_markup: mainKeyboard(ADMIN(env, userId)),
   });
   return json({ ok: true });
