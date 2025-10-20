@@ -1,9 +1,8 @@
 // src/routes/adminLearn.js
 import { enqueueLearn, listQueued, runLearnOnce, getLastSummary } from "../lib/kvLearnQueue.js";
 import { abs } from "../utils/url.js";
-import { uploadFromFormData, readObjectResponse } from "../lib/r2.js";
+import { uploadFromFormData, readObjectResponse } from "../lib/r2.js"; // ✅ R2
 
-// ——— Заголовки/утиліти ————————————————————————————————————————————————————
 const HTML = { "content-type": "text/html; charset=utf-8" };
 const JSONH = { "content-type": "application/json; charset=utf-8" };
 
@@ -29,89 +28,15 @@ function esc(s) {
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-/**
- * Спроба зробити коротке «людське» резюме з сирого логу агента.
- * Якщо агент коли-небудь почне віддавати окремо digest/learnings — UI їх підхопить (див. /summary.json нижче).
- */
-function makeBriefSummary(raw = "") {
-  const txt = String(raw || "").trim();
-  if (!txt) return "";
-
-  // 1) забираємо технічний шум
-  const dropLine = (line) => {
-    const l = line.toLowerCase();
-    return (
-      /^ok[:=]/.test(l) ||
-      /^processed[:=]|^опрацьовано[:=]/.test(l) ||
-      /^(class|bucket|ewma|fails|kv|queue|r2|key|id|size|bytes)\b/.test(l) ||
-      /новий матеріал[:=]/i.test(l)
-    );
-  };
-
-  // 2) виймаємо «підказки змісту»: імена файлів, заголовки, домени
-  const urlRe = /https?:\/\/[^\s)]+/ig;
-  const filenameFromUrl = (u) => {
-    try {
-      const { pathname, hostname } = new URL(u);
-      const base = pathname.split("/").filter(Boolean).pop() || hostname;
-      return base.replace(/[_-]+/g, " ").replace(/\.(pdf|docx?|pptx?|zip|rar|7z|mp4|mp3|mov|webm|txt|md|html?)$/i, "")
-        .slice(0, 80);
-    } catch { return ""; }
-  };
-
-  const lines = txt.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  const cleaned = [];
-
-  for (let line of lines) {
-    if (dropLine(line)) continue;
-
-    // заміняємо URL на читабельні назви
-    const urls = line.match(urlRe);
-    if (urls) {
-      for (const u of urls) {
-        const nice = filenameFromUrl(u) || new URL(u).hostname;
-        line = line.replace(u, nice);
-      }
-    }
-    // прибираємо голі «схожі на id» токени
-    line = line.replace(/\b[a-z0-9]{10,}\b/ig, "").replace(/\s{2,}/g, " ").trim();
-    if (line) cleaned.push(line);
-  }
-
-  // 3) якщо в логу є булети — беремо до 5; інакше формуємо самі
-  const bullets = cleaned.filter(l => /^[•\-—*]\s/.test(l));
-  const chosen = (bullets.length ? bullets : cleaned).slice(0, 5);
-
-  // підфарбовуємо перші слова для зрозумілості
-  const friendly = chosen.map(l => {
-    if (/висновк|тези|підсум/iu.test(l)) return `• ${l}`;
-    if (/додано|добавлено|added/i.test(l)) return `• Додано: ${l.replace(/^[•\-—*]\s*/,'')}`;
-    if (/вивчен|learned|прочитан/i.test(l)) return `• ${l}`;
-    // fallback: якщо рядок виглядає як назва
-    if (l.length < 120) return `• Вивчено: ${l}`;
-    return `• ${l}`;
-  });
-
-  return friendly.join("\n") || "Черга порожня — немає нових матеріалів.";
-}
-
-/** Спроба витягнути digest/learnings з JSON, якщо агент їх віддає */
-function chooseSummaryPieces({ summary, digest, learnings } = {}) {
-  const short = (learnings && Array.isArray(learnings) && learnings.length)
-    ? learnings.slice(0, 5).map(x => `• ${String(x).trim()}`).join("\n")
-    : (digest ? String(digest).trim() : makeBriefSummary(summary || ""));
-
-  return { summary: String(summary || "").trim(), summary_short: short || "—" };
-}
-
 function pageHtml(env, url, { canWrite, lastSummary }) {
   const self = abs(env, "/admin/learn/html");
   const secQS = canWrite ? `?s=${encodeURIComponent(secretFromEnv(env))}` : "";
   const enqueueUrl = abs(env, `/admin/learn/enqueue${secQS}`);
-  const uploadUrl = abs(env, `/admin/learn/upload${secQS}`);
-  const runUrl = abs(env, `/admin/learn/run${secQS}`);
-  const queueJson = abs(env, `/admin/learn/queue.json${secQS}`);
-  const summaryJson = abs(env, `/admin/learn/summary.json${secQS}`);
+  const uploadUrl  = abs(env, `/admin/learn/upload${secQS}`);
+  const runUrl     = abs(env, `/admin/learn/run${secQS}`);
+  const queueJson  = abs(env, `/admin/learn/queue.json${secQS}`);
+  const summaryJson= abs(env, `/admin/learn/summary.json${secQS}`);
+  const usageJson  = abs(env, `/admin/usage/json${secQS}`); // ✅ для віджета пам’яті
 
   return `<!doctype html>
 <html lang="uk">
@@ -127,7 +52,7 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
   .title { font-weight:700; font-size:18px; }
   .badge { padding:4px 8px; border-radius:999px; font-size:12px; background:#1b1f24; color:var(--muted); }
   main { padding:16px; display:grid; gap:16px; grid-template-columns:1fr; }
-  @media(min-width:880px){ main{ grid-template-columns: 1.2fr 1fr; } }
+  @media(min-width:1000px){ main{ grid-template-columns:1.2fr 1fr; } }
   .card { background:var(--card); border:1px solid #1b1f24; border-radius:12px; padding:16px; }
   h2 { margin:0 0 10px 0; font-size:16px; }
   form .row { display:flex; gap:8px; flex-wrap:wrap; }
@@ -139,13 +64,14 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
   .grid { display:grid; gap:8px; }
   .item { padding:10px; border:1px solid #1b1f24; border-radius:10px; background:#0e1116; }
   .muted { color:var(--muted); }
+  .ok { color:var(--ok); } .warn{ color:var(--warn);} .err{ color:var(--err); }
   .hint { font-size:13px; color:var(--muted); }
-  .row-actions { display:flex; gap:8px; flex-wrap:wrap; }
+  .row-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
   .link { color:#93c5fd; text-decoration:none; }
   .two { display:grid; gap:16px; grid-template-columns:1fr; }
   @media(min-width:720px){ .two{ grid-template-columns:1fr 1fr; } }
-  .toggle { cursor:pointer; font-size:13px; color:#93c5fd; user-select:none; }
-  .summary-box { white-space:pre-wrap; }
+  .statbox { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .pill { padding:6px 10px; border-radius:999px; background:#0e1116; border:1px solid #1b1f24; display:inline-block; margin-right:8px; }
 </style>
 </head>
 <body>
@@ -191,10 +117,15 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
   </section>
 
   <section class="card">
+    <h2>Стан пам’яті (R2 + KV)</h2>
+    <div id="usage" class="item">
+      <span class="muted">Завантаження…</span>
+    </div>
+  </section>
+
+  <section class="card">
     <h2>Останній звіт</h2>
-    <div id="summary-brief" class="item summary-box">—</div>
-    <div class="hint"><span id="toggle-log" class="toggle">показати повний лог</span></div>
-    <pre id="summary" class="item summary-box" style="display:none">${esc(lastSummary || "—")}</pre>
+    <pre id="summary" class="item" style="white-space:pre-wrap">${esc(lastSummary || "—")}</pre>
   </section>
 
   <section class="card">
@@ -205,36 +136,54 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
 
 <script>
 async function fetchJSON(u){ const r = await fetch(u, { cache:"no-store" }); return r.json(); }
-function setBrief(txt){ document.getElementById("summary-brief").textContent = txt || "—"; }
 
-async function reloadSummary(){ try{
-  const d = await fetchJSON("${summaryJson}");
-  setBrief(d?.summary_short || d?.summary || "—");
-  document.getElementById("summary").textContent = d?.summary || "—";
-}catch{}}
-
-async function reloadQueue(){ try{
-  const d = await fetchJSON("${queueJson}");
-  const list = Array.isArray(d?.items) ? d.items : [];
-  const root = document.getElementById("queue");
-  root.innerHTML = "";
-  if(!list.length){ root.innerHTML = '<div class="item muted">Черга порожня</div>'; return; }
-  for(const it of list){
-    const el = document.createElement("div");
-    el.className="item";
-    const src = (it?.payload?.url || it?.payload?.r2Key || it?.payload?.name || it?.id);
-    el.innerHTML = "<div><b>"+(it.kind || "item")+"</b> — "+(src || "")+"</div><div class='muted'>"+(it.at || "")+"</div>";
-    root.appendChild(el);
+async function reloadUsage(){
+  try{
+    const d = await fetchJSON("${usageJson}");
+    const box = document.getElementById("usage");
+    const r2 = d?.r2 || {}, kv = d?.kv_learn || {};
+    box.innerHTML = \`
+      <div class="statbox">
+        <div class="item">
+          <b>R2</b><br/>
+          Розмір: <span class="pill">\${r2.human || "—"}</span>
+          Об'єктів: <span class="pill">\${r2.count ?? "—"}</span>
+        </div>
+        <div class="item">
+          <b>KV (Learn)</b><br/>
+          Розмір: <span class="pill">\${kv.human || "—"}</span>
+          Ключів: <span class="pill">\${kv.count ?? "—"}</span>
+        </div>
+      </div>
+      <div class="muted" style="margin-top:8px">Разом: \${d?.total_human || "—"}</div>\`;
+  }catch(e){
+    document.getElementById("usage").innerHTML = '<span class="err">Помилка завантаження usage</span>';
   }
-}catch{}}
+}
 
-document.getElementById("toggle-log")?.addEventListener("click", ()=>{
-  const pre = document.getElementById("summary");
-  const tgl = document.getElementById("toggle-log");
-  const show = pre.style.display === "none";
-  pre.style.display = show ? "block" : "none";
-  tgl.textContent = show ? "сховати повний лог" : "показати повний лог";
-});
+async function reloadSummary(){
+  try{
+    const d = await fetchJSON("${summaryJson}");
+    document.getElementById("summary").textContent = d?.summary || "—";
+  }catch{}
+}
+
+async function reloadQueue(){
+  try{
+    const d = await fetchJSON("${queueJson}");
+    const list = Array.isArray(d?.items) ? d.items : [];
+    const root = document.getElementById("queue");
+    root.innerHTML = "";
+    if(!list.length){ root.innerHTML = '<div class="item muted">Черга порожня</div>'; return; }
+    for(const it of list){
+      const el = document.createElement("div");
+      el.className="item";
+      const src = (it?.payload?.url || it?.payload?.r2Key || it?.payload?.name || it?.id);
+      el.innerHTML = "<div><b>"+(it.kind || "item")+"</b> — "+(src || "")+"</div><div class='muted'>"+(it.at || "")+"</div>";
+      root.appendChild(el);
+    }
+  }catch{}
+}
 
 document.getElementById("btn-run")?.addEventListener("click", async ()=>{
   try{
@@ -242,8 +191,8 @@ document.getElementById("btn-run")?.addEventListener("click", async ()=>{
     btn.disabled = true;
     const r = await fetch("${runUrl}", { method:"POST" });
     const d = await r.json().catch(()=>null);
-    setBrief(d?.summary_short || d?.summary || (d?.ok ? "OK" : "Помилка"));
-    await reloadSummary(); await reloadQueue();
+    document.getElementById("enq-status").textContent = d?.summary || (d?.ok ? "OK" : "Помилка");
+    await reloadSummary(); await reloadQueue(); await reloadUsage();
   }finally{
     document.getElementById("btn-run").disabled = false;
   }
@@ -258,7 +207,7 @@ document.getElementById("f-enq")?.addEventListener("submit", async (e)=>{
     const d = await r.json().catch(()=>null);
     document.getElementById("enq-status").textContent = d?.ok ? "✅ Додано" : ("❌ " + (d?.error || "Помилка"));
     form.reset();
-    await reloadQueue();
+    await reloadQueue(); await reloadUsage();
   }catch(err){
     document.getElementById("enq-status").textContent = "❌ Помилка мережі";
   }
@@ -276,7 +225,7 @@ document.getElementById("f-up")?.addEventListener("submit", async (e)=>{
     const n = Array.isArray(d?.uploaded) ? d.uploaded.length : 0;
     document.getElementById("up-status").textContent = d?.ok ? ("✅ Завантажено: " + n) : ("❌ " + (d?.error || "Помилка"));
     form.reset();
-    await reloadQueue();
+    await reloadQueue(); await reloadUsage();
   }catch(err){
     document.getElementById("up-status").textContent = "❌ Помилка мережі";
   } finally {
@@ -284,50 +233,43 @@ document.getElementById("f-up")?.addEventListener("submit", async (e)=>{
   }
 });
 
-(async()=>{ await reloadSummary(); await reloadQueue(); })();
+(async()=>{ await reloadSummary(); await reloadQueue(); await reloadUsage(); })();
 </script>
 </body>
 </html>`;
 }
 
-// ——— Router ————————————————————————————————————————————————————————
 export async function handleAdminLearn(req, env, url) {
   const p = url.pathname || "";
   const method = req.method.toUpperCase();
   const canWrite = isAuthorized(url, env);
 
-  // HTML UI
   if (p === "/admin/learn/html") {
     const lastSummary = await getLastSummary(env).catch(() => "");
     return new Response(pageHtml(env, url, { canWrite, lastSummary }), { status: 200, headers: HTML });
   }
 
-  // Проксі-роут для віддачі об'єктів із R2 (без секрету; лише GET)
   if (p.startsWith("/admin/learn/file/") && method === "GET") {
     const key = decodeURIComponent(p.replace("/admin/learn/file/", ""));
     if (!key || key.includes("..")) return new Response("Bad key", { status: 400 });
     return await readObjectResponse(env, key);
   }
 
-  // API: summary.json — тут формуємо і коротку версію
   if (p === "/admin/learn/summary.json") {
     const summary = await getLastSummary(env).catch(() => "");
-    const pieces = chooseSummaryPieces({ summary });
-    return okJson({ ok: true, ...pieces });
+    return okJson({ ok: true, summary });
   }
 
-  // API: queue.json
   if (p === "/admin/learn/queue.json") {
     const items = await listQueued(env, { limit: 100 }).catch(() => []);
     return okJson({ ok: true, items });
   }
 
-  // API: enqueue (POST, requires secret)
   if (p === "/admin/learn/enqueue") {
     if (!canWrite) return bad("unauthorized", 401);
     if (method !== "POST") return bad("method not allowed", 405);
-    let urlStr = "", note = "", userId = url.searchParams.get("u") || "admin";
     try {
+      let urlStr = "", note = "", userId = url.searchParams.get("u") || "admin";
       const ct = req.headers.get("content-type") || "";
       if (ct.includes("application/json")) {
         const body = await req.json();
@@ -346,14 +288,13 @@ export async function handleAdminLearn(req, env, url) {
     }
   }
 
-  // API: upload (POST, requires secret) — кладе у R2 та додає у чергу
   if (p === "/admin/learn/upload") {
     if (!canWrite) return bad("unauthorized", 401);
     if (method !== "POST") return bad("method not allowed", 405);
     try {
       const userId = url.searchParams.get("u") || "admin";
       const fd = await req.formData();
-      const uploaded = await uploadFromFormData(env, fd, { userId, prefix: "" }); // -> [{key, name, workerUrl, r2}]
+      const uploaded = await uploadFromFormData(env, fd, { userId, prefix: "" });
       if (!uploaded.length) return bad("no files", 400);
 
       const enq = [];
@@ -367,19 +308,16 @@ export async function handleAdminLearn(req, env, url) {
     }
   }
 
-  // API: run (POST/GET, requires secret)
   if (p === "/admin/learn/run") {
     if (!canWrite) return bad("unauthorized", 401);
-    if (!["POST", "GET"].includes(method)) return bad("method not allowed", 405);
+    if (!["POST","GET"].includes(method)) return bad("method not allowed", 405);
     try {
       const res = await runLearnOnce(env, {});
-      const pieces = chooseSummaryPieces(res); // підхоплює digest/learnings якщо є
-      return okJson({ ok: true, ...res, ...pieces });
+      return okJson({ ok: true, ...res });
     } catch (e) {
       return bad(String(e?.message || e), 500);
     }
   }
 
-  // 404
   return new Response("Not found", { status: 404 });
 }
