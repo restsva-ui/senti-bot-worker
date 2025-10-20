@@ -36,7 +36,7 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
   const runUrl     = abs(env, `/admin/learn/run${secQS}`);
   const queueJson  = abs(env, `/admin/learn/queue.json${secQS}`);
   const summaryJson= abs(env, `/admin/learn/summary.json${secQS}`);
-  const usageJson  = abs(env, `/admin/usage/json${secQS}`); // ✅ для віджета пам’яті
+  const usageJson  = abs(env, `/admin/usage/json${secQS}`); // ✅ віджет пам’яті
 
   return `<!doctype html>
 <html lang="uk">
@@ -55,7 +55,7 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
   @media(min-width:1000px){ main{ grid-template-columns:1.2fr 1fr; } }
   .card { background:var(--card); border:1px solid #1b1f24; border-radius:12px; padding:16px; }
   h2 { margin:0 0 10px 0; font-size:16px; }
-  form .row { display:flex; gap:8px; flex-wrap:wrap; }
+  form .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
   input[type="url"], input[type="file"], textarea { width:100%; padding:10px 12px; border-radius:10px; border:1px solid #222831; background:#0e1116; color:var(--fg); }
   textarea { min-height:80px; resize:vertical; }
   button { padding:10px 14px; border-radius:10px; border:1px solid #1b1f24; background:var(--acc); color:white; cursor:pointer; font-weight:600; }
@@ -66,7 +66,6 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
   .muted { color:var(--muted); }
   .ok { color:var(--ok); } .warn{ color:var(--warn);} .err{ color:var(--err); }
   .hint { font-size:13px; color:var(--muted); }
-  .row-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
   .link { color:#93c5fd; text-decoration:none; }
   .two { display:grid; gap:16px; grid-template-columns:1fr; }
   @media(min-width:720px){ .two{ grid-template-columns:1fr 1fr; } }
@@ -91,7 +90,7 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
           <div class="grid">
             <input type="url" name="url" placeholder="https://..." required ${canWrite ? "" : "disabled"} />
             <textarea name="note" placeholder="Короткий опис (опц.)" ${canWrite ? "" : "disabled"}></textarea>
-            <div class="row row-actions">
+            <div class="row">
               <button ${canWrite ? "" : "disabled"}>Додати у чергу</button>
               <button type="button" id="btn-run" class="secondary" ${canWrite ? "" : "disabled"}>🧠 Прокачай мозок</button>
               <a class="link" href="${self}">Оновити сторінку</a>
@@ -106,7 +105,7 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
         <form id="f-up" method="post" action="${uploadUrl}" enctype="multipart/form-data">
           <div class="grid">
             <input type="file" name="files" multiple ${canWrite ? "" : "disabled"} />
-            <div class="row row-actions">
+            <div class="row">
               <button ${canWrite ? "" : "disabled"}>Завантажити у R2 + додати в чергу</button>
             </div>
           </div>
