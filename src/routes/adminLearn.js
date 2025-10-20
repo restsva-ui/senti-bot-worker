@@ -1,6 +1,7 @@
 // src/routes/adminLearn.js
 import { enqueueLearn, listQueued, runLearnOnce, getLastSummary } from "../lib/kvLearnQueue.js";
 import { abs } from "../utils/url.js";
+import { uploadFromFormData, readObjectResponse } from "../lib/r2.js"; // ✅ R2
 
 // ——— Заголовки/утиліти ————————————————————————————————————————————————————
 const HTML = { "content-type": "text/html; charset=utf-8" };
@@ -27,10 +28,12 @@ function esc(s) {
     .replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
+
 function pageHtml(env, url, { canWrite, lastSummary }) {
   const self = abs(env, "/admin/learn/html");
   const secQS = canWrite ? `?s=${encodeURIComponent(secretFromEnv(env))}` : "";
   const enqueueUrl = abs(env, `/admin/learn/enqueue${secQS}`);
+  const uploadUrl = abs(env, `/admin/learn/upload${secQS}`); // ✅ upload
   const runUrl = abs(env, `/admin/learn/run${secQS}`);
   const queueJson = abs(env, `/admin/learn/queue.json${secQS}`);
   const summaryJson = abs(env, `/admin/learn/summary.json${secQS}`);
@@ -53,7 +56,7 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
   .card { background:var(--card); border:1px solid #1b1f24; border-radius:12px; padding:16px; }
   h2 { margin:0 0 10px 0; font-size:16px; }
   form .row { display:flex; gap:8px; flex-wrap:wrap; }
-  input[type="url"], textarea { width:100%; padding:10px 12px; border-radius:10px; border:1px solid #222831; background:#0e1116; color:var(--fg); }
+  input[type="url"], input[type="file"], textarea { width:100%; padding:10px 12px; border-radius:10px; border:1px solid #222831; background:#0e1116; color:var(--fg); }
   textarea { min-height:80px; resize:vertical; }
   button { padding:10px 14px; border-radius:10px; border:1px solid #1b1f24; background:var(--acc); color:white; cursor:pointer; font-weight:600; }
   button.secondary { background:#1b1f24; color:var(--fg); }
@@ -65,6 +68,8 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
   .hint { font-size:13px; color:var(--muted); }
   .row-actions { display:flex; gap:8px; flex-wrap:wrap; }
   .link { color:#93c5fd; text-decoration:none; }
+  .two { display:grid; gap:16px; grid-template-columns:1fr; }
+  @media(min-width:720px){ .two{ grid-template-columns:1fr 1fr; } }
 </style>
 </head>
 <body>
@@ -77,19 +82,38 @@ function pageHtml(env, url, { canWrite, lastSummary }) {
 <main>
   <section class="card">
     <h2>Додати матеріали</h2>
-    <p class="hint">Встав посилання на статтю/відео/файл/архів (Google Drive, Dropbox, пряма URL). У Telegram можна надсилати і самі файли — вони також летять у чергу.</p>
-    <form id="f-enq" method="post" action="${enqueueUrl}">
-      <div class="grid">
-        <input type="url" name="url" placeholder="https://..." required ${canWrite ? "" : "disabled"} />
-        <textarea name="note" placeholder="Короткий опис (опц.)" ${canWrite ? "" : "disabled"}></textarea>
-        <div class="row row-actions">
-          <button ${canWrite ? "" : "disabled"}>Додати у чергу</button>
-          <button type="button" id="btn-run" class="secondary" ${canWrite ? "" : "disabled"}>Запустити зараз</button>
-          <a class="link" href="${self}">Оновити сторінку</a>
-        </div>
+    <div class="two">
+      <!-- URL/Note enqueue -->
+      <div>
+        <p class="hint">Встав посилання на статтю/відео/файл/архів (Google Drive, Dropbox, пряма URL). У Telegram можна надсилати і самі файли — вони також летять у чергу.</p>
+        <form id="f-enq" method="post" action="${enqueueUrl}">
+          <div class="grid">
+            <input type="url" name="url" placeholder="https://..." required ${canWrite ? "" : "disabled"} />
+            <textarea name="note" placeholder="Короткий опис (опц.)" ${canWrite ? "" : "disabled"}></textarea>
+            <div class="row row-actions">
+              <button ${canWrite ? "" : "disabled"}>Додати у чергу</button>
+              <button type="button" id="btn-run" class="secondary" ${canWrite ? "" : "disabled"}>Запустити зараз</button>
+              <a class="link" href="${self}">Оновити сторінку</a>
+            </div>
+          </div>
+        </form>
+        <div id="enq-status" class="hint"></div>
       </div>
-    </form>
-    <div id="enq-status" class="hint"></div>
+
+      <!-- R2 Upload -->
+      <div>
+        <p class="hint">Або завантаж файли безпосередньо (збережуться у R2 і одразу додадуться у чергу).</p>
+        <form id="f-up" method="post" action="${uploadUrl}" enctype="multipart/form-data">
+          <div class="grid">
+            <input type="file" name="files" multiple ${canWrite ? "" : "disabled"} />
+            <div class="row row-actions">
+              <button ${canWrite ? "" : "disabled"}>Завантажити у R2 + додати в чергу</button>
+            </div>
+          </div>
+        </form>
+        <div id="up-status" class="hint"></div>
+      </div>
+    </div>
   </section>
 
   <section class="card">
@@ -118,7 +142,7 @@ async function reloadQueue(){ try{
   for(const it of list){
     const el = document.createElement("div");
     el.className="item";
-    const src = it?.payload?.url || it?.payload?.name || it?.id;
+    const src = (it?.payload?.url || it?.payload?.r2Key || it?.payload?.name || it?.id);
     el.innerHTML = "<div><b>"+(it.kind || "item")+"</b> — "+(src || "")+"</div><div class='muted'>"+(it.at || "")+"</div>";
     root.appendChild(el);
   }
@@ -151,11 +175,33 @@ document.getElementById("f-enq")?.addEventListener("submit", async (e)=>{
   }
 });
 
+document.getElementById("f-up")?.addEventListener("submit", async (e)=>{
+  e.preventDefault();
+  const form = e.currentTarget;
+  const fd = new FormData(form);
+  const btn = form.querySelector("button");
+  try{
+    btn.disabled = true;
+    const r = await fetch(form.action, { method:"POST", body: fd });
+    const d = await r.json().catch(()=>null);
+    const n = Array.isArray(d?.uploaded) ? d.uploaded.length : 0;
+    document.getElementById("up-status").textContent = d?.ok ? ("✅ Завантажено: " + n) : ("❌ " + (d?.error || "Помилка"));
+    form.reset();
+    await reloadQueue();
+  }catch(err){
+    document.getElementById("up-status").textContent = "❌ Помилка мережі";
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 (async()=>{ await reloadSummary(); await reloadQueue(); })();
 </script>
 </body>
 </html>`;
 }
+
+// ——— Router ————————————————————————————————————————————————————————
 export async function handleAdminLearn(req, env, url) {
   const p = url.pathname || "";
   const method = req.method.toUpperCase();
@@ -167,20 +213,21 @@ export async function handleAdminLearn(req, env, url) {
     return new Response(pageHtml(env, url, { canWrite, lastSummary }), { status: 200, headers: HTML });
   }
 
+  // Проксі-роут для віддачі об'єктів із R2 (без секрету; лише GET)
+  if (p.startsWith("/admin/learn/file/") && method === "GET") {
+    const key = decodeURIComponent(p.replace("/admin/learn/file/", ""));
+    if (!key || key.includes("..")) return new Response("Bad key", { status: 400 });
+    return await readObjectResponse(env, key);
+  }
+
   // API: summary.json
   if (p === "/admin/learn/summary.json") {
-    if (!canWrite) {
-      // читати останній звіт можна й без секрету (щоб вбудовувати у чекліст), при бажанні — закрити.
-      const summary = await getLastSummary(env).catch(() => "");
-      return okJson({ ok: true, summary });
-    }
     const summary = await getLastSummary(env).catch(() => "");
     return okJson({ ok: true, summary });
   }
 
   // API: queue.json
   if (p === "/admin/learn/queue.json") {
-    // показ черги дозволимо без секрету (read-only), можна посилити при потребі
     const items = await listQueued(env, { limit: 100 }).catch(() => []);
     return okJson({ ok: true, items });
   }
@@ -204,6 +251,28 @@ export async function handleAdminLearn(req, env, url) {
       if (!/^https?:\/\//i.test(urlStr)) return bad("invalid url");
       const res = await enqueueLearn(env, String(userId), { url: urlStr, name: note || urlStr });
       return okJson({ ok: true, enqueued: res });
+    } catch (e) {
+      return bad(String(e?.message || e), 500);
+    }
+  }
+
+  // API: upload (POST, requires secret) — кладе у R2 та додає у чергу
+  if (p === "/admin/learn/upload") {
+    if (!canWrite) return bad("unauthorized", 401);
+    if (method !== "POST") return bad("method not allowed", 405);
+    try {
+      const userId = url.searchParams.get("u") || "admin";
+      const fd = await req.formData();
+      const uploaded = await uploadFromFormData(env, fd, { userId, prefix: "" }); // -> [{key, name, workerUrl, r2}]
+      if (!uploaded.length) return bad("no files", 400);
+
+      const enq = [];
+      for (const f of uploaded) {
+        // у payload кладемо і url (через воркер), і r2Key для внутрішнього використання
+        const r = await enqueueLearn(env, String(userId), { url: f.workerUrl, r2Key: f.key, name: f.name });
+        enq.push(r);
+      }
+      return okJson({ ok: true, uploaded, enqueued: enq });
     } catch (e) {
       return bad(String(e?.message || e), 500);
     }
