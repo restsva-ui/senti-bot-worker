@@ -108,4 +108,4 @@ id = "86a54c59ce674a558780c58bf1a47dfd"
 [[r2_buckets]]
 binding = "LEARN_BUCKET"           # ім'я, яке використовуватимеш у коді: env.LEARN_BUCKET
 bucket_name = "senti-learn"        # створи bucket у R2 Dashboard з такою назвою
-# preview_bucket_name = "senti-learn-preview"  # (необов'язково)
+# preview_bucket_name = "senti-learn-preview"  # (необов'язково) 
