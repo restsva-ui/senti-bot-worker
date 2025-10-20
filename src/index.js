@@ -32,6 +32,14 @@ import { home } from "./ui/home.js";
 import { nightlyAutoImprove } from "./lib/autoImprove.js";
 import { runSelfRegulation } from "./lib/selfRegulate.js";
 import { handleAiImprove } from "./routes/aiImprove.js";
+// додай імпорт
+import { handleAdminUsage } from "./routes/adminUsage.js";
+
+// у роутері:
+if (url.pathname.startsWith("/admin/usage")) {
+  return handleAdminUsage(req, env, url);
+}
+
 
 const VERSION = "senti-worker-2025-10-20-learn-admin-only";
 
