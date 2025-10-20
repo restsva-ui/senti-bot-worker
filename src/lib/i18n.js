@@ -75,3 +75,25 @@ const DICTS = {
       "Utilise les boutons ci-dessous ou écris simplement. /start — pour afficher le clavier.",
   },
 };
+function langFromTg(tgUserLang) {
+  if (!tgUserLang) return "uk";
+  const c = tgUserLang.toLowerCase();
+  if (c.startsWith("uk")) return "uk";
+  if (c.startsWith("ru")) return "ru";
+  if (c.startsWith("de")) return "de";
+  if (c.startsWith("fr")) return "fr";
+  if (c.startsWith("en")) return "en";
+  return "uk";
+}
+
+export function pickLang(update) {
+  const from = update?.message?.from || update?.callback_query?.from;
+  return langFromTg(from?.language_code);
+}
+
+export function t(lang, key, ...args) {
+  const L = DICTS[lang] || DICTS.uk;
+  const val = L[key] ?? DICTS.uk[key] ?? key;
+  return typeof val === "function" ? val(...args) : val;
+}
+
