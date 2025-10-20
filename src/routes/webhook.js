@@ -13,7 +13,7 @@ import { loadSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
-import { enqueueLearn } from "../lib/kvLearnQueue.js"; // ✅ додано
+import { enqueueLearn } from "../lib/kvLearnQueue.js"; // використовується лише для адміна
 
 // APIs
 import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from "../apis/time.js";
@@ -24,7 +24,7 @@ import { setUserLocation, getUserLocation } from "../lib/geo.js";
 
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
 const {
-  BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_LEARN, // ✅ BTN_LEARN
+  BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_LEARN,
   mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand,
   askLocationKeyboard
 } = TG;
@@ -90,7 +90,7 @@ function detectAttachment(msg) {
   return pickPhoto(msg);
 }
 async function tgFileUrl(env, file_id) {
-  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN; // ✅ сумісність
+  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   const r = await fetch(`https://api.telegram.org/bot${token}/getFile`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file_id })
   });
@@ -101,15 +101,10 @@ async function tgFileUrl(env, file_id) {
   return `https://api.telegram.org/file/bot${token}/${path}`;
 }
 
-// Learn helpers
+// ===== Learn helpers (адмін-тільки) =========================================
 function extractFirstUrl(text = "") {
   const m = String(text || "").match(/https?:\/\/\S+/i);
   return m ? m[0] : null;
-}
-function isLearnIntent(text = "") {
-  const s = String(text).toLowerCase();
-  // маркери: слово learn або локалізовані форми
-  return /\blearn\b|навч|обуч/i.test(s);
 }
 
 // Drive-режим
@@ -159,6 +154,7 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   }
   return true;
 }
+
 // ── SystemHint ───────────────────────────────────────────────────────────────
 async function buildSystemHint(env, chatId, userId) {
   const statut = String((await readStatut(env)) || "").trim();
@@ -295,6 +291,7 @@ ${control}`;
   const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
 }
+
 // ── MAIN ────────────────────────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "POST") {
@@ -372,22 +369,28 @@ export async function handleTelegramWebhook(req, env) {
       const markup = { inline_keyboard: [
         [{ text: "Відкрити Checklist", url: links.checklist }],
         [{ text: "Керування енергією", url: links.energy }],
-        [{ text: "Open Learn", url: links.learn }], // ✅ кнопка Learn у адмінці
+        [{ text: "Open Learn", url: links.learn }], // Learn — лише в адмін-панелі
       ]};
       await sendPlain(env, chatId, lines.join("\n"), { reply_markup: markup });
     });
     return json({ ok: true });
   }
 
-  // Кнопка LEARN — підказка + лінк на HTML
-  if (textRaw === BTN_LEARN) {
+  // Кнопка LEARN — тільки для адміна (звичайним не показуємо функцію)
+  if (textRaw === (BTN_LEARN || "Learn")) {
+    if (!isAdmin) {
+      // Для не-адміна — поводимось як звичний бот (без згадок про Learn)
+      await sendPlain(env, chatId, t(lang, "how_help"), { reply_markup: mainKeyboard(false) });
+      return json({ ok: true });
+    }
     await safe(async () => {
       const links = energyLinks(env, userId);
-      const hint = t(lang, "learn_hint");
+      const hint =
+        "🧠 Learning mode.\nSend a link, file or archive — I’ll queue it. Use the HTML to review or run processing.";
       const markup = {
         inline_keyboard: [
-          [{ text: t(lang, "learn_open_html_btn"), url: links.learn }],
-          [{ text: t(lang, "learn_run_now_btn"), url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }],
+          [{ text: "🧠 Open Learn HTML", url: links.learn }],
+          [{ text: "Run now", url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }],
         ],
       };
       await sendPlain(env, chatId, hint, { reply_markup: markup });
@@ -458,28 +461,30 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // ===== Learn enqueue з повідомлень (URL/файли/архіви) =====
-  // 1) URL у тексті або підписі
-  const urlInText = extractFirstUrl(textRaw);
-  if (urlInText) {
-    await safe(async () => {
-      await enqueueLearn(env, String(userId), { url: urlInText, name: urlInText });
-      await sendPlain(env, chatId, t(lang, "learn_added"), { reply_markup: mainKeyboard(isAdmin) });
-    });
-    return json({ ok: true });
-  }
-  // 2) Будь-який файл/медіа — беремо файл-URL TG і ставимо у чергу
-  const anyAtt = detectAttachment(msg);
-  if (anyAtt?.file_id) {
-    await safe(async () => {
-      const fUrl = await tgFileUrl(env, anyAtt.file_id);
-      await enqueueLearn(env, String(userId), { url: fUrl, name: anyAtt.name || "file" });
-      await sendPlain(env, chatId, t(lang, "learn_added"), { reply_markup: mainKeyboard(isAdmin) });
-    });
-    return json({ ok: true });
+  // ===== Learn enqueue з повідомлень — ТІЛЬКИ ДЛЯ АДМІНА =====
+  if (isAdmin) {
+    // 1) URL у тексті або підписі
+    const urlInText = extractFirstUrl(textRaw);
+    if (urlInText) {
+      await safe(async () => {
+        await enqueueLearn(env, String(userId), { url: urlInText, name: urlInText });
+        await sendPlain(env, chatId, "✅ Added to Learn queue.");
+      });
+      return json({ ok: true });
+    }
+    // 2) Будь-який файл/медіа — TG file URL → черга
+    const anyAtt = detectAttachment(msg);
+    if (anyAtt?.file_id) {
+      await safe(async () => {
+        const fUrl = await tgFileUrl(env, anyAtt.file_id);
+        await enqueueLearn(env, String(userId), { url: fUrl, name: anyAtt.name || "file" });
+        await sendPlain(env, chatId, "✅ Added to Learn queue.");
+      });
+      return json({ ok: true });
+    }
   }
 
-  // Медіа: Drive або Vision (як і було)
+  // Медіа: Drive або Vision
   try {
     const driveOn = await getDriveMode(env, userId);
     if (driveOn) {
