@@ -11,23 +11,18 @@ function detectFromText(text = "") {
   const hasLat = /[A-Za-z]/.test(s);
 
   if (hasCyr) {
-    // RU markers
     if (/[ыэёъ]/i.test(s)) return "ru";
-    // UK markers
     if (/[іїєґ]/i.test(s)) return "uk";
-    // Heuristic by common words
     if (/\b(що|який|скільки|будь ласка|привіт)\b/i.test(s)) return "uk";
     if (/\b(что|какой|сколько|пожалуйста|привет)\b/i.test(s)) return "ru";
-    return "uk"; // default for cyrillic
+    return "uk";
   }
 
-  // German accents / words
   if (
     /[äöüßÄÖÜ]/.test(s) ||
     /\b(der|die|das|und|ist|wie|viele|bist|heute|kann|konnen|können|schreiben|sie|wir)\b/i.test(s)
   ) return "de";
 
-  // French accents / words
   if (
     /[àâçéèêëîïôûùüÿœÀÂÇÉÈÊËÎÏÔÛÙÜŸŒ]/.test(s) ||
     /\b(qui|quoi|comment|bonjour|bonsoir|merci|combien|pourquoi|ou|est|tu|vous|je|nous|capitale|de|des|du|le|la|les)\b/i.test(s) ||
@@ -35,9 +30,7 @@ function detectFromText(text = "") {
     /\bde\s+l['’][a-z]/i.test(s)
   ) return "fr";
 
-  // English: latin without umlauts/accents + fallback
   if (hasLat) return "en";
-
   return null;
 }
 
@@ -48,11 +41,10 @@ export function pickReplyLanguage(msg, text = "") {
   const code = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
   if (SUP.includes(code)) return code;
 
-  // Chat-language fallback (for groups/clients that send chat language)
   const chatCode = (msg?.language_code || "").slice(0, 2).toLowerCase();
   if (SUP.includes(chatCode)) return chatCode;
 
-  return "uk"; // final fallback
+  return "uk";
 }
 
 const L = {
@@ -69,15 +61,11 @@ const L = {
     need_energy_media: (need, url) => `Для файлів бракує енергії (${need}). Поповнення: ${url}`,
     low_energy_notice: (left, url) => `Низький рівень енергії (${left}). Керування: ${url}`,
     saved_to_drive: "Збережено на Диск",
-
-    // ——— LEARN ———
-    learn_hint: "🧠 Режим навчання.\nНадішли посилання, файл або архів — додам у чергу.",
-    learn_added: "✅ Додано в чергу навчання.",
-    learn_admin_title: "Навчання (Learn)",
-    learn_open_html_btn: "Відкрити Learn HTML",
-    learn_run_now_btn: "Запустити зараз",
-    learn_summary_title: "Короткий звіт останнього навчання:",
-    checklist_learn_btn: "Відкрити Learn",
+    // Learn (admin only)
+    learn_hint: "🧠 Learning mode.\nНадішли посилання, файл або архів — я додам у чергу. Керуйте з HTML-сторінки.",
+    learn_open_html_btn: "Open Learn HTML",
+    learn_run_now_btn: "Run now",
+    learn_added: "✅ Додано в чергу Learn.",
   },
   ru: {
     default_reply: "Извини, я не понял. Попробуешь иначе?",
@@ -92,15 +80,10 @@ const L = {
     need_energy_media: (need, url) => `Для файлов не хватает энергии (${need}). Пополнение: ${url}`,
     low_energy_notice: (left, url) => `Низкий уровень энергии (${left}). Управление: ${url}`,
     saved_to_drive: "Сохранено на Диск",
-
-    // ——— LEARN ———
-    learn_hint: "🧠 Режим обучения.\nПришли ссылку, файл или архив — добавлю в очередь.",
-    learn_added: "✅ Добавлено в очередь обучения.",
-    learn_admin_title: "Обучение (Learn)",
-    learn_open_html_btn: "Открыть Learn HTML",
-    learn_run_now_btn: "Запустить сейчас",
-    learn_summary_title: "Краткий отчёт последнего обучения:",
-    checklist_learn_btn: "Открыть Learn",
+    learn_hint: "🧠 Режим обучения.\nПришли ссылку, файл или архив — добавлю в очередь. Управляй на HTML-странице.",
+    learn_open_html_btn: "Open Learn HTML",
+    learn_run_now_btn: "Run now",
+    learn_added: "✅ Добавлено в очередь Learn.",
   },
   en: {
     default_reply: "Sorry, I didn’t get that. Could you rephrase?",
@@ -115,15 +98,10 @@ const L = {
     need_energy_media: (need, url) => `Not enough energy for files (${need}). Top up: ${url}`,
     low_energy_notice: (left, url) => `Low energy (${left}). Manage: ${url}`,
     saved_to_drive: "Saved to Drive",
-
-    // ——— LEARN ———
-    learn_hint: "🧠 Learning mode.\nSend a link, file or archive — I’ll queue it.",
-    learn_added: "✅ Added to the learning queue.",
-    learn_admin_title: "Learning (Learn)",
+    learn_hint: "🧠 Learning mode.\nSend a link, file or archive — I’ll queue it. Manage from the HTML page.",
     learn_open_html_btn: "Open Learn HTML",
     learn_run_now_btn: "Run now",
-    learn_summary_title: "Short summary of the last learning run:",
-    checklist_learn_btn: "Open Learn",
+    learn_added: "✅ Added to Learn queue.",
   },
   de: {
     default_reply: "Sorry, das habe ich nicht verstanden. Bitte anders formulieren?",
@@ -138,15 +116,10 @@ const L = {
     need_energy_media: (need, url) => `Für Dateien fehlt Energie (${need}). Aufladen: ${url}`,
     low_energy_notice: (left, url) => `Wenig Energie (${left}). Verwalten: ${url}`,
     saved_to_drive: "Auf Drive gespeichert",
-
-    // ——— LEARN ———
-    learn_hint: "🧠 Lernmodus.\nSende einen Link, eine Datei oder ein Archiv — ich stelle es in die Warteschlange.",
-    learn_added: "✅ Zur Lernwarteschlange hinzugefügt.",
-    learn_admin_title: "Lernen (Learn)",
-    learn_open_html_btn: "Learn-HTML öffnen",
-    learn_run_now_btn: "Jetzt starten",
-    learn_summary_title: "Kurze Zusammenfassung des letzten Lernlaufs:",
-    checklist_learn_btn: "Learn öffnen",
+    learn_hint: "🧠 Lernmodus.\nSende Link/Datei/Archiv — ich stelle es in die Queue. Verwaltung über die HTML-Seite.",
+    learn_open_html_btn: "Open Learn HTML",
+    learn_run_now_btn: "Run now",
+    learn_added: "✅ Zur Lern-Queue hinzugefügt.",
   },
   fr: {
     default_reply: "Désolé, je n’ai pas compris. Reformulez, svp.",
@@ -161,16 +134,11 @@ const L = {
     need_energy_media: (need, url) => `Pas assez d’énergie pour les fichiers (${need}). Recharger : ${url}`,
     low_energy_notice: (left, url) => `Énergie faible (${left}). Gérer : ${url}`,
     saved_to_drive: "Enregistré sur Drive",
-
-    // ——— LEARN ———
-    learn_hint: "🧠 Mode apprentissage.\nEnvoyez un lien, un fichier ou une archive — je l’ajouterai à la file.",
-    learn_added: "✅ Ajouté à la file d’apprentissage.",
-    learn_admin_title: "Apprentissage (Learn)",
-    learn_open_html_btn: "Ouvrir Learn HTML",
-    learn_run_now_btn: "Lancer maintenant",
-    learn_summary_title: "Bref résumé du dernier apprentissage :",
-    checklist_learn_btn: "Ouvrir Learn",
-  },
+    learn_hint: "🧠 Mode d’apprentissage.\nEnvoie un lien/fichier/archives — je l’ajoute à la file. Gérer via la page HTML.",
+    learn_open_html_btn: "Open Learn HTML",
+    learn_run_now_btn: "Run now",
+    learn_added: "✅ Ajouté à la file Learn.",
+  }
 };
 
 export function t(lang, key, ...args) {
@@ -178,11 +146,7 @@ export function t(lang, key, ...args) {
   const val = d[key] ?? L.uk[key] ?? key;
   if (typeof val === "function") return val(...args);
   if (!args.length) return val;
-  // simple interpolation for two args max
-  return String(val)
-    .replace("%1", args[0] ?? "")
-    .replace("%2", args[1] ?? "");
+  return String(val).replace("%1", args[0] ?? "").replace("%2", args[1] ?? "");
 }
 
-// also export detector for response-language check in webhook
-export { detectFromText, SUP };
+export { detectFromText };
