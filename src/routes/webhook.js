@@ -367,8 +367,8 @@ export async function handleTelegramWebhook(req, env) {
       }
       const links = energyLinks(env, userId);
       const markup = { inline_keyboard: [
-        [{ text: "Відкрити Checklist", url: links.checklist }],
-        [{ text: "Керування енергією", url: links.energy }],
+        [{ text: "📋 Відкрити Checklist", url: links.checklist }],
+        // Прибрано кнопку "Керування енергією"
         [{ text: "🧠 Open Learn", url: links.learn }], // Learn — у адмін-панелі
       ]};
       await sendPlain(env, chatId, lines.join("\n"), { reply_markup: markup });
