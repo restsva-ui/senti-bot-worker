@@ -4,15 +4,27 @@ import { abs } from "../utils/url.js";
 // Кнопки
 export const BTN_DRIVE = "Google Drive";
 export const BTN_SENTI = "Senti";
-export const BTN_LEARN = "Learn";   // ✅ додано
+export const BTN_LEARN = "Learn";   // є в константах, але в клавіатурі тільки для адміна
 export const BTN_ADMIN = "Admin";
 
-// Головна клавіатура: Drive | Senti | Learn | (Admin)
+// Головна клавіатура:
+// - для звичайних: [Drive, Senti]
+// - для адміна:     [Drive, Senti, Learn] + окрема нижня [Admin]
 export const mainKeyboard = (isAdmin = false) => {
-  const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }, { text: BTN_LEARN }]];
+  const firstRow = isAdmin
+    ? [{ text: BTN_DRIVE }, { text: BTN_SENTI }, { text: BTN_LEARN }]
+    : [{ text: BTN_DRIVE }, { text: BTN_SENTI }];
+  const rows = [firstRow];
   if (isAdmin) rows.push([{ text: BTN_ADMIN }]);
   return { keyboard: rows, resize_keyboard: true };
 };
+
+// Клавіатура для запиту локації (використовується у погоді)
+export const askLocationKeyboard = () => ({
+  keyboard: [[{ text: "📍 Надіслати локацію", request_location: true }], [{ text: BTN_SENTI }]],
+  resize_keyboard: true,
+  one_time_keyboard: true,
+});
 
 // Простий ACL для адміна
 export const ADMIN = (env, userId) =>
@@ -29,14 +41,13 @@ export function energyLinks(env, userId) {
   return {
     energy: abs(env, `/admin/energy/html?${qs}`),
     checklist: abs(env, `/admin/checklist/html?${qs}`),
-    learn: abs(env, `/admin/learn/html?${qs}`), // ✅ додано
+    learn: abs(env, `/admin/learn/html?${qs}`),
   };
 }
 
 // Відправка простого тексту
 export async function sendPlain(env, chatId, text, extra = {}) {
-  // ✅ підтримка двох назв секрету токена
-  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN; // підтримка обох назв
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
   const body = {
     chat_id: chatId,
@@ -73,9 +84,10 @@ export function parseAiCommand(text = "") {
 export const TG = {
   BTN_DRIVE,
   BTN_SENTI,
-  BTN_LEARN,  // ✅ додано
+  BTN_LEARN,
   BTN_ADMIN,
   mainKeyboard,
+  askLocationKeyboard,
   ADMIN,
   energyLinks,
   sendPlain,
