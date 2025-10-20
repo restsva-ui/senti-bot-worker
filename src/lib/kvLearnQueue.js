@@ -4,10 +4,14 @@
  * Minimal Learn queue on KV.
  * Keys:
  *   - learn:q:<ts>:<rand> -> JSON item { id, userId, kind, payload, at, status }
- *   - learn:last_summary  -> short text summary of last run
+ *   - learn:last_summary  -> short text summary of last run (string)
  *
  * Feature flag:
  *   - env.LEARN_ENABLED ("on" / "off")
+ *
+ * На виході runLearnOnce тепер також повертає:
+ *   - digest      -> короткий дайджест булетами (для UI)
+ *   - learnings   -> масив тез (якщо є)
  */
 
 const Q_PREFIX = "learn:q:";
@@ -50,7 +54,7 @@ export async function enqueueLearn(env, userId, payload) {
 function detectKind(payload) {
   // Very light heuristic: url / file / text
   if (payload?.url) return "url";
-  if (payload?.file || payload?.blob || payload?.name?.match?.(/\.(zip|rar|7z|pdf|docx|txt|md|csv)$/i)) return "file";
+  if (payload?.file || payload?.blob || payload?.name?.match?.(/\.(zip|rar|7z|pdf|docx?|pptx?|txt|md|csv|mp4|mov|webm|mp3)$/i)) return "file";
   return "unknown";
 }
 
@@ -80,6 +84,7 @@ export async function saveLastSummary(env, text) {
 export async function getLastSummary(env) {
   return (await kv(env).get(K_LAST_SUMMARY)) || "";
 }
+
 /** One-off processor (used by nightly agent or manual "Run") */
 export async function runLearnOnce(env, { maxItems = 10 } = {}) {
   if (!enabled(env)) return { ok: false, reason: "learn_disabled" };
@@ -111,53 +116,114 @@ export async function runLearnOnce(env, { maxItems = 10 } = {}) {
     }
   }
 
+  // Текстовий (докладний) лог
   const summary = makeSummary(results);
+
+  // Короткий дайджест і «learnings» для UI
+  const ok = results.filter(r => r.ok);
+  const learnings = ok.flatMap(r => r.learnings || []).slice(0, 10);
+  const digest = ok
+    .slice(0, 6)
+    .map(r => `• ${r.title || r.insight}${r.type ? ` (${r.type})` : ""}`)
+    .join("\n");
+
   await saveLastSummary(env, summary);
 
   return {
     ok: true,
     processed: results.length,
     results,
-    summary,
+    summary,     // повний лог (рядки)
+    digest,      // короткий підсумок булетами
+    learnings,   // тези (за наявності)
   };
+}
+
+// ────────────────────── Heuristics & helpers ────────────────────────────────
+function tryGuessTitleFromUrl(u) {
+  try {
+    const url = new URL(u);
+    // якщо є ?title=… — візьми його
+    const t = url.searchParams.get("title");
+    if (t) return decodeURIComponent(t).slice(0, 140);
+
+    // watch?v=... → «YouTube відео <id>»
+    if (/^(www\.)?youtube\.com$/i.test(url.hostname) || /youtu\.be$/i.test(url.hostname)) {
+      const id = url.searchParams.get("v") || url.pathname.split("/").pop();
+      return `YouTube відео ${id || ""}`.trim();
+    }
+
+    const last = url.pathname.split("/").filter(Boolean).pop() || url.hostname;
+    return decodeURIComponent(last).replace(/[_-]+/g, " ").slice(0, 140);
+  } catch { return "link"; }
+}
+
+function humanTypeFromUrlOrName(uOrName = "") {
+  const s = String(uOrName).toLowerCase();
+
+  // за хостом
+  try {
+    if (s.startsWith("http")) {
+      const u = new URL(s);
+      const host = u.hostname.toLowerCase();
+      if (host.includes("youtube") || host.endsWith("youtu.be")) return "відео (YouTube)";
+      if (host.includes("drive.google.")) return "файл (Google Drive)";
+      if (host.includes("dropbox")) return "файл (Dropbox)";
+      if (host.includes("github")) return "репозиторій/файл (GitHub)";
+    }
+  } catch {}
+
+  // за розширенням
+  if (/\.(pdf)$/.test(s)) return "PDF";
+  if (/\.(docx?|odt)$/.test(s)) return "документ";
+  if (/\.(pptx?|key)$/.test(s)) return "презентація";
+  if (/\.(zip|rar|7z|tar\.gz)$/.test(s)) return "архів";
+  if (/\.(mp4|mov|webm)$/.test(s)) return "відео";
+  if (/\.(mp3|wav|m4a|ogg)$/.test(s)) return "аудіо";
+  if (/\.(md|txt|csv)$/.test(s)) return "текст";
+  return "посилання/файл";
 }
 
 /** Simulated learn step; plug real embedding/summarization later */
 async function learnItem(env, item) {
-  // Minimal “learning”: normalize source descriptor and store short insight.
+  // Minimal “learning”: нормалізуємо джерело й створюємо зрозумілий підсумок.
   const { kind, payload } = item;
   let title = "";
   let src = "";
+  let type = "";
 
   if (kind === "url" && typeof payload?.url === "string") {
     src = payload.url;
-    title = tryGuessTitleFromUrl(payload.url);
+    title = payload?.name || tryGuessTitleFromUrl(payload.url);
+    type = humanTypeFromUrlOrName(payload.url);
   } else if (kind === "file") {
     src = payload?.name || "file";
     title = payload?.name || "file";
+    type = humanTypeFromUrlOrName(title);
   } else {
     src = payload?.name || "unknown";
-    title = "material";
+    title = payload?.name || "матеріал";
+    type = "матеріал";
   }
 
-  // Here you can call your LLM/embeddings pipeline later.
-  // For now we return a compact “insight” stub compatible with UI.
-  const insight = `Новий матеріал: ${title}`;
+  // Зараз тут може з’явитися виклик LLM, який зробить реальні тези.
+  // Поки що — робимо маленький корисний «стаб».
+  const insight = `Вивчено: ${title}`;
+  const learnings = [
+    `Додано новий матеріал: ${title}`,
+    `Тип джерела: ${type}`,
+    `Матеріал враховано для подальших відповідей`,
+  ];
 
   return {
     kind,
     src,
+    title,
+    type,
     learned: true,
     insight,
+    learnings,
   };
-}
-
-function tryGuessTitleFromUrl(u) {
-  try {
-    const url = new URL(u);
-    const last = url.pathname.split("/").filter(Boolean).pop() || url.hostname;
-    return decodeURIComponent(last).slice(0, 120);
-  } catch { return "link"; }
 }
 
 function makeSummary(results) {
@@ -168,7 +234,8 @@ function makeSummary(results) {
   if (ok.length) {
     lines.push(`✅ Опрацьовано: ${ok.length}`);
     ok.slice(0, 5).forEach((r, i) => {
-      lines.push(`  ${i + 1}) ${r.insight}`);
+      const addType = r.type ? ` (${r.type})` : "";
+      lines.push(`  ${i + 1}) ${r.insight}${addType}`);
     });
     if (ok.length > 5) lines.push(`  ... та ще ${ok.length - 5}`);
   }
