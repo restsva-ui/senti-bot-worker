@@ -13,7 +13,7 @@ import { loadSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
-import { enqueueLearn } from "../lib/kvLearnQueue.js"; // використовується лише для адміна
+import { enqueueLearn, listQueued } from "../lib/kvLearnQueue.js"; // адмін-тільки Learn
 
 // APIs
 import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from "../apis/time.js";
@@ -369,7 +369,7 @@ export async function handleTelegramWebhook(req, env) {
       const markup = { inline_keyboard: [
         [{ text: "Відкрити Checklist", url: links.checklist }],
         [{ text: "Керування енергією", url: links.energy }],
-        [{ text: "Open Learn", url: links.learn }], // Learn — лише в адмін-панелі
+        [{ text: "🧠 Open Learn", url: links.learn }], // Learn — у адмін-панелі
       ]};
       await sendPlain(env, chatId, lines.join("\n"), { reply_markup: markup });
     });
@@ -379,21 +379,28 @@ export async function handleTelegramWebhook(req, env) {
   // Кнопка LEARN — тільки для адміна (звичайним не показуємо функцію)
   if (textRaw === (BTN_LEARN || "Learn")) {
     if (!isAdmin) {
-      // Для не-адміна — поводимось як звичний бот (без згадок про Learn)
+      // Для не-адміна — без згадок про Learn
       await sendPlain(env, chatId, t(lang, "how_help"), { reply_markup: mainKeyboard(false) });
       return json({ ok: true });
     }
     await safe(async () => {
+      // Легка перевірка: чи є щось у черзі (для показу кнопки "Run now")
+      let hasQueue = false;
+      try {
+        const r = await listQueued(env, { limit: 1 });
+        hasQueue = Array.isArray(r) ? r.length > 0 : Array.isArray(r?.items) ? r.items.length > 0 : false;
+      } catch {}
       const links = energyLinks(env, userId);
       const hint =
-        "🧠 Learning mode.\nSend a link, file or archive — I’ll queue it. Use the HTML to review or run processing.";
-      const markup = {
-        inline_keyboard: [
-          [{ text: "🧠 Open Learn HTML", url: links.learn }],
-          [{ text: "Run now", url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }],
-        ],
-      };
-      await sendPlain(env, chatId, hint, { reply_markup: markup });
+        "🧠 Режим Learn.\nНадсилай посилання, файли або архіви — я додам у чергу. " +
+        "В HTML-інтерфейсі можна переглянути чергу й підсумки, а також запустити обробку.";
+      const keyboard = [[{ text: "🧠 Відкрити Learn HTML", url: links.learn }]];
+      if (hasQueue) {
+        keyboard.push([
+          { text: "▶️ Запустити обробку зараз", url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }
+        ]);
+      }
+      await sendPlain(env, chatId, hint, { reply_markup: { inline_keyboard: keyboard } });
     });
     return json({ ok: true });
   }
@@ -468,7 +475,7 @@ export async function handleTelegramWebhook(req, env) {
     if (urlInText) {
       await safe(async () => {
         await enqueueLearn(env, String(userId), { url: urlInText, name: urlInText });
-        await sendPlain(env, chatId, "✅ Added to Learn queue.");
+        await sendPlain(env, chatId, "✅ Додано в чергу Learn.");
       });
       return json({ ok: true });
     }
@@ -478,7 +485,7 @@ export async function handleTelegramWebhook(req, env) {
       await safe(async () => {
         const fUrl = await tgFileUrl(env, anyAtt.file_id);
         await enqueueLearn(env, String(userId), { url: fUrl, name: anyAtt.name || "file" });
-        await sendPlain(env, chatId, "✅ Added to Learn queue.");
+        await sendPlain(env, chatId, "✅ Додано в чергу Learn.");
       });
       return json({ ok: true });
     }
