@@ -16,10 +16,11 @@ SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
 DRIVE_FOLDER_ID = "root"
 TELEGRAM_ADMIN_ID = "784869835"
 DEPLOY_ID = "local-dev"
+LEARN_ENABLED = "on"                # ✅ додано: вмикає/вимикає Learn
 
 # Секрети для наших HTTP-ендпойнтів і вебхука TG
-WEBHOOK_SECRET   = "senti1984"   # використовується у /admin/*, /cron/*
-TG_WEBHOOK_SECRET = "senti1984"  # використовується у /tg/webhook (Telegram secret token)
+WEBHOOK_SECRET   = "senti1984"      # використовується у /admin/*, /cron/*
+TG_WEBHOOK_SECRET = "senti1984"     # використовується у /tg/webhook (Telegram secret token)
 
 # Локальна таймзона для UI/логів/дебагу часу
 TIMEZONE = "Europe/Kyiv"
@@ -97,7 +98,7 @@ id = "9e6f0ed5bf2544a9a63d57455900a844"
 binding = "DIALOG_KV"
 id = "63c0d1e0962a419ca54082893410b28e"
 
-# ➕ Черга навчання (НОВЕ — для Learn)
+# ➕ Черга навчання (для Learn)
 [[kv_namespaces]]
 binding = "LEARN_QUEUE_KV"
 id = "86a54c59ce674a558780c58bf1a47dfd"
