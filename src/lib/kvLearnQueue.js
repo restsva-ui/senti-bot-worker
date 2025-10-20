@@ -5,14 +5,18 @@
  * KV keys:
  *   - learn:q:<ts>:<rand>        -> JSON item { id, userId, kind, payload, at, status }
  *   - learn:last_summary         -> короткий підсумок останнього прогону
- *   - learned:<ts>:<id>          -> JSON learned item { id, userId, kind, src, title, meta, at, r2Key?, r2Size?, insight }
+ *   - learned:<ts>:<id>          -> JSON learned item { id, userId, kind, src, title, meta, at, r2Key?, r2Size?, insight, textPreview? }
  *
  * Feature flag:
  *   - env.LEARN_ENABLED ("on" / "off")
  *
  * Опціональні залежності:
  *   - env.LEARN_BUCKET  (R2 bucket) — якщо не вказано, файли не зберігаємо, але пишемо інсайт
+ *   - Можлива LLM-стисла анотація через think()/modelRouter (необов'язково)
  */
+
+import { think as coreThink } from "./brain.js";            // для стислого summary (опційно)
+import { askAnyModel } from "./modelRouter.js";             // якщо MODEL_ORDER заданий
 
 const Q_PREFIX = "learn:q:";
 const K_LAST_SUMMARY = "learn:last_summary";
@@ -64,7 +68,7 @@ export async function enqueueLearn(env, userId, payload) {
 function detectKind(payload) {
   // Дуже легка евристика
   if (payload?.url) return "url";
-  if (payload?.file || payload?.blob || payload?.name?.match?.(/\.(zip|rar|7z|pdf|docx|txt|md|csv|json|png|jpg|jpeg|mp4|mov)$/i)) return "file";
+  if (payload?.file || payload?.blob || payload?.name?.match?.(/\.(zip|rar|7z|pdf|docx|xlsx|pptx|txt|md|csv|json|png|jpg|jpeg|gif|mp4|mov|webm)$/i)) return "file";
   if (payload?.text) return "text";
   return "unknown";
 }
@@ -115,6 +119,27 @@ export async function getRecentInsights(env, { limit = 5 } = {}) {
   return arr.slice(0, limit);
 }
 
+/** Usage-статистика: кількість “learned” та сумарний R2 обсяг (по r2Size) */
+export async function getLearnUsage(env) {
+  const list = await kv(env).list({ prefix: L_PREFIX, limit: 1000 });
+  let learnedCount = 0;
+  let r2Bytes = 0;
+  for (const k of list.keys || []) {
+    const raw = await kv(env).get(k.name);
+    if (!raw) continue;
+    try {
+      const o = JSON.parse(raw);
+      learnedCount++;
+      if (o?.r2Size) r2Bytes += Number(o.r2Size) || 0;
+    } catch {}
+  }
+  return {
+    learnedCount,
+    r2Bytes,
+    r2Pretty: bytesFmt(r2Bytes),
+  };
+}
+
 /** Головний однопрохідний процесор */
 export async function runLearnOnce(env, { maxItems = 10 } = {}) {
   if (!enabled(env)) return { ok: false, reason: "learn_disabled" };
@@ -153,7 +178,8 @@ export async function runLearnOnce(env, { maxItems = 10 } = {}) {
 /** === Реальне “засвоєння” одиниці матеріалу ===
  *  - розпізнаємо джерело
  *  - для файлів/посилань на файли — зберігаємо в R2 (якщо прив’язано LEARN_BUCKET)
- *  - формуємо людяний інсайт, зберігаємо у KV (learned:*)
+ *  - для HTML/тексту — тягнемо текст (до ліміту) і робимо стислий інсайт
+ *  - записуємо learned:* у KV
  */
 async function learnItem(env, item) {
   const { kind, payload, userId } = item;
@@ -162,6 +188,7 @@ async function learnItem(env, item) {
   let meta = { type: "unknown" };
   let r2Key = null;
   let r2Size = 0;
+  let textPreview = "";
 
   if (kind === "url" && typeof payload?.url === "string") {
     src = payload.url;
@@ -169,29 +196,22 @@ async function learnItem(env, item) {
     if (u) {
       const host = u.hostname.toLowerCase();
 
-      // YouTube → не качаємо, але робимо нормальний опис
+      // YouTube → не качаємо, але робимо нормальний опис + коротку анотацію з HTML (якщо зможемо)
       if (host.includes("youtube.com") || host === "youtu.be") {
         meta.type = "youtube";
         title = guessHumanTitleFromUrl(u) || "YouTube відео";
-      }
-
-      // Telegram File → намагаємось зберегти в R2
-      else if (host === "api.telegram.org" || host.endsWith(".telegram.org")) {
-        meta.type = "telegram-file";
-        const name = payload?.name || fileNameFromPath(u.pathname) || "file";
-        const putRes = await tryStoreToR2(env, u.toString(), name);
-        if (putRes?.ok) {
-          r2Key = putRes.key;
-          r2Size = putRes.size || 0;
-          title = name;
-        } else {
-          title = name;
-          meta.note = putRes?.error || "failed to store to R2";
+        // Спробуємо дістати HTML і урізати description/title:
+        const html = await tryFetchText(u.toString(), 400_000, /*acceptHtmlOnly*/ true);
+        if (html?.text) {
+          const mined = mineHtmlSummary(html.text, title);
+          textPreview = mined.preview;
+          if (mined.title && mined.title.length > 3) title = mined.title;
         }
       }
 
-      // Інші прямі файли (спробуємо розпізнати content-type, якщо невеликий)
-      else if (/\.(zip|rar|7z|pdf|docx?|xlsx?|pptx?|txt|md|csv|png|jpe?g|gif|mp4|mov|webm)$/i.test(u.pathname)) {
+      // Telegram File / прямі файли — кладемо в R2
+      else if (host === "api.telegram.org" || host.endsWith(".telegram.org") ||
+               /\.(zip|rar|7z|pdf|docx?|xlsx?|pptx?|txt|md|csv|png|jpe?g|gif|mp4|mov|webm)$/i.test(u.pathname)) {
         meta.type = "file";
         const name = payload?.name || fileNameFromPath(u.pathname) || "file";
         const putRes = await tryStoreToR2(env, u.toString(), name);
@@ -203,12 +223,24 @@ async function learnItem(env, item) {
           title = name;
           meta.note = putRes?.error || "failed to store to R2";
         }
+
+        // Для малих текстових/markdown/pdf(ні) — спробуємо коротко описати (без важких парсерів)
+        if (/\.(txt|md|csv|json)$/i.test(name)) {
+          const got = await tryFetchText(u.toString(), 600_000, false);
+          if (got?.text) textPreview = got.text.slice(0, 1800);
+        }
       }
 
-      // Веб-стаття (html) — просто опис, без завантаження
+      // Веб-стаття (html) — тягнемо текст і робимо стислий інсайт
       else {
         meta.type = "web-article";
         title = guessHumanTitleFromUrl(u) || host;
+        const got = await tryFetchText(u.toString(), 800_000, true);
+        if (got?.text) {
+          // Видобудемо <title>
+          if (got?.title && got.title.length > 3) title = got.title;
+          textPreview = got.text.slice(0, 4000); // для анотації
+        }
       }
     } else {
       src = payload.url;
@@ -232,15 +264,15 @@ async function learnItem(env, item) {
     src = "inline-text";
     title = payload?.name || "текст";
     meta.type = "note";
+    textPreview = String(payload.text || "").slice(0, 4000);
   } else {
     src = payload?.name || "unknown";
     title = "матеріал";
     meta.type = "unknown";
   }
 
-  // Людяний інсайт
-  const typeUa = humanTypeUa(meta.type);
-  const insight = `Вивчено: ${title}${typeUa ? ` (${typeUa})` : ""}`;
+  // Людяний інсайт (з LLM, якщо можемо; інакше статичний)
+  const insight = await makeInsight(env, { title, meta, textPreview });
 
   const learnedObj = {
     id: item.id,
@@ -253,6 +285,7 @@ async function learnItem(env, item) {
     r2Key: r2Key || undefined,
     r2Size: r2Size || undefined,
     insight,
+    ...(textPreview ? { textPreview } : {}),
   };
   await saveLearned(env, learnedObj);
 
@@ -269,7 +302,7 @@ function guessHumanTitleFromUrl(u) {
   const last = fileNameFromPath(u?.pathname || "");
   if (u.hostname === "youtu.be") return last || "YouTube відео";
   if (u.hostname.includes("youtube.com")) {
-    const v = u.searchParams.get("v"); if (v) return v;
+    const v = u.searchParams.get("v"); if (v) return `YouTube: ${v}`;
     return "YouTube відео";
   }
   return last || u.hostname;
@@ -309,6 +342,101 @@ async function tryStoreToR2(env, url, name = "file") {
 }
 function safeName(n) { return String(n || "file").replace(/[^\w.\-]+/g, "_").slice(0, 140); }
 
+/** Обережне отримання тексту з URL (HTML або plain), з лімітом байтів */
+async function tryFetchText(url, byteLimit = 800_000, acceptHtmlOnly = false) {
+  try {
+    const r = await fetch(url, { method: "GET" });
+    if (!r.ok) return null;
+    const ct = (r.headers.get("content-type") || "").toLowerCase();
+    if (acceptHtmlOnly && !ct.includes("text/html")) return null;
+
+    // Тільки текстові типи
+    if (!/^(text\/|application\/json)/.test(ct) && !ct.includes("html")) return null;
+
+    // Без стрімінгових хитрощів — читаємо повністю, але перевіряємо Content-Length та урізаємо
+    let ab = await r.arrayBuffer();
+    if (ab.byteLength > byteLimit) {
+      ab = ab.slice(0, byteLimit);
+    }
+    const dec = new TextDecoder("utf-8", { fatal: false });
+    let text = dec.decode(ab);
+
+    let title = "";
+    if (ct.includes("html")) {
+      const m = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+      if (m?.[1]) title = decodeHtmlEntities(stripTags(m[1]).trim()).slice(0, 200);
+      text = htmlToText(text);
+    }
+    return { text: text.trim(), title };
+  } catch {
+    return null;
+  }
+}
+
+/** Примітивне перетворення HTML → текст (з видаленням script/style) */
+function htmlToText(html) {
+  let s = String(html || "");
+  s = s.replace(/<script[\s\S]*?<\/script>/gi, " ");
+  s = s.replace(/<style[\s\S]*?<\/style>/gi, " ");
+  s = s.replace(/<!--[\s\S]*?-->/g, " ");
+  s = s.replace(/<[^>]+>/g, " ");
+  s = s.replace(/\s+/g, " ");
+  return decodeHtmlEntities(s).trim();
+}
+
+function decodeHtmlEntities(str) {
+  const map = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'" };
+  return str.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (_, ent) => {
+    const low = ent.toLowerCase();
+    if (map[low]) return map[low];
+    if (low[0] === "#") {
+      const num = low[1] === "x" ? parseInt(low.slice(2), 16) : parseInt(low.slice(1), 10);
+      if (!isNaN(num)) return String.fromCodePoint(num);
+    }
+    return "&" + ent + ";";
+  });
+}
+
+/** Витяг короткого прев’ю з HTML сторінки */
+function mineHtmlSummary(text, fallbackTitle = "") {
+  const t = String(text || "");
+  // беремо перші 2–3 речення
+  const parts = t.split(/(?<=[.!?])\s+/).slice(0, 3);
+  const preview = parts.join(" ").slice(0, 800);
+  return { title: fallbackTitle, preview };
+}
+
+/** Інсайт: якщо є текст — спробувати LLM-стиснення; інакше статичний опис */
+async function makeInsight(env, { title, meta, textPreview }) {
+  const typeUa = humanTypeUa(meta.type);
+  const base = `Вивчено: ${title}${typeUa ? ` (${typeUa})` : ""}`;
+
+  const sample = (textPreview || "").trim();
+  if (!sample) return base;
+
+  // Підготуємо стислий запит
+  const prompt =
+`Зроби коротку (2–3 пункти) вичавку ключових тез із матеріалу нижче українською. Без "вступу" й "висновків".
+Матеріал: """${sample.slice(0, 3500)}"""`;
+
+  try {
+    const modelOrder = String(env.MODEL_ORDER || "").trim();
+    let out = "";
+    if (modelOrder) {
+      out = await askAnyModel(env, modelOrder, prompt, { systemHint: "Ти помічник, який створює стислий конспект фактів." });
+    } else {
+      out = await coreThink(env, prompt, "Ти помічник, який створює стислий конспект фактів.");
+    }
+    out = (out || "").trim();
+    // іноді моделі додають зайві преамбули
+    out = out.replace(/^[\s\-•]+/g, "• ").replace(/\n{3,}/g, "\n\n").slice(0, 500);
+    if (!out) return base;
+    return `${base}\n${out}`;
+  } catch {
+    return base;
+  }
+}
+
 /** Підсумок для HTML/UI */
 function makeSummary(results) {
   if (!results?.length) return "✅ Черга порожня — немає нових матеріалів.";
@@ -316,7 +444,7 @@ function makeSummary(results) {
   const fail = results.filter(r => !r.ok);
   const lines = [];
   if (ok.length) {
-    lines.push(`🧠 Вивчено: ✅ Опрацьовано: ${ok.length}`);
+    lines.push(`🧠 Вивчено: ${ok.length}`);
     ok.slice(0, 5).forEach((r, i) => {
       const add = r.r2Key ? ` — збережено у R2` : "";
       lines.push(`  ${i + 1}) ${r.insight}${add}`);
@@ -332,3 +460,5 @@ function makeSummary(results) {
   }
   return lines.join("\n");
 }
+
+export { makeSummary }; // якщо потрібно у UI
