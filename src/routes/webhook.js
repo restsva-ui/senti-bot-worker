@@ -29,6 +29,33 @@ const {
   askLocationKeyboard
 } = TG;
 
+// ── Telegram UX helpers (індикатор завантаження) ────────────────────────────
+async function sendTyping(env, chatId) {
+  try {
+    const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+    if (!token || !chatId) return;
+    await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, action: "typing" })
+    });
+  } catch {}
+}
+async function sendThinking(env, chatId, lang = "uk") {
+  const map = {
+    uk: "⏳ Думаю над відповіддю…",
+    ru: "⏳ Думаю над ответом…",
+    en: "⏳ Thinking…",
+    de: "⏳ Nachdenken…",
+    fr: "⏳ Réflexion…",
+  };
+  const text = map[lang.slice(0,2)] || map.uk;
+  try {
+    await sendTyping(env, chatId);
+    await sendPlain(env, chatId, text);
+  } catch {}
+}
+
 // ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
 async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
   if (!env.CLOUDFLARE_API_TOKEN || !env.CF_ACCOUNT_ID) throw new Error("CF credentials missing");
@@ -142,6 +169,9 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
     return true;
   }
   await spendEnergy(env, userId, need, "vision");
+
+  // індикатор завантаження
+  await sendThinking(env, chatId, lang);
 
   const url = await tgFileUrl(env, att.file_id);
   const prompt = caption || "Опиши, що на зображенні, коротко і по суті.";
@@ -404,7 +434,7 @@ export async function handleTelegramWebhook(req, env) {
         "В HTML-інтерфейсі можна переглянути чергу й підсумки, а також запустити обробку.";
       const keyboard = [[{ text: "🧠 Відкрити Learn HTML", url: links.learn }]];
       if (hasQueue) {
-        keyboard.push([{ text: "▶️ Запустити обробку зараз", url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }]);
+        keyboard.push([{ text: "🧠 Прокачай мозок", url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }]);
       }
       await sendPlain(env, chatId, hint, { reply_markup: { inline_keyboard: keyboard } });
     });
@@ -425,6 +455,9 @@ export async function handleTelegramWebhook(req, env) {
         return;
       }
       await spendEnergy(env, userId, need, "text");
+
+      // індикатор завантаження
+      await sendThinking(env, chatId, lang);
 
       const systemHint = await buildSystemHint(env, chatId, userId);
       const name = await getPreferredName(env, msg);
@@ -562,6 +595,9 @@ export async function handleTelegramWebhook(req, env) {
         return;
       }
       await spendEnergy(env, userId, need, "text");
+
+      // індикатор завантаження
+      await sendThinking(env, chatId, lang);
 
       const systemHint = await buildSystemHint(env, chatId, userId);
       const name = await getPreferredName(env, msg);
