@@ -1,63 +1,99 @@
 // src/lib/dialogMemory.js
-// Легка пам'ять діалогу в DIALOG_KV з авто-обрізанням за кількістю ходів і розміром.
+// Простий KV-бекенд короткострокової пам’яті діалогу.
+// Зберігає останні N реплік і віддає їх у компактному форматі
+// для system prompt, щоб модель "пам’ятала" контекст.
+//
+// API:
+//   await pushTurn(env, userId, role, text)
+//   await getRecentTurns(env, userId, limit?)
+//   await buildDialogHint(env, userId, opts?)
 
-const DIALOG_KEY = (uid) => `dlg:${uid}`;
+const TURN_LIMIT_DEFAULT = 14;   // скільки реплік тримати у KV (user+assistant разом)
+const HINT_TURNS_DEFAULT = 8;    // скільки з останніх реплік підкладати у підказку
 
-const DLG_CFG = {
-  maxTurns: 12,         // максимум ходів, що зберігаємо
-  maxBytes: 8_000,      // граничний розмір JSON
-  ttlSec: 14 * 24 * 3600 // 14 днів
-};
-
-function ensureDialog(env) {
-  if (!env.DIALOG_KV) throw new Error("DIALOG_KV binding missing");
-  return env.DIALOG_KV;
+function kv(env) {
+  return env.STATE_KV || env.CHECKLIST_KV || env.ENERGY_LOG_KV || env.LEARN_QUEUE_KV;
 }
 
-/** Прочитати масив ходів [{ r: "user"|"assistant", c: "..." }, ...] */
-export async function readDialog(env, userId) {
-  const kv = ensureDialog(env);
-  const raw = await kv.get(DIALOG_KEY(userId));
-  if (!raw) return [];
-  try { return JSON.parse(raw) || []; } catch { return []; }
+function keyLog(userId) {
+  return `dlg:${userId}:log`;
 }
 
-/** Внутрішній запис з обрізанням по розміру та ліміту ходів */
-async function writeDialog(env, userId, arr) {
-  // ліміт по кількості
-  if (arr.length > DLG_CFG.maxTurns) {
-    arr.splice(0, arr.length - DLG_CFG.maxTurns);
+function toEntry(role, text) {
+  return {
+    role: role === "assistant" ? "assistant" : "user",
+    text: String(text || "").slice(0, 8000), // хард-обмеження від дурних дампів
+    ts: Date.now()
+  };
+}
+
+/**
+ * Додати чергову репліку у круговий буфер.
+ */
+export async function pushTurn(env, userIdRaw, role, text, limit = TURN_LIMIT_DEFAULT) {
+  const store = kv(env);
+  if (!store) return { ok: false, error: "kv_not_bound" };
+
+  const userId = String(userIdRaw || env.TELEGRAM_ADMIN_ID || "0");
+  let arr = [];
+
+  try {
+    const raw = await store.get(keyLog(userId), "json");
+    if (Array.isArray(raw)) arr = raw;
+  } catch {}
+
+  // додати і підрізати
+  arr.push(toEntry(role, text));
+  if (arr.length > Math.max(4, Number(limit || TURN_LIMIT_DEFAULT))) {
+    arr = arr.slice(-Math.max(4, Number(limit || TURN_LIMIT_DEFAULT)));
   }
-  // ліміт по байтах
-  let s = JSON.stringify(arr);
-  if (s.length > DLG_CFG.maxBytes) {
-    // приблизне оцінювання, скільки дропнути
-    const over = s.length - DLG_CFG.maxBytes;
-    const drop = Math.ceil((over / s.length) * arr.length) + 1;
-    arr = arr.slice(drop);
-    s = JSON.stringify(arr);
-  }
-  await ensureDialog(env).put(DIALOG_KEY(userId), s, { expirationTtl: DLG_CFG.ttlSec });
+
+  try {
+    await store.put(keyLog(userId), JSON.stringify(arr));
+  } catch {}
+
+  return { ok: true, size: arr.length };
 }
 
-/** Додати хід у діалог (role: "user" | "assistant") */
-export async function pushTurn(env, userId, role, content) {
-  const arr = await readDialog(env, userId);
-  arr.push({ r: role, c: String(content || "") });
-  await writeDialog(env, userId, arr);
+/**
+ * Отримати останні N реплік у хронології (старі → нові).
+ */
+export async function getRecentTurns(env, userIdRaw, limit = HINT_TURNS_DEFAULT) {
+  const store = kv(env);
+  if (!store) return [];
+
+  const userId = String(userIdRaw || env.TELEGRAM_ADMIN_ID || "0");
+  try {
+    const raw = await store.get(keyLog(userId), "json");
+    if (!Array.isArray(raw) || !raw.length) return [];
+    const n = Math.max(2, Number(limit || HINT_TURNS_DEFAULT));
+    return raw.slice(-n);
+  } catch {
+    return [];
+  }
 }
 
-/** Готовий текстовий хінт для системного промпта з останніх ходів */
-export async function buildDialogHint(env, userId) {
-  const turns = await readDialog(env, userId);
-  if (!turns.length) return "";
-  const lines = ["[Context: попередній діалог (останні повідомлення)]"];
-  for (const it of turns.slice(-DLG_CFG.maxTurns)) {
-    const who = it.r === "user" ? "Користувач" : "Senti";
-    lines.push(`${who}: ${it.c}`);
+/**
+ * Зібрати блок для system prompt:
+ * - останні репліки у форматі «[Dialog memory]»
+ * - без зайвих деталей, лаконічно
+ */
+export async function buildDialogHint(env, userIdRaw, opts = {}) {
+  const maxTurns = Math.max(2, Number(opts.maxTurns || HINT_TURNS_DEFAULT));
+  const turns = await getRecentTurns(env, userIdRaw, maxTurns);
+
+  if (!turns.length) return ""; // нічого не підкладати — модель не вигадуватиме «я не пам’ятаю», бо тексту немає
+
+  const lines = [];
+  lines.push("[Dialog memory — recent turns]");
+  for (const t of turns) {
+    const role = t.role === "assistant" ? "assistant" : "user";
+    // коротко: 300 символів на репліку, щоб не роздувати prompt
+    const s = String(t.text || "").replace(/\s+/g, " ").trim().slice(0, 300);
+    // маркуємо ролі, щоб модель розуміла хто говорив
+    lines.push(`${role}: ${s}`);
   }
+  lines.push("— End of dialog memory. Keep answers consistent with it.");
+
   return lines.join("\n");
 }
-
-// Експорт конфіга (може знадобитися іншим модулям)
-export const DIALOG_MEMORY_CONFIG = Object.freeze({ ...DLG_CFG });
