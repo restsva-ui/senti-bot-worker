@@ -1,62 +1,51 @@
-// [2/3] src/lib/energy.js
-// Просте сховище стану енергії + логування подій.
-import { logEnergyEvent } from "./energyLog.js";
+// src/lib/energy.js
+// Проста KV-бекенд реалізація "енергії":
+// - Баланс користувача: key = energy:user:<id>:balance  (в ENERGY_LOG_KV або STATE_KV)
+// - Вартість:          key = energy:cost:text|image     (в ENERGY_LOG_KV або STATE_KV)
+// Значення за замовчуванням беруться з env: ENERGY_MAX, ENERGY_COST_TEXT, ENERGY_COST_IMAGE.
 
-const ensureState = (env) => {
-  if (!env.STATE_KV) throw new Error("STATE_KV binding missing");
-  return env.STATE_KV;
-};
-
-const K = (u) => `energy:${u}`;
-const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
-
-const ENV = (env) => ({
-  max: Number(env.ENERGY_MAX ?? 100),
-  recoverPerMin: Number(env.ENERGY_RECOVER_PER_MIN ?? 1),
-  costText: Number(env.ENERGY_COST_TEXT ?? 1),
-  costImage: Number(env.ENERGY_COST_IMAGE ?? 5),
-  low: Number(env.ENERGY_LOW_THRESHOLD ?? 10),
-});
-
-export async function getEnergy(env, userId) {
-  const kv = ensureState(env);
-  const raw = await kv.get(K(userId));
-  const cfg = ENV(env);
-  if (!raw) {
-    const rec = { v: cfg.max, ts: Date.now() };
-    await kv.put(K(userId), JSON.stringify(rec));
-    return { energy: cfg.max, ...cfg };
-  }
-  const rec = JSON.parse(raw);
-  // пасивне відновлення
-  const mins = Math.floor((Date.now() - (rec.ts || 0)) / 60000);
-  if (mins > 0 && cfg.recoverPerMin > 0) {
-    const add = mins * cfg.recoverPerMin;
-    const v2 = clamp((rec.v ?? cfg.max) + add, 0, cfg.max);
-    if (v2 !== rec.v) {
-      await kv.put(K(userId), JSON.stringify({ v: v2, ts: Date.now() }));
-      await logEnergyEvent(env, userId, { delta: (v2 - (rec.v ?? 0)), kind: "recover", meta: { mins } });
-      return { energy: v2, ...cfg };
-    }
-  }
-  return { energy: rec.v ?? cfg.max, ...cfg };
+function pickKV(env) {
+  return env.ENERGY_LOG_KV || env.STATE_KV || env.CHECKLIST_KV || env.LEARN_QUEUE_KV;
+}
+function toInt(x, def = 0) {
+  const n = Number(x);
+  return Number.isFinite(n) ? Math.trunc(n) : def;
 }
 
-export async function resetEnergy(env, userId) {
-  const kv = ensureState(env);
-  const cfg = ENV(env);
-  const rec = { v: cfg.max, ts: Date.now() };
-  await kv.put(K(userId), JSON.stringify(rec));
-  await logEnergyEvent(env, userId, { delta: cfg.max, kind: "reset" });
-  return { energy: cfg.max, ...cfg };
+export async function getEnergy(env, userIdRaw) {
+  const kv = pickKV(env);
+  const userId = String(userIdRaw || env.TELEGRAM_ADMIN_ID || "0");
+
+  const [balStr, costTextStr, costImgStr] = kv
+    ? await Promise.all([
+        kv.get(`energy:user:${userId}:balance`, "text"),
+        kv.get(`energy:cost:text`, "text"),
+        kv.get(`energy:cost:image`, "text"),
+      ])
+    : [null, null, null];
+
+  const balance   = balStr     != null ? toInt(balStr, toInt(env.ENERGY_MAX, 100))   : toInt(env.ENERGY_MAX, 100);
+  const costText  = costTextStr!= null ? toInt(costTextStr, toInt(env.ENERGY_COST_TEXT, 1))  : toInt(env.ENERGY_COST_TEXT, 1);
+  const costImage = costImgStr != null ? toInt(costImgStr, toInt(env.ENERGY_COST_IMAGE, 5))  : toInt(env.ENERGY_COST_IMAGE, 5);
+
+  return { userId, balance, costText, costImage };
 }
 
-export async function spendEnergy(env, userId, amount, kind = "spend") {
-  const kv = ensureState(env);
-  const cfg = ENV(env);
-  const cur = await getEnergy(env, userId);
-  const v2 = clamp(cur.energy - amount, 0, cfg.max);
-  await kv.put(K(userId), JSON.stringify({ v: v2, ts: Date.now() }));
-  await logEnergyEvent(env, userId, { delta: -amount, kind });
-  return { energy: v2, ...cfg };
+export async function setEnergyCosts(env, textCost, imageCost) {
+  const kv = pickKV(env);
+  if (!kv) return { ok: false, error: "kv_not_bound" };
+  await kv.put("energy:cost:text", String(toInt(textCost, 1)));
+  await kv.put("energy:cost:image", String(toInt(imageCost, 5)));
+  return { ok: true };
+}
+
+// Опціонально: зменшити/збільшити баланс (не використовується прямо в UI, але може знадобитись)
+export async function addEnergy(env, userIdRaw, delta) {
+  const kv = pickKV(env);
+  if (!kv) return { ok: false, error: "kv_not_bound" };
+  const userId = String(userIdRaw || env.TELEGRAM_ADMIN_ID || "0");
+  const cur = toInt(await kv.get(`energy:user:${userId}:balance`, "text"), toInt(env.ENERGY_MAX, 100));
+  const next = Math.max(0, cur + Number(delta || 0));
+  await kv.put(`energy:user:${userId}:balance`, String(next));
+  return { ok: true, balance: next };
 }
