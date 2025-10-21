@@ -38,7 +38,7 @@ function css() {
     .wrap{max-width:900px;margin:0 auto;padding:12px}
     .row{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
     .card{background:#11161d;border:1px solid #1f2937;border-radius:12px;padding:14px;margin:10px 0}
-    .btn{display:inline-block;padding:10px 14px;border-radius:10px;background:#223449;border:1px solid #2d4f6b;color:#e6edf3}
+    .btn{display:inline-block;padding:10px 14px;border-radius:10px;background:#223449;border:1px solid #2d4f6b;color:#e6edf3;text-decoration:none}
     .btn:hover{background:#2a3f55}
     .muted{opacity:.8}
     .mono{font-family:ui-monospace,Consolas,Menlo,monospace}
@@ -46,18 +46,26 @@ function css() {
     @media (max-width:760px){ .wrap{padding:10px} .kvs{grid-template-columns:1fr} }
 
     .meter{width:100%;height:14px;background:#0b1117;border:1px solid #1f2937;border-radius:999px;overflow:hidden}
-    .meter > span{display:block;height:100%;background:#2d8cff}
+    .meter > span{display:block;height:100%;background:#2d8cff;transition:width .3s ease}
     .pill{display:inline-block;padding:2px 8px;border:1px solid #2d4f6b;border-radius:999px;margin-right:6px;font-size:12px}
     .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
     @media (max-width:640px){ .grid{grid-template-columns:1fr} }
-    .kv{display:flex;align-items:center;gap:10px}
+    .kv{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    .warn{color:#ffb454}
+    .ok{color:#6ee7a8}
   </style>`;
 }
 
+function clampNum(n, min, max) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return min;
+  return Math.max(min, Math.min(max, x));
+}
+
 function progressBar(current, max) {
-  const cur = Math.max(0, Number(current || 0));
+  const cur = clampNum(current, 0, Infinity);
   const mx = Math.max(1, Number(max || 1));
-  const pct = Math.min(100, Math.round((cur / mx) * 100));
+  const pct = clampNum(Math.round((cur / mx) * 100), 0, 100);
   return `
     <div class="meter" title="${cur}/${mx}">
       <span style="width:${pct}%"></span>
@@ -66,8 +74,20 @@ function progressBar(current, max) {
   `;
 }
 
+function etaToFull(current, max, recoverPerMin) {
+  const cur = clampNum(current, 0, Infinity);
+  const mx = Math.max(1, Number(max || 1));
+  const r = Math.max(0, Number(recoverPerMin || 0));
+  if (cur >= mx || r <= 0) return "—";
+  const mins = Math.ceil((mx - cur) / r);
+  if (mins < 60) return `${mins} хв`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h} год ${m} хв`;
+}
+
 export async function handleAdminEnergy(req, env, url) {
-  // Авторизація секретом
+  // Авторизація секретом (дубль-перевірка, але не завадить; якщо секрет у env порожній — пропускаємо)
   const secret = url.searchParams.get("s") || "";
   const expected = env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || "";
   if (expected && secret !== expected) return unauthorized();
@@ -91,6 +111,9 @@ export async function handleAdminEnergy(req, env, url) {
   const costText = Number(e.costText ?? env.ENERGY_COST_TEXT ?? 1);
   const costImage = Number(e.costImage ?? env.ENERGY_COST_IMAGE ?? 5);
 
+  const isLow = energy <= low;
+  const eta = etaToFull(energy, max, recover);
+
   const header = `
     <!doctype html>
     <html lang="uk">
@@ -113,8 +136,13 @@ export async function handleAdminEnergy(req, env, url) {
   const balance = `
     <div class="card">
       <div class="row" style="margin-bottom:10px">
-        <div class="kv"><span class="pill mono">u=${esc(String(userId))}</span><span class="pill mono">tz=${esc(String(env.TIMEZONE || "UTC"))}</span></div>
-        <div class="kv"><span class="muted mono">DEPLOY=${esc(String(env.DEPLOY_ID || "n/a"))}</span></div>
+        <div class="kv">
+          <span class="pill mono">u=${esc(String(userId))}</span>
+          <span class="pill mono">tz=${esc(String(env.TIMEZONE || "UTC"))}</span>
+        </div>
+        <div class="kv">
+          <span class="muted mono">DEPLOY=${esc(String(env.DEPLOY_ID || "n/a"))}</span>
+        </div>
       </div>
 
       <b>Поточний баланс</b>
@@ -125,8 +153,9 @@ export async function handleAdminEnergy(req, env, url) {
           <div class="muted">Налаштування</div>
           <div style="margin-top:8px" class="mono">
             MAX = ${max}<br/>
-            LOW = ${low}<br/>
-            RECOVER_PER_MIN = ${recover}
+            LOW = ${low} ${isLow ? '<span class="warn">(низько)</span>' : '<span class="ok">(ок)</span>'}<br/>
+            RECOVER_PER_MIN = ${recover}<br/>
+            ETA до повного = ${esc(eta)}
           </div>
         </div>
         <div class="card" style="margin:0">
