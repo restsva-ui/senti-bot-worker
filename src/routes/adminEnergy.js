@@ -8,7 +8,7 @@ const json = (d, init={}) => new Response(JSON.stringify(d, null, 2), {
 });
 
 export async function handleAdminEnergy(req, env, url) {
-  // HTML (читання завжди дозволено — як було у 1.8)
+  // HTML (читання без обов’язкового секрету — як було у 1.8)
   if (req.method === "GET" && url.pathname === "/admin/energy/html") {
     const s = await getEnergy(env, url.searchParams.get("u") || env.TELEGRAM_ADMIN_ID);
     const css = `
@@ -26,26 +26,13 @@ export async function handleAdminEnergy(req, env, url) {
       <div class="wrap">
         <div class="card">
           <div class="row" style="justify-content:space-between">
-            <b>⚡ Energy</b>
-            <span class="muted">User</span>
+            <b>⚡ Energy</b><span class="muted">User</span>
           </div>
           <div class="row" style="gap:24px;margin-top:6px">
-            <div>
-              <div class="muted">User</div>
-              <div>${String(s.userId || "")}</div>
-            </div>
-            <div>
-              <div class="muted">Balance</div>
-              <div>${String(s.balance ?? 0)}</div>
-            </div>
-            <div>
-              <div class="muted">Cost (text)</div>
-              <div>${String(s.costText ?? 1)}</div>
-            </div>
-            <div>
-              <div class="muted">Cost (image)</div>
-              <div>${String(s.costImage ?? 5)}</div>
-            </div>
+            <div><div class="muted">User</div><div>${String(s.userId || "")}</div></div>
+            <div><div class="muted">Balance</div><div>${String(s.balance ?? 0)}</div></div>
+            <div><div class="muted">Cost (text)</div><div>${String(s.costText ?? 1)}</div></div>
+            <div><div class="muted">Cost (image)</div><div>${String(s.costImage ?? 5)}</div></div>
           </div>
           <div class="muted" style="margin-top:8px">Поповнення/налаштування — через API/адмін-інтерфейси.</div>
         </div>
@@ -53,15 +40,15 @@ export async function handleAdminEnergy(req, env, url) {
     return okHtml(html);
   }
 
-  // API (опціонально, за секретом)
+  // API: зміна вартості (захищено секретом)
   if (req.method === "POST" && url.pathname === "/admin/energy/set-costs") {
     const secret = url.searchParams.get("s") || "";
     if (env.WEBHOOK_SECRET && secret !== env.WEBHOOK_SECRET) {
       return json({ ok:false, error:"unauthorized" }, { status:401 });
     }
     const body = await req.json().catch(()=> ({}));
-    await setEnergyCosts(env, Number(body.text) || 1, Number(body.image) || 5);
-    return json({ ok:true });
+    const out = await setEnergyCosts(env, Number(body.text) || 1, Number(body.image) || 5);
+    return json({ ok: !!out?.ok });
   }
 
   return null;
