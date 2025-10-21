@@ -1,347 +1,285 @@
-// src/index.js
-import { TG } from "./lib/tg.js";
-import { putUserTokens } from "./lib/userDrive.js";
-import { checklistHtml, statutHtml, appendChecklist } from "./lib/kvChecklist.js";
-import { logHeartbeat } from "./lib/audit.js";
-import { abs } from "./utils/url.js";
-import { html, json, CORS, preflight } from "./utils/http.js";
+// src/index.js — Cloudflare Workers entrypoint (router + Learn admin + cron)
 
-// Routers
-import { handleAdminRepo } from "./routes/adminRepo.js";
-import { handleAdminChecklist } from "./routes/adminChecklist.js";
-import { handleAdminStatut } from "./routes/adminStatut.js";
-import { handleAdminBrain } from "./routes/adminBrain.js";
 import { handleTelegramWebhook } from "./routes/webhook.js";
-import { handleHealth } from "./routes/health.js";
-import { handleBrainState } from "./routes/brainState.js";
-import { handleCiDeploy } from "./routes/ciDeploy.js";
-import { handleBrainApi } from "./routes/brainApi.js";
-import { handleAiTrain } from "./routes/aiTrain.js";
-import { handleAiEvolve } from "./routes/aiEvolve.js";
-import { handleBrainPromote } from "./routes/brainPromote.js";
-import { handleAdminEnergy } from "./routes/adminEnergy.js";
-import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
+import {
+  runLearnOnce,
+  getLastSummary,
+  listQueued,
+  enqueueLearn,
+  getRecentInsights,
+} from "./lib/kvLearnQueue.js";
 
-// ✅ Learn (admin only) + queue
-import { handleAdminLearn } from "./routes/adminLearn.js";
-import { runLearnOnce } from "./lib/kvLearnQueue.js";
+// ── helpers ──────────────────────────────────────────────────────────────────
+function secFromEnv(env) {
+  return (
+    env.WEBHOOK_SECRET ||
+    env.TG_WEBHOOK_SECRET ||
+    env.TELEGRAM_SECRET_TOKEN ||
+    ""
+  );
+}
+function isAuthed(url, env) {
+  const s = url.searchParams.get("s") || "";
+  const exp = secFromEnv(env);
+  return !!exp && s === exp;
+}
+function json(data, init = {}) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status: init.status || 200,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...(init.headers || {}),
+    },
+  });
+}
+function html(markup, init = {}) {
+  return new Response(String(markup || ""), {
+    status: init.status || 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      ...(init.headers || {}),
+    },
+  });
+}
+function text(txt, init = {}) {
+  return new Response(String(txt || ""), {
+    status: init.status || 200,
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      ...(init.headers || {}),
+    },
+  });
+}
+function notFound() {
+  return json({ ok: false, error: "not_found" }, { status: 404 });
+}
+function unauthorized() {
+  return json({ ok: false, error: "unauthorized" }, { status: 401 });
+}
+function safeHost(u) {
+  try { return new URL(u).hostname; } catch { return ""; }
+}
+function esc(s = "") {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
 
-import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
-import { fallbackBrainCurrent, fallbackBrainList, fallbackBrainGet } from "./routes/brainFallbacks.js";
-import { home } from "./ui/home.js";
-import { nightlyAutoImprove } from "./lib/autoImprove.js";
-import { runSelfRegulation } from "./lib/selfRegulate.js";
-import { handleAiImprove } from "./routes/aiImprove.js";
+// ── Learn: tiny HTML UI ──────────────────────────────────────────────────────
+async function learnHtml(env, url) {
+  const last = await getLastSummary(env).catch(() => "");
+  const queued = await listQueued(env, { limit: 50 }).catch(() => []);
+  const insights = await getRecentInsights(env, { limit: 10 }).catch(() => []);
 
-// ✅ Storage usage (R2 + KV)
-import { handleAdminUsage } from "./routes/adminUsage.js";
+  const runUrl = (() => {
+    url.searchParams.set("s", secFromEnv(env));
+    const u = new URL(url);
+    u.pathname = "/admin/learn/run";
+    return u.toString();
+  })();
 
-const VERSION = "senti-worker-2025-10-20-learn-admin-only";
+  const css = `
+  <style>
+    body{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial,sans-serif;padding:24px;max-width:960px;margin:0 auto;background:#0b0f14;color:#e6edf3}
+    a{color:#8ab4f8;text-decoration:none}
+    a:hover{text-decoration:underline}
+    h1{font-size:22px;margin:0 0 16px}
+    .card{background:#11161d;border:1px solid #1f2937;border-radius:12px;padding:16px;margin:12px 0}
+    .btn{display:inline-block;padding:10px 14px;border-radius:10px;background:#223449;border:1px solid #2d4f6b;color:#e6edf3}
+    .btn:hover{background:#2a3f55}
+    .muted{opacity:.8}
+    code,pre{background:#0b1117;border:1px solid #1f2937;border-radius:10px;padding:10px;display:block;white-space:pre-wrap}
+    ul{margin:0;padding-left:18px}
+    li{margin:6px 0}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .mono{font-family:ui-monospace,Consolas,Monaco,monospace}
+    .tag{display:inline-block;font-size:12px;padding:2px 8px;border:1px solid #2d4f6b;border-radius:999px;margin-left:6px}
+  </style>`;
 
-export default {
-  async fetch(req, env) {
-    const url = new URL(req.url);
-    const p = (url.pathname || "/").replace(/\/+$/, "") || "/";
-    url.pathname = p;
-    const method = req.method === "HEAD" ? "GET" : req.method;
+  const queuedList = queued.length
+    ? `<ul>${queued
+        .map(
+          (q) =>
+            `<li><span class="mono">${esc(q.kind)}</span> — ${esc(
+              q?.payload?.name || q?.payload?.url || "item"
+            )} <span class="muted mono">(${esc(q.at)})</span></li>`
+        )
+        .join("")}</ul>`
+    : `<p class="muted">Черга порожня.</p>`;
 
-    if (req.method === "OPTIONS") return preflight();
+  const insightsList = insights.length
+    ? `<ul>${insights
+        .map(
+          (i) =>
+            `<li>${esc(i.insight || "")}${
+              i.r2TxtKey || i.r2JsonKey || i.r2RawKey
+                ? `<span class="tag">R2</span>`
+                : ""
+            }</li>`
+        )
+        .join("")}</ul>`
+    : `<p class="muted">Ще немає збережених знань.</p>`;
 
-    // version
-    if (p === "/_version") {
-      return json({ ok: true, version: VERSION, entry: "src/index.js" }, 200, CORS);
+  const body = `
+    ${css}
+    <h1>🧠 Senti Learn — статус</h1>
+
+    <div class="card">
+      <b>Останній підсумок</b>
+      <pre>${esc(last || "—")}</pre>
+      <a class="btn" href="${esc(runUrl)}">▶️ Запустити навчання зараз</a>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <b>Черга</b>
+        ${queuedList}
+      </div>
+      <div class="card">
+        <b>Нещодавні знання (для System Prompt)</b>
+        ${insightsList}
+      </div>
+    </div>
+
+    <div class="card">
+      <b>Додати в чергу</b>
+      <form method="post" action="/admin/learn/enqueue?s=${esc(secFromEnv(env))}">
+        <p><input name="url" placeholder="https://посилання або прямий файл" style="width:100%;padding:10px;border-radius:8px;border:1px solid #2d4f6b;background:#0b1117;color:#e6edf3"/></p>
+        <p><input name="name" placeholder="Опційно: назва" style="width:100%;padding:10px;border-radius:8px;border:1px solid #2d4f6b;background:#0b1117;color:#e6edf3"/></p>
+        <p><textarea name="text" rows="6" placeholder="Або встав тут текст, який треба вивчити" style="width:100%;padding:10px;border-radius:8px;border:1px solid #2d4f6b;background:#0b1117;color:#e6edf3"></textarea></p>
+        <p><button class="btn" type="submit">＋ Додати</button></p>
+      </form>
+      <p class="muted">Підтримуються: статті/сторінки, YouTube (коли є транскрипт), PDF/TXT/MD/ZIP та ін.</p>
+    </div>
+  `;
+  return html(body);
+}
+
+// ── Router ───────────────────────────────────────────────────────────────────
+async function route(req, env, ctx) {
+  const url = new URL(req.url);
+  const p = url.pathname;
+
+  // Health
+  if (req.method === "GET" && (p === "/" || p === "/health")) {
+    return json({ ok: true, name: "Senti", env: "workers", time: new Date().toISOString() });
+  }
+
+  // Telegram webhook (support both /webhook and /tg/webhook)
+  if (p === "/webhook" || p === "/tg/webhook") {
+    return handleTelegramWebhook(req, env);
+  }
+
+  // Learn Admin: HTML
+  if (req.method === "GET" && p === "/admin/learn/html") {
+    if (!isAuthed(url, env)) return unauthorized();
+    return learnHtml(env, url);
+  }
+
+  // Learn Admin: run once (GET for browser / POST for API)
+  if ((req.method === "GET" || req.method === "POST") && p === "/admin/learn/run") {
+    if (!isAuthed(url, env)) return unauthorized();
+    try {
+      const out = await runLearnOnce(env, { maxItems: Number(url.searchParams.get("n") || 10) });
+      // якщо прийшли з браузера — повернемо html з підсумком
+      if (req.method === "GET") {
+        const back = (() => {
+          const u = new URL(url);
+          u.pathname = "/admin/learn/html";
+          return u.toString();
+        })();
+        return html(`
+          <pre>${esc(out.summary || JSON.stringify(out, null, 2))}</pre>
+          <p><a class="btn" href="${esc(back)}">← Назад</a></p>
+        `);
+      }
+      return json(out);
+    } catch (e) {
+      return json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+    }
+  }
+
+  // Learn Admin: enqueue (POST form or JSON)
+  if (req.method === "POST" && p === "/admin/learn/enqueue") {
+    if (!isAuthed(url, env)) return unauthorized();
+    let body = {};
+    const ctype = req.headers.get("content-type") || "";
+    try {
+      if (ctype.includes("application/json")) {
+        body = await req.json();
+      } else if (ctype.includes("application/x-www-form-urlencoded")) {
+        const form = await req.formData();
+        body = Object.fromEntries(form.entries());
+      } else if (ctype.includes("multipart/form-data")) {
+        const form = await req.formData();
+        body = Object.fromEntries(form.entries());
+      } else {
+        body = {};
+      }
+    } catch {
+      body = {};
     }
 
+    const userId = url.searchParams.get("u") || "admin";
+    const hasText = body?.text && String(body.text).trim().length > 0;
+    const hasUrl = body?.url && String(body.url).startsWith("http");
+
+    if (!hasText && !hasUrl) {
+      return json({ ok: false, error: "provide url or text" }, { status: 400 });
+    }
+
+    if (hasText) {
+      await enqueueLearn(env, userId, {
+        text: String(body.text),
+        name: body?.name || "inline-text",
+      });
+    }
+    if (hasUrl) {
+      await enqueueLearn(env, userId, {
+        url: String(body.url),
+        name: body?.name || String(body.url),
+      });
+    }
+
+    // redirect back if form
+    if (!ctype.includes("application/json")) {
+      const back = new URL(url);
+      back.pathname = "/admin/learn/html";
+      return Response.redirect(back.toString(), 303);
+    }
+    return json({ ok: true });
+  }
+
+  // Learn Admin: JSON status (for tooling)
+  if (req.method === "GET" && p === "/admin/learn/status") {
+    if (!isAuthed(url, env)) return unauthorized();
     try {
-      if (p === "/") return html(home(env));
-
-      if (p === "/health") {
-        try {
-          const r = await handleHealth?.(req, env, url);
-          if (r && r.status !== 404) return r;
-        } catch {}
-        return json(
-          {
-            ok: true,
-            name: "senti-bot-worker",
-            service: env.SERVICE_HOST || "senti-bot-worker.restsva.workers.dev",
-            ts: new Date().toISOString(),
-          },
-          200,
-          CORS
-        );
-      }
-
-      if (p === "/webhook" && method === "GET") {
-        return json({ ok: true, method: "GET", message: "webhook alive" }, 200, CORS);
-      }
-
-      // ===== Brain/API =====
-      if (p === "/brain/state") {
-        try {
-          const r = await handleBrainState?.(req, env, url);
-          if (r && r.status !== 404) return r;
-        } catch {}
-        return json({ ok: true, state: "available" }, 200, CORS);
-      }
-
-      if (p.startsWith("/api/brain/promote")) {
-        try {
-          const r = await handleBrainPromote?.(req, env, url);
-          if (r) return r;
-        } catch {}
-        return json({ ok: true, promoted: false, note: "promote handler missing" }, 200, CORS);
-      }
-
-      if (p.startsWith("/api/brain")) {
-        try {
-          const r = await handleBrainApi?.(req, env, url);
-          if (r) return r;
-        } catch {}
-        if (p === "/api/brain/current" && method === "GET") return await fallbackBrainCurrent(env);
-        if (p === "/api/brain/list" && method === "GET") return await fallbackBrainList(env);
-        if (p === "/api/brain/get" && method === "GET") {
-          const key = url.searchParams.get("key");
-          return await fallbackBrainGet(env, key);
-        }
-        return json({ ok: false, error: "unknown endpoint" }, 404, CORS);
-      }
-
-      // selftest
-      if (p.startsWith("/selftest")) {
-        const res = await runSelfTestLocalDirect(env);
-        return json(res, 200, CORS);
-      }
-
-      // cron evolve manual trigger
-      if (p === "/cron/evolve") {
-        if (!["GET", "POST"].includes(req.method)) return json({ ok: false, error: "method not allowed" }, 405, CORS);
-        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET)
-          return json({ ok: false, error: "unauthorized" }, 401, CORS);
-        const u = new URL(abs(env, "/ai/evolve/auto"));
-        if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
-        const innerReq = new Request(u.toString(), { method: "GET" });
-        const r = await handleAiEvolve?.(innerReq, env, u);
-        if (r) return r;
-        return json({ ok: true, note: "evolve triggered" }, 200, CORS);
-      }
-
-      // nightly auto-improve manual
-      if (p === "/cron/auto-improve") {
-        if (!["GET", "POST"].includes(req.method)) return json({ ok: false, error: "method not allowed" }, 405, CORS);
-        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET)
-          return json({ ok: false, error: "unauthorized" }, 401, CORS);
-        const res = await nightlyAutoImprove(env, { now: new Date(), reason: "manual" });
-        if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
-          await runSelfRegulation(env, res?.insights || null).catch(() => {});
-        }
-        return json({ ok: true, ...res }, 200, CORS);
-      }
-
-      // ai/improve + debug
-      if (p.startsWith("/ai/improve") || p.startsWith("/debug/")) {
-        const r = await handleAiImprove?.(req, env, url);
-        if (r) return r;
-        return json({ ok: false, error: "aiImprove router missing" }, 500, CORS);
-      }
-
-      // self-regulate on demand
-      if (p === "/ai/self-regulate") {
-        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET)
-          return json({ ok: false, error: "unauthorized" }, 401, CORS);
-        const res = await runSelfRegulation(env, null);
-        return json({ ok: true, ...res }, 200, CORS);
-      }
-
-      // ===== Learn (admin only) =====
-      if (p.startsWith("/admin/learn")) {
-        const r = await handleAdminLearn?.(req, env, url);
-        if (r) return r;
-      }
-
-      // ===== Storage usage (admin only) =====
-      if (p.startsWith("/admin/usage")) {
-        const r = await handleAdminUsage?.(req, env, url);
-        if (r) return r;
-      }
-
-      // ===== ADMIN pages =====
-      if (p.startsWith("/admin/checklist/with-energy")) {
-        try {
-          const r = await handleAdminChecklistWithEnergy?.(req, env, url);
-          if (r && r.status !== 404) return r;
-        } catch {}
-        return html("<h3>Checklist + Energy</h3><p>Fallback UI.</p>");
-      }
-
-      if (p.startsWith("/admin/checklist")) {
-        try {
-          const r = await handleAdminChecklist?.(req, env, url);
-          if (r && r.status !== 404) return r;
-        } catch {}
-        return html(await checklistHtml?.(env).catch(() => "<h3>Checklist</h3>"));
-      }
-
-      if (p.startsWith("/admin/repo") || p.startsWith("/admin/archive")) {
-        try {
-          const r = await handleAdminRepo?.(req, env, url);
-          if (r && r.status !== 404) return r;
-        } catch {}
-        return html(`<h3>Repo / Архів</h3><p>Fallback UI.</p>`);
-      }
-
-      if (p.startsWith("/admin/statut")) {
-        try {
-          const r = await handleAdminStatut?.(req, env, url);
-          if (r && r.status !== 404) return r;
-        } catch {}
-        return html(await statutHtml?.(env).catch(() => "<h3>Statut</h3>"));
-      }
-
-      if (p.startsWith("/admin/brain")) {
-        try {
-          const r = await handleAdminBrain?.(req, env, url);
-          if (r && r.status !== 404) return r;
-        } catch {}
-        return json({ ok: true, note: "admin brain fallback" }, 200, CORS);
-      }
-
-      if (p.startsWith("/admin/energy")) {
-        try {
-          const r = await handleAdminEnergy?.(req, env, url);
-          if (r && r.status !== 404) return r;
-        } catch {}
-        return json({ ok: true, note: "admin energy fallback" }, 200, CORS);
-      }
-
-      // webhook
-      if (p === "/webhook" && req.method === "POST") {
-        try {
-          const sec = req.headers.get("x-telegram-bot-api-secret-token");
-          if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
-            return json({ ok: false, error: "unauthorized" }, 401, CORS);
-          }
-          const r = await handleTelegramWebhook?.(req, env, url);
-          if (r) return r;
-        } catch {}
-        return json({ ok: true, note: "fallback webhook POST" }, 200, CORS);
-      }
-
-      // tg helpers
-      if (p === "/tg/get-webhook") {
-        const r = await TG.getWebhook(env.BOT_TOKEN);
-        return new Response(await r.text(), { headers: { "content-type": "application/json" } });
-      }
-      if (p === "/tg/set-webhook") {
-        const target = abs(env, "/webhook");
-        const r = await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
-        return new Response(await r.text(), { headers: { "content-type": "application/json" } });
-      }
-      if (p === "/tg/del-webhook") {
-        const r =
-          (await TG.deleteWebhook?.(env.BOT_TOKEN)) ||
-          (await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteWebhook`));
-        return new Response(await r.text(), { headers: { "content-type": "application/json" } });
-      }
-
-      // CI note
-      if (p.startsWith("/ci/deploy-note")) {
-        try {
-          const r = await handleCiDeploy?.(req, env, url);
-          if (r) return r;
-        } catch {}
-        return json({ ok: true }, 200, CORS);
-      }
-
-      // OAuth
-      if (p === "/auth/start") {
-        const u = url.searchParams.get("u");
-        const state = btoa(JSON.stringify({ u }));
-        const redirect_uri = abs(env, "/auth/cb");
-        const auth = new URL("https://accounts.google.com/o/oauth2/v2/auth");
-        auth.searchParams.set("client_id", env.GOOGLE_CLIENT_ID);
-        auth.searchParams.set("redirect_uri", redirect_uri);
-        auth.searchParams.set("response_type", "code");
-        auth.searchParams.set("access_type", "offline");
-        auth.searchParams.set("prompt", "consent");
-        auth.searchParams.set("scope", "https://www.googleapis.com/auth/drive.file");
-        auth.searchParams.set("state", state);
-        return Response.redirect(auth.toString(), 302);
-      }
-
-      if (p === "/auth/cb") {
-        const state = JSON.parse(atob(url.searchParams.get("state") || "e30="));
-        const code = url.searchParams.get("code");
-        const redirect_uri = abs(env, "/auth/cb");
-        const body = new URLSearchParams({
-          code,
-          client_id: env.GOOGLE_CLIENT_ID,
-          client_secret: env.GOOGLE_CLIENT_SECRET,
-          redirect_uri,
-          grant_type: "authorization_code",
-        });
-        const r = await fetch("https://oauth2.googleapis.com/token", {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body,
-        });
-        const d = await r.json();
-        if (!r.ok) return html(`<pre>${JSON.stringify(d, null, 2)}</pre>`);
-        const tokens = {
-          access_token: d.access_token,
-          refresh_token: d.refresh_token,
-          expiry: Math.floor(Date.now() / 1000) + (d.expires_in || 3600) - 60,
-        };
-        await putUserTokens(env, state.u, tokens);
-        return html(`<h3>✅ Готово</h3><p>Тепер повернись у Telegram і натисни <b>Google Drive</b> ще раз.</p>`);
-      }
-
-      // 404
-      try {
-        await appendChecklist(env, `[miss] ${new Date().toISOString()} ${req.method} ${p}${url.search}`);
-      } catch {}
-      return json({ ok: false, error: "Not found", path: p }, 404, CORS);
+      const last = await getLastSummary(env);
+      const queued = await listQueued(env, { limit: 50 });
+      const insights = await getRecentInsights(env, { limit: 10 });
+      return json({ ok: true, last, queued, insights });
     } catch (e) {
-      return json({ ok: false, error: String(e) }, 500, CORS);
+      return json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+    }
+  }
+
+  return notFound();
+}
+
+// ── Worker exports ───────────────────────────────────────────────────────────
+export default {
+  async fetch(req, env, ctx) {
+    try {
+      return await route(req, env, ctx);
+    } catch (e) {
+      return json({ ok: false, error: String(e?.message || e) }, { status: 500 });
     }
   },
 
-  async scheduled(event, env) {
-    await logHeartbeat(env);
-
-    try {
-      if (event && event.cron === "0 * * * *") {
-        const u = new URL(abs(env, "/ai/evolve/auto"));
-        if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
-        const req = new Request(u.toString(), { method: "GET" });
-        await handleAiEvolve?.(req, env, u);
-      }
-    } catch (e) {
-      await appendChecklist(env, `[${new Date().toISOString()}] evolve_auto:error ${String(e)}`);
-    }
-
-    // Нічні авто-поліпшення + саморегуляція
-    try {
-      const hour = new Date().getUTCHours();
-      const targetHour = Number(env.NIGHTLY_UTC_HOUR ?? 2);
-      const runByCron = event && event.cron === "10 2 * * *";
-      const runByHour = hour === targetHour;
-
-      if (String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" && (runByCron || runByHour)) {
-        const res = await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
-        if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
-          await runSelfRegulation(env, res?.insights || null).catch(() => {});
-        }
-      }
-    } catch (e) {
-      await appendChecklist(env, `[${new Date().toISOString()}] auto_improve:error ${String(e)}`);
-    }
-
-    // 🎓 Нічний прогін черги Learn
-    try {
-      await runLearnOnce(env, {});
-    } catch (e) {
-      await appendChecklist(env, `[${new Date().toISOString()}] learn_queue:error ${String(e)}`);
-    }
+  // Нічний агент: запуск навчання за розкладом (створи CRON trigger у Workers)
+  async scheduled(event, env, ctx) {
+    // Запускаємо невеликий батч; масштабуй за потреби
+    ctx.waitUntil(runLearnOnce(env, { maxItems: 12 }).catch(() => null));
   },
 };
