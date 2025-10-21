@@ -16,10 +16,23 @@ SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
 DRIVE_FOLDER_ID = "root"
 TELEGRAM_ADMIN_ID = "784869835"
 DEPLOY_ID = "local-dev"
-LEARN_ENABLED = "on"                # вмикає/вимикає Learn
-CF_ACCOUNT_ID = "2cf6e316af8623546c95c0354bc3aa00"   # ✅ для CF Vision SDK/запитів
+
+# Увімкнення/вимкнення Learn
+LEARN_ENABLED = "on"
+
+# Cloudflare Vision (для @cf/... моделей). ID публічний, токен — у секретах.
+CF_ACCOUNT_ID = "2cf6e316af8623546c95c0354bc3aa00"
+
+# ── Доступ до адмін-HTML без секрету (як було "раніше")
+# "on" -> дозволяє readonly-перегляд без ?s=
+# (також у коді є ?public=1 як форсований readonly)
+ALLOW_PUBLIC_REPO = "on"
+ALLOW_PUBLIC_STATUT = "on"
+ALLOW_PUBLIC_CHECKLIST = "on"
 
 # Секрети для наших HTTP-ендпойнтів і вебхука TG
+# Якщо хочеш відкрити все "як раніше", можеш тимчасово прибрати ці значення,
+# або залишити їх — і ввімкнути ALLOW_PUBLIC_* як вище.
 WEBHOOK_SECRET    = "senti1984"     # використовується у /admin/*, /cron/*
 TG_WEBHOOK_SECRET = "senti1984"     # використовується у /tg/webhook (Telegram secret token)
 
@@ -37,7 +50,8 @@ GEMINI_MODEL = "gemini-2.5-flash"
 CF_MODEL     = "@cf/meta/llama-3.1-8b-instruct"
 
 # --- OpenAI-compatible fallback (через OpenRouter) ---
-# ВАЖЛИВО: сам ключ додай як secret:  wrangler secret put FREE_API_KEY
+# ВАЖЛИВО: сам ключ додай як secret:
+#   wrangler secret put FREE_API_KEY
 FREE_API_BASE_URL = "https://openrouter.ai/api"
 FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
 FREE_API_PATH     = "/v1/chat/completions"
@@ -106,6 +120,15 @@ id = "86a54c59ce674a558780c58bf1a47dfd"
 
 # --- R2 buckets (для upload файлів у Learn) ---
 [[r2_buckets]]
-binding = "LEARN_BUCKET"           # ім'я, яке використовуватимеш у коді: env.LEARN_BUCKET
-bucket_name = "senti-learn"        # створи bucket у R2 Dashboard з такою назвою
-# preview_bucket_name = "senti-learn-preview"  # (необов'язково) 
+binding = "LEARN_BUCKET"           # використовуй у коді: env.LEARN_BUCKET
+bucket_name = "senti-learn"
+# preview_bucket_name = "senti-learn-preview"  # (необов'язково)
+
+# ───────────────────────── ПІДКАЗКИ ПО СЕКРЕТАХ ─────────────────────────
+# Додай ОКРЕМИМИ СЕКРЕТАМИ (не у [vars]):
+#   wrangler secret put GEMINI_API_KEY
+#   wrangler secret put OPENROUTER_API_KEY
+#   wrangler secret put FREE_API_KEY
+#   wrangler secret put TELEGRAM_BOT_TOKEN
+#   wrangler secret put CLOUDFLARE_API_TOKEN
+# Якщо щось з цього відсутнє — відповідні можливості будуть обмежені.
