@@ -18,6 +18,9 @@ import {
   repoHtml,
 } from "./lib/kvChecklist.js";
 
+// ⚡ Energy HTML (mobile-first, read-only UI)
+import { handleAdminEnergy } from "./routes/adminEnergy.js";
+
 /* ───────────────────────── helpers ───────────────────────── */
 
 function secFromEnv(env) {
@@ -28,15 +31,22 @@ function secFromEnv(env) {
     ""
   );
 }
+
+// • Якщо секрет не налаштований → вважаємо авторизованим (як “раніше”)
+// • Інакше — потрібно передати ?s=<secret>
 function isAuthed(url, env) {
-  const s = url.searchParams.get("s") || "";
   const exp = secFromEnv(env);
-  return !!exp && s === exp;
+  if (!exp) return true;
+  const s = url.searchParams.get("s") || "";
+  return s === exp;
 }
+
 // allow public=1 to bypass secret for readonly pages (repo/statut/checklist-view)
+// також дозволяємо без секрету, якщо ALLOW_PUBLIC_* = "on"
 function wantPublic(url) {
   return (url.searchParams.get("public") || "").trim() === "1";
 }
+
 function json(data, init = {}) {
   return new Response(JSON.stringify(data, null, 2), {
     status: init.status || 200,
@@ -86,12 +96,14 @@ async function r2Count(env, prefix, limit = 500) {
   const b = env.LEARN_BUCKET;
   if (!b) return 0;
   let n = 0, cursor, guard = 0;
-  do {
-    const r = await b.list({ prefix, limit: Math.min(1000, limit), cursor });
-    n += (r.objects || []).length;
-    cursor = r.truncated ? r.cursor : undefined;
-    guard++;
-  } while (cursor && n < limit && guard < 20);
+  try {
+    do {
+      const r = await b.list({ prefix, limit: Math.min(1000, limit), cursor });
+      n += (r.objects || []).length;
+      cursor = r.truncated ? r.cursor : undefined;
+      guard++;
+    } while (cursor && n < limit && guard < 20);
+  } catch { /* ignore */ }
   return n;
 }
 
@@ -277,6 +289,13 @@ async function route(req, env, ctx) {
     return handleTelegramWebhook(req, env);
   }
 
+  /* ───────────── Energy (HTML) ───────────── */
+  if (req.method === "GET" && p === "/admin/energy/html") {
+    // energy — тільки за секретом або якщо секрет не налаштовано (isAuthed вже враховує)
+    if (!isAuthed(url, env)) return unauthorized();
+    return handleAdminEnergy(req, env, url);
+  }
+
   /* ───────────── Learn Admin: HTML ───────────── */
   if (req.method === "GET" && p === "/admin/learn/html") {
     if (!isAuthed(url, env)) return unauthorized();
@@ -373,11 +392,14 @@ async function route(req, env, ctx) {
 
   /* ───────────── Checklist (HTML, GET) ─────────────
      - якщо public=1 → readonly версія (без секрету)
-     - якщо без public → потрібен secret і повний UI
+     - якщо без public:
+         • якщо секрет НЕ налаштовано → пускаємо
+         • інакше — потрібно ?s=<secret>
+     - якщо ALLOW_PUBLIC_CHECKLIST="on" → readonly без секрету
   */
   if (req.method === "GET" && p === "/admin/checklist/html") {
-    if (wantPublic(url)) {
-      // легкий readonly вигляд (без форм)
+    const allowAll = String(env.ALLOW_PUBLIC_CHECKLIST || "").toLowerCase() === "on";
+    if (wantPublic(url) || allowAll) {
       const base = await checklistHtml(env);
       const stripped = base
         .replace(/<form[\s\S]*?<\/form>/gi, "")
@@ -420,10 +442,14 @@ async function route(req, env, ctx) {
     return json({ ok: false, error: "unknown action" }, { status: 400 });
   }
 
-  /* ───────────── Statut (HTML) ───────────── */
+  /* ───────────── Statut (HTML) ─────────────
+     - public=1 → readonly
+     - ALLOW_PUBLIC_STATUT="on" → readonly без секрету
+     - інакше — секрет (або відсутність секрету в env допускається)
+  */
   if (req.method === "GET" && p === "/admin/statut/html") {
-    if (wantPublic(url)) {
-      // readonly view: видалимо форми
+    const allowAll = String(env.ALLOW_PUBLIC_STATUT || "").toLowerCase() === "on";
+    if (wantPublic(url) || allowAll) {
       const base = await statutHtml(env);
       const stripped = base.replace(/<form[\s\S]*?<\/form>/gi, "");
       return html(stripped);
@@ -458,10 +484,15 @@ async function route(req, env, ctx) {
   }
 
   /* ───────────── Repo (R2) HTML ─────────────
-     - public=1 дозволяє перегляд без секрету (readonly)
+     - public=1 або ALLOW_PUBLIC_REPO="on" → readonly без секрету
+     - якщо секрет не налаштовано — теж пускаємо (як було раніше)
   */
   if (req.method === "GET" && p === "/admin/repo/html") {
-    if (!wantPublic(url) && !isAuthed(url, env)) return unauthorized();
+    const allowAll = String(env.ALLOW_PUBLIC_REPO || "").toLowerCase() === "on";
+    if (wantPublic(url) || allowAll || !secFromEnv(env)) {
+      return html(await repoHtml(env));
+    }
+    if (!isAuthed(url, env)) return unauthorized();
     return html(await repoHtml(env));
   }
 
