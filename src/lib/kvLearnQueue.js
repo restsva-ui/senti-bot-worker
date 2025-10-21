@@ -82,6 +82,7 @@ export async function listQueued(env, { limit = 50 } = {}) {
     if (!raw) continue;
     try { out.push(JSON.parse(raw)); } catch {}
   }
+  // черга — від старішого до новішого (щоб першим оброблявся найстаріший)
   return out.sort((a, b) => (a.at < b.at ? -1 : 1));
 }
 
@@ -323,7 +324,15 @@ async function tryStoreToR2(env, url, name = "file") {
   if (!bucket) return { ok: false, error: "LEARN_BUCKET is not bound" };
 
   let resp;
-  try { resp = await fetch(url, { method: "GET" }); }
+  try {
+    resp = await fetch(url, {
+      method: "GET",
+      headers: {
+        "user-agent": "SentiBot-Learn/1.0 (+https://example.invalid)",
+        "accept": "*/*",
+      },
+    });
+  }
   catch (e) { return { ok: false, error: `fetch failed: ${String(e?.message || e)}` }; }
 
   if (!resp.ok) return { ok: false, error: `HTTP ${resp.status}` };
@@ -345,7 +354,13 @@ function safeName(n) { return String(n || "file").replace(/[^\w.\-]+/g, "_").sli
 /** Обережне отримання тексту з URL (HTML або plain), з лімітом байтів */
 async function tryFetchText(url, byteLimit = 800_000, acceptHtmlOnly = false) {
   try {
-    const r = await fetch(url, { method: "GET" });
+    const r = await fetch(url, {
+      method: "GET",
+      headers: {
+        "user-agent": "SentiBot-Learn/1.0",
+        "accept": acceptHtmlOnly ? "text/html,application/xhtml+xml" : "text/*,application/json,application/xhtml+xml",
+      },
+    });
     if (!r.ok) return null;
     const ct = (r.headers.get("content-type") || "").toLowerCase();
     if (acceptHtmlOnly && !ct.includes("text/html")) return null;
@@ -353,7 +368,13 @@ async function tryFetchText(url, byteLimit = 800_000, acceptHtmlOnly = false) {
     // Тільки текстові типи
     if (!/^(text\/|application\/json)/.test(ct) && !ct.includes("html")) return null;
 
-    // Без стрімінгових хитрощів — читаємо повністю, але перевіряємо Content-Length та урізаємо
+    // Перекриваємо занадто великі відповіді
+    const lenHeader = Number(r.headers.get("content-length") || 0);
+    if (lenHeader && lenHeader > byteLimit * 2) {
+      // якщо занадто велике — відмовляємось, щоб не перевантажувати воркер
+      return null;
+    }
+
     let ab = await r.arrayBuffer();
     if (ab.byteLength > byteLimit) {
       ab = ab.slice(0, byteLimit);
@@ -383,6 +404,7 @@ function htmlToText(html) {
   s = s.replace(/\s+/g, " ");
   return decodeHtmlEntities(s).trim();
 }
+function stripTags(x = "") { return String(x).replace(/<[^>]+>/g, " "); }
 
 function decodeHtmlEntities(str) {
   const map = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'" };
@@ -447,18 +469,22 @@ function makeSummary(results) {
     lines.push(`🧠 Вивчено: ${ok.length}`);
     ok.slice(0, 5).forEach((r, i) => {
       const add = r.r2Key ? ` — збережено у R2` : "";
-      lines.push(`  ${i + 1}) ${r.insight}${add}`);
+      lines.push(`  ${i + 1}) ${cleanInsightLine(r.insight)}${add}`);
     });
     if (ok.length > 5) lines.push(`  ... та ще ${ok.length - 5}`);
   }
   if (fail.length) {
     lines.push(`⚠️ З помилками: ${fail.length}`);
     fail.slice(0, 3).forEach((r, i) => {
-      lines.push(`  - ${i + 1}) ${r.error}`);
+      lines.push(`  - ${i + 1}) ${String(r.error || "").slice(0, 160)}`);
     });
     if (fail.length > 3) lines.push(`  ... та ще ${fail.length - 3}`);
   }
   return lines.join("\n");
 }
 
-export { makeSummary }; // якщо потрібно у UI
+function cleanInsightLine(s = "") {
+  return String(s || "").replace(/\s+/g, " ").trim().slice(0, 260);
+}
+
+export { makeSummary };
