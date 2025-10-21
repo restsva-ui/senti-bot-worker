@@ -1,8 +1,7 @@
 // src/routes/adminChecklistWrap.js
 // Checklist + Energy wrapper (HTML)
-// Авторизація: ?s=<WEBHOOK_SECRET>
-// Додатково: ?u=<telegram_user_id> (якщо не задано — TELEGRAM_ADMIN_ID)
-// Приклад: /admin/checklist/with-energy/html?s=...&u=...
+// Авторизація: ?s=<WEBHOOK_SECRET або TG_WEBHOOK_SECRET або TELEGRAM_SECRET_TOKEN>
+// Додатково: ?u=<telegram_user_id> (опційно)
 
 import { checklistHtml } from "../lib/kvChecklist.js";
 
@@ -13,29 +12,41 @@ const json = (data, init = {}) =>
     ...init,
   });
 
+function secFromEnv(env) {
+  return (
+    env.WEBHOOK_SECRET ||
+    env.TG_WEBHOOK_SECRET ||
+    env.TELEGRAM_SECRET_TOKEN ||
+    ""
+  );
+}
+function isAuthed(url, env) {
+  const s = url.searchParams.get("s") || "";
+  const exp = secFromEnv(env);
+  return !!exp && s === exp;
+}
+
 function unauthorized() {
   return json({ ok: false, error: "unauthorized" }, { status: 401 });
 }
-
 function okHtml(s) {
   return new Response(s, CTYPE_HTML);
 }
 
 export async function handleAdminChecklistWithEnergy(req, env, url) {
-  // Перевірка секрету
-  const secret = url.searchParams.get("s") || "";
-  if (env.WEBHOOK_SECRET && secret !== env.WEBHOOK_SECRET) return unauthorized();
+  if (!isAuthed(url, env)) return unauthorized();
 
+  const secret = url.searchParams.get("s") || "";
   const u = (url.searchParams.get("u") || env.TELEGRAM_ADMIN_ID || "").trim();
 
-  // Базовий HTML чек-листа
+  // Базовий HTML чекліста (вставляємо як є)
   const inner = await checklistHtml(env).catch(() => "<h3>Checklist</h3>");
 
   // Вставляємо зверху iframe з енергією
   const energySrc =
     `/admin/energy/html?s=${encodeURIComponent(secret)}${u ? `&u=${encodeURIComponent(u)}` : ""}`;
 
-  const html = `<!doctype html>
+  const markup = `<!doctype html>
 <html lang="uk">
 <head>
   <meta charset="utf-8"/>
@@ -72,5 +83,5 @@ export async function handleAdminChecklistWithEnergy(req, env, url) {
 </body>
 </html>`;
 
-  return okHtml(html);
+  return okHtml(markup);
 }
