@@ -1,6 +1,9 @@
 // src/index.js — Cloudflare Workers entrypoint (router + Learn admin + cron)
 
 import { handleTelegramWebhook } from "./routes/webhook.js";
+import { handleAdminChecklist } from "./routes/adminChecklist.js";
+import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
+
 import {
   runLearnOnce,
   getLastSummary,
@@ -9,9 +12,7 @@ import {
   getRecentInsights,
 } from "./lib/kvLearnQueue.js";
 
-// Checklist routes
-import { handleAdminChecklist } from "./routes/adminChecklist.js";
-import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
+import { getEnergy } from "./lib/energy.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 function secFromEnv(env) {
@@ -52,31 +53,51 @@ function unauthorized() {
   return json({ ok: false, error: "unauthorized" }, { status: 401 });
 }
 function esc(s = "") {
-  return String(s)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+  return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 function hostOf(u = "") {
   try { return new URL(u).host; } catch { return ""; }
 }
 function since(iso) {
-  const t = Date.parse(iso || "");
-  if (!t) return "";
+  const t = Date.parse(iso || ""); if (!t) return "";
   const sec = Math.max(1, Math.floor((Date.now() - t) / 1000));
-  const units = [
-    ["д", 86400],
-    ["год", 3600],
-    ["хв", 60],
-    ["с", 1],
-  ];
-  for (const [lbl, s] of units) {
-    if (sec >= s) return `${Math.floor(sec / s)} ${lbl} тому`;
-  }
+  const L = [["д",86400],["год",3600],["хв",60],["с",1]];
+  for (const [lbl,s] of L) if (sec >= s) return `${Math.floor(sec/s)} ${lbl} тому`;
   return "щойно";
 }
 
-// ── Learn: HTML UI (перероблено) ─────────────────────────────────────────────
+// ── Energy HTML (простий віджет) ─────────────────────────────────────────────
+async function energyHtml(env, url) {
+  const uid = url.searchParams.get("u") || env.TELEGRAM_ADMIN_ID || "admin";
+  const data = await getEnergy(env, uid).catch(() => ({}));
+
+  const css = `
+  <style>
+    :root{--bg:#0b0f14;--card:#11161d;--border:#1f2937;--txt:#e6edf3;--muted:#9fb0c2}
+    body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,Segoe UI,Roboto,sans-serif}
+    .wrap{max-width:720px;margin:0 auto;padding:16px}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .k{color:var(--muted)}
+  </style>`;
+  const body = `
+    ${css}
+    <div class="wrap">
+      <div class="card">
+        <h3 style="margin:6px 0">⚡ Energy</h3>
+        <div class="grid">
+          <div><div class="k">User</div><div class="mono">${esc(String(uid))}</div></div>
+          <div><div class="k">Balance</div><b>${esc(String(data.energy ?? "—"))}</b></div>
+          <div><div class="k">Cost (text)</div><div>${esc(String(data.costText ?? "1"))}</div></div>
+          <div><div class="k">Cost (image)</div><div>${esc(String(data.costImage ?? "5"))}</div></div>
+        </div>
+        <p class="k" style="margin-top:10px">Поповнення/налаштування — через API/адмін-панель.</p>
+      </div>
+    </div>`;
+  return html(body);
+}
+
+// ── Learn: мобільний HTML UI з R2/KV блоками ────────────────────────────────
 async function learnHtml(env, url) {
   const last = await getLastSummary(env).catch(() => "");
   const queued = await listQueued(env, { limit: 200 }).catch(() => []);
@@ -84,60 +105,60 @@ async function learnHtml(env, url) {
 
   const runUrl = (() => {
     url.searchParams.set("s", secFromEnv(env));
-    const u = new URL(url);
-    u.pathname = "/admin/learn/run";
-    return u.toString();
+    const u = new URL(url); u.pathname = "/admin/learn/run"; return u.toString();
   })();
+
+  const hasKV = !!env.STATE_KV || !!env.KV || !!env.CHECKLIST_KV;
+  const hasR2 = !!env.R2 || !!env.ASSETS || !!env.BUCKET;
 
   const css = `
   <style>
     :root{
-      --bg:#0b0f14; --card:#11161d; --muted:#9fb0c2; --border:#1f2937;
-      --btn:#223449; --btn2:#2a3f55; --txt:#e6edf3; --pill:#263445;
+      --bg:#0b0f14;--card:#11161d;--muted:#9fb0c2;--border:#1f2937;--btn:#223449;--btn2:#2a3f55;--txt:#e6edf3;
       --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
     }
     *{box-sizing:border-box}
     body{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--txt)}
-    a{color:#8ab4f8;text-decoration:none} a:hover{text-decoration:underline}
-    header{position:sticky;top:0;background:rgba(11,15,20,.85);backdrop-filter:blur(6px);
-      border-bottom:1px solid var(--border);z-index:10}
-    .bar{max-width:1080px;margin:0 auto;display:flex;gap:12px;align-items:center;justify-content:space-between;padding:12px}
-    .wrap{max-width:1080px;margin:0 auto;padding:16px}
+    a{color:#8ab4f8;text-decoration:none}
+    a:hover{text-decoration:underline}
+    header{position:sticky;top:0;background:rgba(11,15,20,.85);backdrop-filter:blur(6px);border-bottom:1px solid var(--border);z-index:10}
+    .bar{max-width:1080px;margin:0 auto;display:flex;gap:8px;align-items:center;justify-content:space-between;padding:10px}
+    .wrap{max-width:1080px;margin:0 auto;padding:12px}
     h1{margin:0;font-size:18px}
-    .btn{display:inline-flex;gap:8px;align-items:center;padding:10px 14px;border-radius:10px;background:var(--btn);border:1px solid var(--border);color:var(--txt)}
+    .btn{display:inline-flex;gap:8px;align-items:center;padding:9px 12px;border-radius:10px;background:var(--btn);border:1px solid var(--border);color:var(--txt)}
     .btn:hover{background:var(--btn2)}
-    .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-    .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px}
     .muted{color:var(--muted)}
-    pre{white-space:pre-wrap;background:#0b1117;border:1px solid var(--border);border-radius:10px;padding:12px}
-    table{width:100%;border-collapse:collapse}
-    th,td{padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
-    th{color:var(--muted);font-weight:600;text-align:left}
+    pre{white-space:pre-wrap;background:#0b1117;border:1px solid var(--border);border-radius:10px;padding:10px;margin:0}
+    table{width:100%;border-collapse:collapse;font-size:14px}
+    th,td{padding:8px;border-bottom:1px solid var(--border);vertical-align:top}
+    th{text-align:left;color:var(--muted)}
     .mono{font-family:var(--mono)}
-    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:var(--pill);font-size:12px;margin-left:6px}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#263445;font-size:12px;margin-left:6px}
     input,textarea{width:100%;padding:10px;border-radius:8px;border:1px solid var(--border);background:#0b1117;color:var(--txt)}
-    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    /* Мобільна колонка */
+    @media (max-width: 820px){
+      .grid{grid-template-columns:1fr}
+      table{font-size:15px}
+      .bar{padding:8px}
+      .btn{padding:8px 10px}
+    }
   </style>`;
 
-  const queuedTable = (queued && queued.length)
-    ? `
-      <table>
-        <thead>
-          <tr>
-            <th>Коли</th>
-            <th>Тип</th>
-            <th>Назва / Посилання</th>
-          </tr>
-        </thead>
+  const queuedTable = queued.length
+    ? `<table>
+        <thead><tr><th>Коли</th><th>Тип</th><th>Назва / Посилання</th></tr></thead>
         <tbody>
-          ${queued.map(q => {
-            const when = esc(q.at || "");
-            const kind = esc(q.kind || "");
+          ${queued.map(q=>{
+            const when = esc(q.at||"");
+            const kind = esc(q.kind||"");
             const name = esc(q?.payload?.name || "");
             const urlStr = q?.payload?.url ? String(q.payload.url) : "";
             const link = urlStr
               ? `<a href="${esc(urlStr)}" target="_blank">${esc(name || hostOf(urlStr) || urlStr)}</a> <span class="muted mono">(${esc(hostOf(urlStr))})</span>`
-              : `<span class="mono">${name || "(текст)"}</span>`;
+              : `<span class="mono">${esc(name || "(текст)")}</span>`;
             return `<tr>
               <td class="muted" title="${esc(when)}">${esc(since(when))}</td>
               <td><span class="mono">${kind}</span></td>
@@ -145,15 +166,28 @@ async function learnHtml(env, url) {
             </tr>`;
           }).join("")}
         </tbody>
-      </table>
-    `
+      </table>`
     : `<p class="muted">Черга порожня.</p>`;
 
-  const insightsList = (insights && insights.length)
-    ? `<ul style="margin:0;padding-left:18px">
-        ${insights.map(i => `<li>${esc(i.insight || "")}${(i.r2TxtKey||i.r2JsonKey||i.r2RawKey)?'<span class="pill">R2</span>':''}</li>`).join("")}
+  const insightsList = insights.length
+    ? `<ul style="margin:0;padding-left:18px">${insights.map(i =>
+        `<li>${esc(i.insight || "")}${(i.r2TxtKey||i.r2JsonKey||i.r2RawKey)?'<span class="pill">R2</span>':''}</li>`).join("")}
       </ul>`
     : `<p class="muted">Ще немає збережених знань.</p>`;
+
+  const storageBlock = `
+    <div class="grid">
+      <div class="card">
+        <b>Пам'ять KV</b>
+        <p class="muted" style="margin:.4rem 0">Стан: ${hasKV ? "під’єднано ✅" : "не знайдено ❌"}</p>
+        <p class="muted">Використовується для: черги Learn, чекліста, інсайтів.</p>
+      </div>
+      <div class="card">
+        <b>R2 Storage</b>
+        <p class="muted" style="margin:.4rem 0">Стан: ${hasR2 ? "під’єднано ✅" : "не знайдено ❌"}</p>
+        <p class="muted">Зберігаємо великі файли: оригінали, очищені тексти, JSON-індекси.</p>
+      </div>
+    </div>`;
 
   const body = `
     ${css}
@@ -161,7 +195,7 @@ async function learnHtml(env, url) {
       <div class="bar">
         <h1>🧠 Senti Learn</h1>
         <div class="row">
-          <a class="btn" href="${esc(runUrl)}">▶️ Запустити навчання зараз</a>
+          <a class="btn" href="${esc(runUrl)}">▶️ Запустити</a>
           <a class="btn" href="/admin/checklist/html?s=${esc(secFromEnv(env))}" target="_blank">📝 Checklist</a>
           <a class="btn" href="/admin/energy/html?s=${esc(secFromEnv(env))}" target="_blank">⚡ Energy</a>
         </div>
@@ -169,16 +203,17 @@ async function learnHtml(env, url) {
     </header>
 
     <div class="wrap">
-      <div class="card">
+      ${storageBlock}
+
+      <div class="card" style="margin-top:12px">
         <b>Останній підсумок</b>
         <pre>${esc(last || "—")}</pre>
       </div>
 
-      <div class="grid">
+      <div class="grid" style="margin-top:12px">
         <div class="card">
           <div class="row" style="justify-content:space-between">
-            <b>Черга</b>
-            <span class="muted">${queued.length} елем.</span>
+            <b>Черга</b><span class="muted">${queued.length} елем.</span>
           </div>
           ${queuedTable}
         </div>
@@ -189,7 +224,7 @@ async function learnHtml(env, url) {
         </div>
       </div>
 
-      <div class="card">
+      <div class="card" style="margin-top:12px">
         <b>Додати в чергу</b>
         <form method="post" action="/admin/learn/enqueue?s=${esc(secFromEnv(env))}">
           <p><input name="url" placeholder="https://посилання або прямий файл"/></p>
@@ -197,10 +232,9 @@ async function learnHtml(env, url) {
           <p><textarea name="text" rows="6" placeholder="Або встав тут текст, який треба вивчити"></textarea></p>
           <p><button class="btn" type="submit">＋ Додати</button></p>
         </form>
-        <p class="muted">Підтримуються: статті/сторінки, YouTube (коли є транскрипт), PDF/TXT/MD/ZIP та ін.</p>
+        <p class="muted">Підтримуються: статті/сторінки, YouTube (коли є транскрипт), PDF/TXT/MD/ZIP тощо.</p>
       </div>
-    </div>
-  `;
+    </div>`;
   return html(body);
 }
 
@@ -219,15 +253,23 @@ async function route(req, env, ctx) {
     return handleTelegramWebhook(req, env);
   }
 
-  // Checklist HTML/API
+  // Checklist HTML/API (і html-аліас)
   if (p.startsWith("/admin/checklist")) {
+    if (!isAuthed(url, env)) return unauthorized();
     const handled = await handleAdminChecklist(req, env, url);
     if (handled) return handled;
   }
 
   // Wrapper: Checklist + Energy (iframe)
   if (req.method === "GET" && p === "/admin/checklist/with-energy/html") {
+    if (!isAuthed(url, env)) return unauthorized();
     return handleAdminChecklistWithEnergy(req, env, url);
+  }
+
+  // Energy HTML
+  if (req.method === "GET" && p === "/admin/energy/html") {
+    if (!isAuthed(url, env)) return unauthorized();
+    return energyHtml(env, url);
   }
 
   // Learn Admin: HTML
@@ -242,15 +284,8 @@ async function route(req, env, ctx) {
     try {
       const out = await runLearnOnce(env, { maxItems: Number(url.searchParams.get("n") || 10) });
       if (req.method === "GET") {
-        const back = (() => {
-          const u = new URL(url);
-          u.pathname = "/admin/learn/html";
-          return u.toString();
-        })();
-        return html(`
-          <pre>${esc(out.summary || JSON.stringify(out, null, 2))}</pre>
-          <p><a href="${esc(back)}">← Назад</a></p>
-        `);
+        const back = (() => { const u = new URL(url); u.pathname = "/admin/learn/html"; return u.toString(); })();
+        return html(`<pre>${esc(out.summary || JSON.stringify(out, null, 2))}</pre><p><a href="${esc(back)}">← Назад</a></p>`);
       }
       return json(out);
     } catch (e) {
@@ -262,39 +297,26 @@ async function route(req, env, ctx) {
   if (req.method === "POST" && p === "/admin/learn/enqueue") {
     if (!isAuthed(url, env)) return unauthorized();
     let body = {};
-    const ctype = req.headers.get("content-type") || "";
+    const ctype = (req.headers.get("content-type") || "").toLowerCase();
     try {
       if (ctype.includes("application/json")) {
         body = await req.json();
       } else if (ctype.includes("application/x-www-form-urlencoded") || ctype.includes("multipart/form-data")) {
-        const form = await req.formData();
-        body = Object.fromEntries(form.entries());
-      } else {
-        body = {};
-      }
-    } catch {
-      body = {};
-    }
+        const form = await req.formData(); body = Object.fromEntries(form.entries());
+      } else { body = {}; }
+    } catch { body = {}; }
 
     const userId = url.searchParams.get("u") || "admin";
     const hasText = body?.text && String(body.text).trim().length > 0;
     const hasUrl  = body?.url && String(body.url).startsWith("http");
 
-    if (!hasText && !hasUrl) {
-      return json({ ok: false, error: "provide url or text" }, { status: 400 });
-    }
+    if (!hasText && !hasUrl) return json({ ok: false, error: "provide url or text" }, { status: 400 });
 
-    if (hasText) {
-      await enqueueLearn(env, userId, { text: String(body.text), name: body?.name || "inline-text" });
-    }
-    if (hasUrl) {
-      await enqueueLearn(env, userId, { url: String(body.url),  name: body?.name || String(body.url) });
-    }
+    if (hasText) await enqueueLearn(env, userId, { text: String(body.text), name: body?.name || "inline-text" });
+    if (hasUrl)  await enqueueLearn(env, userId, { url: String(body.url),  name: body?.name || String(body.url) });
 
     if (!ctype.includes("application/json")) {
-      const back = new URL(url);
-      back.pathname = "/admin/learn/html";
-      return Response.redirect(back.toString(), 303);
+      const back = new URL(url); back.pathname = "/admin/learn/html"; return Response.redirect(back.toString(), 303);
     }
     return json({ ok: true });
   }
@@ -325,7 +347,7 @@ export default {
     }
   },
 
-  // Нічний агент: запуск навчання за розкладом (створи CRON trigger у Workers)
+  // Нічний агент: запуск навчання за розкладом
   async scheduled(event, env, ctx) {
     ctx.waitUntil(runLearnOnce(env, { maxItems: 12 }).catch(() => null));
   },
