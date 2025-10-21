@@ -1,8 +1,5 @@
 // src/lib/energy.js
-// Проста KV-бекенд реалізація "енергії":
-// - Баланс користувача: key = energy:user:<id>:balance  (в ENERGY_LOG_KV або STATE_KV)
-// - Вартість:          key = energy:cost:text|image     (в ENERGY_LOG_KV або STATE_KV)
-// Значення за замовчуванням беруться з env: ENERGY_MAX, ENERGY_COST_TEXT, ENERGY_COST_IMAGE.
+// KV-бекенд "Енергії": баланс користувача + вартість текст/зображення.
 
 function pickKV(env) {
   return env.ENERGY_LOG_KV || env.STATE_KV || env.CHECKLIST_KV || env.LEARN_QUEUE_KV;
@@ -24,9 +21,9 @@ export async function getEnergy(env, userIdRaw) {
       ])
     : [null, null, null];
 
-  const balance   = balStr     != null ? toInt(balStr, toInt(env.ENERGY_MAX, 100))   : toInt(env.ENERGY_MAX, 100);
-  const costText  = costTextStr!= null ? toInt(costTextStr, toInt(env.ENERGY_COST_TEXT, 1))  : toInt(env.ENERGY_COST_TEXT, 1);
-  const costImage = costImgStr != null ? toInt(costImgStr, toInt(env.ENERGY_COST_IMAGE, 5))  : toInt(env.ENERGY_COST_IMAGE, 5);
+  const balance   = balStr      != null ? toInt(balStr,      toInt(env.ENERGY_MAX, 100))       : toInt(env.ENERGY_MAX, 100);
+  const costText  = costTextStr != null ? toInt(costTextStr, toInt(env.ENERGY_COST_TEXT, 1))   : toInt(env.ENERGY_COST_TEXT, 1);
+  const costImage = costImgStr  != null ? toInt(costImgStr,  toInt(env.ENERGY_COST_IMAGE, 5))  : toInt(env.ENERGY_COST_IMAGE, 5);
 
   return { userId, balance, costText, costImage };
 }
@@ -39,7 +36,6 @@ export async function setEnergyCosts(env, textCost, imageCost) {
   return { ok: true };
 }
 
-// Опціонально: зменшити/збільшити баланс (не використовується прямо в UI, але може знадобитись)
 export async function addEnergy(env, userIdRaw, delta) {
   const kv = pickKV(env);
   if (!kv) return { ok: false, error: "kv_not_bound" };
