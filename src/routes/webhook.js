@@ -29,7 +29,7 @@ const {
   askLocationKeyboard
 } = TG;
 
-// ── Telegram UX helpers (індикатор завантаження) ────────────────────────────
+// ── Telegram UX helpers (індикатор як у GPT) ────────────────────────────────
 async function sendTyping(env, chatId) {
   try {
     const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
@@ -41,19 +41,13 @@ async function sendTyping(env, chatId) {
     });
   } catch {}
 }
-async function sendThinking(env, chatId, lang = "uk") {
-  const map = {
-    uk: "⏳ Думаю над відповіддю…",
-    ru: "⏳ Думаю над ответом…",
-    en: "⏳ Thinking…",
-    de: "⏳ Nachdenken…",
-    fr: "⏳ Réflexion…",
-  };
-  const text = map[lang.slice(0,2)] || map.uk;
-  try {
-    await sendTyping(env, chatId);
-    await sendPlain(env, chatId, text);
-  } catch {}
+// Надсилаємо кілька «пульсів» typing, поки модель думає.
+// Telegram автоматично приховує індикатор, коли приходить відповідь.
+function pulseTyping(env, chatId, times = 4, intervalMs = 4000) {
+  sendTyping(env, chatId);
+  for (let i = 1; i < times; i++) {
+    setTimeout(() => { sendTyping(env, chatId); }, i * intervalMs);
+  }
 }
 
 // ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
@@ -170,8 +164,8 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   }
   await spendEnergy(env, userId, need, "vision");
 
-  // індикатор завантаження
-  await sendThinking(env, chatId, lang);
+  // індикатор typing
+  pulseTyping(env, chatId);
 
   const url = await tgFileUrl(env, att.file_id);
   const prompt = caption || "Опиши, що на зображенні, коротко і по суті.";
@@ -456,8 +450,8 @@ export async function handleTelegramWebhook(req, env) {
       }
       await spendEnergy(env, userId, need, "text");
 
-      // індикатор завантаження
-      await sendThinking(env, chatId, lang);
+      // індикатор typing
+      pulseTyping(env, chatId);
 
       const systemHint = await buildSystemHint(env, chatId, userId);
       const name = await getPreferredName(env, msg);
@@ -596,8 +590,8 @@ export async function handleTelegramWebhook(req, env) {
       }
       await spendEnergy(env, userId, need, "text");
 
-      // індикатор завантаження
-      await sendThinking(env, chatId, lang);
+      // індикатор typing
+      pulseTyping(env, chatId);
 
       const systemHint = await buildSystemHint(env, chatId, userId);
       const name = await getPreferredName(env, msg);
