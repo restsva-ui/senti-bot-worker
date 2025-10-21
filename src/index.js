@@ -9,7 +9,7 @@ import {
   getRecentInsights,
 } from "./lib/kvLearnQueue.js";
 
-// ✅ підключаємо чекліст-роути
+// Checklist routes
 import { handleAdminChecklist } from "./routes/adminChecklist.js";
 import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
 
@@ -57,12 +57,30 @@ function esc(s = "") {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
 }
+function hostOf(u = "") {
+  try { return new URL(u).host; } catch { return ""; }
+}
+function since(iso) {
+  const t = Date.parse(iso || "");
+  if (!t) return "";
+  const sec = Math.max(1, Math.floor((Date.now() - t) / 1000));
+  const units = [
+    ["д", 86400],
+    ["год", 3600],
+    ["хв", 60],
+    ["с", 1],
+  ];
+  for (const [lbl, s] of units) {
+    if (sec >= s) return `${Math.floor(sec / s)} ${lbl} тому`;
+  }
+  return "щойно";
+}
 
-// ── Learn: tiny HTML UI ──────────────────────────────────────────────────────
+// ── Learn: HTML UI (перероблено) ─────────────────────────────────────────────
 async function learnHtml(env, url) {
   const last = await getLastSummary(env).catch(() => "");
-  const queued = await listQueued(env, { limit: 50 }).catch(() => []);
-  const insights = await getRecentInsights(env, { limit: 10 }).catch(() => []);
+  const queued = await listQueued(env, { limit: 200 }).catch(() => []);
+  const insights = await getRecentInsights(env, { limit: 50 }).catch(() => []);
 
   const runUrl = (() => {
     url.searchParams.set("s", secFromEnv(env));
@@ -73,76 +91,114 @@ async function learnHtml(env, url) {
 
   const css = `
   <style>
-    body{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial,sans-serif;padding:24px;max-width:960px;margin:0 auto;background:#0b0f14;color:#e6edf3}
-    a{color:#8ab4f8;text-decoration:none}
-    a:hover{text-decoration:underline}
-    h1{font-size:22px;margin:0 0 16px}
-    .card{background:#11161d;border:1px solid #1f2937;border-radius:12px;padding:16px;margin:12px 0}
-    .btn{display:inline-block;padding:10px 14px;border-radius:10px;background:#223449;border:1px solid #2d4f6b;color:#e6edf3}
-    .btn:hover{background:#2a3f55}
-    .muted{opacity:.8}
-    code,pre{background:#0b1117;border:1px solid #1f2937;border-radius:10px;padding:10px;display:block;white-space:pre-wrap}
-    ul{margin:0;padding-left:18px}
-    li{margin:6px 0}
-    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-    .mono{font-family:ui-monospace,Consolas,Monaco,monospace}
-    .tag{display:inline-block;font-size:12px;padding:2px 8px;border:1px solid #2d4f6b;border-radius:999px;margin-left:6px}
+    :root{
+      --bg:#0b0f14; --card:#11161d; --muted:#9fb0c2; --border:#1f2937;
+      --btn:#223449; --btn2:#2a3f55; --txt:#e6edf3; --pill:#263445;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+    *{box-sizing:border-box}
+    body{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--txt)}
+    a{color:#8ab4f8;text-decoration:none} a:hover{text-decoration:underline}
+    header{position:sticky;top:0;background:rgba(11,15,20,.85);backdrop-filter:blur(6px);
+      border-bottom:1px solid var(--border);z-index:10}
+    .bar{max-width:1080px;margin:0 auto;display:flex;gap:12px;align-items:center;justify-content:space-between;padding:12px}
+    .wrap{max-width:1080px;margin:0 auto;padding:16px}
+    h1{margin:0;font-size:18px}
+    .btn{display:inline-flex;gap:8px;align-items:center;padding:10px 14px;border-radius:10px;background:var(--btn);border:1px solid var(--border);color:var(--txt)}
+    .btn:hover{background:var(--btn2)}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+    .muted{color:var(--muted)}
+    pre{white-space:pre-wrap;background:#0b1117;border:1px solid var(--border);border-radius:10px;padding:12px}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+    th{color:var(--muted);font-weight:600;text-align:left}
+    .mono{font-family:var(--mono)}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:var(--pill);font-size:12px;margin-left:6px}
+    input,textarea{width:100%;padding:10px;border-radius:8px;border:1px solid var(--border);background:#0b1117;color:var(--txt)}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
   </style>`;
 
-  const queuedList = (queued && queued.length)
-    ? `<ul>${queued
-        .map(
-          (q) =>
-            `<li><span class="mono">${esc(q.kind)}</span> — ${esc(
-              q?.payload?.name || q?.payload?.url || "item"
-            )} <span class="muted mono">(${esc(q.at)})</span></li>`
-        )
-        .join("")}</ul>`
+  const queuedTable = (queued && queued.length)
+    ? `
+      <table>
+        <thead>
+          <tr>
+            <th>Коли</th>
+            <th>Тип</th>
+            <th>Назва / Посилання</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${queued.map(q => {
+            const when = esc(q.at || "");
+            const kind = esc(q.kind || "");
+            const name = esc(q?.payload?.name || "");
+            const urlStr = q?.payload?.url ? String(q.payload.url) : "";
+            const link = urlStr
+              ? `<a href="${esc(urlStr)}" target="_blank">${esc(name || hostOf(urlStr) || urlStr)}</a> <span class="muted mono">(${esc(hostOf(urlStr))})</span>`
+              : `<span class="mono">${name || "(текст)"}</span>`;
+            return `<tr>
+              <td class="muted" title="${esc(when)}">${esc(since(when))}</td>
+              <td><span class="mono">${kind}</span></td>
+              <td>${link}</td>
+            </tr>`;
+          }).join("")}
+        </tbody>
+      </table>
+    `
     : `<p class="muted">Черга порожня.</p>`;
 
   const insightsList = (insights && insights.length)
-    ? `<ul>${insights
-        .map(
-          (i) =>
-            `<li>${esc(i.insight || "")}${
-              i.r2TxtKey || i.r2JsonKey || i.r2RawKey
-                ? `<span class="tag">R2</span>`
-                : ""
-            }</li>`
-        )
-        .join("")}</ul>`
+    ? `<ul style="margin:0;padding-left:18px">
+        ${insights.map(i => `<li>${esc(i.insight || "")}${(i.r2TxtKey||i.r2JsonKey||i.r2RawKey)?'<span class="pill">R2</span>':''}</li>`).join("")}
+      </ul>`
     : `<p class="muted">Ще немає збережених знань.</p>`;
 
   const body = `
     ${css}
-    <h1>🧠 Senti Learn — статус</h1>
-
-    <div class="card">
-      <b>Останній підсумок</b>
-      <pre>${esc(last || "—")}</pre>
-      <a class="btn" href="${esc(runUrl)}">▶️ Запустити навчання зараз</a>
-    </div>
-
-    <div class="grid">
-      <div class="card">
-        <b>Черга</b>
-        ${queuedList}
+    <header>
+      <div class="bar">
+        <h1>🧠 Senti Learn</h1>
+        <div class="row">
+          <a class="btn" href="${esc(runUrl)}">▶️ Запустити навчання зараз</a>
+          <a class="btn" href="/admin/checklist/html?s=${esc(secFromEnv(env))}" target="_blank">📝 Checklist</a>
+          <a class="btn" href="/admin/energy/html?s=${esc(secFromEnv(env))}" target="_blank">⚡ Energy</a>
+        </div>
       </div>
-      <div class="card">
-        <b>Нещодавні знання (для System Prompt)</b>
-        ${insightsList}
-      </div>
-    </div>
+    </header>
 
-    <div class="card">
-      <b>Додати в чергу</b>
-      <form method="post" action="/admin/learn/enqueue?s=${esc(secFromEnv(env))}">
-        <p><input name="url" placeholder="https://посилання або прямий файл" style="width:100%;padding:10px;border-radius:8px;border:1px solid #2d4f6b;background:#0b1117;color:#e6edf3"/></p>
-        <p><input name="name" placeholder="Опційно: назва" style="width:100%;padding:10px;border-radius:8px;border:1px solid #2d4f6b;background:#0b1117;color:#e6edf3"/></p>
-        <p><textarea name="text" rows="6" placeholder="Або встав тут текст, який треба вивчити" style="width:100%;padding:10px;border-radius:8px;border:1px solid #2d4f6b;background:#0b1117;color:#e6edf3"></textarea></p>
-        <p><button class="btn" type="submit">＋ Додати</button></p>
-      </form>
-      <p class="muted">Підтримуються: статті/сторінки, YouTube (коли є транскрипт), PDF/TXT/MD/ZIP та ін.</p>
+    <div class="wrap">
+      <div class="card">
+        <b>Останній підсумок</b>
+        <pre>${esc(last || "—")}</pre>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <div class="row" style="justify-content:space-between">
+            <b>Черга</b>
+            <span class="muted">${queued.length} елем.</span>
+          </div>
+          ${queuedTable}
+        </div>
+
+        <div class="card">
+          <b>Нещодавні знання (для System Prompt)</b>
+          ${insightsList}
+        </div>
+      </div>
+
+      <div class="card">
+        <b>Додати в чергу</b>
+        <form method="post" action="/admin/learn/enqueue?s=${esc(secFromEnv(env))}">
+          <p><input name="url" placeholder="https://посилання або прямий файл"/></p>
+          <p><input name="name" placeholder="Опційно: назва"/></p>
+          <p><textarea name="text" rows="6" placeholder="Або встав тут текст, який треба вивчити"></textarea></p>
+          <p><button class="btn" type="submit">＋ Додати</button></p>
+        </form>
+        <p class="muted">Підтримуються: статті/сторінки, YouTube (коли є транскрипт), PDF/TXT/MD/ZIP та ін.</p>
+      </div>
     </div>
   `;
   return html(body);
@@ -163,13 +219,13 @@ async function route(req, env, ctx) {
     return handleTelegramWebhook(req, env);
   }
 
-  // ✅ Checklist HTML / API
+  // Checklist HTML/API
   if (p.startsWith("/admin/checklist")) {
     const handled = await handleAdminChecklist(req, env, url);
     if (handled) return handled;
   }
 
-  // ✅ Wrapper: Checklist + Energy (iframe)
+  // Wrapper: Checklist + Energy (iframe)
   if (req.method === "GET" && p === "/admin/checklist/with-energy/html") {
     return handleAdminChecklistWithEnergy(req, env, url);
   }
@@ -222,23 +278,17 @@ async function route(req, env, ctx) {
 
     const userId = url.searchParams.get("u") || "admin";
     const hasText = body?.text && String(body.text).trim().length > 0;
-    const hasUrl = body?.url && String(body.url).startsWith("http");
+    const hasUrl  = body?.url && String(body.url).startsWith("http");
 
     if (!hasText && !hasUrl) {
       return json({ ok: false, error: "provide url or text" }, { status: 400 });
     }
 
     if (hasText) {
-      await enqueueLearn(env, userId, {
-        text: String(body.text),
-        name: body?.name || "inline-text",
-      });
+      await enqueueLearn(env, userId, { text: String(body.text), name: body?.name || "inline-text" });
     }
     if (hasUrl) {
-      await enqueueLearn(env, userId, {
-        url: String(body.url),
-        name: body?.name || String(body.url),
-      });
+      await enqueueLearn(env, userId, { url: String(body.url),  name: body?.name || String(body.url) });
     }
 
     if (!ctype.includes("application/json")) {
