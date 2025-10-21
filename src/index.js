@@ -66,7 +66,7 @@ function since(iso) {
   return "щойно";
 }
 
-// ── Energy HTML (простий віджет) ─────────────────────────────────────────────
+// ── Energy HTML (адаптивний віджет) ──────────────────────────────────────────
 async function energyHtml(env, url) {
   const uid = url.searchParams.get("u") || env.TELEGRAM_ADMIN_ID || "admin";
   const data = await getEnergy(env, uid).catch(() => ({}));
@@ -74,11 +74,14 @@ async function energyHtml(env, url) {
   const css = `
   <style>
     :root{--bg:#0b0f14;--card:#11161d;--border:#1f2937;--txt:#e6edf3;--muted:#9fb0c2}
-    body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,Segoe UI,Roboto,sans-serif}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.4 system-ui,Segoe UI,Roboto,sans-serif}
     .wrap{max-width:720px;margin:0 auto;padding:16px}
     .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px}
     .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
     .k{color:var(--muted)}
+    .mono{font-family:ui-monospace,Consolas,Menlo,monospace}
+    @media (max-width:760px){ .grid{grid-template-columns:1fr} body{font-size:15px} }
   </style>`;
   const body = `
     ${css}
@@ -91,7 +94,7 @@ async function energyHtml(env, url) {
           <div><div class="k">Cost (text)</div><div>${esc(String(data.costText ?? "1"))}</div></div>
           <div><div class="k">Cost (image)</div><div>${esc(String(data.costImage ?? "5"))}</div></div>
         </div>
-        <p class="k" style="margin-top:10px">Поповнення/налаштування — через API/адмін-панель.</p>
+        <p class="k" style="margin-top:10px">Поповнення/налаштування — через API/адмін-інтерфейси.</p>
       </div>
     </div>`;
   return html(body);
@@ -118,19 +121,19 @@ async function learnHtml(env, url) {
       --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
     }
     *{box-sizing:border-box}
-    body{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--txt)}
+    body{font:15px/1.45 ui-sans-serif,system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--txt)}
     a{color:#8ab4f8;text-decoration:none}
     a:hover{text-decoration:underline}
     header{position:sticky;top:0;background:rgba(11,15,20,.85);backdrop-filter:blur(6px);border-bottom:1px solid var(--border);z-index:10}
     .bar{max-width:1080px;margin:0 auto;display:flex;gap:8px;align-items:center;justify-content:space-between;padding:10px}
     .wrap{max-width:1080px;margin:0 auto;padding:12px}
     h1{margin:0;font-size:18px}
-    .btn{display:inline-flex;gap:8px;align-items:center;padding:9px 12px;border-radius:10px;background:var(--btn);border:1px solid var(--border);color:var(--txt)}
+    .btn{display:inline-flex;gap:8px;align-items:center;padding:8px 12px;border-radius:10px;background:var(--btn);border:1px solid var(--border);color:var(--txt)}
     .btn:hover{background:var(--btn2)}
     .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
     .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px}
     .muted{color:var(--muted)}
-    pre{white-space:pre-wrap;background:#0b1117;border:1px solid var(--border);border-radius:10px;padding:10px;margin:0}
+    pre{white-space:pre-wrap;background:#0b1117;border:1px solid var(--border);border-radius:10px;padding:10px;margin:0;word-break:break-word}
     table{width:100%;border-collapse:collapse;font-size:14px}
     th,td{padding:8px;border-bottom:1px solid var(--border);vertical-align:top}
     th{text-align:left;color:var(--muted)}
@@ -138,12 +141,13 @@ async function learnHtml(env, url) {
     .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#263445;font-size:12px;margin-left:6px}
     input,textarea{width:100%;padding:10px;border-radius:8px;border:1px solid var(--border);background:#0b1117;color:var(--txt)}
     .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-    /* Мобільна колонка */
+    li{line-height:1.35;word-break:break-word}
     @media (max-width: 820px){
       .grid{grid-template-columns:1fr}
       table{font-size:15px}
       .bar{padding:8px}
       .btn{padding:8px 10px}
+      body{font-size:16px}
     }
   </style>`;
 
@@ -179,18 +183,19 @@ async function learnHtml(env, url) {
     <div class="grid">
       <div class="card">
         <b>Пам'ять KV</b>
-        <p class="muted" style="margin:.4rem 0">Стан: ${hasKV ? "під’єднано ✅" : "не знайдено ❌"}</p>
+        <p class="muted" style="margin:.4rem 0">${hasKV ? "Стан: під’єднано ✅" : "Стан: не знайдено ❌"}</p>
         <p class="muted">Використовується для: черги Learn, чекліста, інсайтів.</p>
       </div>
       <div class="card">
         <b>R2 Storage</b>
-        <p class="muted" style="margin:.4rem 0">Стан: ${hasR2 ? "під’єднано ✅" : "не знайдено ❌"}</p>
+        <p class="muted" style="margin:.4rem 0">${hasR2 ? "Стан: під’єднано ✅" : "Стан: не знайдено ❌"}</p>
         <p class="muted">Зберігаємо великі файли: оригінали, очищені тексти, JSON-індекси.</p>
       </div>
     </div>`;
 
   const body = `
     ${css}
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
     <header>
       <div class="bar">
         <h1>🧠 Senti Learn</h1>
@@ -238,6 +243,30 @@ async function learnHtml(env, url) {
   return html(body);
 }
 
+// ── Прості сторінки для Repo/Statute (щоб не давали 404) ─────────────────────
+function simpleLinkPage(title, href, fallbackMsg) {
+  const css = `
+  <style>
+    body{margin:0;background:#0b0f14;color:#e6edf3;font:15px/1.45 system-ui,Segoe UI,Roboto,sans-serif}
+    .wrap{max-width:860px;margin:0 auto;padding:18px}
+    .card{background:#11161d;border:1px solid #1f2937;border-radius:12px;padding:14px}
+    a.btn{display:inline-block;padding:10px 14px;border-radius:10px;background:#223449;border:1px solid #2d4f6b;color:#e6edf3;text-decoration:none}
+    a.btn:hover{background:#2a3f55}
+    .muted{opacity:.8}
+  </style>`;
+  const body = `
+  ${css}
+  <div class="wrap">
+    <div class="card">
+      <h3 style="margin:0 0 10px">${esc(title)}</h3>
+      ${href ? `<p><a class="btn" target="_blank" href="${esc(href)}">Відкрити</a></p>` :
+        `<p class="muted">${esc(fallbackMsg)}</p>`}
+      <p><a class="btn" href="/admin/checklist/html?s=${esc(href ? "" : "")}">← До Checklist</a></p>
+    </div>
+  </div>`;
+  return html(body);
+}
+
 // ── Router ───────────────────────────────────────────────────────────────────
 async function route(req, env, ctx) {
   const url = new URL(req.url);
@@ -270,6 +299,20 @@ async function route(req, env, ctx) {
   if (req.method === "GET" && p === "/admin/energy/html") {
     if (!isAuthed(url, env)) return unauthorized();
     return energyHtml(env, url);
+  }
+
+  // Repo / Statute link pages (кнопки з Checklist)
+  if (req.method === "GET" && p === "/admin/repo/html") {
+    if (!isAuthed(url, env)) return unauthorized();
+    const href = env.REPO_URL || "";
+    const msg = "REPO_URL не налаштовано в Environment. Додай REPO_URL (GitHub / R2-браузер) або зміни посилання в чеклісті.";
+    return simpleLinkPage("📁 Repo", href, msg);
+  }
+  if (req.method === "GET" && p === "/admin/statut/html") {
+    if (!isAuthed(url, env)) return unauthorized();
+    const href = env.STATUTE_URL || "";
+    const msg = "STATUTE_URL не налаштовано. Додай STATUTE_URL (наприклад, Google Doc) або зміни посилання в чеклісті.";
+    return simpleLinkPage("📜 Статут", href, msg);
   }
 
   // Learn Admin: HTML
