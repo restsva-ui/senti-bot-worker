@@ -41,10 +41,59 @@ export function energyLinks(env, userId) {
   };
 }
 
+/* ===================== Telegram API helpers ===================== */
+
+function botToken(env) {
+  return env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+}
+
+async function tgCall(env, method, payload) {
+  const token = botToken(env);
+  const url = `https://api.telegram.org/bot${token}/${method}`;
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload || {}),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data?.ok) throw new Error(data?.description || `HTTP ${r.status}`);
+    return data.result;
+  } catch {
+    // тихо ігноруємо у проді
+    return null;
+  }
+}
+
+/** Показати індикатор активності: typing / upload_photo / upload_document / upload_video */
+export async function sendChatAction(env, chatId, action = "typing") {
+  return tgCall(env, "sendChatAction", { chat_id: chatId, action });
+}
+
+/**
+ * Запускає періодичний індикатор під час виконання async-функції fn().
+ * За замовчуванням — typing кожні ~4с (Telegram сам гасить через ~5с).
+ * Використання:
+ *   await withAction(env, chatId, () => довгаОперація(), "typing");
+ */
+export async function withAction(env, chatId, fn, action = "typing", pingMs = 4000) {
+  let timer = null;
+  try {
+    await sendChatAction(env, chatId, action);
+    timer = setInterval(() => sendChatAction(env, chatId, action), pingMs);
+    const res = await fn();
+    return res;
+  } finally {
+    if (timer) clearInterval(timer);
+  }
+}
+
+// Зручні шорткати
+export const withTyping = (env, chatId, fn) => withAction(env, chatId, fn, "typing");
+export const withUploading = (env, chatId, fn) => withAction(env, chatId, fn, "upload_document");
+
 // Відправка повідомлення
 export async function sendPlain(env, chatId, text, extra = {}) {
-  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
-  const url = `https://api.telegram.org/bot${token}/sendMessage`;
   const body = {
     chat_id: chatId,
     text,
@@ -52,12 +101,7 @@ export async function sendPlain(env, chatId, text, extra = {}) {
   };
   if (extra.parse_mode) body.parse_mode = extra.parse_mode;
   if (extra.reply_markup) body.reply_markup = extra.reply_markup;
-
-  await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  }).catch(() => {});
+  await tgCall(env, "sendMessage", body);
 }
 
 export function parseAiCommand(text = "") {
@@ -78,4 +122,10 @@ export const TG = {
   sendPlain,
   parseAiCommand,
   askLocationKeyboard,
+
+  // нове:
+  sendChatAction,
+  withAction,
+  withTyping,
+  withUploading,
 };
