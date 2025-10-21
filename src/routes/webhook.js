@@ -29,7 +29,8 @@ const {
   askLocationKeyboard
 } = TG;
 
-// ── Telegram UX helpers (індикатор як у GPT) ────────────────────────────────
+// ── Telegram UX helpers (індикатор завантаження) ────────────────────────────
+// ТІЛЬКИ "typing" без текстового повідомлення (як у GPT).
 async function sendTyping(env, chatId) {
   try {
     const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
@@ -41,14 +42,8 @@ async function sendTyping(env, chatId) {
     });
   } catch {}
 }
-// Надсилаємо кілька «пульсів» typing, поки модель думає.
-// Telegram автоматично приховує індикатор, коли приходить відповідь.
-function pulseTyping(env, chatId, times = 4, intervalMs = 4000) {
-  sendTyping(env, chatId);
-  for (let i = 1; i < times; i++) {
-    setTimeout(() => { sendTyping(env, chatId); }, i * intervalMs);
-  }
-}
+// Для зручності лишили сумісну назву:
+const sendThinking = sendTyping;
 
 // ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
 async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
@@ -164,8 +159,8 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   }
   await spendEnergy(env, userId, need, "vision");
 
-  // індикатор typing
-  pulseTyping(env, chatId);
+  // індикатор завантаження — тільки typing
+  await sendThinking(env, chatId);
 
   const url = await tgFileUrl(env, att.file_id);
   const prompt = caption || "Опиши, що на зображенні, коротко і по суті.";
@@ -450,8 +445,8 @@ export async function handleTelegramWebhook(req, env) {
       }
       await spendEnergy(env, userId, need, "text");
 
-      // індикатор typing
-      pulseTyping(env, chatId);
+      // індикатор завантаження — тільки typing
+      await sendThinking(env, chatId);
 
       const systemHint = await buildSystemHint(env, chatId, userId);
       const name = await getPreferredName(env, msg);
@@ -590,8 +585,8 @@ export async function handleTelegramWebhook(req, env) {
       }
       await spendEnergy(env, userId, need, "text");
 
-      // індикатор typing
-      pulseTyping(env, chatId);
+      // індикатор завантаження — тільки typing
+      await sendThinking(env, chatId);
 
       const systemHint = await buildSystemHint(env, chatId, userId);
       const name = await getPreferredName(env, msg);
