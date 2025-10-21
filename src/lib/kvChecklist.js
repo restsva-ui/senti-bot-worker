@@ -3,16 +3,16 @@
 //
 // Keys in CHECKLIST_KV:
 //   - checklist:text    -> string (markdown/plain)
-//   - checklist:log     -> newline-delimited audit
+//   - checklist:log     -> newline-delimited audit (включає і зміну статуту)
 //   - statut:text       -> string (markdown/plain)
 //   - archive:<ts>      -> archived checklist snapshot
 //
 // R2 (optional):
 //   - LEARN_BUCKET with prefixes:
 //       repo/*   - "особистий репозиторій з архівами"
-//       learn/*  - навчальні файли (перелік віддаємо окремо в index.js)
+//       learn/*  - навчальні файли
 //
-// All HTML is mobile-first, dark theme, no external deps.
+// Усі HTML — mobile-first, dark theme, без зовнішніх залежностей.
 
 const K_CHECKLIST = "checklist:text";
 const K_CHECKLIST_LOG = "checklist:log";
@@ -46,7 +46,7 @@ async function appendChecklistLog(env, line) {
     const prev = await kv.get(K_CHECKLIST_LOG);
     const stamp = `[${nowISO()}] ${line}`;
     const joined = prev ? (prev + "\n" + stamp) : stamp;
-    // обмежуємо ~1000 рядків, щоб не роздувать
+    // обмежуємо ~1000 рядків
     const lines = joined.split("\n");
     const tail = lines.slice(-1000).join("\n");
     await kv.put(K_CHECKLIST_LOG, tail);
@@ -67,12 +67,39 @@ function baseCss() {
     .btn{display:inline-block;padding:10px 14px;border-radius:10px;background:#223449;border:1px solid #2d4f6b;color:#e6edf3}
     .btn:hover{background:#2a3f55}
     .muted{opacity:.8}
+    .badges{display:flex;gap:8px;flex-wrap:wrap}
+    .badge{font-size:12px;padding:6px 10px;border-radius:999px;border:1px solid #2d4f6b;background:#0c1722;display:inline-flex;gap:6px;align-items:center}
     textarea,input{width:100%;padding:10px;border-radius:10px;border:1px solid #2d4f6b;background:#0b1117;color:#e6edf3}
     textarea{min-height:160px}
     pre{white-space:pre-wrap;background:#0b1117;border:1px solid #1f2937;border-radius:10px;padding:10px}
     .mono{font-family:ui-monospace,Consolas,Menlo,monospace}
-    @media (max-width:760px){ .wrap{padding:10px} }
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px;border-bottom:1px solid #1f2937;vertical-align:top}
+    .nowrap{white-space:nowrap}
+    @media (max-width:760px){ .wrap{padding:10px} table{font-size:14px} }
   </style>`;
+}
+
+function secretFromEnv(env){
+  return env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || "";
+}
+
+function topLinksHtml(env, sectionTitle = ""){
+  const sec = encodeURIComponent(secretFromEnv(env));
+  const links = [
+    `<a class="btn" href="/admin/learn/html?s=${sec}">🧠 Learn</a>`,
+    `<a class="btn" href="/admin/repo/html?s=${sec}">📁 Repo</a>`,
+    `<a class="btn" href="/admin/checklist/html?s=${sec}">📝 Checklist</a>`,
+    `<a class="btn" href="/admin/statut/html?s=${sec}">📜 Статут</a>`
+  ].join(" ");
+  const publicHint = `<span class="muted">Readonly без секрету: додай <code>?public=1</code> до URL</span>`;
+  return `
+    <div class="card row">
+      <h2 style="margin:0">${sectionTitle || "Панель"}</h2>
+      <div class="row" style="gap:8px">${links}</div>
+      <div class="muted" style="width:100%;margin-top:6px">${publicHint}</div>
+    </div>
+  `;
 }
 
 // ───────────────────────── Checklist core ─────────────────────────
@@ -83,14 +110,15 @@ export async function readChecklist(env) {
 
 export async function writeChecklist(env, text) {
   await kvPut(env.CHECKLIST_KV, K_CHECKLIST, String(text || ""));
-  await appendChecklistLog(env, `replace checklist (${(String(text||"")).length} chars)`);
+  await appendChecklistLog(env, `checklist: replace (${(String(text||"")).length} chars)`);
 }
 
 export async function appendChecklist(env, line) {
   const cur = await readChecklist(env);
-  const next = (cur ? cur + "\n" : "") + String(line || "");
+  const toAdd = String(line || "");
+  const next = (cur ? (cur.endsWith("\n") ? cur : cur + "\n") : "") + toAdd;
   await kvPut(env.CHECKLIST_KV, K_CHECKLIST, next);
-  await appendChecklistLog(env, `append checklist line (${(String(line||"")).length} chars)`);
+  await appendChecklistLog(env, `checklist: append (${toAdd.length} chars)`);
 }
 
 export async function saveArchive(env, label = "manual") {
@@ -98,7 +126,7 @@ export async function saveArchive(env, label = "manual") {
   const ts = nowISO().replace(/[:.]/g, "-");
   const key = `archive:${ts}`;
   await kvPut(env.CHECKLIST_KV, key, cur);
-  await appendChecklistLog(env, `archive saved: ${key} (${label})`);
+  await appendChecklistLog(env, `checklist: archive saved: ${key} (${label})`);
   return key;
 }
 
@@ -106,7 +134,12 @@ export async function checklistHtml(env) {
   const css = baseCss();
   const text = await readChecklist(env);
   const log = await kvGet(env.CHECKLIST_KV, K_CHECKLIST_LOG, "");
-  const sec = env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || "";
+  const sec = secretFromEnv(env);
+
+  const lastUpdate = (() => {
+    const L = (log || "").trim().split("\n");
+    return L.length ? L[L.length - 1] : "—";
+  })();
 
   return `<!doctype html>
 <html lang="uk">
@@ -118,8 +151,10 @@ ${css}
 </head>
 <body>
   <div class="wrap">
+    ${topLinksHtml(env, "📝 Checklist")}
+
     <div class="card row">
-      <h2 style="margin:0">📝 Checklist</h2>
+      <div class="muted">Останнє оновлення: <span class="mono">${esc(lastUpdate)}</span></div>
       <div class="row" style="gap:8px">
         <a class="btn" href="/admin/checklist/html?s=${encodeURIComponent(sec)}">Оновити</a>
       </div>
@@ -161,18 +196,28 @@ export async function readStatut(env) {
 
 export async function writeStatut(env, text) {
   await kvPut(env.CHECKLIST_KV, K_STATUT, String(text || ""));
+  await appendChecklistLog(env, `statut: replace (${(String(text||"")).length} chars)`);
 }
 
 export async function appendStatut(env, line) {
   const cur = await readStatut(env);
-  const next = (cur ? cur + "\n" : "") + String(line || "");
+  const toAdd = String(line || "");
+  const next = (cur ? (cur.endsWith("\n") ? cur : cur + "\n") : "") + toAdd;
   await kvPut(env.CHECKLIST_KV, K_STATUT, next);
+  await appendChecklistLog(env, `statut: append (${toAdd.length} chars)`);
 }
 
 export async function statutHtml(env) {
   const css = baseCss();
   const text = await readStatut(env);
-  const sec = env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || "";
+  const log = await kvGet(env.CHECKLIST_KV, K_CHECKLIST_LOG, "");
+  const sec = secretFromEnv(env);
+
+  const lastUpdate = (() => {
+    const L = (log || "").trim().split("\n");
+    const last = L.reverse().find(x => /statut: /.test(x));
+    return last || (L.length ? L[0] : "—");
+  })();
 
   return `<!doctype html>
 <html lang="uk">
@@ -184,8 +229,10 @@ ${css}
 </head>
 <body>
   <div class="wrap">
+    ${topLinksHtml(env, "📜 Статут")}
+
     <div class="card row">
-      <h2 style="margin:0">📜 Статут</h2>
+      <div class="muted">Останнє оновлення: <span class="mono">${esc(lastUpdate)}</span></div>
       <div class="row" style="gap:8px">
         <a class="btn" href="/admin/statut/html?s=${encodeURIComponent(sec)}">Оновити</a>
       </div>
@@ -206,6 +253,10 @@ ${css}
         <p><input name="line" placeholder="Додати рядок"/></p>
         <p><button class="btn" type="submit">＋ Додати</button></p>
       </form>
+      <details class="muted" style="margin-top:10px">
+        <summary>Загальний лог (включно зі статутом)</summary>
+        <pre class="mono" style="max-height:280px;overflow:auto">${esc(log || "—")}</pre>
+      </details>
     </div>
   </div>
 </body>
@@ -222,6 +273,7 @@ export async function repoHtml(env) {
 <html lang="uk"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Repo (R2)</title>${css}</head>
 <body><div class="wrap">
+  ${topLinksHtml(env, "📁 Repo (R2)")}
   <div class="card">R2 не прив’язано (LEARN_BUCKET).</div>
 </div></body></html>`;
   }
@@ -242,12 +294,15 @@ export async function repoHtml(env) {
   const rows = items.length ? items.map(o => {
     const size = (o.size || 0).toLocaleString("uk-UA");
     const uploaded = o.uploaded ? new Date(o.uploaded).toISOString() : "";
+    // Пряма роздача з R2 потребує public binding / signed URL — лишаємо ключ
     return `<tr>
       <td class="mono" style="word-break:break-all">${esc(o.key)}</td>
-      <td>${size} B</td>
-      <td class="mono">${esc(uploaded)}</td>
+      <td class="nowrap">${size} B</td>
+      <td class="mono nowrap">${esc(uploaded)}</td>
     </tr>`;
   }).join("") : `<tr><td colspan="3" class="mono">Порожньо.</td></tr>`;
+
+  const sec = encodeURIComponent(secretFromEnv(env));
 
   return `<!doctype html>
 <html lang="uk">
@@ -259,22 +314,31 @@ ${css}
 </head>
 <body>
   <div class="wrap">
+    ${topLinksHtml(env, "📁 Repo (R2: repo/*)")}
+
     <div class="card row">
-      <h2 style="margin:0">📁 Repo (R2: repo/*)</h2>
-      <a class="btn" href="/admin/repo/html">Оновити</a>
+      <div class="muted">Разом файлів: <b>${items.length}</b></div>
+      <div class="row" style="gap:8px">
+        <a class="btn" href="/admin/repo/html?s=${sec}">Оновити</a>
+      </div>
     </div>
 
     <div class="card" style="overflow:auto">
-      <table style="width:100%;border-collapse:collapse">
+      <table>
         <thead>
-          <tr><th style="text-align:left;padding:8px;border-bottom:1px solid #1f2937">Key</th>
-              <th style="text-align:left;padding:8px;border-bottom:1px solid #1f2937">Size</th>
-              <th style="text-align:left;padding:8px;border-bottom:1px solid #1f2937">Uploaded</th></tr>
+          <tr>
+            <th>Key</th>
+            <th class="nowrap">Size</th>
+            <th class="nowrap">Uploaded</th>
+          </tr>
         </thead>
         <tbody>
           ${rows}
         </tbody>
       </table>
+      <div class="muted" style="margin-top:8px">
+        Публічний readonly: додай <code>?public=1</code> до URL (якщо дозволено у конфіг).
+      </div>
     </div>
   </div>
 </body>
