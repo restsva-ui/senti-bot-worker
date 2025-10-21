@@ -42,9 +42,16 @@ export function energyLinks(env, userId) {
   };
 }
 
+/* ──────────────── ВНУТРІШНІ ДРІБНИЦІ ─────────────── */
+function botToken(env) {
+  return env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN || "";
+}
+function hasToken(env) { return !!botToken(env); }
+
 /* ───────────────────── ВІДПРАВКА ТЕКСТУ ─────────── */
 export async function sendPlain(env, chatId, text, extra = {}) {
-  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+  if (!hasToken(env)) return;
+  const token = botToken(env);
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
   const body = {
     chat_id: chatId,
@@ -53,20 +60,32 @@ export async function sendPlain(env, chatId, text, extra = {}) {
   };
   if (extra.parse_mode)  body.parse_mode  = extra.parse_mode;
   if (extra.reply_markup) body.reply_markup = extra.reply_markup;
-  if (typeof extra.disable_notification === "boolean") {
+  if (typeof extra.disable_notification === "boolean")
     body.disable_notification = extra.disable_notification;
-  }
+  if (extra.reply_to_message_id)
+    body.reply_to_message_id = extra.reply_to_message_id;
 
-  await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  }).catch(() => {});
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {}
+}
+
+/* Швидкі хелпери */
+export function sendHtml(env, chatId, html, extra = {}) {
+  return sendPlain(env, chatId, html, { ...extra, parse_mode: "HTML" });
+}
+export function sendMarkdown(env, chatId, md, extra = {}) {
+  return sendPlain(env, chatId, md, { ...extra, parse_mode: "MarkdownV2" });
 }
 
 /* ──────────────── ДІЇ ЧАТУ (typing/uploading) ───── */
 export async function sendChatAction(env, chatId, action = "typing") {
-  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+  if (!hasToken(env)) return;
+  const token = botToken(env);
   const url = `https://api.telegram.org/bot${token}/sendChatAction`;
   const body = { chat_id: chatId, action };
   try {
@@ -124,7 +143,8 @@ export async function withUploading(env, chatId, fn, { action = "upload_document
    (опційно; дає UX на кшталт GPT — "Думаю…" з крапками)
 */
 export async function startSpinner(env, chatId, base = "Думаю над відповіддю") {
-  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+  if (!hasToken(env)) return { stop: async () => {} };
+  const token = botToken(env);
 
   async function send(text) {
     try {
@@ -187,6 +207,8 @@ export const TG = {
   ADMIN,
   energyLinks,
   sendPlain,
+  sendHtml,
+  sendMarkdown,
   parseAiCommand,
   askLocationKeyboard,
   // нові/сумісність
