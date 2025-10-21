@@ -13,7 +13,7 @@ import { loadSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
-import { enqueueLearn, listQueued, getRecentInsights } from "../lib/kvLearnQueue.js"; // Learn + інсайти
+import { enqueueLearn, listQueued, getRecentInsights } from "../lib/kvLearnQueue.js";
 
 // APIs
 import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from "../apis/time.js";
@@ -26,7 +26,7 @@ import { setUserLocation, getUserLocation } from "../lib/geo.js";
 const {
   BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_LEARN,
   mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand,
-  askLocationKeyboard, withTyping // ⬅️ головне: беремо withTyping з tg.js
+  askLocationKeyboard, sendAction, // ← сучасний індикатор «typing»
 } = TG;
 
 // ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
@@ -143,14 +143,13 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   }
   await spendEnergy(env, userId, need, "vision");
 
-  // typing-індикатор без “пісочного годинника”
-  const resp = await withTyping(env, chatId, async () => {
-    const url = await tgFileUrl(env, att.file_id);
-    const prompt = caption || "Опиши, що на зображенні, коротко і по суті.";
-    return await cfVisionDescribe(env, url, prompt, lang);
-  });
+  // сучасний «typing…» без зайвого тексту
+  await sendAction(env, chatId, "typing");
 
+  const url = await tgFileUrl(env, att.file_id);
+  const prompt = caption || "Опиши, що на зображенні, коротко і по суті.";
   try {
+    const resp = await cfVisionDescribe(env, url, prompt, lang);
     await sendPlain(env, chatId, `🖼️ ${resp}`);
   } catch (e) {
     if (ADMIN(env, userId)) { await sendPlain(env, chatId, `❌ Vision error: ${String(e.message || e).slice(0, 180)}`); }
@@ -170,12 +169,15 @@ async function buildSystemHint(env, chatId, userId) {
 - Speak naturally and human-like with warmth and clarity.
 - Prefer concise, practical answers; expand only when asked.`;
 
-  // 👇 додаємо останні інсайти з Learn
+  // 👇 додамо останні інсайти з Learn, щоб Сенті реально "знав" свіже
   let insightsBlock = "";
   try {
     const insights = await getRecentInsights(env, { limit: 5 });
     if (insights?.length) {
-      const lines = insights.map(i => `• ${i.insight}${i.r2Key ? " [R2]" : ""}`);
+      const lines = insights.map((i) => {
+        const badge = i.summary ? " ✅" : "";
+        return `• ${i.insight}${i.r2Key ? " [R2]" : ""}${badge}`;
+      });
       insightsBlock = `[Нещодавні знання]\n${lines.join("\n")}`;
     }
   } catch {}
@@ -421,6 +423,7 @@ export async function handleTelegramWebhook(req, env) {
     await safe(async () => {
       const q = aiArg || "";
       if (!q) { await sendPlain(env, chatId, t(lang, "senti_tip")); return; }
+
       const cur = await getEnergy(env, userId);
       const need = Number(cur.costText ?? 1);
       if ((cur.energy ?? 0) < need) {
@@ -430,19 +433,20 @@ export async function handleTelegramWebhook(req, env) {
       }
       await spendEnergy(env, userId, need, "text");
 
-      // typing-індикатор навколо LLM-виклику
-      const { short, full } = await withTyping(env, chatId, async () => {
-        const systemHint = await buildSystemHint(env, chatId, userId);
-        const name = await getPreferredName(env, msg);
-        const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(q);
-        return await callSmartLLM(env, q, { lang, name, systemHint, expand, adminDiag: isAdmin });
-      });
+      // сучасний «typing…»
+      await sendAction(env, chatId, "typing");
+
+      const systemHint = await buildSystemHint(env, chatId, userId);
+      const name = await getPreferredName(env, msg);
+      const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(q);
+
+      const { short, full } = await callSmartLLM(env, q, { lang, name, systemHint, expand, adminDiag: isAdmin });
 
       await pushTurn(env, userId, "user", q);
       await pushTurn(env, userId, "assistant", full);
 
       const after = (cur.energy - need);
-      if (full.length > short.length) { for (const ch of chunkText(full)) await sendPlain(env, chatId, ch); }
+      if (expand && full.length > short.length) { for (const ch of chunkText(full)) await sendPlain(env, chatId, ch); }
       else { await sendPlain(env, chatId, short); }
       if (after <= Number(cur.low ?? 10)) {
         const links = energyLinks(env, userId);
@@ -569,19 +573,19 @@ export async function handleTelegramWebhook(req, env) {
       }
       await spendEnergy(env, userId, need, "text");
 
-      // typing-індикатор навколо LLM-виклику
-      const { short, full } = await withTyping(env, chatId, async () => {
-        const systemHint = await buildSystemHint(env, chatId, userId);
-        const name = await getPreferredName(env, msg);
-        const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
-        return await callSmartLLM(env, textRaw, { lang, name, systemHint, expand, adminDiag: isAdmin });
-      });
+      // сучасний «typing…»
+      await sendAction(env, chatId, "typing");
+
+      const systemHint = await buildSystemHint(env, chatId, userId);
+      const name = await getPreferredName(env, msg);
+      const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
+      const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand, adminDiag: isAdmin });
 
       await pushTurn(env, userId, "user", textRaw);
       await pushTurn(env, userId, "assistant", full);
 
       const after = (cur.energy - need);
-      if (full.length > short.length) { for (const ch of chunkText(full)) await sendPlain(env, chatId, ch); }
+      if (expand && full.length > short.length) { for (const ch of chunkText(full)) await sendPlain(env, chatId, ch); }
       else { await sendPlain(env, chatId, short); }
       if (after <= Number(cur.low ?? 10)) {
         const links = energyLinks(env, userId);
