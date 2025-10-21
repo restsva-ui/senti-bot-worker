@@ -1,272 +1,167 @@
 // src/lib/kvChecklist.js
-// KV-backed checklist/statut utilities with robust fallbacks and a simple HTML UI.
+// В одному модулі — чекліст + прості HTML-рендери Repo та Статуту.
+// KV binding: CHECKLIST_KV (або STATE_KV як fallback)
+// R2 binding (необов'язково): LEARN_BUCKET — для архівів (zip) та списку Repo.
 
-const CHECKLIST_KEY = "service:checklist";
-const STATUT_KEY = "service:statut";
-const ARCHIVE_PREFIX = "archive:checklist:";
-
-// --- small helpers -----------------------------------------------------------
-function fmtNow() { return new Date().toISOString(); }
-
-async function safeGet(kv, key, fallback = "") {
-  try {
-    const v = await kv.get(key);
-    return v ?? fallback;
-  } catch (e) {
-    console.error("[kvChecklist.get]", key, e?.message || e);
-    return fallback;
-  }
+function pickKV(env) {
+  return env.CHECKLIST_KV || env.STATE_KV || env.LEARN_QUEUE_KV || env.TODO_KV;
 }
-async function safePut(kv, key, value, options) {
+function esc(s = "") {
+  return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+function fmtLocal(dt, tz) {
   try {
-    await kv.put(key, value, options);
-    return true;
-  } catch (e) {
-    console.error("[kvChecklist.put]", key, e?.message || e);
-    return false;
-  }
+    return new Date(dt).toLocaleString("uk-UA", { timeZone: tz || "Europe/Kyiv" });
+  } catch { return String(dt); }
 }
 
-// --- public API: checklist ---------------------------------------------------
+// ── ЧЕКЛІСТ ──────────────────────────────────────────────────────────────────
+const KEY_TEXT = "checklist:text";
+const KEY_LOG  = "checklist:log"; // простий журнал
+
 export async function readChecklist(env) {
-  if (!env?.CHECKLIST_KV) return "";
-  return await safeGet(env.CHECKLIST_KV, CHECKLIST_KEY, "");
+  const kv = pickKV(env);
+  return (await kv?.get(KEY_TEXT, "text")) || "";
 }
 
 export async function writeChecklist(env, text) {
-  if (!env?.CHECKLIST_KV) return false;
-  return await safePut(env.CHECKLIST_KV, CHECKLIST_KEY, String(text || ""));
+  const kv = pickKV(env);
+  if (!kv) return;
+  await kv.put(KEY_TEXT, String(text || ""));
+  await appendLog(env, `✍️ replace checklist (${(String(text||"").length)} chars)`);
 }
 
 export async function appendChecklist(env, line) {
-  if (!env?.CHECKLIST_KV) return false;
-  const cur = await readChecklist(env);
-  const next = (cur ? cur + "\n" : "") + String(line || "").trim();
-  return await writeChecklist(env, next);
+  const kv = pickKV(env);
+  if (!kv) return;
+  const cur = (await kv.get(KEY_TEXT, "text")) || "";
+  const next = cur ? `${cur}\n${String(line || "")}` : String(line || "");
+  await kv.put(KEY_TEXT, next);
+  await appendLog(env, `➕ append "${String(line||"").slice(0,80)}"`);
 }
 
-// --- public API: statut ------------------------------------------------------
-export async function readStatut(env) {
-  if (!env?.CHECKLIST_KV) return "";
-  return await safeGet(env.CHECKLIST_KV, STATUT_KEY, "");
+async function appendLog(env, msg) {
+  const kv = pickKV(env);
+  if (!kv) return;
+  const now = new Date().toISOString();
+  const cur = (await kv.get(KEY_LOG, "text")) || "";
+  const line = `[${fmtLocal(now, env.TIMEZONE)}] ${msg}`;
+  const next = cur ? `${line}\n${cur}` : line;
+  await kv.put(KEY_LOG, next.slice(0, 20000)); // обрізаємо довгі логи
 }
 
-export async function writeStatut(env, html) {
-  if (!env?.CHECKLIST_KV) return false;
-  return await safePut(env.CHECKLIST_KV, STATUT_KEY, String(html || ""));
-}
-
-// --- archive (optional) ------------------------------------------------------
-export async function listArchives(env) {
-  if (!env?.CHECKLIST_KV || !env.CHECKLIST_KV.list) return [];
-  try {
-    const { keys } = await env.CHECKLIST_KV.list({ prefix: ARCHIVE_PREFIX });
-    return keys?.map(k => k.name)?.sort()?.reverse() || [];
-  } catch (e) {
-    console.error("[kvChecklist.listArchives]", e?.message || e);
-    return [];
+export async function saveArchive(env, reason = "manual") {
+  // Зберігає чекліст в R2 (як .txt) якщо LEARN_BUCKET під'єднаний.
+  const bucket = env.LEARN_BUCKET;
+  const text = await readChecklist(env);
+  if (!bucket || !text) {
+    await appendLog(env, `⛔ archive skipped (bucket:${!!bucket}, text:${text ? 'yes':'no'})`);
+    return { ok:false, skipped:true };
   }
-}
-export async function getArchive(env, key) {
-  if (!env?.CHECKLIST_KV) return "";
-  const full = key?.startsWith(ARCHIVE_PREFIX) ? key : ARCHIVE_PREFIX + String(key || "");
-  return await safeGet(env.CHECKLIST_KV, full, "");
-}
-export async function saveArchive(env, note = "manual") {
-  if (!env?.CHECKLIST_KV) return false;
-  const stamp = fmtNow().replace(/[:.]/g, "-"); // safe for key
-  const key = `${ARCHIVE_PREFIX}${stamp}__${note}`;
-  const body = await readChecklist(env);
-  return await safePut(env.CHECKLIST_KV, key, body);
-}
-
-// --- HTML views --------------------------------------------------------------
-export async function statutHtml(env) {
-  const body = await readStatut(env);
-  const sec = env?.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
-  const checklistHref = `/admin/checklist${sec}`;
-  return `<!doctype html>
-<html lang="uk">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Statut</title>
-<style>
-  body{font:14px/1.4 -apple-system,system-ui,Segoe UI,Roboto,Ubuntu,sans-serif;padding:16px;background:#0b0b0b;color:#e6e6e6}
-  a{color:#7dd3fc}
-  .wrap{max-width:900px;margin:0 auto}
-  .card{background:#111;border:1px solid #222;border-radius:12px;padding:16px}
-  h1{margin:0 0 12px;font-size:18px}
-  textarea{width:100%;min-height:300px;background:#0d0d0d;color:#eaeaea;border:1px solid #2a2a2a;border-radius:10px;padding:10px}
-  .row{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
-  button,input[type=submit]{background:#1f2937;border:1px solid #334155;color:#e5e7eb;border-radius:10px;padding:8px 12px}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <h1>📜 Statut</h1>
-  <div class="card">
-    <form method="post" action="/admin/statut?save=1">
-      <textarea name="text" placeholder="HTML...">${body || ""}</textarea>
-      <div class="row">
-        <input type="submit" value="Зберегти"/>
-        <a href="${checklistHref}">➡️ до Checklist</a>
-      </div>
-    </form>
-  </div>
-</div>
-</body>
-</html>`;
+  const ts = new Date().toISOString().replace(/[:]/g, "-");
+  const key = `senti_archive/${ts}__checklist__${reason}.txt`;
+  await bucket.put(key, new Blob([text], { type: "text/plain; charset=utf-8" }));
+  await appendLog(env, `📦 archived → ${key}`);
+  return { ok: true, key };
 }
 
 export async function checklistHtml(env) {
-  const body = await readChecklist(env);
-  const empty = !String(body).trim();
+  const kv = pickKV(env);
+  const text = await readChecklist(env);
+  const log  = (await kv?.get(KEY_LOG, "text")) || "";
 
-  const lines = (body || "").split(/\n/);
-  const last200 = lines.slice(-200); // сирі рядки (UTC)
-  const raw = last200.join("\n");
+  const tz = env.TIMEZONE || "Europe/Kyiv";
+  const css = `
+  <style>
+    :root{--bg:#0b0f14;--panel:#11161d;--border:#1f2937;--txt:#e6edf3;--muted:#9aa7b2;--btn:#223449;--btnb:#2d4f6b}
+    body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,Segoe UI,Roboto,sans-serif}
+    .wrap{max-width:980px;margin:0 auto;padding:12px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px;margin:10px 0}
+    .btn{display:inline-block;padding:10px 14px;border-radius:10px;background:var(--btn);border:1px solid var(--btnb);color:var(--txt);text-decoration:none}
+    textarea{width:100%;min-height:220px;background:#0b1117;color:var(--txt);border:1px solid var(--border);border-radius:10px;padding:10px}
+    pre{white-space:pre-wrap;background:#0b1117;border:1px solid var(--border);border-radius:10px;padding:10px}
+  </style>`;
 
-  // посилання з урахуванням секрету
-  const sec = env?.WEBHOOK_SECRET ? `?s=${encodeURIComponent(env.WEBHOOK_SECRET)}` : "";
-  const repoHref = `/admin/repo/html${sec}`;
-  const statutHref = `/admin/statut${sec}`;
-  const improveAction = `/ai/improve${sec}`;
+  const s = esc(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || "");
+  const links = `
+    <div class="row">
+      <a class="btn" href="/admin/repo/html">📂 Відкрити Repo</a>
+      <a class="btn" href="/admin/statut/html">📜 Статут</a>
+      <a class="btn" href="/admin/energy/html?s=${encodeURIComponent(s)}&u=${encodeURIComponent(env.TELEGRAM_ADMIN_ID||"")}">⚡ Відкрити Energy</a>
+    </div>`;
 
-  // ⚡ кнопка Energy (HTML-сторінка) для ADMIN_ID
-  const params = [];
-  if (env?.WEBHOOK_SECRET) params.push(`s=${encodeURIComponent(env.WEBHOOK_SECRET)}`);
-  const adminId = encodeURIComponent(env?.TELEGRAM_ADMIN_ID || "");
-  params.push(`u=${adminId}`);
-  const energyHref = `/admin/energy/html?${params.join("&")}`;
+  return `
+  ${css}
+  <div class="wrap">
+    <h2>📝 Checklist</h2>
+    ${links}
 
-  const esc = (s)=>s.replace(/[&<>]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
-
-  return `<!doctype html>
-<html lang="ук">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Checklist</title>
-<meta http-equiv="refresh" content="15">
-<style>
-  body{font:14px/1.4 -apple-system,system-ui,Segoe UI,Roboto,Ubuntu,sans-serif;padding:16px;background:#0b0b0b;color:#e6e6e6}
-  a{color:#7dd3fc}
-  .wrap{max-width:900px;margin:0 auto}
-  .card{background:#111;border:1px solid #222;border-radius:12px;padding:12px}
-  h1{margin:0 0 12px;font-size:18px}
-  textarea{width:100%;min-height:260px;background:#0d0d0d;color:#eaeaea;border:1px solid #2a2a2a;border-radius:10px;padding:10px}
-  input[type=text]{width:100%;background:#0d0d0d;color:#eaeaea;border:1px solid #2a2a2a;border-radius:10px;padding:10px}
-  .row{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap;align-items:center}
-  button,input[type=submit]{background:#1f2937;border:1px solid #334155;color:#e5e7eb;border-radius:10px;padding:8px 12px}
-  .muted{opacity:.7}
-  .danger{background:#3a1f1f;border-color:#5b2b2b}
-  .viewer{max-height:340px;overflow:auto;
-          white-space:pre-wrap;      /* переносимо рядки */
-          overflow-wrap:anywhere;    /* довгі токени теж ламаємо */
-          font-family: ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
-          background:#0d0d0d;border:1px solid #2a2a2a;border-radius:10px;padding:10px}
-  .controls{display:flex;gap:10px;align-items:center;justify-content:space-between;margin:8px 0}
-  details>summary{cursor:pointer;opacity:.9}
-  .dot{display:inline-block;width:8px;height:8px;border-radius:999px;background:#22c55e;margin-left:6px}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <h1>📝 Checklist</h1>
-  <div class="row">
-    <a href="${repoHref}">📁 Відкрити Repo</a>
-    <a href="${statutHref}">📜 Статут</a>
-    <a href="${energyHref}">⚡ Відкрити Energy</a>
-    <form method="post" action="/admin/checklist?archive=1">
-      <button title="Зберегти знімок у архів">💾 Зберегти архів</button>
-    </form>
-    ${
-      env?.WEBHOOK_SECRET
-        ? `<form method="post" action="${improveAction}">
-             <button class="danger" title="Запустити нічного агента прямо зараз">🌙 Запустити нічного агента</button>
-           </form>`
-        : `<span class="muted">🌙 Для ручного запуску нічного агента задай WEBHOOK_SECRET у ENV</span>`
-    }
-    <span class="muted">оновлюється кожні 15с<span class="dot" title="alive"></span></span>
-  </div>
-
-  <div class="card">
-    <div class="controls">
-      <strong>Останні записи (локальний час)</strong>
-      <label style="display:flex;gap:6px;align-items:center">
-        <input type="checkbox" id="newestFirst" checked>
-        <span>Нові зверху</span>
-      </label>
-    </div>
-    <pre id="viewer" class="viewer">${esc(raw)}</pre>
-    <div class="muted" id="tzNote" style="margin-top:6px"></div>
-  </div>
-
-  <div class="card" style="margin-top:10px">
-    ${empty ? '<div class="muted">(поки немає записів)</div>' : ''}
-    <details>
-      <summary>✏️ Редагувати сирий текст (UTC)</summary>
+    <div class="card">
       <form method="post" action="/admin/checklist?replace=1">
-        <textarea name="text" placeholder="повний текст">${raw}</textarea>
-        <div class="row">
-          <input type="submit" value="Зберегти"/>
-        </div>
+        <textarea name="text" placeholder="Введіть повний чекліст…">${esc(text)}</textarea>
+        <p><button class="btn" type="submit">💾 Зберегти</button>
+           <button class="btn" formaction="/admin/checklist?archive=1">📦 Зберегти архів</button></p>
       </form>
-    </details>
-  </div>
+    </div>
 
-  <div class="card" style="margin-top:10px">
-    <form method="post" action="/admin/checklist?append=1">
-      <input type="text" name="line" placeholder="новий рядок…"/>
-      <div class="row">
-        <input type="submit" value="Додати рядок"/>
-      </div>
-    </form>
-  </div>
-</div>
+    <div class="card">
+      <h3 style="margin-top:0">Журнал</h3>
+      <pre>${esc(log)}</pre>
+      <div class="muted">Показано у локальному часі (${esc(tz)}).</div>
+    </div>
+  </div>`;
+}
 
-<script>
-(function(){
-  const viewer = document.getElementById('viewer');
-  const newestFirst = document.getElementById('newestFirst');
-  const tzNote = document.getElementById('tzNote');
-
-  const RAW = viewer.textContent;
-
-  const fmt = new Intl.DateTimeFormat(navigator.language || 'uk-UA', {
-    dateStyle: 'short',
-    timeStyle: 'medium'
-  });
-  const tzOffsetMin = -new Date().getTimezoneOffset(); // хвилини схід +, захід -
-  const tzSign = tzOffsetMin >= 0 ? '+' : '-';
-  const tzAbs = Math.abs(tzOffsetMin);
-  const tzStr = 'GMT' + tzSign + String(Math.floor(tzAbs/60)).padStart(2,'0') + ':' + String(tzAbs%60).padStart(2,'0');
-  tzNote.textContent = 'Показано у локальному часі (' + Intl.DateTimeFormat().resolvedOptions().timeZone + ', ' + tzStr + ').';
-
-  function toLocalPretty(s){
-    return s.replace(/\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z/g, (m)=>{
-      const d = new Date(m);
-      return isNaN(d) ? m : fmt.format(d);
-    });
+// ── REPO (список архівів у R2) ───────────────────────────────────────────────
+export async function repoHtml(env) {
+  const bucket = env.LEARN_BUCKET;
+  const css = `
+  <style>
+    :root{--bg:#0b0f14;--panel:#11161d;--border:#1f2937;--txt:#e6edf3;--muted:#9aa7b2}
+    body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,Segoe UI,Roboto,sans-serif}
+    .wrap{max-width:980px;margin:0 auto;padding:12px}
+    .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px;margin:10px 0}
+    a{color:#8ab4f8;text-decoration:none}
+  </style>`;
+  if (!bucket) {
+    return `${css}<div class="wrap"><div class="card"><b>Repo</b><p class="muted">R2 bucket не під’єднано (LEARN_BUCKET).</p></div></div>`;
   }
+  const objects = await bucket.list({ prefix: "senti_archive/" });
+  const items = (objects?.objects || []).sort((a,b)=> (b.uploaded?.getTime?.()||0)-(a.uploaded?.getTime?.()||0));
 
-  function render(){
-    const lines = RAW.split(/\\n/);
-    const ordered = newestFirst.checked ? lines.slice().reverse() : lines;
-    let out = ordered.join("\\n");
-    out = toLocalPretty(out);
-    viewer.textContent = out;
+  const list = items.length
+    ? `<ul>${items.map(o => {
+        const name = o.key.split("/").pop();
+        const url  = bucket.getPublicUrl ? bucket.getPublicUrl(o.key) : `#${o.key}`;
+        const when = o.uploaded ? ` (${esc(fmtLocal(o.uploaded, env.TIMEZONE))})` : "";
+        return `<li><a href="${esc(url)}" target="_blank" rel="noopener">${esc(name)}</a>${when}</li>`;
+      }).join("")}</ul>`
+    : `<p class="muted">Поки що немає архівів.</p>`;
 
-    // автопрокрутка: останні — одразу у видимій зоні
-    if (newestFirst.checked) viewer.scrollTop = 0;
-    else viewer.scrollTop = viewer.scrollHeight;
+  return `${css}<div class="wrap"><div class="card"><b>📁 Repo</b>${list}</div></div>`;
+}
+
+// ── СТАТУТ (беремо з KV ключа statut:html або statut:text) ──────────────────
+export async function statutHtml(env) {
+  const kv = pickKV(env);
+  const htmlRaw = await kv?.get("statut:html", "text");
+  const textRaw = await kv?.get("statut:text", "text");
+
+  const css = `
+  <style>
+    :root{--bg:#0b0f14;--panel:#11161d;--border:#1f2937;--txt:#e6edf3}
+    body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,Segoe UI,Roboto,sans-serif}
+    .wrap{max-width:980px;margin:0 auto;padding:12px}
+    .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px;margin:10px 0}
+    pre{white-space:pre-wrap}
+  </style>`;
+
+  if (htmlRaw) {
+    return `${css}<div class="wrap"><div class="card"><b>📜 Статут</b><div>${htmlRaw}</div></div></div>`;
   }
-
-  render();
-  newestFirst.addEventListener('change', render);
-})();
-</script>
-</body>
-</html>`;
+  if (textRaw) {
+    return `${css}<div class="wrap"><div class="card"><b>📜 Статут</b><pre>${esc(textRaw)}</pre></div></div>`;
+  }
+  return `${css}<div class="wrap"><div class="card"><b>📜 Статут</b><p class="muted">Немає даних у KV (keys: <code>statut:html</code> або <code>statut:text</code>).</p></div></div>`;
 }
