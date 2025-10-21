@@ -1,9 +1,6 @@
-// src/index.js — маршрути: Telegram, Learn, Checklist, Energy, Repo, Статут
+// src/index.js — Cloudflare Workers entrypoint (router + Learn admin + public views)
 
 import { handleTelegramWebhook } from "./routes/webhook.js";
-import { handleAdminChecklist } from "./routes/adminChecklist.js";
-import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
-import { handleAdminEnergy } from "./routes/adminEnergy.js";
 
 import {
   runLearnOnce,
@@ -13,210 +10,478 @@ import {
   getRecentInsights,
 } from "./lib/kvLearnQueue.js";
 
-import { repoHtml, statutHtml, logChecklist } from "./lib/kvChecklist.js";
+import {
+  checklistHtml,
+  readChecklist, writeChecklist, appendChecklist, saveArchive,
+  statutHtml,
+  readStatut, writeStatut, appendStatut,
+  repoHtml,
+} from "./lib/kvChecklist.js";
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+/* ───────────────────────── helpers ───────────────────────── */
+
 function secFromEnv(env) {
-  return env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || "";
+  return (
+    env.WEBHOOK_SECRET ||
+    env.TG_WEBHOOK_SECRET ||
+    env.TELEGRAM_SECRET_TOKEN ||
+    ""
+  );
 }
 function isAuthed(url, env) {
   const s = url.searchParams.get("s") || "";
   const exp = secFromEnv(env);
   return !!exp && s === exp;
 }
+// allow public=1 to bypass secret for readonly pages (repo/statut/checklist-view)
+function wantPublic(url) {
+  return (url.searchParams.get("public") || "").trim() === "1";
+}
 function json(data, init = {}) {
   return new Response(JSON.stringify(data, null, 2), {
     status: init.status || 200,
-    headers: { "content-type": "application/json; charset=utf-8", ...(init.headers || {}) },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...(init.headers || {}),
+    },
   });
 }
 function html(markup, init = {}) {
   return new Response(String(markup || ""), {
     status: init.status || 200,
-    headers: { "content-type": "text/html; charset=utf-8", ...(init.headers || {}) },
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      ...(init.headers || {}),
+    },
   });
 }
-function notFound() { return json({ ok: false, error: "not_found" }, { status: 404 }); }
-function esc(s = "") { return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }
+function text(txt, init = {}) {
+  return new Response(String(txt || ""), {
+    status: init.status || 200,
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      ...(init.headers || {}),
+    },
+  });
+}
+function notFound() {
+  return json({ ok: false, error: "not_found" }, { status: 404 });
+}
+function unauthorized() {
+  return json({ ok: false, error: "unauthorized" }, { status: 401 });
+}
+function esc(s = "") {
+  return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
 
-// ── Learn HTML (мобільно-дружній; форма зверху; картки KV/R2) ───────────────
+/* ─────────────────────── Learn HTML (mobile-first) ───────────────────────
+   - форма додавання (url / text) — ЗВЕРХУ
+   - статус черги
+   - останній підсумок
+   - інсайти
+   - міні-виджети пам’яті (KV/R2) у вигляді бейджів-лічильників
+   - посилання на /admin/repo/html і список learn/ у R2
+------------------------------------------------------------------------- */
+async function r2Count(env, prefix, limit = 500) {
+  const b = env.LEARN_BUCKET;
+  if (!b) return 0;
+  let n = 0, cursor, guard = 0;
+  do {
+    const r = await b.list({ prefix, limit: Math.min(1000, limit), cursor });
+    n += (r.objects || []).length;
+    cursor = r.truncated ? r.cursor : undefined;
+    guard++;
+  } while (cursor && n < limit && guard < 20);
+  return n;
+}
+
 async function learnHtml(env, url) {
   const last = await getLastSummary(env).catch(() => "");
-  const queued = await listQueued(env, { limit: 50 }).catch(() => []);
-  const insights = await getRecentInsights(env, { limit: 10 }).catch(() => []);
+  const queued = await listQueued(env, { limit: 100 }).catch(() => []);
+  const insights = await getRecentInsights(env, { limit: 12 }).catch(() => []);
+
+  // міні-виджети (best-effort; без дорогих операцій)
+  const kvQueuedCount = Array.isArray(queued) ? queued.length : 0;
+  const kvInsightsCount = Array.isArray(insights) ? insights.length : 0;
+  const r2LearnCount = await r2Count(env, "learn/", 500).catch(() => 0);
+  const r2RepoCount  = await r2Count(env, "repo/", 500).catch(() => 0);
 
   const runUrl = (() => {
-    url.searchParams.set("s", secFromEnv(env));
     const u = new URL(url);
     u.pathname = "/admin/learn/run";
+    u.searchParams.set("s", secFromEnv(env));
     return u.toString();
   })();
 
-  const hasKV = !!env.LEARN_QUEUE_KV || !!env.STATE_KV;
-  const hasR2 = !!env.LEARN_BUCKET;
-
   const css = `
   <style>
-    :root{--bg:#0b0f14;--panel:#11161d;--border:#1f2937;--txt:#e6edf3;--muted:#9aa7b2;--btn:#223449;--btnb:#2d4f6b}
-    body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:var(--txt);margin:0}
+    :root{color-scheme:dark}
+    body{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#0b0f14;color:#e6edf3}
+    a{color:#8ab4f8;text-decoration:none}
+    a:hover{text-decoration:underline}
     .wrap{max-width:980px;margin:0 auto;padding:12px}
-    .row{display:flex;gap:8px;flex-wrap:wrap}
-    .btn{display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border-radius:12px;background:var(--btn);border:1px solid var(--btnb);color:var(--txt);text-decoration:none}
-    .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px;margin:10px 0}
-    .grid{display:grid;grid-template-columns:1fr;gap:12px}
-    @media(min-width:820px){.grid{grid-template-columns:1fr 1fr}}
-    input,textarea{width:100%;padding:10px;border-radius:8px;border:1px solid var(--btnb);background:#0b1117;color:var(--txt)}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .card{background:#11161d;border:1px solid #1f2937;border-radius:12px;padding:14px}
+    .row{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+    .btn{display:inline-block;padding:10px 14px;border-radius:10px;background:#223449;border:1px solid #2d4f6b;color:#e6edf3}
+    .btn:hover{background:#2a3f55}
+    .muted{opacity:.8}
+    input,textarea{width:100%;padding:10px;border-radius:10px;border:1px solid #2d4f6b;background:#0b1117;color:#e6edf3}
+    textarea{min-height:120px}
     ul{margin:0;padding-left:18px}
-    .muted{color:var(--muted)}
-    .ok{color:#34d399} .bad{color:#f87171}
+    li{margin:6px 0}
+    pre{white-space:pre-wrap;background:#0b1117;border:1px solid #1f2937;border-radius:10px;padding:10px}
+    .badges{display:flex;gap:8px;flex-wrap:wrap}
+    .badge{font-size:12px;padding:6px 10px;border-radius:999px;border:1px solid #2d4f6b;background:#0c1722;display:inline-flex;gap:6px;align-items:center}
+    .badge b{font-variant-numeric:tabular-nums}
+    .section-title{margin:0 0 8px}
+    @media (max-width: 760px){ .grid{grid-template-columns:1fr} .wrap{padding:10px} }
   </style>`;
 
-  const queuedList = queued.length
-    ? `<ul>${queued.map(q => `<li><span class="muted">${esc(q.kind)}</span> — ${esc(q?.payload?.name || q?.payload?.url || "item")} <span class="muted">(${esc(q.at)})</span></li>`).join("")}</ul>`
+  const queuedList = kvQueuedCount
+    ? `<ul>${queued.map(q =>
+        `<li><span class="muted">${esc(q.kind)}</span> — ${esc(q?.payload?.name || q?.payload?.url || "item")} <span class="muted">(${esc(q.at)})</span></li>`
+      ).join("")}</ul>`
     : `<p class="muted">Черга порожня.</p>`;
 
-  const insightsList = insights.length
-    ? `<ul>${insights.map(i => `<li>${esc(i.insight || "")}${(i.r2TxtKey || i.r2JsonKey || i.r2RawKey) ? ` <span class="muted">[R2]</span>` : ""}</li>`).join("")}</ul>`
+  const insightsList = kvInsightsCount
+    ? `<ul>${insights.map(i =>
+        `<li>${esc(i.insight || "")}${i.r2Key ? ` <span class="badge"><span>R2</span></span>` : ""}</li>`
+      ).join("")}</ul>`
     : `<p class="muted">Ще немає збережених знань.</p>`;
+
+  const r2Links = `
+    <div class="badges">
+      <a class="badge" href="/admin/repo/html?s=${encodeURIComponent(secFromEnv(env))}"><span>R2 Repo</span> <b>${r2RepoCount}</b></a>
+      <a class="badge" href="/admin/learn/r2/html?s=${encodeURIComponent(secFromEnv(env))}"><span>R2 Learn</span> <b>${r2LearnCount}</b></a>
+      <span class="badge"><span>KV Queue</span> <b>${kvQueuedCount}</b></span>
+      <span class="badge"><span>KV Insights</span> <b>${kvInsightsCount}</b></span>
+    </div>`;
 
   const body = `
     ${css}
     <div class="wrap">
-      <div class="row" style="margin-bottom:10px">
-        <a class="btn" href="${esc(runUrl)}">▶️ Запустити</a>
-        <a class="btn" href="/admin/checklist/html?s=${encodeURIComponent(secFromEnv(env))}">📝 Checklist</a>
-        <a class="btn" href="/admin/energy/html">⚡ Energy</a>
+
+      <div class="card row">
+        <h1 class="section-title">🧠 Senti Learn</h1>
+        <div class="row">
+          <a class="btn" href="${esc(runUrl)}">▶️ Запустити навчання</a>
+          <a class="btn" href="/admin/learn/html?s=${encodeURIComponent(secFromEnv(env))}">Оновити</a>
+        </div>
       </div>
 
       <div class="card">
-        <b>Додати в чергу</b>
-        <form method="post" action="/admin/learn/enqueue?s=${esc(secFromEnv(env))}">
-          <p><input name="url" placeholder="https://посилання або прямий файл"/></p>
-          <p><input name="name" placeholder="Опційно: назва"/></p>
+        <h3 class="section-title">Додати в чергу</h3>
+        <form method="post" action="/admin/learn/enqueue?s=${encodeURIComponent(secFromEnv(env))}">
+          <p><input name="url" type="url" inputmode="url" placeholder="https://посилання або прямий файл"/></p>
+          <p><input name="name" type="text" placeholder="Опційно: назва"/></p>
           <p><textarea name="text" rows="6" placeholder="Або встав тут текст, який треба вивчити"></textarea></p>
           <p><button class="btn" type="submit">＋ Додати</button></p>
         </form>
-        <p class="muted">Підтримуються: статті/сторінки, YouTube (коли є транскрипт), PDF/TXT/MD/ZIP тощо.</p>
+        <p class="muted">Підтримуються: статті/сторінки, YouTube (мета), PDF/TXT/MD/ZIP, зображення/відео (як файли — йдуть у R2).</p>
+      </div>
+
+      <div class="card">
+        <h3 class="section-title">Пам'ять</h3>
+        ${r2Links}
       </div>
 
       <div class="grid">
         <div class="card">
-          <b>Пам'ять KV</b><div class="${hasKV ? "ok":"bad"}">${hasKV ? "Стан: під’єднано ✅" : "Стан: не знайдено ❌"}</div>
-          <p class="muted">Використовується для черги Learn, чекліста, інсайтів. <a href="/admin/checklist/html?s=${encodeURIComponent(secFromEnv(env))}">Відкрити</a></p>
+          <h3 class="section-title">Черга</h3>
+          ${queuedList}
         </div>
         <div class="card">
-          <b>R2 Storage</b><div class="${hasR2 ? "ok":"bad"}">${hasR2 ? "Стан: під’єднано ✅" : "Стан: не знайдено ❌"}</div>
-          <p class="muted">Зберігаємо великі файли: оригінали, очищені тексти, JSON-індекси. <a href="/admin/repo/html">Відкрити Repo</a></p>
+          <h3 class="section-title">Нещодавні знання</h3>
+          ${insightsList}
         </div>
       </div>
 
       <div class="card">
-        <b>Останній підсумок</b>
-        <pre style="white-space:pre-wrap;background:#0b1117;border:1px solid #1f2937;border-radius:10px;padding:10px">${esc(last || "—")}</pre>
+        <h3 class="section-title">Останній підсумок</h3>
+        <pre>${esc(last || "—")}</pre>
       </div>
-
-      <div class="grid">
-        <div class="card">
-          <b>Черга</b>
-          ${queuedList}
-        </div>
-        <div class="card">
-          <b>Нещодавні знання (для System Prompt)</b>
-          ${insightsList}
-        </div>
-      </div>
-    </div>`;
+    </div>
+  `;
   return html(body);
 }
 
-// ── Router ───────────────────────────────────────────────────────────────────
+/* ────────────── simple R2 listing for learn/ prefix (HTML) ────────────── */
+async function learnR2Html(env) {
+  const bucket = env.LEARN_BUCKET;
+  const css = `
+  <style>
+    :root{color-scheme:dark}
+    body{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#0b0f14;color:#e6edf3}
+    .wrap{max-width:980px;margin:0 auto;padding:12px}
+    .card{background:#11161d;border:1px solid #1f2937;border-radius:12px;padding:14px;margin:10px 0}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px;border-bottom:1px solid #1f2937}
+    .mono{font-family:ui-monospace,Consolas,Menlo,monospace}
+    .btn{display:inline-block;padding:10px 14px;border-radius:10px;background:#223449;border:1px solid #2d4f6b;color:#e6edf3;text-decoration:none}
+  </style>`;
+  if (!bucket) {
+    return html(`${css}<div class="wrap"><div class="card">R2 не прив’язано (LEARN_BUCKET).</div></div>`);
+  }
+  // List
+  const items = [];
+  let cursor, guard = 0;
+  do {
+    const r = await bucket.list({ prefix: "learn/", limit: 500, cursor });
+    (r.objects || []).forEach(o => items.push(o));
+    cursor = r.truncated ? r.cursor : undefined;
+    guard++;
+  } while (cursor && guard < 20);
+
+  items.sort((a,b)=> (a.key < b.key ? 1 : -1));
+  const rows = items.length
+    ? items.map(o => `<tr>
+        <td class="mono" style="word-break:break-all">${esc(o.key)}</td>
+        <td>${(o.size||0).toLocaleString("uk-UA")} B</td>
+        <td class="mono">${esc(o.uploaded || "")}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="3" class="mono">Порожньо.</td></tr>`;
+
+  return html(`${css}
+  <div class="wrap">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <h2 style="margin:0">R2: learn/*</h2>
+        <a class="btn" href="/admin/learn/r2/html?s=${encodeURIComponent(secFromEnv(env))}">Оновити</a>
+      </div>
+    </div>
+    <div class="card">
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>Key</th><th>Size</th><th>Uploaded</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>`);
+}
+
+/* ───────────────────────────── Router ───────────────────────────── */
+
 async function route(req, env, ctx) {
   const url = new URL(req.url);
   const p = url.pathname;
 
+  // Health
   if (req.method === "GET" && (p === "/" || p === "/health")) {
     return json({ ok: true, name: "Senti", env: "workers", time: new Date().toISOString() });
   }
 
+  // Telegram webhook (both /webhook and /tg/webhook)
   if (p === "/webhook" || p === "/tg/webhook") {
     return handleTelegramWebhook(req, env);
   }
 
-  // Learn Admin
+  /* ───────────── Learn Admin: HTML ───────────── */
   if (req.method === "GET" && p === "/admin/learn/html") {
-    if (!isAuthed(url, env)) return json({ ok:false, error:"unauthorized" }, { status:401 });
+    if (!isAuthed(url, env)) return unauthorized();
     return learnHtml(env, url);
   }
+
+  /* Learn Admin: run once (GET for browser / POST for API) */
   if ((req.method === "GET" || req.method === "POST") && p === "/admin/learn/run") {
-    if (!isAuthed(url, env)) return json({ ok:false, error:"unauthorized" }, { status:401 });
-    const out = await runLearnOnce(env, { maxItems: Number(url.searchParams.get("n") || 10) }).catch(e => ({ ok:false, error:String(e?.message||e) }));
-    if (req.method === "GET") {
-      const back = (() => { const u = new URL(url); u.pathname = "/admin/learn/html"; return u.toString(); })();
-      return html(`<pre>${esc(out.summary || JSON.stringify(out, null, 2))}</pre><p><a href="${esc(back)}">← Назад</a></p>`);
-    }
-    return json(out);
-  }
-  if (req.method === "POST" && p === "/admin/learn/enqueue") {
-    if (!isAuthed(url, env)) return json({ ok:false, error:"unauthorized" }, { status:401 });
-    let body = {}; const ctype = req.headers.get("content-type") || "";
+    if (!isAuthed(url, env)) return unauthorized();
     try {
-      if (ctype.includes("application/json")) body = await req.json();
-      else if (ctype.includes("application/x-www-form-urlencoded") || ctype.includes("multipart/form-data")) body = Object.fromEntries((await req.formData()).entries());
-    } catch {}
+      const out = await runLearnOnce(env, { maxItems: Number(url.searchParams.get("n") || 10) });
+      if (req.method === "GET") {
+        const back = (() => {
+          const u = new URL(url);
+          u.pathname = "/admin/learn/html";
+          return u.toString();
+        })();
+        return html(`
+          <style>
+            :root{color-scheme:dark}
+            body{background:#0b0f14;color:#e6edf3;font-family:ui-sans-serif,system-ui}
+            .wrap{max-width:980px;margin:0 auto;padding:12px}
+            .card{background:#11161d;border:1px solid #1f2937;border-radius:12px;padding:14px}
+            .btn{display:inline-block;padding:10px 14px;border-radius:10px;background:#223449;border:1px solid #2d4f6b;color:#e6edf3;text-decoration:none}
+            pre{white-space:pre-wrap;background:#0b1117;border:1px solid #1f2937;border-radius:10px;padding:10px}
+          </style>
+          <div class="wrap">
+            <div class="card">
+              <b>Підсумок</b>
+              <pre>${esc(out.summary || JSON.stringify(out, null, 2))}</pre>
+              <p><a class="btn" href="${esc(back)}">← Назад</a></p>
+            </div>
+          </div>
+        `);
+      }
+      return json(out);
+    } catch (e) {
+      return json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+    }
+  }
+
+  /* Learn Admin: enqueue (POST form or JSON) */
+  if (req.method === "POST" && p === "/admin/learn/enqueue") {
+    if (!isAuthed(url, env)) return unauthorized();
+    let body = {};
+    const ctype = req.headers.get("content-type") || "";
+    try {
+      if (ctype.includes("application/json")) {
+        body = await req.json();
+      } else if (ctype.includes("application/x-www-form-urlencoded") || ctype.includes("multipart/form-data")) {
+        const form = await req.formData();
+        body = Object.fromEntries(form.entries());
+      }
+    } catch { body = {}; }
+
     const userId = url.searchParams.get("u") || "admin";
     const hasText = body?.text && String(body.text).trim().length > 0;
     const hasUrl = body?.url && String(body.url).startsWith("http");
-    if (!hasText && !hasUrl) return json({ ok:false, error:"provide url or text" }, { status:400 });
-    if (hasText) await enqueueLearn(env, userId, { text: String(body.text), name: body?.name || "inline-text" });
-    if (hasUrl)  await enqueueLearn(env, userId, { url:  String(body.url),  name: body?.name || String(body.url) });
 
+    if (!hasText && !hasUrl) {
+      return json({ ok: false, error: "provide url or text" }, { status: 400 });
+    }
+    if (hasText) {
+      await enqueueLearn(env, userId, { text: String(body.text), name: body?.name || "inline-text" });
+    }
+    if (hasUrl) {
+      await enqueueLearn(env, userId, { url: String(body.url), name: body?.name || String(body.url) });
+    }
     if (!ctype.includes("application/json")) {
       const back = new URL(url); back.pathname = "/admin/learn/html";
       return Response.redirect(back.toString(), 303);
     }
-    return json({ ok:true });
+    return json({ ok: true });
   }
+
+  /* Learn Admin: JSON status */
   if (req.method === "GET" && p === "/admin/learn/status") {
-    if (!isAuthed(url, env)) return json({ ok:false, error:"unauthorized" }, { status:401 });
-    const [last, queued, insights] = await Promise.all([
-      getLastSummary(env).catch(()=>""), listQueued(env, {limit:50}).catch(()=>[]), getRecentInsights(env, {limit:10}).catch(()=>[])
-    ]);
-    return json({ ok:true, last, queued, insights });
+    if (!isAuthed(url, env)) return unauthorized();
+    try {
+      const last = await getLastSummary(env);
+      const queued = await listQueued(env, { limit: 50 });
+      const insights = await getRecentInsights(env, { limit: 10 });
+      return json({ ok: true, last, queued, insights });
+    } catch (e) {
+      return json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+    }
   }
 
-  // Checklist (GET/POST) + wrapper з енергією
-  const resChecklist = await handleAdminChecklist(req, env, url);
-  if (resChecklist) return resChecklist;
+  /* Learn Admin: R2 list for learn/ */
+  if (req.method === "GET" && p === "/admin/learn/r2/html") {
+    if (!isAuthed(url, env)) return unauthorized();
+    return learnR2Html(env);
+  }
+
+  /* ───────────── Checklist (HTML, GET) ─────────────
+     - якщо public=1 → readonly версія (без секрету)
+     - якщо без public → потрібен secret і повний UI
+  */
   if (req.method === "GET" && p === "/admin/checklist/html") {
-    return (await import("./lib/kvChecklist.js")).then(m => html(await m.checklistHtml(env)));
-  }
-  if (req.method === "GET" && p === "/admin/checklist/with-energy/html") {
-    return handleAdminChecklistWithEnergy(req, env, url);
+    if (wantPublic(url)) {
+      // легкий readonly вигляд (без форм)
+      const base = await checklistHtml(env);
+      const stripped = base
+        .replace(/<form[\s\S]*?<\/form>/gi, "")
+        .replace(/<a class="btn"[^>]*>[^<]*Архівувати[\s\S]*?<\/a>/gi, "");
+      return html(stripped);
+    }
+    if (!isAuthed(url, env)) return unauthorized();
+    return html(await checklistHtml(env));
   }
 
-  // Energy
-  const resEnergy = await handleAdminEnergy(req, env, url);
-  if (resEnergy) return resEnergy;
+  // Checklist actions (POST)
+  if (req.method === "POST" && p === "/admin/checklist") {
+    if (!isAuthed(url, env)) return unauthorized();
+    const params = url.searchParams;
+    const ct = req.headers.get("content-type") || "";
+    let body = {};
+    if (ct.includes("application/json")) {
+      body = await req.json().catch(() => ({}));
+    } else if (ct.includes("application/x-www-form-urlencoded") || ct.includes("multipart/form-data")) {
+      const f = await req.formData(); body = Object.fromEntries([...f.entries()]);
+    } else {
+      const textBody = await req.text().catch(() => "");
+      if (textBody) { try { body = JSON.parse(textBody); } catch { body = { text: textBody }; } }
+    }
+    if (params.has("replace")) {
+      await writeChecklist(env, body.text || "");
+      const back = new URL(url); back.pathname = "/admin/checklist/html";
+      return Response.redirect(back.toString(), 303);
+    }
+    if (params.has("append")) {
+      await appendChecklist(env, body.line || body.text || "");
+      const back = new URL(url); back.pathname = "/admin/checklist/html";
+      return Response.redirect(back.toString(), 303);
+    }
+    if (params.has("archive")) {
+      await saveArchive(env, "manual");
+      const back = new URL(url); back.pathname = "/admin/checklist/html";
+      return Response.redirect(back.toString(), 303);
+    }
+    return json({ ok: false, error: "unknown action" }, { status: 400 });
+  }
 
-  // Repo / Статут (без секрету, як у 1.8)
-  if (req.method === "GET" && p === "/admin/repo/html")   return html(await repoHtml(env));
-  if (req.method === "GET" && p === "/admin/statut/html") return html(await statutHtml(env));
+  /* ───────────── Statut (HTML) ───────────── */
+  if (req.method === "GET" && p === "/admin/statut/html") {
+    if (wantPublic(url)) {
+      // readonly view: видалимо форми
+      const base = await statutHtml(env);
+      const stripped = base.replace(/<form[\s\S]*?<\/form>/gi, "");
+      return html(stripped);
+    }
+    if (!isAuthed(url, env)) return unauthorized();
+    return html(await statutHtml(env));
+  }
+  if (req.method === "POST" && p === "/admin/statut") {
+    if (!isAuthed(url, env)) return unauthorized();
+    const params = url.searchParams;
+    const ct = req.headers.get("content-type") || "";
+    let body = {};
+    if (ct.includes("application/json")) {
+      body = await req.json().catch(() => ({}));
+    } else if (ct.includes("application/x-www-form-urlencoded") || ct.includes("multipart/form-data")) {
+      const f = await req.formData(); body = Object.fromEntries([...f.entries()]);
+    } else {
+      const textBody = await req.text().catch(() => "");
+      if (textBody) { try { body = JSON.parse(textBody); } catch { body = { text: textBody }; } }
+    }
+    if (params.has("replace")) {
+      await writeStatut(env, body.text || "");
+      const back = new URL(url); back.pathname = "/admin/statut/html";
+      return Response.redirect(back.toString(), 303);
+    }
+    if (params.has("append")) {
+      await appendStatut(env, body.line || body.text || "");
+      const back = new URL(url); back.pathname = "/admin/statut/html";
+      return Response.redirect(back.toString(), 303);
+    }
+    return json({ ok: false, error: "unknown action" }, { status: 400 });
+  }
+
+  /* ───────────── Repo (R2) HTML ─────────────
+     - public=1 дозволяє перегляд без секрету (readonly)
+  */
+  if (req.method === "GET" && p === "/admin/repo/html") {
+    if (!wantPublic(url) && !isAuthed(url, env)) return unauthorized();
+    return html(await repoHtml(env));
+  }
 
   return notFound();
 }
 
-// ── Worker exports ───────────────────────────────────────────────────────────
+/* ───────────────────── Worker exports ───────────────────── */
+
 export default {
   async fetch(req, env, ctx) {
-    try { return await route(req, env, ctx); }
-    catch (e) { return json({ ok:false, error:String(e?.message||e) }, { status:500 }); }
+    try {
+      return await route(req, env, ctx);
+    } catch (e) {
+      return json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+    }
   },
 
+  // Нічний агент: запуск навчання за розкладом (див. wrangler.toml triggers)
   async scheduled(event, env, ctx) {
-    // лог хартбіта (як у 1.8)
-    ctx.waitUntil(logChecklist(env, "heartbeat cron").catch(()=>null));
-
-    // щогодини — невеликий батч
+    // невеликий батч; масштабуй за потреби
     ctx.waitUntil(runLearnOnce(env, { maxItems: 12 }).catch(() => null));
   },
 };
