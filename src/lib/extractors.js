@@ -1,273 +1,449 @@
-// Простий набір екстракторів для Learn:
-// - HTML-статті (виділення основного тексту)
-// - YouTube (спроба дістати транскрипт, якщо доступний)
-// - Текстові/JSON/CSV файли
-// - Чанкінг тексту для подальшої індексації (Vectorize)
+// src/lib/extractors.js
 //
-// Усі функції — без зовнішніх залежностей, сумісні з Cloudflare Workers.
+// Мінімальні екстрактори для Learn:
+//  - fetchAndExtract(env, payload) -> { type, title, text, chunks, meta }
+//  - Підтримка: text/html, text/plain/markdown, YouTube (мета), PDF/ZIP/бінарні (тільки мета)
+//  - Без зовнішніх залежностей — сумісно з Cloudflare Workers.
+//
+// Використання у Learn-процесі:
+// const { type, title, text, chunks, meta } = await fetchAndExtract(env, item.payload);
+// Далі на chunks робимо короткі summary/інсайти (LLM), а файли — у R2.
+//
 
-const TEXT_MIME = [
-  "text/plain",
-  "text/markdown",
-  "text/csv",
-  "application/json",
-];
+// ─────────────────────────────────────────────────────────────────────────────
+// Публічний API
+// ─────────────────────────────────────────────────────────────────────────────
 
-function normMime(m) {
-  if (!m) return "";
-  return String(m).split(";")[0].trim().toLowerCase();
+export async function fetchAndExtract(env, payload) {
+  if (payload?.text) {
+    const text = normalizePlainText(String(payload.text || ""));
+    return {
+      ok: true,
+      type: "inline-text",
+      title: payload?.name || guessTitleFromText(text) || "Нотатка",
+      text,
+      chunks: chunkText(text, 4000),
+      meta: { source: "inline" },
+    };
+  }
+
+  if (payload?.url) {
+    const u = safeUrl(payload.url);
+    if (!u) return { ok: false, error: "bad_url" };
+
+    // YouTube: мета + (опційно) транскрипт у майбутньому
+    if (isYouTube(u)) {
+      const meta = await getYouTubeMeta(u).catch(() => null);
+      const title = meta?.title || guessHumanTitleFromUrl(u) || "YouTube відео";
+      return {
+        ok: true,
+        type: "youtube",
+        title,
+        text: "",
+        chunks: [],
+        meta: {
+          kind: "youtube",
+          url: u.toString(),
+          ...cleanNulls(meta),
+        },
+      };
+    }
+
+    // Загальний fetch
+    const res = await safeFetch(u.toString(), { method: "GET" });
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}` };
+    }
+
+    // Контент-тайп
+    const ctype = (res.headers.get("content-type") || "").toLowerCase();
+
+    // HTML сторінка → екстракція статті
+    if (ctype.includes("text/html")) {
+      const rawHtml = await res.text();
+      const { title, text, meta } = extractFromHtml(rawHtml, u);
+      return {
+        ok: true,
+        type: "article",
+        title: title || payload?.name || u.hostname,
+        text,
+        chunks: chunkText(text, 4000),
+        meta: {
+          kind: "html",
+          url: u.toString(),
+          ...cleanNulls(meta),
+        },
+      };
+    }
+
+    // Прості тексти (txt/markdown)
+    if (ctype.includes("text/plain") || looksLikePlainByPath(u.pathname)) {
+      const body = await res.text();
+      const text = normalizePlainText(body);
+      return {
+        ok: true,
+        type: "text",
+        title: payload?.name || guessTitleFromText(text) || u.hostname,
+        text,
+        chunks: chunkText(text, 4000),
+        meta: { kind: "text", url: u.toString() },
+      };
+    }
+
+    // PDF / архіви / інше — віддаємо метадані; сам файл кладемо у R2 поза межами цього модуля
+    const rawBytes = await res.arrayBuffer(); // Для визначення розміру
+    const size = rawBytes.byteLength || 0;
+
+    const kind = detectBinaryKind(ctype, u.pathname);
+    return {
+      ok: true,
+      type: kind, // "pdf" | "zip" | "binary"
+      title: payload?.name || fileNameFromPath(u.pathname) || u.hostname,
+      text: "",
+      chunks: [],
+      meta: {
+        kind,
+        url: u.toString(),
+        contentType: ctype || "application/octet-stream",
+        size,
+        sizePretty: bytesFmt(size),
+      },
+    };
+  }
+
+  // Невідомий кейс
+  return { ok: false, error: "unsupported_payload" };
 }
 
-function stripTags(html = "") {
-  // Прибираємо <script>/<style>, коментарі, потім теги
-  let s = String(html || "");
-  s = s.replace(/<script[\s\S]*?<\/script>/gi, " ");
-  s = s.replace(/<style[\s\S]*?<\/style>/gi, " ");
-  s = s.replace(/<!--[\s\S]*?-->/g, " ");
-  // Зберегти розділювачі для <p>, <br>, <li>, <h1..h6>
-  s = s.replace(/<(\/)?(p|br|li|h[1-6]|div|section|article)\b[^>]*>/gi, "\n");
-  // Прибрати решту тегів
-  s = s.replace(/<[^>]+>/g, " ");
-  // Декодування найчастіших HTML-ентіті
-  s = s
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">");
-  // Нормалізація пробілів
-  s = s.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
-  return s;
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// HTML екстракція (Readability-лайт)
+// ─────────────────────────────────────────────────────────────────────────────
 
-function extractTitle(html = "", fallback = "") {
-  const m = String(html || "").match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  if (m?.[1]) {
-    return stripTags(m[1]).replace(/\s+/g, " ").trim().slice(0, 180);
-  }
-  // спроба з og:title / twitter:title
-  const m2 =
-    String(html || "").match(/property=["']og:title["'][^>]*content=["']([^"']+)["']/i) ||
-    String(html || "").match(/name=["']twitter:title["'][^>]*content=["']([^"']+)["']/i);
-  if (m2?.[1]) return String(m2[1]).trim().slice(0, 180);
-  return fallback || "Без назви";
-}
+export function extractFromHtml(html, baseUrlObj = null) {
+  const cleaned = stripDangerous(html || "");
+  const title = extractTitle(cleaned) || "";
+  const meta = extractMeta(cleaned, baseUrlObj);
+  const mainText = pickMainText(cleaned);
 
-function guessMainFromHtml(html = "") {
-  // Дуже проста евристика: якщо є <article> — беремо його, інакше — усе тіло
-  let body = "";
-  const art = html.match(/<article[\s\S]*?<\/article>/i);
-  if (art?.[0]) body = art[0];
-  else {
-    const main = html.match(/<main[\s\S]*?<\/main>/i);
-    body = main?.[0] || html;
-  }
-  const text = stripTags(body);
-  // Відсікти «хвости» навігації/футерів: беремо найдовший абзацний блок
-  const chunks = text.split(/\n{2,}/g).map(s => s.trim()).filter(Boolean);
-  if (!chunks.length) return text;
-  chunks.sort((a, b) => b.length - a.length);
-  // Візьмемо топ-3 великих блоки, склеїмо
-  const main3 = chunks.slice(0, 3).join("\n\n");
-  return main3.length > 400 ? main3 : text;
-}
-
-export async function fetchAndExtractArticle(url) {
-  let r;
-  try {
-    r = await fetch(url, { method: "GET" });
-  } catch (e) {
-    return { ok: false, error: `fetch failed: ${String(e?.message || e)}` };
-  }
-  if (!r.ok) return { ok: false, error: `HTTP ${r.status}` };
-
-  const html = await r.text();
-  const title = extractTitle(html, new URL(url).hostname);
-  const text = guessMainFromHtml(html);
-  if (!text || text.length < 120) {
-    return { ok: false, error: "no_main_text", title, rawLength: html.length };
-  }
   return {
-    ok: true,
-    kind: "web-article",
-    title,
-    text,
-    source: url,
+    title: (meta?.ogTitle || meta?.title || title || "").trim(),
+    text: mainText.trim(),
+    meta,
   };
 }
 
-export async function fetchTextFromUrl(url) {
-  let r;
-  try {
-    r = await fetch(url, { method: "GET" });
-  } catch (e) {
-    return { ok: false, error: `fetch failed: ${String(e?.message || e)}` };
-  }
-  if (!r.ok) return { ok: false, error: `HTTP ${r.status}` };
-
-  const ct = normMime(r.headers.get("content-type"));
-  // Підтримка текстових типів
-  if (TEXT_MIME.includes(ct) || ct.startsWith("text/")) {
-    const text = await r.text();
-    return { ok: true, kind: "text", mime: ct || "text/plain", text, source: url };
-  }
-  // JSON як текст
-  if (ct === "application/json") {
-    const raw = await r.text();
-    return { ok: true, kind: "text", mime: ct, text: raw, source: url };
-  }
-  // CSV
-  if (ct === "text/csv") {
-    const raw = await r.text();
-    return { ok: true, kind: "text", mime: ct, text: raw, source: url };
-  }
-
-  // Непідтримуваний тип для інлайнового парсингу (pdf/docx/zip/відео/зображення)
-  return { ok: false, error: `unsupported_content_type:${ct || "unknown"}` };
+function stripDangerous(html) {
+  return String(html || "")
+    // прибираємо скрипти/стилі/носкріпти
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, "")
+    // зайві коментарі
+    .replace(/<!--[\s\S]*?-->/g, "");
 }
 
-// === YouTube ===
+function extractTitle(html) {
+  const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return m ? decodeEntities(m[1]) : "";
+}
 
-function ytIdFromUrl(u) {
+function extractMeta(html, baseUrlObj) {
+  const og = {};
+  function metaContent(name) {
+    const rx = new RegExp(
+      `<meta[^>]+(?:name|property)=(?:"|')${name.replace(
+        /[-/\\^$*+?.()|[\]{}]/g,
+        "\\$&"
+      )}(?:"|')[^>]*content=(?:"|')([^"']+)(?:"|')[^>]*>`,
+      "i"
+    );
+    const m = html.match(rx);
+    return m ? decodeEntities(m[1]) : "";
+  }
+
+  og.ogTitle = metaContent("og:title") || metaContent("twitter:title") || "";
+  og.description =
+    metaContent("description") || metaContent("og:description") || "";
+  og.image = metaContent("og:image") || metaContent("twitter:image") || "";
+  og.siteName = metaContent("og:site_name") || "";
+  og.url = metaContent("og:url") || (baseUrlObj ? baseUrlObj.toString() : "");
+
+  // favicon
+  const fav = (() => {
+    // <link rel="icon" href="..."> або apple-touch-icon
+    const m =
+      html.match(
+        /<link[^>]+rel=["'](?:shortcut )?icon["'][^>]*href=["']([^"']+)["'][^>]*>/i
+      ) ||
+      html.match(
+        /<link[^>]+rel=["']apple-touch-icon(?:-precomposed)?["'][^>]*href=["']([^"']+)["'][^>]*>/i
+      );
+    if (!m) return "";
+    const href = decodeEntities(m[1]);
+    if (!href) return "";
+    if (href.startsWith("http")) return href;
+    try {
+      const b = baseUrlObj || new URL("http://example.com/");
+      return new URL(href, b).toString();
+    } catch {
+      return href;
+    }
+  })();
+
+  const title = extractTitle(html);
+
+  return {
+    title: title,
+    ...og,
+    favicon: fav || "",
+  };
+}
+
+// Проста евристика вибору основного тексту:
+// 1) беремо <article> якщо є
+// 2) або <main>
+// 3) або найбільший блок з великою щільністю <p>/<li>
+// 4) прибираємо навігаційні блоки за класами/ід (nav, header, footer, aside, promo)
+function pickMainText(html) {
+  const cleaned = removeNavBlocks(html);
+
+  // article/main
+  const blocks = [
+    pickTag(cleaned, "article"),
+    pickTag(cleaned, "main"),
+    pickByDensity(cleaned),
+  ];
+
+  const firstGood = blocks.find((b) => b && b.trim().length > 200);
+  const raw = firstGood || cleaned;
+
+  // Перетворюємо в текст
+  return htmlToText(raw);
+}
+
+function removeNavBlocks(html) {
+  return html
+    .replace(
+      /<(nav|header|footer|aside)\b[^>]*>[\s\S]*?<\/\1>/gi,
+      " "
+    )
+    .replace(
+      /<div\b[^>]+class=["'][^"']*(nav|menu|header|footer|sidebar|aside|subscribe|promo|advert|ads)[^"']*["'][^>]*>[\s\S]*?<\/div>/gi,
+      " "
+    );
+}
+
+function pickTag(html, tag) {
+  const rx = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i");
+  const m = html.match(rx);
+  return m ? m[1] : "";
+}
+
+function pickByDensity(html) {
+  // Ріжемо на великі DIV/SECTION і обираємо той, де найбільше <p>/<li>
+  const rx = /<(div|section)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+  let best = "";
+  let bestScore = 0;
+  let m;
+  while ((m = rx.exec(html))) {
+    const block = m[2] || "";
+    const score =
+      (block.match(/<p\b/gi)?.length || 0) * 3 +
+      (block.match(/<li\b/gi)?.length || 0) * 2 +
+      (block.length / 10000); // невеликий бонус за довжину
+    if (score > bestScore) {
+      best = block;
+      bestScore = score;
+    }
+  }
+  return best || "";
+}
+
+function htmlToText(fragment) {
+  return decodeEntities(
+    String(fragment || "")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/p>/gi, "\n\n")
+      .replace(/<\/h[1-6]>/gi, "\n\n")
+      .replace(/<li[^>]*>/gi, "• ")
+      .replace(/<\/li>/gi, "\n")
+      .replace(/<[^>]+>/g, "")
+  )
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// YouTube утиліти (метадані без API-ключа)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function isYouTube(u) {
+  const h = u.hostname.toLowerCase();
+  return h.includes("youtube.com") || h === "youtu.be";
+}
+
+function getVideoId(u) {
+  if (!u) return "";
+  if (u.hostname === "youtu.be") {
+    const last = (u.pathname || "").split("/").filter(Boolean).pop() || "";
+    return last;
+  }
+  if (u.hostname.includes("youtube.com")) {
+    const v = u.searchParams.get("v");
+    if (v) return v;
+    // формати /shorts/ID /embed/ID
+    const m = u.pathname.match(/\/(shorts|embed)\/([^/?#]+)/i);
+    if (m?.[2]) return m[2];
+  }
+  return "";
+}
+
+async function getYouTubeMeta(u) {
+  const vid = getVideoId(u);
+  if (!vid) return null;
+
+  // Простий oEmbed (без ключа) — дістаємо заголовок/автора/thumbnail
+  // https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=ID&format=json
+  const oembed = await safeFetch(
+    `https://www.youtube.com/oembed?url=${encodeURIComponent(
+      `https://www.youtube.com/watch?v=${vid}`
+    )}&format=json`,
+    { method: "GET" }
+  );
+  if (!oembed.ok) return { id: vid, title: "YouTube відео" };
+
+  const data = await oembed.json().catch(() => ({}));
+  return {
+    id: vid,
+    title: data?.title || "YouTube відео",
+    author: data?.author_name || "",
+    provider: data?.provider_name || "YouTube",
+    thumbnail: data?.thumbnail_url || "",
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Допоміжні утиліти
+// ─────────────────────────────────────────────────────────────────────────────
+
+function safeUrl(u) {
   try {
-    const url = new URL(u);
-    if (url.hostname === "youtu.be") {
-      return url.pathname.replace("/", "").trim();
-    }
-    if (url.hostname.includes("youtube.com")) {
-      return url.searchParams.get("v");
-    }
-    return null;
+    return new URL(u);
   } catch {
     return null;
   }
 }
 
-/**
- * Найпростіша спроба дістати транскрипт без офіційного ключа:
- * - деякі публічні сервіси повертають XML/JSON субтитри
- * - працює не завжди (може 403/404)
- */
-export async function tryFetchYouTubeTranscript(videoUrl) {
-  const id = ytIdFromUrl(videoUrl);
-  if (!id) return { ok: false, error: "not_youtube" };
+async function safeFetch(url, init, timeoutMs = 20000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...(init || {}), signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
 
-  // Популярний ендпоінт (може не працювати для окремих роликів/регіонів)
-  const candidates = [
-    `https://youtubetranscript.com/?server_vid2=${encodeURIComponent(id)}`,
-    // Можливі додаткові дзеркала / API — додати за потреби.
-  ];
-
-  for (const u of candidates) {
-    try {
-      const r = await fetch(u, { method: "GET" });
-      if (!r.ok) continue;
-      const t = await r.text();
-      // Проста евристика: у відповідях цього сервісу приходить HTML з <text>...</text> або JSON
-      const xmlLike = t.match(/<text[^>]*>([\s\S]*?)<\/text>/gi);
-      if (xmlLike?.length) {
-        const joined = xmlLike
-          .map(x => x.replace(/<[^>]+>/g, " "))
-          .join(" ")
-          .replace(/\s+/g, " ")
-          .trim();
-        if (joined && joined.length > 60) {
-          return {
-            ok: true,
-            kind: "youtube",
-            title: `YouTube #${id}`,
-            text: joined,
-            source: videoUrl,
-          };
-        }
+function decodeEntities(s = "") {
+  if (!s) return "";
+  const map = {
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    quot: '"',
+    apos: "'",
+    nbsp: " ",
+  };
+  return s
+    .replace(/&(#\d+|#x[a-f0-9]+|[a-z]+);/gi, (m, g) => {
+      if (g[0] === "#") {
+        const code =
+          g[1].toLowerCase() === "x"
+            ? parseInt(g.slice(2), 16)
+            : parseInt(g.slice(1), 10);
+        return Number.isFinite(code) ? String.fromCharCode(code) : m;
       }
-      // Якщо JSON
-      try {
-        const j = JSON.parse(t);
-        if (Array.isArray(j) && j.length) {
-          const joined = j.map(n => (n?.text || "").trim()).join(" ");
-          if (joined && joined.length > 60) {
-            return {
-              ok: true,
-              kind: "youtube",
-              title: `YouTube #${id}`,
-              text: joined,
-              source: videoUrl,
-            };
-          }
-        }
-      } catch {}
-    } catch {}
-  }
-
-  return { ok: false, error: "transcript_unavailable", id };
+      return map[g.toLowerCase()] ?? m;
+    })
+    .trim();
 }
 
-// === Чанкінг ===
-
-export function chunkText(text, { size = 1000, overlap = 200 } = {}) {
-  const s = String(text || "").trim();
-  if (!s) return [];
-  const safeSize = Math.max(200, Number(size) || 1000);
-  const safeOverlap = Math.min(Math.max(0, Number(overlap) || 200), Math.floor(safeSize / 2));
-
-  const chunks = [];
-  let i = 0;
-  while (i < s.length) {
-    const end = Math.min(s.length, i + safeSize);
-    let slice = s.slice(i, end);
-
-    // намагаємося різати по межі речення
-    if (end < s.length) {
-      const back = slice.lastIndexOf(". ");
-      if (back > safeSize * 0.6) {
-        slice = slice.slice(0, back + 1);
-      }
-    }
-
-    chunks.push(slice.trim());
-    if (end >= s.length) break;
-    i += safeSize - safeOverlap;
-  }
-  return chunks.filter(Boolean);
+function looksLikePlainByPath(pathname = "") {
+  return /\.(txt|md|csv|log)(?:$|\?)/i.test(String(pathname || ""));
 }
 
-// === Головний універсальний екстрактор для URL ===
-
-export async function extractFromUrl(url) {
-  // 1) YouTube → спроба транскрипту
-  const id = ytIdFromUrl(url);
-  if (id) {
-    const y = await tryFetchYouTubeTranscript(url);
-    if (y.ok) return y;
-    // якщо транскрипт недоступний — впадемо до HTML-сторінки (опис)
+function fileNameFromPath(p) {
+  try {
+    return decodeURIComponent((p || "").split("/").filter(Boolean).pop() || "file");
+  } catch {
+    return "file";
   }
-
-  // 2) Текстові / JSON / CSV
-  const t = await fetchTextFromUrl(url);
-  if (t.ok) {
-    // для JSON водночас перетворимо в «pretty»
-    const title = (id ? `YouTube #${id}` : new URL(url).hostname);
-    let text = t.text;
-    if (t.mime === "application/json") {
-      try { text = JSON.stringify(JSON.parse(t.text), null, 2); } catch {}
-    }
-    return { ok: true, kind: "text", title, text, source: url, mime: t.mime };
-  }
-
-  // 3) HTML-стаття
-  const art = await fetchAndExtractArticle(url);
-  if (art.ok) return art;
-
-  // 4) Якщо все інше не спрацювало — повідомляємо, що тип не підтримано
-  return { ok: false, error: t.error || art.error || "unrecognized_content" };
 }
 
-export function bytesFmt(n) {
+function guessHumanTitleFromUrl(u) {
+  const last = fileNameFromPath(u?.pathname || "");
+  if (u.hostname === "youtu.be") return last || "YouTube відео";
+  if (u.hostname.includes("youtube.com")) {
+    const v = u.searchParams.get("v");
+    if (v) return v;
+    return "YouTube відео";
+  }
+  return last || u.hostname;
+}
+
+function guessTitleFromText(text = "") {
+  const firstLine = String(text || "").split(/\r?\n/).map(s => s.trim()).find(Boolean) || "";
+  if (!firstLine) return "";
+  // обрізаємо дуже довгі "перші рядки"
+  return firstLine.length > 120 ? firstLine.slice(0, 117) + "…" : firstLine;
+}
+
+function bytesFmt(n) {
   const b = Number(n || 0);
   if (b < 1024) return `${b} B`;
   const kb = b / 1024; if (kb < 1024) return `${kb.toFixed(1)} KB`;
   const mb = kb / 1024; if (mb < 1024) return `${mb.toFixed(1)} MB`;
   const gb = mb / 1024; return `${gb.toFixed(2)} GB`;
+}
+
+function cleanNulls(obj) {
+  const out = {};
+  Object.keys(obj || {}).forEach((k) => {
+    const v = obj[k];
+    if (v !== null && v !== undefined && v !== "") out[k] = v;
+  });
+  return out;
+}
+
+function detectBinaryKind(ctype, path) {
+  const p = (path || "").toLowerCase();
+  if (ctype.includes("pdf") || /\.pdf(?:$|\?)/.test(p)) return "pdf";
+  if (
+    ctype.includes("zip") ||
+    /\.zip(?:$|\?)/.test(p) ||
+    /\.7z(?:$|\?)/.test(p) ||
+    /\.rar(?:$|\?)/.test(p)
+  ) {
+    return "zip";
+  }
+  return "binary";
+}
+
+function normalizePlainText(s = "") {
+  return String(s || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\t/g, "  ")
+    .replace(/\u00A0/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export function chunkText(s, size = 4000) {
+  const out = [];
+  let t = String(s || "");
+  while (t.length) {
+    out.push(t.slice(0, size));
+    t = t.slice(size);
+  }
+  return out;
 }
