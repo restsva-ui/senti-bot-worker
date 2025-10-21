@@ -8,7 +8,7 @@ const json = (d, init={}) => new Response(JSON.stringify(d, null, 2), {
 });
 
 export async function handleAdminEnergy(req, env, url) {
-  // HTML (читання без обов’язкового секрету — як було у 1.8)
+  // Публічна HTML-сторінка (як у 1.8) — без секрету
   if (req.method === "GET" && url.pathname === "/admin/energy/html") {
     const s = await getEnergy(env, url.searchParams.get("u") || env.TELEGRAM_ADMIN_ID);
     const css = `
@@ -26,7 +26,7 @@ export async function handleAdminEnergy(req, env, url) {
       <div class="wrap">
         <div class="card">
           <div class="row" style="justify-content:space-between">
-            <b>⚡ Energy</b><span class="muted">User</span>
+            <b>⚡ Energy</b><span class="muted">Мобільний вигляд</span>
           </div>
           <div class="row" style="gap:24px;margin-top:6px">
             <div><div class="muted">User</div><div>${String(s.userId || "")}</div></div>
@@ -40,7 +40,7 @@ export async function handleAdminEnergy(req, env, url) {
     return okHtml(html);
   }
 
-  // API: зміна вартості (захищено секретом)
+  // API (захищено секретом)
   if (req.method === "POST" && url.pathname === "/admin/energy/set-costs") {
     const secret = url.searchParams.get("s") || "";
     if (env.WEBHOOK_SECRET && secret !== env.WEBHOOK_SECRET) {
