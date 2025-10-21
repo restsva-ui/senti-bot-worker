@@ -9,6 +9,10 @@ import {
   getRecentInsights,
 } from "./lib/kvLearnQueue.js";
 
+// ✅ підключаємо чекліст-роути
+import { handleAdminChecklist } from "./routes/adminChecklist.js";
+import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 function secFromEnv(env) {
   return (
@@ -41,23 +45,11 @@ function html(markup, init = {}) {
     },
   });
 }
-function text(txt, init = {}) {
-  return new Response(String(txt || ""), {
-    status: init.status || 200,
-    headers: {
-      "content-type": "text/plain; charset=utf-8",
-      ...(init.headers || {}),
-    },
-  });
-}
 function notFound() {
   return json({ ok: false, error: "not_found" }, { status: 404 });
 }
 function unauthorized() {
   return json({ ok: false, error: "unauthorized" }, { status: 401 });
-}
-function safeHost(u) {
-  try { return new URL(u).hostname; } catch { return ""; }
 }
 function esc(s = "") {
   return String(s)
@@ -97,7 +89,7 @@ async function learnHtml(env, url) {
     .tag{display:inline-block;font-size:12px;padding:2px 8px;border:1px solid #2d4f6b;border-radius:999px;margin-left:6px}
   </style>`;
 
-  const queuedList = queued.length
+  const queuedList = (queued && queued.length)
     ? `<ul>${queued
         .map(
           (q) =>
@@ -108,7 +100,7 @@ async function learnHtml(env, url) {
         .join("")}</ul>`
     : `<p class="muted">Черга порожня.</p>`;
 
-  const insightsList = insights.length
+  const insightsList = (insights && insights.length)
     ? `<ul>${insights
         .map(
           (i) =>
@@ -171,6 +163,17 @@ async function route(req, env, ctx) {
     return handleTelegramWebhook(req, env);
   }
 
+  // ✅ Checklist HTML / API
+  if (p.startsWith("/admin/checklist")) {
+    const handled = await handleAdminChecklist(req, env, url);
+    if (handled) return handled;
+  }
+
+  // ✅ Wrapper: Checklist + Energy (iframe)
+  if (req.method === "GET" && p === "/admin/checklist/with-energy/html") {
+    return handleAdminChecklistWithEnergy(req, env, url);
+  }
+
   // Learn Admin: HTML
   if (req.method === "GET" && p === "/admin/learn/html") {
     if (!isAuthed(url, env)) return unauthorized();
@@ -182,7 +185,6 @@ async function route(req, env, ctx) {
     if (!isAuthed(url, env)) return unauthorized();
     try {
       const out = await runLearnOnce(env, { maxItems: Number(url.searchParams.get("n") || 10) });
-      // якщо прийшли з браузера — повернемо html з підсумком
       if (req.method === "GET") {
         const back = (() => {
           const u = new URL(url);
@@ -191,7 +193,7 @@ async function route(req, env, ctx) {
         })();
         return html(`
           <pre>${esc(out.summary || JSON.stringify(out, null, 2))}</pre>
-          <p><a class="btn" href="${esc(back)}">← Назад</a></p>
+          <p><a href="${esc(back)}">← Назад</a></p>
         `);
       }
       return json(out);
@@ -208,10 +210,7 @@ async function route(req, env, ctx) {
     try {
       if (ctype.includes("application/json")) {
         body = await req.json();
-      } else if (ctype.includes("application/x-www-form-urlencoded")) {
-        const form = await req.formData();
-        body = Object.fromEntries(form.entries());
-      } else if (ctype.includes("multipart/form-data")) {
+      } else if (ctype.includes("application/x-www-form-urlencoded") || ctype.includes("multipart/form-data")) {
         const form = await req.formData();
         body = Object.fromEntries(form.entries());
       } else {
@@ -242,7 +241,6 @@ async function route(req, env, ctx) {
       });
     }
 
-    // redirect back if form
     if (!ctype.includes("application/json")) {
       const back = new URL(url);
       back.pathname = "/admin/learn/html";
@@ -279,7 +277,6 @@ export default {
 
   // Нічний агент: запуск навчання за розкладом (створи CRON trigger у Workers)
   async scheduled(event, env, ctx) {
-    // Запускаємо невеликий батч; масштабуй за потреби
     ctx.waitUntil(runLearnOnce(env, { maxItems: 12 }).catch(() => null));
   },
 };
