@@ -38,6 +38,11 @@ import { handleAdminUsage } from "./routes/adminUsage.js";
 
 const VERSION = "senti-worker-2025-10-20-learn-admin-only";
 
+// локальний esc для безпечного виводу в HTML (викор. у /admin/*/run)
+function esc(s = "") {
+  return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
@@ -151,6 +156,48 @@ export default {
           return json({ ok: false, error: "unauthorized" }, 401, CORS);
         const res = await runSelfRegulation(env, null);
         return json({ ok: true, ...res }, 200, CORS);
+      }
+
+      /* ──────────────────────────────────────────────────────────────
+         Learn RUN: сумісні ендпойнти /admin/learn/run та /admin/brain/run
+         - GET: HTML з підсумком
+         - POST: JSON
+      ─────────────────────────────────────────────────────────────── */
+      if ((p === "/admin/learn/run" || p === "/admin/brain/run") && (method === "GET" || method === "POST")) {
+        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
+          return json({ ok: false, error: "unauthorized" }, 401, CORS);
+        }
+        try {
+          const maxItems = Number(url.searchParams.get("n") || 10);
+          const out = await runLearnOnce(env, { maxItems });
+          if (method === "GET") {
+            const back = (() => {
+              const u = new URL(url);
+              u.pathname = "/admin/learn/html";
+              return u.toString();
+            })();
+            return html(`
+              <style>
+                :root{color-scheme:dark}
+                body{background:#0b0f14;color:#e6edf3;font-family:ui-sans-serif,system-ui}
+                .wrap{max-width:980px;margin:0 auto;padding:12px}
+                .card{background:#11161d;border:1px solid #1f2937;border-radius:12px;padding:14px}
+                .btn{display:inline-block;padding:10px 14px;border-radius:10px;background:#223449;border:1px solid #2d4f6b;color:#e6edf3;text-decoration:none}
+                pre{white-space:pre-wrap;background:#0b1117;border:1px solid #1f2937;border-radius:10px;padding:10px}
+              </style>
+              <div class="wrap">
+                <div class="card">
+                  <b>Підсумок виконання</b>
+                  <pre>${esc(out?.summary || JSON.stringify(out, null, 2))}</pre>
+                  <p><a class="btn" href="${esc(back)}">← Назад</a></p>
+                </div>
+              </div>
+            `);
+          }
+          return json(out, 200, CORS);
+        } catch (e) {
+          return json({ ok: false, error: String(e?.message || e) }, 500, CORS);
+        }
       }
 
       // ===== Learn (admin only) =====
