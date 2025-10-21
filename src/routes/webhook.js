@@ -26,24 +26,8 @@ import { setUserLocation, getUserLocation } from "../lib/geo.js";
 const {
   BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_LEARN,
   mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand,
-  askLocationKeyboard
+  askLocationKeyboard, withTyping // ⬅️ головне: беремо withTyping з tg.js
 } = TG;
-
-// ── Telegram UX helpers (індикатор завантаження) ────────────────────────────
-// ТІЛЬКИ "typing" без текстового повідомлення (як у GPT).
-async function sendTyping(env, chatId) {
-  try {
-    const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
-    if (!token || !chatId) return;
-    await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, action: "typing" })
-    });
-  } catch {}
-}
-// Для зручності лишили сумісну назву:
-const sendThinking = sendTyping;
 
 // ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
 async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
@@ -159,13 +143,14 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   }
   await spendEnergy(env, userId, need, "vision");
 
-  // індикатор завантаження — тільки typing
-  await sendThinking(env, chatId);
+  // typing-індикатор без “пісочного годинника”
+  const resp = await withTyping(env, chatId, async () => {
+    const url = await tgFileUrl(env, att.file_id);
+    const prompt = caption || "Опиши, що на зображенні, коротко і по суті.";
+    return await cfVisionDescribe(env, url, prompt, lang);
+  });
 
-  const url = await tgFileUrl(env, att.file_id);
-  const prompt = caption || "Опиши, що на зображенні, коротко і по суті.";
   try {
-    const resp = await cfVisionDescribe(env, url, prompt, lang);
     await sendPlain(env, chatId, `🖼️ ${resp}`);
   } catch (e) {
     if (ADMIN(env, userId)) { await sendPlain(env, chatId, `❌ Vision error: ${String(e.message || e).slice(0, 180)}`); }
@@ -185,7 +170,7 @@ async function buildSystemHint(env, chatId, userId) {
 - Speak naturally and human-like with warmth and clarity.
 - Prefer concise, practical answers; expand only when asked.`;
 
-  // 👇 додамо останні інсайти з Learn
+  // 👇 додаємо останні інсайти з Learn
   let insightsBlock = "";
   try {
     const insights = await getRecentInsights(env, { limit: 5 });
@@ -445,20 +430,19 @@ export async function handleTelegramWebhook(req, env) {
       }
       await spendEnergy(env, userId, need, "text");
 
-      // індикатор завантаження — тільки typing
-      await sendThinking(env, chatId);
-
-      const systemHint = await buildSystemHint(env, chatId, userId);
-      const name = await getPreferredName(env, msg);
-      const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(q);
-
-      const { short, full } = await callSmartLLM(env, q, { lang, name, systemHint, expand, adminDiag: isAdmin });
+      // typing-індикатор навколо LLM-виклику
+      const { short, full } = await withTyping(env, chatId, async () => {
+        const systemHint = await buildSystemHint(env, chatId, userId);
+        const name = await getPreferredName(env, msg);
+        const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(q);
+        return await callSmartLLM(env, q, { lang, name, systemHint, expand, adminDiag: isAdmin });
+      });
 
       await pushTurn(env, userId, "user", q);
       await pushTurn(env, userId, "assistant", full);
 
       const after = (cur.energy - need);
-      if (expand && full.length > short.length) { for (const ch of chunkText(full)) await sendPlain(env, chatId, ch); }
+      if (full.length > short.length) { for (const ch of chunkText(full)) await sendPlain(env, chatId, ch); }
       else { await sendPlain(env, chatId, short); }
       if (after <= Number(cur.low ?? 10)) {
         const links = energyLinks(env, userId);
@@ -585,19 +569,19 @@ export async function handleTelegramWebhook(req, env) {
       }
       await spendEnergy(env, userId, need, "text");
 
-      // індикатор завантаження — тільки typing
-      await sendThinking(env, chatId);
-
-      const systemHint = await buildSystemHint(env, chatId, userId);
-      const name = await getPreferredName(env, msg);
-      const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
-      const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand, adminDiag: isAdmin });
+      // typing-індикатор навколо LLM-виклику
+      const { short, full } = await withTyping(env, chatId, async () => {
+        const systemHint = await buildSystemHint(env, chatId, userId);
+        const name = await getPreferredName(env, msg);
+        const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
+        return await callSmartLLM(env, textRaw, { lang, name, systemHint, expand, adminDiag: isAdmin });
+      });
 
       await pushTurn(env, userId, "user", textRaw);
       await pushTurn(env, userId, "assistant", full);
 
       const after = (cur.energy - need);
-      if (expand && full.length > short.length) { for (const ch of chunkText(full)) await sendPlain(env, chatId, ch); }
+      if (full.length > short.length) { for (const ch of chunkText(full)) await sendPlain(env, chatId, ch); }
       else { await sendPlain(env, chatId, short); }
       if (after <= Number(cur.low ?? 10)) {
         const links = energyLinks(env, userId);
