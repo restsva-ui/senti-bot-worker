@@ -398,7 +398,8 @@ function guessTitleFromText(text = "") {
   return firstLine.length > 120 ? firstLine.slice(0, 117) + "…" : firstLine;
 }
 
-function bytesFmt(n) {
+// ЕКСПОРТУЄМО bytesFmt (було потрібно імпортом у kvLearnQueue)
+export function bytesFmt(n) {
   const b = Number(n || 0);
   if (b < 1024) return `${b} B`;
   const kb = b / 1024; if (kb < 1024) return `${kb.toFixed(1)} KB`;
@@ -438,6 +439,7 @@ function normalizePlainText(s = "") {
     .trim();
 }
 
+// ЕКСПОРТУЄМО chunkText (імпортується як `chunkText as chunkTextForIndex`)
 export function chunkText(s, size = 4000) {
   const out = [];
   let t = String(s || "");
@@ -447,3 +449,10 @@ export function chunkText(s, size = 4000) {
   }
   return out;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Сумісність зі старими імпортами з інших модулів
+// ─────────────────────────────────────────────────────────────────────────────
+
+// kvLearnQueue.js очікує named-export `extractFromUrl`
+export { fetchAndExtract as extractFromUrl };
