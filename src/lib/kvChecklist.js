@@ -1,36 +1,29 @@
 // src/lib/kvChecklist.js
-// В одному модулі — чекліст + прості HTML-рендери Repo та Статуту.
-// KV binding: CHECKLIST_KV (або STATE_KV як fallback)
-// R2 binding (необов'язково): LEARN_BUCKET — для архівів (zip) та списку Repo.
+// Чекліст + Repo (R2) + Статут (KV) + HTML-рендери.
 
 function pickKV(env) {
   return env.CHECKLIST_KV || env.STATE_KV || env.LEARN_QUEUE_KV || env.TODO_KV;
 }
-function esc(s = "") {
-  return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
+function esc(s = "") { return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }
 function fmtLocal(dt, tz) {
-  try {
-    return new Date(dt).toLocaleString("uk-UA", { timeZone: tz || "Europe/Kyiv" });
-  } catch { return String(dt); }
+  try { return new Date(dt).toLocaleString("uk-UA", { timeZone: tz || "Europe/Kyiv" }); }
+  catch { return String(dt); }
 }
 
-// ── ЧЕКЛІСТ ──────────────────────────────────────────────────────────────────
+// ── ЧЕКЛІСТ ─────────────────────────────────────────
 const KEY_TEXT = "checklist:text";
-const KEY_LOG  = "checklist:log"; // простий журнал
+const KEY_LOG  = "checklist:log";
 
 export async function readChecklist(env) {
   const kv = pickKV(env);
   return (await kv?.get(KEY_TEXT, "text")) || "";
 }
-
 export async function writeChecklist(env, text) {
   const kv = pickKV(env);
   if (!kv) return;
   await kv.put(KEY_TEXT, String(text || ""));
   await appendLog(env, `✍️ replace checklist (${(String(text||"").length)} chars)`);
 }
-
 export async function appendChecklist(env, line) {
   const kv = pickKV(env);
   if (!kv) return;
@@ -39,19 +32,18 @@ export async function appendChecklist(env, line) {
   await kv.put(KEY_TEXT, next);
   await appendLog(env, `➕ append "${String(line||"").slice(0,80)}"`);
 }
-
 async function appendLog(env, msg) {
-  const kv = pickKV(env);
-  if (!kv) return;
+  const kv = pickKV(env); if (!kv) return;
   const now = new Date().toISOString();
   const cur = (await kv.get(KEY_LOG, "text")) || "";
   const line = `[${fmtLocal(now, env.TIMEZONE)}] ${msg}`;
   const next = cur ? `${line}\n${cur}` : line;
-  await kv.put(KEY_LOG, next.slice(0, 20000)); // обрізаємо довгі логи
+  await kv.put(KEY_LOG, next.slice(0, 20000));
 }
+// публічний логгер для cron
+export async function logChecklist(env, msg) { await appendLog(env, msg); }
 
 export async function saveArchive(env, reason = "manual") {
-  // Зберігає чекліст в R2 (як .txt) якщо LEARN_BUCKET під'єднаний.
   const bucket = env.LEARN_BUCKET;
   const text = await readChecklist(env);
   if (!bucket || !text) {
@@ -113,7 +105,7 @@ export async function checklistHtml(env) {
   </div>`;
 }
 
-// ── REPO (список архівів у R2) ───────────────────────────────────────────────
+// ── REPO (R2) ──────────────────────────────────────
 export async function repoHtml(env) {
   const bucket = env.LEARN_BUCKET;
   const css = `
@@ -142,7 +134,7 @@ export async function repoHtml(env) {
   return `${css}<div class="wrap"><div class="card"><b>📁 Repo</b>${list}</div></div>`;
 }
 
-// ── СТАТУТ (беремо з KV ключа statut:html або statut:text) ──────────────────
+// ── СТАТУТ (KV) ────────────────────────────────────
 export async function statutHtml(env) {
   const kv = pickKV(env);
   const htmlRaw = await kv?.get("statut:html", "text");
