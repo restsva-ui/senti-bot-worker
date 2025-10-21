@@ -53,6 +53,9 @@ export async function sendPlain(env, chatId, text, extra = {}) {
   };
   if (extra.parse_mode)  body.parse_mode  = extra.parse_mode;
   if (extra.reply_markup) body.reply_markup = extra.reply_markup;
+  if (typeof extra.disable_notification === "boolean") {
+    body.disable_notification = extra.disable_notification;
+  }
 
   await fetch(url, {
     method: "POST",
@@ -73,6 +76,14 @@ export async function sendChatAction(env, chatId, action = "typing") {
       body: JSON.stringify(body),
     });
   } catch {}
+}
+
+// 🔁 Аліаси для зворотної сумісності зі старим кодом
+export async function sendAction(env, chatId, action = "typing") {
+  return sendChatAction(env, chatId, action);
+}
+export async function sendTyping(env, chatId) {
+  return sendChatAction(env, chatId, "typing");
 }
 
 /** Обгортач: увімкнути "друкує…" на час довгої операції */
@@ -178,8 +189,10 @@ export const TG = {
   sendPlain,
   parseAiCommand,
   askLocationKeyboard,
-  // нові
+  // нові/сумісність
   sendChatAction,
+  sendAction,     // ✅ для старих викликів
+  sendTyping,     // ✅ для старих викликів
   withTyping,
   withUploading,
   startSpinner,
