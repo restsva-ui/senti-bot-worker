@@ -84,7 +84,7 @@ async function ensureInlineImage(image, fallbackMime = "image/jpeg") {
     const b64 = bufToBase64(arr);
     return `data:${mime};base64,${b64}`;
   }
-  // Якщо раптом прилетіло "file_id" або інше — нехай звідти виклик зробить попередню конвертацію
+  // Якщо раптом прилетіло "file_id" або інший маркер — попередньо конвертуй у http(s)/data: на стороні виклику
   throw new Error("Unsupported image input; pass data:URL or http(s) URL");
 }
 
@@ -221,7 +221,7 @@ async function callFree(env, model, prompt, systemHint) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Провайдери — VISION
+/** Провайдери — VISION */
 
 // Gemini vision (REST, v1beta generateContent)
 // images: масив data:URL або http(s) URL (ми всередині перетворимо у data:)
@@ -276,7 +276,7 @@ async function callCFVision(env, model, { prompt, images = [], systemHint }) {
 
   const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/${encodeURIComponent(model)}`;
 
-  // Беремо перше зображення (або кілька — але Workers AI краще працює з 1)
+  // Беремо перше зображення (або кілька — але Workers AI стабільніше з 1)
   const img = images[0];
   if (!img) throw new Error("No image provided");
 
