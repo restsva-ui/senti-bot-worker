@@ -2,6 +2,7 @@
 // Узагальнений маршрутизатор моделей + health-метрики.
 // ВАЖЛИВО: systemHint завжди додається. Якщо API не має поля system —
 // підмішуємо як префікс до user-повідомлення.
+// Додано: askVision() з каскадом Gemini → Cloudflare Workers AI (vision).
 
 const HEALTH_NS = "ai:health";
 const ALPHA = 0.3; // EWMA коеф.
@@ -57,18 +58,47 @@ function parseEntry(raw) {
   return { provider: "free", model: s };
 }
 
+// Невеличкі утиліти для vision
+function isDataUrl(s = "") { return /^data:/.test(String(s || "")); }
+function bufToBase64(bytes) {
+  // безпечне кодування великого буфера у base64
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+async function ensureInlineImage(image, fallbackMime = "image/jpeg") {
+  // Приймаємо або data: URL, або http(s)-URL; повертаємо data:URL для Gemini
+  if (!image) return null;
+  const s = String(image);
+  if (isDataUrl(s)) return s;
+
+  if (/^https?:\/\//i.test(s)) {
+    // Скачуємо і конвертуємо у data: для стабільної роботи Gemini
+    const r = await fetch(s);
+    if (!r.ok) throw new Error(`image fetch http ${r.status}`);
+    const arr = new Uint8Array(await r.arrayBuffer());
+    const mime = r.headers.get("content-type") || fallbackMime;
+    const b64 = bufToBase64(arr);
+    return `data:${mime};base64,${b64}`;
+  }
+  // Якщо раптом прилетіло "file_id" або інше — нехай звідти виклик зробить попередню конвертацію
+  throw new Error("Unsupported image input; pass data:URL or http(s) URL");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Провайдери
+// Провайдери — текст
 
 async function callGemini(env, model, prompt, systemHint) {
   const key =
     env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY;
   if (!key) throw new Error("GEMINI key missing");
 
-  // Надійніше — одним промптом з префіксом (бо різні ревізії API іменують поле по-різному)
   const user = withSystemPrefix(systemHint, prompt);
 
-  // generateContent (v1beta) формат
+  // generateContent (v1beta)
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(
     key
   )}`;
@@ -86,7 +116,6 @@ async function callGemini(env, model, prompt, systemHint) {
   });
   const data = await jsonSafe(r);
   if (!r.ok) throw new Error(`gemini ${r.status} ${data?.error?.message || ""}`);
-  // Витягуємо текст
   const text =
     data?.candidates?.[0]?.content?.parts?.map(p => p?.text).filter(Boolean).join("\n").trim() ||
     data?.candidates?.[0]?.content?.parts?.[0]?.text ||
@@ -100,7 +129,6 @@ async function callCF(env, model, prompt, systemHint) {
   const acc = env.CF_ACCOUNT_ID;
   if (!token || !acc) throw new Error("Cloudflare credentials missing");
 
-  // Workers AI підтримує chat messages (system + user)
   const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/${encodeURIComponent(model)}`;
   const messages = [];
   if (systemHint?.trim()) messages.push({ role: "system", content: systemHint.trim() });
@@ -167,8 +195,6 @@ async function callFree(env, model, prompt, systemHint) {
     env.FREE_LLM_API_KEY || env.FREE_API_KEY || "";
   const endpoint = base.replace(/\/+$/, "") + "/v1/chat/completions";
 
-  // OpenAI-сумісний чат. Якщо системний промпт не підтримується — усе одно
-  // моделі його «бачитимуть», бо ми додаємо role:system.
   const messages = [];
   if (systemHint?.trim()) messages.push({ role: "system", content: systemHint.trim() });
   messages.push({ role: "user", content: String(prompt || "") });
@@ -195,7 +221,98 @@ async function callFree(env, model, prompt, systemHint) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Головна точка: послідовний перебір за modelOrder.
+// Провайдери — VISION
+
+// Gemini vision (REST, v1beta generateContent)
+// images: масив data:URL або http(s) URL (ми всередині перетворимо у data:)
+async function callGeminiVision(env, model, { prompt, images = [], systemHint }) {
+  const key = env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY;
+  if (!key) throw new Error("GEMINI key missing");
+
+  // Підготуємо parts: текст + inline_data (base64)
+  const parts = [];
+  const textPrompt = withSystemPrefix(systemHint, prompt || "Describe the image briefly.");
+  parts.push({ text: textPrompt });
+
+  // Робимо максимум 4 зображення на запит, щоб не перевантажувати
+  const maxImg = Math.min(4, images.length || 0);
+  for (let i = 0; i < maxImg; i++) {
+    const dataUrl = await ensureInlineImage(images[i]);
+    const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/i);
+    if (!m) continue;
+    const mimeType = m[1] || "image/jpeg";
+    const data = m[2] || "";
+    parts.push({ inline_data: { mime_type: mimeType, data } });
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+  const body = {
+    contents: [{ role: "user", parts }],
+    safetySettings: [{ category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }],
+  };
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await jsonSafe(r);
+  if (!r.ok) throw new Error(`gemini-vision ${r.status} ${data?.error?.message || ""}`);
+
+  const out =
+    data?.candidates?.[0]?.content?.parts?.map(p => p?.text).filter(Boolean).join("\n").trim() ||
+    data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+    "";
+  if (!out) throw new Error("gemini-vision: empty response");
+  return out.trim();
+}
+
+// Cloudflare Workers AI vision (@cf/*-vision-instruct)
+// Приймає image_url; якщо нам подали data:URL — теж працює.
+async function callCFVision(env, model, { prompt, images = [], systemHint }) {
+  const token = env.CLOUDFLARE_API_TOKEN;
+  const acc = env.CF_ACCOUNT_ID;
+  if (!token || !acc) throw new Error("Cloudflare credentials missing");
+
+  const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/${encodeURIComponent(model)}`;
+
+  // Беремо перше зображення (або кілька — але Workers AI краще працює з 1)
+  const img = images[0];
+  if (!img) throw new Error("No image provided");
+
+  const content = [];
+  // Текст
+  const fullPrompt = withSystemPrefix(systemHint, prompt || "Describe the image briefly.");
+  content.push({ type: "input_text", text: fullPrompt });
+  // Картинка (можна data:URL або http URL)
+  content.push({ type: "input_image", image_url: img });
+
+  const messages = [{ role: "user", content }];
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ messages }),
+  });
+  const data = await jsonSafe(r);
+  if (!data?.success) {
+    const msg = data?.errors?.[0]?.message || `cf-vision http ${r.status}`;
+    throw new Error(msg);
+  }
+  const out =
+    data?.result?.response?.trim?.() ||
+    data?.result?.text?.trim?.() ||
+    data?.result?.output_text?.trim?.() ||
+    "";
+  if (!out) throw new Error("cf-vision: empty response");
+  return out.trim();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Головна точка: послідовний перебір за modelOrder (TEXT)
 
 export async function askAnyModel(env, modelOrder, prompt, { systemHint } = {}) {
   const entries = String(modelOrder || "")
@@ -206,8 +323,6 @@ export async function askAnyModel(env, modelOrder, prompt, { systemHint } = {}) 
   if (!entries.length) {
     // Якщо порядок не задано — спробуємо мінімальний FREE як запасний варіант
     const p = withSystemPrefix(systemHint, prompt);
-    // Або, якщо у твоєму проекті є think(), можеш підмінити тут.
-    // Але щоб файл був самодостатній — йдемо на free-гілку:
     return await callFree(env, env.FREE_LLM_MODEL || "gpt-3.5-turbo", p, "");
   }
 
@@ -236,13 +351,55 @@ export async function askAnyModel(env, modelOrder, prompt, { systemHint } = {}) 
       const ms = nowMs() - t0;
       updateHealth(env, { provider, model, ms, ok: false }).catch(() => {});
       lastErr = e;
-      // пробуємо наступний у ланцюжку
-      continue;
+      continue; // пробуємо наступний
     }
   }
 
-  // Якщо усі впали — кидаємо останню помилку
   throw lastErr || new Error("All providers failed");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// НОВЕ: Vision-каскад (Gemini → Cloudflare). Безкоштовно, з фолбеком.
+
+export async function askVision(env, { prompt, images = [], systemHint } = {}) {
+  // Порядок можна задати через ENV або використовуємо дефолт:
+  // 1) Gemini (gemini-2.5-flash або gemini-1.5-flash)
+  // 2) Cloudflare (@cf/meta/llama-3.2-11b-vision-instruct)
+  const order = [
+    { provider: "gemini-vision", model: env.GEMINI_MODEL_VISION || "gemini-2.5-flash" },
+    { provider: "cf-vision",     model: env.CF_VISION_MODEL     || "@cf/meta/llama-3.2-11b-vision-instruct" },
+  ];
+
+  let lastErr = null;
+
+  for (const ent of order) {
+    const { provider, model } = ent;
+    const t0 = nowMs();
+    try {
+      let out;
+      if (provider === "gemini-vision") {
+        // Уніфікуємо input: навіть якщо прийшов http URL — конвертуємо у data:
+        const prepared = [];
+        for (const img of images || []) prepared.push(await ensureInlineImage(img));
+        out = await callGeminiVision(env, model, { prompt, images: prepared, systemHint });
+      } else if (provider === "cf-vision") {
+        // CF дозволяє image_url як data: так і http(s)
+        out = await callCFVision(env, model, { prompt, images, systemHint });
+      } else {
+        throw new Error(`unknown vision provider: ${provider}`);
+      }
+      const ms = nowMs() - t0;
+      updateHealth(env, { provider, model, ms, ok: true }).catch(() => {});
+      return out;
+    } catch (e) {
+      const ms = nowMs() - t0;
+      updateHealth(env, { provider, model, ms, ok: false }).catch(() => {});
+      lastErr = e;
+      continue; // м’який фолбек на наступного
+    }
+  }
+
+  throw lastErr || new Error("All vision providers failed");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
