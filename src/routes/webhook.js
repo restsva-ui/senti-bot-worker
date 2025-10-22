@@ -8,19 +8,15 @@ import { readStatut } from "../lib/kvChecklist.js";
 import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
 import { json } from "../lib/utils.js";
 import { getEnergy, spendEnergy } from "../lib/energy.js";
-// ⬇️ заміна dialogMemory → memory
-import { getShortContext, recallFacts, pushContext, contextToTranscript } from "../lib/memory.js";
+import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
 import { loadSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
-import { enqueueLearn, listQueued, getRecentInsights } from "../lib/kvLearnQueue.js"; // Learn + інсайти
+import { enqueueLearn, listQueued, getRecentInsights } from "../lib/kvLearnQueue.js";
 
-// APIs
 import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from "../apis/time.js";
 import { weatherIntent, weatherSummaryByPlace, weatherSummaryByCoords } from "../apis/weather.js";
-
-// Геолокація користувача (KV)
 import { setUserLocation, getUserLocation } from "../lib/geo.js";
 
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
@@ -29,6 +25,13 @@ const {
   mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand,
   askLocationKeyboard
 } = TG;
+
+// ── Ключі в STATE_KV ────────────────────────────────────────────────────────
+const KV = {
+  greetingVideoId: "greet:video:file_id",
+  greetedFlag: (uid) => `greet:done:${uid}`,
+  learnMode:   (uid) => `learn:mode:${uid}`, // "on" | "off"
+};
 
 // ── Telegram UX helpers (індикатор як у GPT) ────────────────────────────────
 async function sendTyping(env, chatId) {
@@ -42,12 +45,9 @@ async function sendTyping(env, chatId) {
     });
   } catch {}
 }
-// Надсилаємо кілька «пульсів» typing, поки модель думає.
 function pulseTyping(env, chatId, times = 4, intervalMs = 4000) {
   sendTyping(env, chatId);
-  for (let i = 1; i < times; i++) {
-    setTimeout(() => { sendTyping(env, chatId); }, i * intervalMs);
-  }
+  for (let i = 1; i < times; i++) setTimeout(() => sendTyping(env, chatId), i * intervalMs);
 }
 
 // ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
@@ -122,10 +122,16 @@ async function tgFileUrl(env, file_id) {
   return `https://api.telegram.org/file/bot${token}/${path}`;
 }
 
-// ===== Learn helpers (адмін-тільки) =========================================
+// ===== Learn helpers (admin-only, ручний режим) =============================
 function extractFirstUrl(text = "") {
   const m = String(text || "").match(/https?:\/\/\S+/i);
   return m ? m[0] : null;
+}
+async function getLearnMode(env, userId) {
+  try { return (await env.STATE_KV.get(KV.learnMode(userId))) === "on"; } catch { return false; }
+}
+async function setLearnMode(env, userId, on) {
+  try { await env.STATE_KV.put(KV.learnMode(userId), on ? "on" : "off"); } catch {}
 }
 
 // Drive-режим
@@ -135,8 +141,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
 
   const cur = await getEnergy(env, userId);
   const need = Number(cur.costImage ?? 5);
-  const curBal = Number((cur.energy ?? cur.balance ?? 0));
-  if (curBal < need) {
+  if ((cur.energy ?? 0) < need) {
     const links = energyLinks(env, userId);
     await sendPlain(env, chatId, t(lang, "need_energy_media", need, links.energy));
     return true;
@@ -158,15 +163,13 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
 
   const cur = await getEnergy(env, userId);
   const need = Number(cur.costText ?? 1);
-  const curBal = Number((cur.energy ?? cur.balance ?? 0));
-  if (curBal < need) {
+  if ((cur.energy ?? 0) < need) {
     const links = energyLinks(env, userId);
     await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
     return true;
   }
   await spendEnergy(env, userId, need, "vision");
 
-  // індикатор typing
   pulseTyping(env, chatId);
 
   const url = await tgFileUrl(env, att.file_id);
@@ -184,9 +187,14 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
 // ── SystemHint ───────────────────────────────────────────────────────────────
 async function buildSystemHint(env, chatId, userId) {
   const statut = String((await readStatut(env)) || "").trim();
+  const dlg = await buildDialogHint(env, userId);
   const tune = await loadSelfTune(env, chatId);
 
-  // 🔸 додамо останні інсайти з Learn
+  const core = `You are Senti — a thoughtful, self-improving assistant and companion.
+- Never claim to be an AI, model, chatbot, or a product made by any company.
+- Speak naturally and human-like with warmth and clarity.
+- Prefer concise, practical answers; expand only when asked.`;
+
   let insightsBlock = "";
   try {
     const insights = await getRecentInsights(env, { limit: 5 });
@@ -196,27 +204,11 @@ async function buildSystemHint(env, chatId, userId) {
     }
   } catch {}
 
-  // 🔸 короткий контекст + факти з memory.js
-  let dialogBlock = "";
-  try {
-    const shortCtx = await getShortContext(env, chatId, 8);
-    const transcript = contextToTranscript(shortCtx);
-    const facts = await recallFacts(env, userId);
-    const factsBlock = facts?.length ? `\n[Факти про користувача]\n• ${facts.slice(0, 12).join("\n• ")}` : "";
-    const ctxBlock = transcript ? `[Останній контекст]\n${transcript}` : "";
-    dialogBlock = [ctxBlock, factsBlock].filter(Boolean).join("\n");
-  } catch {}
-
-  const core = `You are Senti — a thoughtful, self-improving assistant and companion.
-- Never claim to be an AI, model, chatbot, or a product made by any company.
-- Speak naturally and human-like with warmth and clarity.
-- Prefer concise, practical answers; expand only when asked.`;
-
   const blocks = [core];
   if (statut) blocks.push(`[Статут/чеклист]\n${statut}`);
   if (tune) blocks.push(`[Self-Tune]\n${tune}`);
   if (insightsBlock) blocks.push(insightsBlock);
-  if (dialogBlock) blocks.push(dialogBlock);
+  if (dlg) blocks.push(dlg);
   return blocks.join("\n\n");
 }
 
@@ -224,14 +216,16 @@ async function buildSystemHint(env, chatId, userId) {
 function guessEmoji(text = "") {
   const tt = text.toLowerCase();
   if (tt.includes("колес") || tt.includes("wheel")) return "🛞";
-  if (tt.includes("дзеркал") || tt.includes("зеркал") || tt.includes("mirror")) return "🪞";
+  if (tt.includes("дзеркал") || tt.includes("mirror")) return "🪞";
   if (tt.includes("машин") || tt.includes("авто") || tt.includes("car")) return "🚗";
   if (tt.includes("вода") || tt.includes("рідина") || tt.includes("water")) return "💧";
-  if (tt.includes("світл") || tt.includes("light") || tt.includes("солнц")) return "☀️";
-  if (tt.includes("електр") || tt.includes("струм") || tt.includes("current")) return "⚡";
+  if (tt.includes("світл") || tt.includes("light")) return "☀️";
+  if (tt.includes("електр") || tt.includes("струм")) return "⚡";
   return "💡";
 }
 function looksLikeEmojiStart(s = "") { try { return /^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(String(s)); } catch { return false; } }
+
+// Ім’я користувача
 function tryParseUserNamedAs(text) {
   const s = (text || "").trim();
   const NAME_RX = "([A-Za-zÀ-ÿĀ-žЀ-ӿʼ'`\\-\\s]{2,30})";
@@ -344,19 +338,49 @@ async function runLearnNow(env) {
   const secret = env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || "";
   const u = new URL(abs(env, "/admin/learn/run"));
   if (secret) u.searchParams.set("s", secret);
-  // POST → index.js повертає JSON (summary тощо)
   const r = await fetch(u.toString(), { method: "POST" });
   const ct = r.headers.get("content-type") || "";
   if (!r.ok) throw new Error(`learn_run http ${r.status}`);
   if (ct.includes("application/json")) return await r.json();
   return { ok: true, summary: await r.text() };
 }
-
 async function listInsights(env, limit = 5) {
+  try { return await getRecentInsights(env, { limit }) || []; } catch { return []; }
+}
+
+// ── Вітальне відео ──────────────────────────────────────────────────────────
+async function setGreetingVideo(env, file_id) {
+  try { await env.STATE_KV.put(KV.greetingVideoId, file_id); return true; } catch { return false; }
+}
+async function getGreetingVideo(env) {
+  try { return await env.STATE_KV.get(KV.greetingVideoId); } catch { return null; }
+}
+async function markGreeted(env, userId) {
+  try { await env.STATE_KV.put(KV.greetedFlag(userId), "1", { expirationTtl: 60 * 60 * 24 * 400 }); } catch {}
+}
+async function wasGreeted(env, userId) {
+  try { return !!(await env.STATE_KV.get(KV.greetedFlag(userId))); } catch { return false; }
+}
+async function sendGreetingIfNeeded(env, chatId, userId, lang) {
+  if (!chatId || !userId) return;
+  if (await wasGreeted(env, userId)) return;
+
+  const fileId = await getGreetingVideo(env);
+  if (!fileId) return;
+
   try {
-    const arr = await getRecentInsights(env, { limit });
-    return Array.isArray(arr) ? arr : [];
-  } catch { return []; }
+    const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+    await fetch(`https://api.telegram.org/bot${token}/sendVideo`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        video: fileId,
+        caption: t(lang, "hello_name", await getPreferredName(env, { from: { id: userId } })) + " " + t(lang, "how_help")
+      })
+    });
+    await markGreeted(env, userId);
+  } catch {}
 }
 
 // ── MAIN ────────────────────────────────────────────────────────────────────
@@ -405,6 +429,16 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
+  // /start — вітальне відео (1 раз на користувача)
+  if (textRaw === "/start") {
+    await safe(async () => {
+      await sendGreetingIfNeeded(env, chatId, userId, lang);
+      const name = await getPreferredName(env, msg);
+      await sendPlain(env, chatId, `${t(lang, "hello_name", name)} ${t(lang, "how_help")}`, { reply_markup: mainKeyboard(isAdmin) });
+    });
+    return json({ ok: true });
+  }
+
   // /admin
   if (textRaw === "/admin" || textRaw === "/admin@SentiBot" || textRaw === BTN_ADMIN) {
     await safe(async () => {
@@ -432,17 +466,19 @@ export async function handleTelegramWebhook(req, env) {
           lines.push(`${light} ${h.provider}:${h.model} — ewma ${ms}, fails ${h.failStreak || 0}`);
         }
       }
+      const learnOn = await getLearnMode(env, userId);
       const links = energyLinks(env, userId);
       const markup = { inline_keyboard: [
         [{ text: "📋 Відкрити Checklist", url: links.checklist }],
         [{ text: "🧠 Open Learn", url: links.learn }],
+        [{ text: learnOn ? "🧠 Learn: ON → OFF" : "🧠 Learn: OFF → ON", url: abs(env, `/admin/learn/toggle?s=${encodeURIComponent(env.WEBHOOK_SECRET || "")}&u=${userId}`) }],
       ]};
       await sendPlain(env, chatId, lines.join("\n"), { reply_markup: markup });
     });
     return json({ ok: true });
   }
 
-  // Кнопка LEARN — лише адмін
+  // Кнопка LEARN / команда — лише адмін
   if (textRaw === (BTN_LEARN || "Learn") || (isAdmin && textRaw === "/learn")) {
     if (!isAdmin) {
       await sendPlain(env, chatId, t(lang, "how_help"), { reply_markup: mainKeyboard(false) });
@@ -455,15 +491,35 @@ export async function handleTelegramWebhook(req, env) {
         hasQueue = Array.isArray(r) ? r.length > 0 : Array.isArray(r?.items) ? r.items.length > 0 : false;
       } catch {}
       const links = energyLinks(env, userId);
+      const learnOn = await getLearnMode(env, userId);
       const hint =
-        "🧠 Режим Learn.\nНадсилай посилання, файли або архіви — я додам у чергу. " +
+        "🧠 Режим Learn.\nНадсилай посилання, файли або архіви — я додам у чергу, **якщо Learn увімкнено** (/learn_on). " +
         "В HTML-інтерфейсі можна переглянути чергу й підсумки, а також запустити обробку.";
       const keyboard = [[{ text: "🧠 Відкрити Learn HTML", url: links.learn }]];
-      if (hasQueue) {
-        keyboard.push([{ text: "🧠 Прокачай мозок", url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }]);
-      }
+      if (hasQueue) keyboard.push([{ text: "🧠 Прокачай мозок", url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }]);
+      keyboard.push([{ text: learnOn ? "🔴 Learn OFF (/learn_off)" : "🟢 Learn ON (/learn_on)", url: "https://t.me" }]); // підказка
       await sendPlain(env, chatId, hint, { reply_markup: { inline_keyboard: keyboard } });
     });
+    return json({ ok: true });
+  }
+
+  // Явні тумблери Learn
+  if (isAdmin && textRaw === "/learn_on") {
+    await setLearnMode(env, userId, true);
+    await sendPlain(env, chatId, "🟢 Learn-режим увімкнено. Надіслані посилання/файли підуть у чергу.");
+    return json({ ok: true });
+  }
+  if (isAdmin && textRaw === "/learn_off") {
+    await setLearnMode(env, userId, false);
+    await sendPlain(env, chatId, "🔴 Learn-режим вимкнено. Медіа знову обробляються як зазвичай (Drive/Vision).");
+    return json({ ok: true });
+  }
+  // Швидке додавання одного URL в Learn
+  if (isAdmin && textRaw.startsWith("/learn_add")) {
+    const u = extractFirstUrl(textRaw);
+    if (!u) { await sendPlain(env, chatId, "Дай посилання після команди, напр.: /learn_add https://..."); return json({ ok: true }); }
+    await enqueueLearn(env, String(userId), { url: u, name: u });
+    await sendPlain(env, chatId, "✅ Додано в чергу Learn.");
     return json({ ok: true });
   }
 
@@ -480,76 +536,17 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /ai
-  const aiArg = parseAiCommand(textRaw);
-  if (aiArg !== null) {
+  // Налаштування вітального відео (адмін): надішли відео з підписом #set_greeting
+  if (isAdmin && msg?.video && /#set_greeting\b/i.test(textRaw)) {
     await safe(async () => {
-      const q = aiArg || "";
-      if (!q) { await sendPlain(env, chatId, t(lang, "senti_tip")); return; }
-      const cur = await getEnergy(env, userId);
-      const need = Number(cur.costText ?? 1);
-      const curBal = Number((cur.energy ?? cur.balance ?? 0));
-      if (curBal < need) {
-        const links = energyLinks(env, userId);
-        await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
-        return;
-      }
-      await spendEnergy(env, userId, need, "text");
-
-      // індикатор typing
-      pulseTyping(env, chatId);
-
-      const systemHint = await buildSystemHint(env, chatId, userId);
-      const name = await getPreferredName(env, msg);
-      const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(q);
-
-      const { short, full } = await callSmartLLM(env, q, { lang, name, systemHint, expand, adminDiag: isAdmin });
-
-      // ⬇️ зберігаємо діалог у memory.js
-      await pushContext(env, chatId, "user", q);
-      await pushContext(env, chatId, "assistant", full);
-
-      const after = curBal - need;
-      if (expand && full.length > short.length) { for (const ch of chunkText(full)) await sendPlain(env, chatId, ch); }
-      else { await sendPlain(env, chatId, short); }
-      if (after <= Number(cur.low ?? 10)) {
-        const links = energyLinks(env, userId);
-        await sendPlain(env, chatId, t(lang, "low_energy_notice", after, links.energy));
-      }
+      const ok = await setGreetingVideo(env, msg.video.file_id);
+      await sendPlain(env, chatId, ok ? "✅ Вітальне відео збережено. Надсилатиметься новим користувачам при /start." : "❌ Не вдалось зберегти відео.");
     });
     return json({ ok: true });
   }
 
-  // Google Drive кнопка
-  if (textRaw === BTN_DRIVE) {
-    await safe(async () => {
-      const ut = await getUserTokens(env, userId);
-      await setDriveMode(env, userId, true);
-      const zeroWidth = "\u2063";
-      if (!ut?.refresh_token) {
-        const authUrl = abs(env, `/auth/start?u=${userId}`);
-        await sendPlain(env, chatId, zeroWidth, {
-          reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: authUrl }]] }
-        });
-        return;
-      }
-      await sendPlain(env, chatId, zeroWidth, {
-        reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: "https://drive.google.com/drive/my-drive" }]] }
-      });
-    });
-    return json({ ok: true });
-  }
-
-  // Кнопка Senti
-  if (textRaw === BTN_SENTI) {
-    await setDriveMode(env, userId, false);
-    const zeroWidth = "\u2063";
-    await sendPlain(env, chatId, zeroWidth, { reply_markup: mainKeyboard(isAdmin) });
-    return json({ ok: true });
-  }
-
-  // ===== Learn enqueue (адмін) =====
-  if (isAdmin) {
+  // ===== Learn enqueue (адмін, тільки коли Learn ON) =====
+  if (isAdmin && await getLearnMode(env, userId)) {
     const urlInText = extractFirstUrl(textRaw);
     if (urlInText) {
       await safe(async () => {
@@ -569,7 +566,7 @@ export async function handleTelegramWebhook(req, env) {
     }
   }
 
-  // Медіа: Drive або Vision
+  // Медіа: Drive або Vision (звичайна поведінка)
   try {
     const driveOn = await getDriveMode(env, userId);
     if (driveOn) {
@@ -630,15 +627,13 @@ export async function handleTelegramWebhook(req, env) {
 
       const cur = await getEnergy(env, userId);
       const need = Number(cur.costText ?? 1);
-      const curBal = Number((cur.energy ?? cur.balance ?? 0));
-      if (curBal < need) {
+      if ((cur.energy ?? 0) < need) {
         const links = energyLinks(env, userId);
         await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
         return;
       }
       await spendEnergy(env, userId, need, "text");
 
-      // індикатор typing
       pulseTyping(env, chatId);
 
       const systemHint = await buildSystemHint(env, chatId, userId);
@@ -646,11 +641,10 @@ export async function handleTelegramWebhook(req, env) {
       const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
       const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand, adminDiag: isAdmin });
 
-      // ⬇️ зберігаємо діалог у memory.js
-      await pushContext(env, chatId, "user", textRaw);
-      await pushContext(env, chatId, "assistant", full);
+      await pushTurn(env, userId, "user", textRaw);
+      await pushTurn(env, userId, "assistant", full);
 
-      const after = curBal - need;
+      const after = (cur.energy - need);
       if (expand && full.length > short.length) { for (const ch of chunkText(full)) await sendPlain(env, chatId, ch); }
       else { await sendPlain(env, chatId, short); }
       if (after <= Number(cur.low ?? 10)) {
@@ -661,7 +655,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Дефолтне привітання
+  // Дефолтне привітання (на випадок інших тригерів)
   const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
   const greetLang = ["uk", "ru", "en", "de", "fr"].includes(profileLang) ? profileLang : lang;
   const name = await getPreferredName(env, msg);
