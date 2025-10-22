@@ -139,6 +139,21 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
   if (!att) return false;
 
+  // Переконатися, що підключений Drive
+  let hasTokens = false;
+  try {
+    const tokens = await getUserTokens(env, userId);
+    hasTokens = !!tokens;
+  } catch {}
+  if (!hasTokens) {
+    const connectUrl = abs(env, "/auth/drive");
+    await sendPlain(env, chatId,
+      t(lang, "drive_connect_hint") || "Щоб зберігати файли, підключи Google Drive.",
+      { reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn") || "Підключити Drive", url: connectUrl }]] } }
+    );
+    return true;
+  }
+
   const cur = await getEnergy(env, userId);
   const need = Number(cur.costImage ?? 5);
   if ((cur.energy ?? 0) < need) {
@@ -178,8 +193,18 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
     const resp = await cfVisionDescribe(env, url, prompt, lang);
     await sendPlain(env, chatId, `🖼️ ${resp}`);
   } catch (e) {
-    if (ADMIN(env, userId)) { await sendPlain(env, chatId, `❌ Vision error: ${String(e.message || e).slice(0, 180)}`); }
-    else { await sendPlain(env, chatId, t(lang, "default_reply")); }
+    if (ADMIN(env, userId)) {
+      await sendPlain(env, chatId, `❌ Vision error: ${String(e.message || e).slice(0, 180)}`);
+    } else {
+      // дружній фолбек
+      const connectUrl = abs(env, "/auth/drive");
+      await sendPlain(
+        env,
+        chatId,
+        "Поки що не можу аналізувати фото. Можу зберегти його у Google Drive — натисни «Google Drive» або підключи Drive.",
+        { reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn") || "Підключити Drive", url: connectUrl }]] } }
+      );
+    }
   }
   return true;
 }
@@ -439,6 +464,18 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
+  // Вмик/вимик Drive-режим (кнопки)
+  if (textRaw === BTN_DRIVE || /^(google\s*drive)$/i.test(textRaw)) {
+    await setDriveMode(env, userId, true);
+    await sendPlain(env, chatId, "🟢 Режим збереження у Google Drive увімкнено. Надішли файл або фото — збережу у твій Drive.", { reply_markup: mainKeyboard(isAdmin) });
+    return json({ ok: true });
+  }
+  if (textRaw === BTN_SENTI || /^(senti|сенті)$/i.test(textRaw)) {
+    await setDriveMode(env, userId, false);
+    await sendPlain(env, chatId, "🔵 Режим Senti увімкнено. Фото спробую описати (якщо доступна Vision), інші файли — не зберігатиму автоматично.", { reply_markup: mainKeyboard(isAdmin) });
+    return json({ ok: true });
+  }
+
   // /admin
   if (textRaw === "/admin" || textRaw === "/admin@SentiBot" || textRaw === BTN_ADMIN) {
     await safe(async () => {
@@ -466,12 +503,10 @@ export async function handleTelegramWebhook(req, env) {
           lines.push(`${light} ${h.provider}:${h.model} — ewma ${ms}, fails ${h.failStreak || 0}`);
         }
       }
-      const learnOn = await getLearnMode(env, userId);
       const links = energyLinks(env, userId);
       const markup = { inline_keyboard: [
         [{ text: "📋 Відкрити Checklist", url: links.checklist }],
         [{ text: "🧠 Open Learn", url: links.learn }],
-        [{ text: learnOn ? "🧠 Learn: ON → OFF" : "🧠 Learn: OFF → ON", url: abs(env, `/admin/learn/toggle?s=${encodeURIComponent(env.WEBHOOK_SECRET || "")}&u=${userId}`) }],
       ]};
       await sendPlain(env, chatId, lines.join("\n"), { reply_markup: markup });
     });
@@ -491,13 +526,13 @@ export async function handleTelegramWebhook(req, env) {
         hasQueue = Array.isArray(r) ? r.length > 0 : Array.isArray(r?.items) ? r.items.length > 0 : false;
       } catch {}
       const links = energyLinks(env, userId);
-      const learnOn = await getLearnMode(env, userId);
       const hint =
         "🧠 Режим Learn.\nНадсилай посилання, файли або архіви — я додам у чергу, **якщо Learn увімкнено** (/learn_on). " +
         "В HTML-інтерфейсі можна переглянути чергу й підсумки, а також запустити обробку.";
       const keyboard = [[{ text: "🧠 Відкрити Learn HTML", url: links.learn }]];
-      if (hasQueue) keyboard.push([{ text: "🧠 Прокачай мозок", url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }]);
-      keyboard.push([{ text: learnOn ? "🔴 Learn OFF (/learn_off)" : "🟢 Learn ON (/learn_on)", url: "https://t.me" }]); // підказка
+      if (hasQueue) {
+        keyboard.push([{ text: "🧠 Прокачай мозок", url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }]);
+      }
       await sendPlain(env, chatId, hint, { reply_markup: { inline_keyboard: keyboard } });
     });
     return json({ ok: true });
@@ -566,13 +601,23 @@ export async function handleTelegramWebhook(req, env) {
     }
   }
 
-  // Медіа: Drive або Vision (звичайна поведінка)
+  // ── MEDIA ROUTING (Senti vs Drive vs Vision) ──────────────────────────────
   try {
     const driveOn = await getDriveMode(env, userId);
-    if (driveOn) {
+    const hasAnyMedia = !!detectAttachment(msg) || !!pickPhoto(msg);
+
+    // 1) Увімкнений Drive → будь-які медіа зберігаємо у Google Drive
+    if (driveOn && hasAnyMedia) {
       if (await handleIncomingMedia(env, chatId, userId, msg, lang)) return json({ ok: true });
-    } else {
+    }
+
+    // 2) Без Drive: фото → Vision (якщо є ключі), інше медіа → дружній фолбек
+    if (!driveOn && pickPhoto(msg)) {
       if (await handleVisionMedia(env, chatId, userId, msg, lang, msg?.caption)) return json({ ok: true });
+    }
+    if (!driveOn && (msg?.video || msg?.document || msg?.audio || msg?.voice || msg?.video_note)) {
+      await sendPlain(env, chatId, "Поки що не аналізую такі файли в цьому режимі. Хочеш — увімкну збереження у Google Drive кнопкою «Google Drive».", { reply_markup: mainKeyboard(ADMIN(env, userId)) });
+      return json({ ok: true });
     }
   } catch (e) {
     const isAdm = ADMIN(env, userId);
