@@ -1,171 +1,309 @@
 // src/lib/selfTune.js
-// Self-Tune (мультимовний, з довготривалим збереженням стилю).
-// Профілі користувача зберігаються окремо для кожної мови у вигляді:
-//   insight:latest:<chatId>:<lang>
+// Self-Tune профілі стилю користувача: багатомовні, автопідлаштування кожні 20 реплік.
+// Зовнішній інтерфейс:
+//   - loadSelfTune(env, chatId, preferredLang?) -> string|null   (готовий блок для system prompt)
+//   - autoUpdateSelfTune(env, userId, preferredLang?) -> { updated: boolean, reason?: string }
 //
-// Якщо профіль існує — Senti застосовує його до system prompt.
-// Якщо ні — аналізує останні 16 повідомлень користувача, створює профіль і кешує.
-//
-// Автор: Senti core (оновлення 2025-10)
+// Залежить від:
+//   - STATE_KV  — для зберігання профілів і службових маркерів
+//   - dlg:<uid>:log  — масив реплік діалогу (див. dialogMemory.js)
+//   - askAnyModel / think — для стислого аналізу стилю (fallback сумісний)
 
+import { askAnyModel } from "./modelRouter.js";
+import { think as coreThink } from "./brain.js";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Налаштування
+// ─────────────────────────────────────────────────────────────────────────────
+const PROFILE_KEY = (chatId, lang) => `selftune:profile:${chatId}:${lang || "any"}`;
+const INDEX_KEY   = (chatId)        => `selftune:index:${chatId}`;            // список наявних мов профілю
+const LEGACY_KEY  = (chatId)        => `insight:latest:${chatId}`;            // сумісність із попереднім форматом (текст)
+const LASTCOUNT_KEY = (chatId, lang) => `selftune:lastCount:${chatId}:${lang || "any"}`;
+const LASTRUN_KEY   = (chatId, lang) => `selftune:lastRun:${chatId}:${lang || "any"}`;
+
+const DLG_LOG_KEY = (userId)        => `dlg:${userId}:log`;                    // як у dialogMemory.js
+
+const USER_TURNS_PER_UPDATE = 20;   // кожні 20 користувацьких реплік
+const MIN_UPDATE_INTERVAL_MS = 5 * 60 * 1000; // не частіше ніж раз на 5 хв
+const MAX_SAMPLES = 40;             // макс. реплік (user) у вибірці для аналізу
+const LANG_FALLBACKS = ["uk","ru","en","de","fr"]; // якщо preferredLang немає
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Утиліти KV
+// ─────────────────────────────────────────────────────────────────────────────
 function ensureState(env) {
   if (!env.STATE_KV) throw new Error("STATE_KV binding missing");
   return env.STATE_KV;
 }
-
-const DLG_KEY = (uid) => `dlg:${uid}:log`;
-
-// --------------------------------------------------------------
-// Допоміжні функції
-// --------------------------------------------------------------
-
-async function kvGetJson(kv, key) {
-  try {
-    const v = await kv.get(key, "json");
-    if (v && typeof v === "object") return v;
-  } catch {}
+async function kvGetJSON(kv, key, fallback = null) {
   try {
     const raw = await kv.get(key);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+    if (!raw) return fallback;
+    try { return JSON.parse(raw); } catch { return fallback; }
+  } catch { return fallback; }
+}
+async function kvPutJSON(kv, key, obj) {
+  try { await kv.put(key, JSON.stringify(obj)); } catch {}
 }
 
-function guessLangSimple(text = "") {
-  const s = String(text || "").toLowerCase();
-  if (/[їієґ]/i.test(s)) return "uk";
-  if (/[ёыэ]/i.test(s)) return "ru";
-  if (/[a-z]/i.test(s) && !/[а-яёіїєґ]/i.test(s)) return "en";
-  if (/[а-яёіїєґ]/i.test(s)) return "uk";
-  if (/[äöüß]/i.test(s)) return "de";
-  if (/[çéàèùâêîôûëïüœ]/i.test(s)) return "fr";
-  return "uk";
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Публічний API: читання профілю
+// ─────────────────────────────────────────────────────────────────────────────
 
-function hasEmoji(s = "") {
-  try { return /[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(s); }
-  catch { return false; }
-}
-
-function isInformalUAorRU(s = "") {
-  const t = s.toLowerCase();
-  const hints = ["прив", "дякс", "пасіб", "шо", "чо", "ти", "йо", "ага", "ок", "окей", "спс", "пж", "дякую", "сорян", "лол", "ахах", "круто", "жесть"];
-  return hints.some(h => t.includes(h));
-}
-
-function isPoliteUAorRU(s = "") {
-  const t = s.toLowerCase();
-  const hints = ["будь ласка", "будь-ласка", "підкажіть", "скажіть", "дякую."];
-  return hints.some(h => t.includes(h));
-}
-
-// --------------------------------------------------------------
-// Аналіз діалогів користувача
-// --------------------------------------------------------------
-
-function analyzeTurns(turns = []) {
-  const userTurns = turns.filter(t => (t?.role || "user") === "user" && t?.text);
-  if (!userTurns.length) {
-    return { tone: "дружній, нейтральний", rules: ["Пиши простою людською мовою.", "Відповідай коротко (1–3 речення)."] };
-  }
-
-  const N = userTurns.length;
-  let totalLen = 0, qCount = 0, emojiCount = 0, informalCount = 0, politeCount = 0;
-  const langStats = { uk: 0, ru: 0, en: 0, de: 0, fr: 0 };
-
-  for (const u of userTurns) {
-    const s = String(u.text || "");
-    totalLen += s.length;
-    if (s.trim().endsWith("?")) qCount++;
-    if (hasEmoji(s)) emojiCount++;
-    if (isInformalUAorRU(s)) informalCount++;
-    if (isPoliteUAorRU(s)) politeCount++;
-    const L = guessLangSimple(s);
-    langStats[L] = (langStats[L] || 0) + 1;
-  }
-
-  const avgLen = totalLen / N;
-  const qRatio = qCount / N;
-  const emojiRatio = emojiCount / N;
-  const topLang = Object.entries(langStats).sort((a, b) => b[1] - a[1])[0]?.[0] || "uk";
-
-  let tone = "нейтральний і дружній";
-  if (informalCount / N > 0.15) tone = "неформальний, розслаблений";
-  else if (politeCount / N > 0.15) tone = "ввічливий, спокійний";
-
-  const rules = [];
-  const langMap = { uk: "українською", ru: "російською", en: "англійською", de: "німецькою", fr: "французькою" };
-
-  rules.push(`Пиши ${langMap[topLang] || "українською"} мовою.`);
-  rules.push(informalCount > politeCount ? "Звертайся на «ти»." : "Використовуй м’який нейтральний стиль («ви»).");
-
-  if (avgLen < 45) rules.push("Користувач лаконічний — відповідай коротко (1–3 речення).");
-  else if (avgLen > 120) rules.push("Користувач любить деталі — можна давати розгорнуті відповіді.");
-  else rules.push("Пиши по суті, але не сухо.");
-
-  if (qRatio > 0.35) rules.push("Часто ставить питання — відповідай чітко й по пунктах.");
-  if (emojiRatio >= 0.25) rules.push("Використовуй 1 доречне емодзі на початку.");
-  else rules.push("Емодзі додавай лише коли природно.");
-
-  rules.push("Уникай фраз типу «як ШІ»; спілкуйся як справжній друг-помічник.");
-  return { tone, rules, lang: topLang };
-}
-
-function toTextBlock(a) {
-  if (!a) return null;
-  const lines = [`• Тон: ${a.tone}.`, "• Підлаштування:"];
-  for (const r of (a.rules || []).slice(0, 10)) lines.push(`  – ${r}`);
-  return lines.join("\n");
-}
-
-// --------------------------------------------------------------
-// Головні функції
-// --------------------------------------------------------------
-
-export async function loadSelfTune(env, chatId) {
+/**
+ * loadSelfTune: повертає сформований текстовий блок для system prompt.
+ * Якщо передано preferredLang — підтягує відповідний профіль; інакше бере перший доступний.
+ * Залишається сумісним із попереднім кодом (можна викликати з 2 аргументами).
+ */
+export async function loadSelfTune(env, chatId, preferredLang) {
   try {
     const kv = ensureState(env);
 
-    // Пробуємо знайти останні репліки
-    const logArr = await kvGetJson(kv, DLG_KEY(chatId));
-    const recent = Array.isArray(logArr) ? logArr.slice(-16) : [];
-
-    // Якщо є останній текст — визначаємо мову
-    const lastMsg = recent?.length ? recent[recent.length - 1]?.text || "" : "";
-    const lang = guessLangSimple(lastMsg);
-
-    // Перевіряємо, чи є профіль для цієї мови
-    const key = `insight:latest:${chatId}:${lang}`;
-    const stored = await kvGetJson(kv, key);
-    if (stored?.analysis && (stored.analysis.rules?.length || stored.analysis.tone)) {
-      return toTextBlock(stored.analysis);
+    // 1) якщо є профіль для preferredLang → беремо його
+    if (preferredLang) {
+      const prof = await kvGetJSON(kv, PROFILE_KEY(chatId, preferredLang), null);
+      if (prof) return formatProfileBlock(prof, preferredLang);
     }
 
-    // Якщо ні — генеруємо
-    if (recent.length) {
-      const analysis = analyzeTurns(recent);
-      const payload = JSON.stringify({ analysis, ts: Date.now() });
-      await kv.put(key, payload); // зберігаємо без TTL
-      return toTextBlock(analysis);
+    // 2) інакше шукаємо будь-який профіль із індексу
+    const idx = await kvGetJSON(kv, INDEX_KEY(chatId), []);
+    for (const lang of [preferredLang, ...LANG_FALLBACKS, ...(idx || [])].filter(Boolean)) {
+      const prof = await kvGetJSON(kv, PROFILE_KEY(chatId, lang), null);
+      if (prof) return formatProfileBlock(prof, lang);
     }
+
+    // 3) сумісність зі старим ключем (просто текст)
+    const legacy = await kv.get(LEGACY_KEY(chatId)).catch(() => null);
+    if (legacy) return String(legacy || "").trim();
 
     return null;
-  } catch (e) {
+  } catch {
     return null;
   }
 }
 
-export async function saveSelfTune(env, chatId, analysis) {
-  const kv = ensureState(env);
-  try {
-    const lang = analysis?.lang || "uk";
-    const key = `insight:latest:${chatId}:${lang}`;
-    const payload = JSON.stringify({ analysis, ts: Date.now() });
-    await kv.put(key, payload);
-    return true;
-  } catch {
-    return false;
+/** Форматує профіль у компактний блок для system prompt */
+function formatProfileBlock(profile, langTag = "any") {
+  const tone = (profile?.tone || "").trim();
+  const rules = Array.isArray(profile?.rules) ? profile.rules : [];
+  const style = profile?.style || {};
+  const samples = Array.isArray(profile?.samples) ? profile.samples : [];
+
+  const lines = [];
+  lines.push(`[Self-Tune ${langTag}]`);
+  if (tone) lines.push(`• Тон користувача: ${tone}.`);
+  if (rules.length) {
+    lines.push("• Звички/правила спілкування:");
+    for (const r of rules.slice(0, 8)) lines.push(`  – ${r}`);
   }
+  if (style && (style.formality || style.warmth || style.emoji || style.slang)) {
+    const bits = [];
+    if (style.formality) bits.push(`формальність: ${style.formality}`);
+    if (style.warmth) bits.push(`теплота: ${style.warmth}`);
+    if (style.emoji) bits.push(`емодзі: ${style.emoji}`);
+    if (style.slang) bits.push(`сленг: ${style.slang}`);
+    if (bits.length) lines.push(`• Параметри стилю: ${bits.join(", ")}.`);
+  }
+  if (samples.length) lines.push(`• Улюблені фрази: ${samples.slice(0,4).join(" • ")}`);
+  lines.push("— Дотримуйся цього стилю, коли відповідаєш користувачу.");
+  return lines.join("\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Публічний API: автооновлення профілю (викликати після pushTurn(...,"user",...))
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function autoUpdateSelfTune(env, userId, preferredLang) {
+  try {
+    const kv = ensureState(env);
+    const log = await kvGetJSON(kv, DLG_LOG_KEY(userId), []);
+    if (!Array.isArray(log) || !log.length) return { updated: false, reason: "no_log" };
+
+    // Визначаємо активну мову: якщо передали — використовуємо її,
+    // інакше приблизно — за останніми репліками (дуже грубо).
+    const lang = (preferredLang || guessLangFromLog(log) || "any").toLowerCase();
+
+    const userTurnsAll = log.filter(x => x?.role === "user" && x?.text).map(x => String(x.text));
+    const userTurnsCount = userTurnsAll.length;
+
+    const lastCount = Number(await kv.get(LASTCOUNT_KEY(userId, lang))) || 0;
+    const lastRun = Number(await kv.get(LASTRUN_KEY(userId, lang))) || 0;
+
+    // Тротл: не частіше ніж раз на 5 хв
+    const now = Date.now();
+    if (now - lastRun < MIN_UPDATE_INTERVAL_MS) {
+      return { updated: false, reason: "throttled" };
+    }
+
+    // Поріг: кожні 20 користувацьких реплік
+    if (userTurnsCount - lastCount < USER_TURNS_PER_UPDATE) {
+      return { updated: false, reason: "not_enough_new_turns" };
+    }
+
+    // Готуємо вибірку останніх user-повідомлень
+    const sample = userTurnsAll.slice(-MAX_SAMPLES);
+    const profile = await synthesizeProfile(env, sample, lang);
+
+    // Зберігаємо профіль
+    await kvPutJSON(kv, PROFILE_KEY(userId, lang), profile);
+
+    // Оновлюємо індекс мов для цього користувача
+    const idx = await kvGetJSON(kv, INDEX_KEY(userId), []);
+    if (!idx.includes(lang)) {
+      idx.push(lang);
+      await kvPutJSON(kv, INDEX_KEY(userId), idx.slice(0, 12)); // невелика «кепка» на індекс
+    }
+
+    // Сумісність: записати текстову версію в legacy-ключ
+    try {
+      await kv.put(LEGACY_KEY(userId), formatProfileBlock(profile, lang));
+    } catch {}
+
+    // Службові лічильники
+    try {
+      await kv.put(LASTCOUNT_KEY(userId, lang), String(userTurnsCount));
+      await kv.put(LASTRUN_KEY(userId, lang), String(now));
+    } catch {}
+
+    return { updated: true };
+  } catch (e) {
+    return { updated: false, reason: String(e?.message || e) };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Аналіз стилю через LLM
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function synthesizeProfile(env, samples, lang = "any") {
+  const joined = samples
+    .map(s => s.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(-MAX_SAMPLES)
+    .join("\n• ");
+
+  const sys = `You are a concise sociolinguistic analyzer.
+Given several recent user utterances, infer their communication style in ${lang}.
+Be precise, terse, and avoid generic fluff. Return STRICT JSON.`;
+
+  const prompt = `Recent user utterances (bullet list):
+• ${joined}
+
+Return STRICT JSON with the following shape and short, concrete values:
+
+{
+  "tone": "<5–10 words in ${lang} describing tone (e.g. теплий, трохи іронічний, неформальний)>",
+  "rules": [
+    "<habit 1 in ${lang}, concrete and short>",
+    "<habit 2>",
+    "<habit 3>"
+  ],
+  "style": {
+    "formality": "<low|medium|high>",
+    "warmth": "<low|medium|high>",
+    "emoji": "<rare|sometimes|often>",
+    "slang": "<none|mild|rich>"
+  },
+  "samples": [
+    "<2–4 short favorite phrases the user tends to use, in ${lang}>"
+  ]
+}
+
+Notes:
+- Keep total JSON under ~700 chars.
+- Do NOT include explanations outside JSON. Only JSON.`;
+
+  let raw;
+  try {
+    const order = String(env.MODEL_ORDER || "").trim();
+    raw = order
+      ? await askAnyModel(env, order, prompt, { systemHint: sys, temperature: 0.2, max_tokens: 300 })
+      : await coreThink(env, prompt, sys);
+  } catch {
+    // fallback на найпростіший профіль, якщо LLM недоступний
+    return {
+      tone: "дружній, неформальний",
+      rules: ["короткі відповіді", "по суті", "без води"],
+      style: { formality: "low", warmth: "high", emoji: "sometimes", slang: "mild" },
+      samples: []
+    };
+  }
+
+  const cleaned = sanitizeToJson(raw);
+  let obj = safeParse(cleaned, null);
+  if (!obj || typeof obj !== "object") {
+    // ще одна спроба з fallback-промптом
+    try {
+      const fix = `The previous output was not strict JSON. Respond again with ONLY the JSON as specified.`;
+      const order = String(env.MODEL_ORDER || "").trim();
+      const again = order
+        ? await askAnyModel(env, order, fix, { systemHint: sys, temperature: 0.1, max_tokens: 280 })
+        : await coreThink(env, fix, sys);
+      obj = safeParse(sanitizeToJson(again), null);
+    } catch {}
+  }
+
+  // Страхувальний мінімум
+  if (!obj || typeof obj !== "object") {
+    return {
+      tone: "дружній, неформальний",
+      rules: ["короткі відповіді", "по суті", "без води"],
+      style: { formality: "low", warmth: "high", emoji: "sometimes", slang: "mild" },
+      samples: []
+    };
+  }
+
+  // Обмеження довжин
+  const tone = String(obj.tone || "").trim().slice(0, 120);
+  const rules = (Array.isArray(obj.rules) ? obj.rules : []).map(s => String(s || "").trim()).filter(Boolean).slice(0, 8);
+  const style = obj.style && typeof obj.style === "object"
+    ? {
+        formality: oneOf(obj.style.formality, ["low","medium","high"], "medium"),
+        warmth:    oneOf(obj.style.warmth,    ["low","medium","high"], "high"),
+        emoji:     oneOf(obj.style.emoji,     ["rare","sometimes","often"], "sometimes"),
+        slang:     oneOf(obj.style.slang,     ["none","mild","rich"], "mild"),
+      }
+    : { formality: "medium", warmth: "high", emoji: "sometimes", slang: "mild" };
+  const samplesOut = (Array.isArray(obj.samples) ? obj.samples : [])
+    .map(s => String(s || "").trim())
+    .filter(Boolean)
+    .slice(0, 4);
+
+  return { tone, rules, style, samples: samplesOut };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Допоміжні
+// ─────────────────────────────────────────────────────────────────────────────
+
+function guessLangFromLog(log = []) {
+  // Дуже проста евристика: шукаємо маркери кирилиці/латиниці.
+  // Реальна детекція є у i18n.detectFromText, але тут не імпортуємо, щоб уникнути циклів.
+  // Якщо потрібно — можна передати preferredLang із webhook.
+  const lastUser = [...log].reverse().find(x => x?.role === "user" && x?.text);
+  if (!lastUser) return null;
+  const s = String(lastUser.text || "");
+  // Примітивні евристики
+  if (/[а-яіїєґ]/i.test(s)) return "uk";
+  if (/[а-яё]/i.test(s)) return "ru";
+  if (/\bthe\b|\band\b|\bto\b/i.test(s)) return "en";
+  if (/\bund\b|\bich\b|\bdu\b/i.test(s)) return "de";
+  if (/\bet\b|\bje\b|\btu\b/i.test(s)) return "fr";
+  return null;
+}
+
+function sanitizeToJson(s) {
+  let x = String(s || "");
+  x = x.replace(/```json/gi, "").replace(/```/g, "").trim();
+  const a = x.indexOf("{");
+  const b = x.lastIndexOf("}");
+  if (a !== -1 && b !== -1 && b > a) x = x.slice(a, b + 1);
+  return x;
+}
+function safeParse(s, fallback = null) {
+  try { return JSON.parse(s); } catch { return fallback; }
+}
+function oneOf(val, allowed, def) {
+  const v = String(val || "").toLowerCase();
+  return allowed.includes(v) ? v : def;
 }
