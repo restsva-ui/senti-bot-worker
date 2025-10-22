@@ -1,6 +1,7 @@
 // src/routes/webhook.js
 // (rev) Без вітального відео; тихе перемикання режимів; фікс мови на /start;
-// перевірка підключення Google Drive; дружній фолбек для медіа в Senti.
+// перевірка підключення Google Drive; дружній фолбек для медіа в Senti;
+// авто-самотюнінг стилю (мовні профілі) через selfTune.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -11,9 +12,9 @@ import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
 import { json } from "../lib/utils.js";
 import { getEnergy, spendEnergy } from "../lib/energy.js";
 import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
-import { loadSelfTune } from "../lib/selfTune.js";
+import { loadSelfTune, autoUpdateSelfTune } from "../lib/selfTune.js"; // ⬅️ додано
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
-import { t, detectFromText } from "../lib/i18n.js"; // ← прибрали pickReplyLanguage
+import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
 import { enqueueLearn, listQueued, getRecentInsights } from "../lib/kvLearnQueue.js";
 
@@ -170,7 +171,6 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   });
   return true;
 }
-
 // Vision-режим
 async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const att = pickPhoto(msg);
@@ -210,10 +210,10 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
 }
 
 // ── SystemHint ───────────────────────────────────────────────────────────────
-async function buildSystemHint(env, chatId, userId) {
+async function buildSystemHint(env, chatId, userId, preferredLang) { // ⬅️ додано preferredLang
   const statut = String((await readStatut(env)) || "").trim();
   const dlg = await buildDialogHint(env, userId);
-  const tune = await loadSelfTune(env, chatId);
+  const tune = await loadSelfTune(env, chatId, { preferredLang }).catch(() => null); // ⬅️ передаємо мову
 
   const core = `You are Senti — a thoughtful, self-improving assistant and companion.
 - Never claim to be an AI, model, chatbot, or a product made by any company.
@@ -372,7 +372,6 @@ async function runLearnNow(env) {
 async function listInsights(env, limit = 5) {
   try { return await getRecentInsights(env, { limit }) || []; } catch { return []; }
 }
-
 // ── MAIN ────────────────────────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "POST") {
@@ -394,11 +393,7 @@ export async function handleTelegramWebhook(req, env) {
   const isAdmin = ADMIN(env, userId);
   const textRaw = String(msg?.text || msg?.caption || "").trim();
 
-  // === МОВА: спочатку профіль Telegram, потім — детект з тексту ===
-  const supported = new Set(["uk", "ru", "en", "de", "fr"]);
-  const profileLangRaw = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
-  const baseLang = supported.has(profileLangRaw) ? profileLangRaw : "uk";
-  let lang = textRaw ? (detectFromText(textRaw) || baseLang) : baseLang;
+  let lang = pickReplyLanguage(msg, textRaw);
 
   const safe = async (fn) => {
     try { await fn(); }
@@ -426,7 +421,8 @@ export async function handleTelegramWebhook(req, env) {
   // /start — спершу мова з Telegram, потім ім'я
   if (textRaw === "/start") {
     await safe(async () => {
-      const startLang = baseLang; // гарантуємо мову профілю на привітанні
+      const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
+      const startLang = ["uk", "ru", "en", "de", "fr"].includes(profileLang) ? profileLang : lang;
       const name = await getPreferredName(env, msg);
       await sendPlain(env, chatId, `${t(startLang, "hello_name", name)} ${t(startLang, "how_help")}`, {
         reply_markup: mainKeyboard(isAdmin)
@@ -646,12 +642,15 @@ export async function handleTelegramWebhook(req, env) {
 
       pulseTyping(env, chatId);
 
-      const systemHint = await buildSystemHint(env, chatId, userId);
+      // ⬇️ записуємо репліку користувача раніше, щоб авто-тюн бачив найсвіжчий контекст
+      await pushTurn(env, userId, "user", textRaw);
+      await autoUpdateSelfTune(env, userId, lang).catch(() => {}); // тихий гачок
+
+      const systemHint = await buildSystemHint(env, chatId, userId, lang); // ⬅️ передаємо мову
       const name = await getPreferredName(env, msg);
       const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
       const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand, adminDiag: isAdmin });
 
-      await pushTurn(env, userId, "user", textRaw);
       await pushTurn(env, userId, "assistant", full);
 
       const after = (cur.energy - need);
@@ -666,7 +665,8 @@ export async function handleTelegramWebhook(req, env) {
   }
 
   // Дефолтне привітання (якщо нічого іншого не спрацювало)
-  const greetLang = baseLang; // мова профілю як дефолт
+  const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
+  const greetLang = ["uk", "ru", "en", "de", "fr"].includes(profileLang) ? profileLang : lang;
   const name = await getPreferredName(env, msg);
   await sendPlain(env, chatId, `${t(greetLang, "hello_name", name)} ${t(greetLang, "how_help")}`, {
     reply_markup: mainKeyboard(isAdmin)
