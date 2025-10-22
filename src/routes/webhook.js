@@ -1,7 +1,7 @@
 // src/routes/webhook.js
 // (rev) Без вітального відео; тихе перемикання режимів; фікс мови на /start;
 // дружній фолбек для медіа в Senti; авто-selfTune; Cloudflare Vision з фолбеками
-// по змінних оточення (CF_VISION, CLOUDFLARE_ACCOUNT_ID, CF_MODEL) + auto-agree + dataURL.
+// по змінних оточення (CF_VISION, CLOUDFLARE_ACCOUNT_ID, CF_MODEL) + auto-agree + dataURL + /cf_test.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -142,7 +142,6 @@ async function cfVisionDescribe(env, imageUrlOrObj, userPrompt = "", lang = "uk"
   const result = data.result?.response || data.result?.output_text || data.result?.text || "";
   return String(result || "").trim();
 }
-
 // ── Media helpers ───────────────────────────────────────────────────────────
 function pickPhoto(msg) {
   const arr = Array.isArray(msg?.photo) ? msg.photo : null;
@@ -185,6 +184,7 @@ async function tgFileUrl(env, file_id) {
   if (!path) throw new Error("file_path missing");
   return `https://api.telegram.org/file/bot${token}/${path}`;
 }
+
 // ===== Learn helpers (admin-only, ручний режим) =============================
 function extractFirstUrl(text = "") {
   const m = String(text || "").match(/https?:\/\/\S+/i);
@@ -311,7 +311,7 @@ function guessEmoji(text = "") {
   if (tt.includes("електр") || tt.includes("струм")) return "⚡";
   return "💡";
 }
-function looksLikeEmojiStart(s = "") { try { return /^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(String(s)); } catch { return false; } }
+function looksLikeEmojiStart(s = "") { try { return /^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(String(s || "")); } catch { return false; } }
 
 // Ім’я користувача
 function tryParseUserNamedAs(text) {
@@ -420,7 +420,6 @@ ${control}`;
   const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
 }
-
 // ── маленькі адмін-хелпери для Learn ────────────────────────────────────────
 async function runLearnNow(env) {
   const secret = env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || "";
@@ -435,6 +434,37 @@ async function runLearnNow(env) {
 async function listInsights(env, limit = 5) {
   try { return await getRecentInsights(env, { limit }) || []; } catch { return []; }
 }
+
+// ── Діагностика CF Vision (адмін) ───────────────────────────────────────────
+async function runCfVisionSelfTest(env) {
+  const { token, accountId, model } = getCfCreds(env);
+  if (!token || !accountId) throw new Error("CF credentials missing");
+  // 1×1 білий PNG (data:)
+  const tinyWhite = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAOz2nT8AAAAASUVORK5CYII=";
+  // тихий agree
+  await ensureCFVisionAgreed({ accountId, token, model });
+  // виклик
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${encodeURIComponent(model)}`;
+  const messages = [{
+    role: "user",
+    content: [
+      { type: "input_text", text: "What color is this image? reply one word." },
+      { type: "input_image", image_url: { url: tinyWhite } }
+    ]
+  }];
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ messages }),
+  });
+  const data = await r.json().catch(() => null);
+  if (!r.ok || !data?.success) {
+    const msg = data?.errors?.[0]?.message || `http ${r.status}`;
+    throw new Error(msg);
+  }
+  return data?.result?.response || data?.result?.text || data?.result?.output_text || "OK";
+}
+
 // ── MAIN ────────────────────────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "POST") {
@@ -496,6 +526,17 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
+  // ── Діагностика: /cf_test (тільки адмін)
+  if (isAdmin && textRaw === "/cf_test") {
+    await safe(async () => {
+      const { token, accountId, model } = getCfCreds(env);
+      await sendPlain(env, chatId, `🔎 CF test…\nModel: ${model}\nAccount: ${accountId}\nToken: ${token ? "set" : "missing"}`);
+      const res = await runCfVisionSelfTest(env).catch(e => { throw new Error(String(e?.message || e)); });
+      await sendPlain(env, chatId, `✅ CF Vision OK: ${String(res).slice(0, 200)}`);
+    });
+    return json({ ok: true });
+  }
+
   // ТИХИЙ перемикач режимів (без повідомлень)
   if (textRaw === BTN_DRIVE || /^(google\s*drive)$/i.test(textRaw)) {
     await setDriveMode(env, userId, true);
@@ -510,7 +551,7 @@ export async function handleTelegramWebhook(req, env) {
   if (textRaw === "/admin" || textRaw === "/admin@SentiBot" || textRaw === BTN_ADMIN) {
     await safe(async () => {
       const mo = String(env.MODEL_ORDER || "").trim();
-      const { token, accountId } = getCfCreds(env);
+      const { token, accountId, model } = getCfCreds(env);
       const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY);
       const hasCF = !!(token && accountId);
       const hasOR = !!(env.OPENROUTER_API_KEY);
@@ -520,7 +561,7 @@ export async function handleTelegramWebhook(req, env) {
         t(lang, "admin_header"),
         `MODEL_ORDER: ${mo || "(not set)"}`,
         `GEMINI key: ${hasGemini ? "✅" : "❌"}`,
-        `Cloudflare (account+token): ${hasCF ? "✅" : "❌"}`,
+        `Cloudflare (account+token): ${hasCF ? "✅" : "❌"} | model: ${model}`,
         `OpenRouter key: ${hasOR ? "✅" : "❌"}`,
         `FreeLLM (BASE_URL + KEY): ${hasFreeBase && hasFreeKey ? "✅" : "❌"}`
       ];
