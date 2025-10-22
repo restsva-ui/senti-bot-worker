@@ -12,9 +12,7 @@ const SLOW_MS = 4500; // поріг "повільно"
 // Helpers
 
 function nowMs() { return Date.now(); }
-async function jsonSafe(r) {
-  try { return await r.json(); } catch { return null; }
-}
+async function jsonSafe(r) { try { return await r.json(); } catch { return null; } }
 function withSystemPrefix(systemHint, userPrompt) {
   const s = (systemHint || "").trim();
   if (!s) return String(userPrompt || "");
@@ -23,9 +21,7 @@ function withSystemPrefix(systemHint, userPrompt) {
 function pickKV(env) {
   return env.STATE_KV || env.CHECKLIST_KV || env.ENERGY_LOG_KV || env.LEARN_QUEUE_KV;
 }
-function hkey(provider, model) {
-  return `${HEALTH_NS}:${provider}:${model}`;
-}
+function hkey(provider, model) { return `${HEALTH_NS}:${provider}:${model}`; }
 async function updateHealth(env, { provider, model, ms, ok }) {
   const kv = pickKV(env);
   if (!kv) return;
@@ -53,7 +49,6 @@ function parseEntry(raw) {
     const model = m.slice(1).join(":").trim();
     return { provider, model };
   }
-  // якщо явно не вказано — вважаємо, що це openrouter-модель (вигляд a/b)
   if (s.includes("/")) return { provider: "openrouter", model: s };
   return { provider: "free", model: s };
 }
@@ -61,7 +56,6 @@ function parseEntry(raw) {
 // Невеличкі утиліти для vision
 function isDataUrl(s = "") { return /^data:/.test(String(s || "")); }
 function bufToBase64(bytes) {
-  // безпечне кодування великого буфера у base64
   let bin = "";
   const chunk = 0x8000;
   for (let i = 0; i < bytes.length; i += chunk) {
@@ -83,7 +77,6 @@ async function ensureInlineImage(image, fallbackMime = "image/jpeg") {
     const b64 = bufToBase64(arr);
     return `data:${mime};base64,${b64}`;
   }
-  // Якщо прилетів нестандартний тип — просимо конвертувати до http(s)/data:
   throw new Error("Unsupported image input; pass data:URL or http(s) URL");
 }
 
@@ -91,20 +84,13 @@ async function ensureInlineImage(image, fallbackMime = "image/jpeg") {
 // Провайдери — текст
 
 async function callGemini(env, model, prompt, systemHint) {
-  const key =
-    env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY;
+  const key = env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY;
   if (!key) throw new Error("GEMINI key missing");
 
   const user = withSystemPrefix(systemHint, prompt);
-
-  // generateContent (v1beta)
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(
-    key
-  )}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
   const body = {
-    contents: [
-      { role: "user", parts: [{ text: user }] },
-    ],
+    contents: [{ role: "user", parts: [{ text: user }] }],
     safetySettings: [{ category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }],
   };
 
@@ -117,32 +103,27 @@ async function callGemini(env, model, prompt, systemHint) {
   if (!r.ok) throw new Error(`gemini ${r.status} ${data?.error?.message || ""}`);
   const text =
     data?.candidates?.[0]?.content?.parts?.map(p => p?.text).filter(Boolean).join("\n").trim() ||
-    data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-    "";
+    data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
   if (!text) throw new Error("gemini: empty response");
   return text.trim();
 }
 
 async function callCF(env, model, prompt, systemHint) {
-  // 🔧 Тепер з фолбеками назв
-  const token =
-    env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || env.CLOUDFLARE_TOKEN;
-  const acc =
-    env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID || env.ACCOUNT_ID;
-
+  // Фолбеки назв змінних
+  const token = env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || env.CLOUDFLARE_TOKEN;
+  const acc   = env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID || env.ACCOUNT_ID;
   if (!token || !acc) throw new Error("Cloudflare credentials missing");
 
-  const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/${encodeURIComponent(model)}`;
+  // ⛏️ ВАЖЛИВО: НЕ кодуємо model, інакше вийде "No route for that URI"
+  const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/${model}`;
+
   const messages = [];
   if (systemHint?.trim()) messages.push({ role: "system", content: systemHint.trim() });
   messages.push({ role: "user", content: prompt });
 
   const r = await fetch(url, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-    },
+    headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ messages }),
   });
   const data = await jsonSafe(r);
@@ -153,8 +134,7 @@ async function callCF(env, model, prompt, systemHint) {
   const out =
     data?.result?.response?.trim?.() ||
     data?.result?.text?.trim?.() ||
-    data?.result?.output_text?.trim?.() ||
-    "";
+    data?.result?.output_text?.trim?.() || "";
   if (!out) throw new Error("cf: empty response");
   return out.trim();
 }
@@ -170,15 +150,8 @@ async function callOpenRouter(env, model, prompt, systemHint) {
 
   const r = await fetch(url, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature: 0.6,
-    }),
+    headers: { Authorization: `Bearer ${key}`, "content-type": "application/json" },
+    body: JSON.stringify({ model, messages, temperature: 0.6 }),
   });
   const data = await jsonSafe(r);
   const txt = data?.choices?.[0]?.message?.content || "";
@@ -190,12 +163,9 @@ async function callOpenRouter(env, model, prompt, systemHint) {
 }
 
 async function callFree(env, model, prompt, systemHint) {
-  const base =
-    env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL || "";
+  const base = env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL || "";
   if (!base) throw new Error("FREE base url missing");
-
-  const key =
-    env.FREE_LLM_API_KEY || env.FREE_API_KEY || "";
+  const key  = env.FREE_LLM_API_KEY || env.FREE_API_KEY || "";
   const endpoint = base.replace(/\/+$/, "") + "/v1/chat/completions";
 
   const messages = [];
@@ -204,15 +174,8 @@ async function callFree(env, model, prompt, systemHint) {
 
   const r = await fetch(endpoint, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(key ? { Authorization: `Bearer ${key}` } : {} ),
-    },
-    body: JSON.stringify({
-      model: model || env.FREE_LLM_MODEL || "gpt-3.5-turbo",
-      messages,
-      temperature: 0.6,
-    }),
+    headers: { "content-type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) },
+    body: JSON.stringify({ model: model || env.FREE_LLM_MODEL || "gpt-3.5-turbo", messages, temperature: 0.6 }),
   });
   const data = await jsonSafe(r);
   const txt = data?.choices?.[0]?.message?.content || "";
@@ -222,11 +185,11 @@ async function callFree(env, model, prompt, systemHint) {
   }
   return txt.trim();
 }
+
 // ─────────────────────────────────────────────────────────────────────────────
 /** Провайдери — VISION */
 
 // Gemini vision (REST, v1beta generateContent)
-// images: масив data:URL або http(s) URL (ми всередині перетворимо у data:)
 async function callGeminiVision(env, model, { prompt, images = [], systemHint }) {
   const key = env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY;
   if (!key) throw new Error("GEMINI key missing");
@@ -235,7 +198,6 @@ async function callGeminiVision(env, model, { prompt, images = [], systemHint })
   const textPrompt = withSystemPrefix(systemHint, prompt || "Describe the image briefly.");
   parts.push({ text: textPrompt });
 
-  // До 4 зображень
   const maxImg = Math.min(4, images.length || 0);
   for (let i = 0; i < maxImg; i++) {
     const dataUrl = await ensureInlineImage(images[i]);
@@ -246,31 +208,26 @@ async function callGeminiVision(env, model, { prompt, images = [], systemHint })
     parts.push({ inline_data: { mime_type: mimeType, data } });
   }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
   const body = {
     contents: [{ role: "user", parts }],
     safetySettings: [{ category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }],
   };
 
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   const data = await jsonSafe(r);
   if (!r.ok) throw new Error(`gemini-vision ${r.status} ${data?.error?.message || ""}`);
 
   const out =
     data?.candidates?.[0]?.content?.parts?.map(p => p?.text).filter(Boolean).join("\n").trim() ||
-    data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-    "";
+    data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
   if (!out) throw new Error("gemini-vision: empty response");
   return out.trim();
 }
 
 // CF: one-time license agree (silent)
 async function ensureCFVisionAgreed({ accountId, token, model }) {
-  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${encodeURIComponent(model)}`;
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`;
   try {
     await fetch(url, {
       method: "POST",
@@ -281,39 +238,31 @@ async function ensureCFVisionAgreed({ accountId, token, model }) {
 }
 
 // Cloudflare Workers AI vision (@cf/*-vision-instruct)
-// ВАЖЛИВО: image_url має бути у вигляді { url: "data:..." }
+// ВАЖЛИВО: не кодуємо шлях моделі; image_url — рядок (data: або http)
 async function callCFVision(env, model, { prompt, images = [], systemHint }) {
-  const token =
-    env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || env.CLOUDFLARE_TOKEN;
-  const acc =
-    env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID || env.ACCOUNT_ID;
-
+  const token = env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || env.CLOUDFLARE_TOKEN;
+  const acc   = env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID || env.ACCOUNT_ID;
   if (!token || !acc) throw new Error("Cloudflare credentials missing");
 
-  // тихий agree
   await ensureCFVisionAgreed({ accountId: acc, token, model });
 
-  const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/${encodeURIComponent(model)}`;
+  const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/${model}`;
 
   const img = images[0];
   if (!img) throw new Error("No image provided");
 
-  // конвертуємо у data:
   const dataUrl = await ensureInlineImage(img);
 
   const content = [];
   const fullPrompt = withSystemPrefix(systemHint, prompt || "Describe the image briefly.");
   content.push({ type: "input_text", text: fullPrompt });
-  content.push({ type: "input_image", image_url: { url: dataUrl } });
+  content.push({ type: "input_image", image_url: dataUrl }); // ← рядок, не об’єкт
 
   const messages = [{ role: "user", content }];
 
   const r = await fetch(url, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-    },
+    headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ messages }),
   });
   const data = await jsonSafe(r);
@@ -324,8 +273,7 @@ async function callCFVision(env, model, { prompt, images = [], systemHint }) {
   const out =
     data?.result?.response?.trim?.() ||
     data?.result?.text?.trim?.() ||
-    data?.result?.output_text?.trim?.() ||
-    "";
+    data?.result?.output_text?.trim?.() || "";
   if (!out) throw new Error("cf-vision: empty response");
   return out.trim();
 }
@@ -334,13 +282,9 @@ async function callCFVision(env, model, { prompt, images = [], systemHint }) {
 // Головна точка: послідовний перебір за modelOrder (TEXT)
 
 export async function askAnyModel(env, modelOrder, prompt, { systemHint } = {}) {
-  const entries = String(modelOrder || "")
-    .split(",")
-    .map(s => s.trim())
-    .filter(Boolean);
+  const entries = String(modelOrder || "").split(",").map(s => s.trim()).filter(Boolean);
 
   if (!entries.length) {
-    // Якщо порядок не задано — спробуємо мінімальний FREE як запасний варіант
     const p = withSystemPrefix(systemHint, prompt);
     return await callFree(env, env.FREE_LLM_MODEL || "gpt-3.5-turbo", p, "");
   }
@@ -359,10 +303,8 @@ export async function askAnyModel(env, modelOrder, prompt, { systemHint } = {}) 
       else if (provider === "cf") out = await callCF(env, model, prompt, systemHint);
       else if (provider === "openrouter") out = await callOpenRouter(env, model, prompt, systemHint);
       else if (provider === "free") out = await callFree(env, model, prompt, systemHint);
-      else {
-        // невідомий провайдер — пробуємо як Free (OpenAI-сумісний)
-        out = await callFree(env, model, prompt, systemHint);
-      }
+      else out = await callFree(env, model, prompt, systemHint); // невідомий → OpenAI-сумісний
+
       const ms = nowMs() - t0;
       updateHealth(env, { provider, model, ms, ok: true }).catch(() => {});
       return out;
@@ -370,7 +312,7 @@ export async function askAnyModel(env, modelOrder, prompt, { systemHint } = {}) 
       const ms = nowMs() - t0;
       updateHealth(env, { provider, model, ms, ok: false }).catch(() => {});
       lastErr = e;
-      continue; // пробуємо наступний
+      continue;
     }
   }
 
@@ -381,9 +323,6 @@ export async function askAnyModel(env, modelOrder, prompt, { systemHint } = {}) 
 // НОВЕ: Vision-каскад (Gemini → Cloudflare). Безкоштовно, з фолбеком.
 
 export async function askVision(env, { prompt, images = [], systemHint } = {}) {
-  // Порядок можна задати через ENV або використовуємо дефолт:
-  // 1) Gemini (gemini-2.5-flash або gemini-1.5-flash)
-  // 2) Cloudflare (@cf/meta/llama-3.2-11b-vision-instruct)
   const order = [
     { provider: "gemini-vision", model: env.GEMINI_MODEL_VISION || "gemini-2.5-flash" },
     { provider: "cf-vision",     model: env.CF_VISION_MODEL     || "@cf/meta/llama-3.2-11b-vision-instruct" },
@@ -412,7 +351,7 @@ export async function askVision(env, { prompt, images = [], systemHint } = {}) {
       const ms = nowMs() - t0;
       updateHealth(env, { provider, model, ms, ok: false }).catch(() => {});
       lastErr = e;
-      continue; // м’який фолбек на наступного
+      continue;
     }
   }
 
