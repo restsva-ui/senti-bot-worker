@@ -1,7 +1,7 @@
 // src/routes/webhook.js
 // (rev) Без вітального відео; тихе перемикання режимів; фікс мови на /start;
 // дружній фолбек для медіа в Senti; авто-selfTune; Cloudflare Vision з фолбеками
-// по змінних оточення (CF_VISION, CLOUDFLARE_ACCOUNT_ID, CF_MODEL).
+// по змінних оточення (CF_VISION, CLOUDFLARE_ACCOUNT_ID, CF_MODEL) + auto-agree + dataURL.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -51,27 +51,80 @@ function pulseTyping(env, chatId, times = 4, intervalMs = 4000) {
   for (let i = 1; i < times; i++) setTimeout(() => sendTyping(env, chatId), i * intervalMs);
 }
 
-// ── CF Vision (Cloudflare) з фолбеками на назви змінних ─────────────────────
+// ── CF Vision creds + helpers ────────────────────────────────────────────────
 function getCfCreds(env) {
-  // Токен: спочатку CLOUDFLARE_API_TOKEN, потім CF_VISION
-  const token = env.CLOUDFLARE_API_TOKEN || env.CF_VISION;
-  // Аккаунт: спочатку CF_ACCOUNT_ID, потім CLOUDFLARE_ACCOUNT_ID
-  const accountId = env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID;
-  // Модель: CF_MODEL або дефолт
-  const model = (env.CF_MODEL || "@cf/llama-3.2-11b-vision-instruct").trim();
+  // Token fallbacks
+  const token =
+    env.CLOUDFLARE_API_TOKEN ||
+    env.CF_API_TOKEN ||
+    env.CLOUDFLARE_TOKEN ||
+    env.CF_VISION;
+
+  // Account fallbacks
+  const accountId =
+    env.CF_ACCOUNT_ID ||
+    env.CLOUDFLARE_ACCOUNT_ID ||
+    env.ACCOUNT_ID;
+
+  // Model fallbacks (завжди з meta/)
+  const model = (env.CF_MODEL || env.CF_VISION_MODEL || "@cf/meta/llama-3.2-11b-vision-instruct").trim();
+
   return { token, accountId, model };
 }
 
-async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
+// HTTP → data: URL
+async function toDataUrlFromHttp(httpUrl) {
+  const res = await fetch(httpUrl);
+  if (!res.ok) throw new Error(`fetch image failed: ${res.status}`);
+  const ab = await res.arrayBuffer();
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(ab)));
+  const ct = res.headers.get("content-type") || "image/jpeg";
+  return `data:${ct};base64,${b64}`;
+}
+
+// normalize image input to data URL
+async function ensureImageDataUrl(input) {
+  if (typeof input === "string") {
+    if (input.startsWith("data:")) return input;
+    if (/^https?:\/\//i.test(input)) return await toDataUrlFromHttp(input);
+  }
+  if (input && input.bytes) {
+    const b64 = btoa(String.fromCharCode(...new Uint8Array(input.bytes)));
+    const ct = input.contentType || "image/jpeg";
+    return `data:${ct};base64,${b64}`;
+  }
+  throw new Error("Unsupported image input for CF Vision");
+}
+
+// one-time license agree (silent)
+async function ensureCFVisionAgreed({ accountId, token, model }) {
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${encodeURIComponent(model)}`;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "agree" }),
+    });
+  } catch {}
+}
+
+// Основний виклик CF Vision
+async function cfVisionDescribe(env, imageUrlOrObj, userPrompt = "", lang = "uk") {
   const { token, accountId, model } = getCfCreds(env);
   if (!token || !accountId) throw new Error("CF credentials missing");
 
-  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`;
+  // тихий agree
+  await ensureCFVisionAgreed({ accountId, token, model });
+
+  // конвертація до data:
+  const dataUrl = await ensureImageDataUrl(imageUrlOrObj);
+
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${encodeURIComponent(model)}`;
   const messages = [{
     role: "user",
     content: [
       { type: "input_text", text: `${userPrompt || "Describe the image briefly."} Reply in ${lang}.` },
-      { type: "input_image", image_url: imageUrl }
+      { type: "input_image", image_url: { url: dataUrl } }
     ]
   }];
 
@@ -82,7 +135,7 @@ async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
   });
 
   const data = await r.json().catch(() => null);
-  if (!data || !data.success) {
+  if (!r.ok || !data || data.success === false) {
     const msg = data?.errors?.[0]?.message || `CF vision failed (HTTP ${r.status})`;
     throw new Error(msg);
   }
@@ -132,7 +185,6 @@ async function tgFileUrl(env, file_id) {
   if (!path) throw new Error("file_path missing");
   return `https://api.telegram.org/file/bot${token}/${path}`;
 }
-
 // ===== Learn helpers (admin-only, ручний режим) =============================
 function extractFirstUrl(text = "") {
   const m = String(text || "").match(/https?:\/\/\S+/i);
@@ -200,6 +252,7 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const url = await tgFileUrl(env, att.file_id);
   const prompt = caption || "Опиши, що на зображенні, коротко і по суті.";
   try {
+    // cfVisionDescribe всередині зробить agree + перетворить http у data:
     const resp = await cfVisionDescribe(env, url, prompt, lang);
     await sendPlain(env, chatId, `🖼️ ${resp}`);
   } catch (e) {
