@@ -144,7 +144,6 @@ async function getLearnMode(env, userId) {
 async function setLearnMode(env, userId, on) {
   try { await env.STATE_KV.put(KV.learnMode(userId), on ? "on" : "off"); } catch {}
 }
-
 // Drive-режим
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
@@ -181,6 +180,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   });
   return true;
 }
+
 // Vision-режим
 async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const att = pickPhoto(msg);
@@ -621,7 +621,7 @@ export async function handleTelegramWebhook(req, env) {
                 uk: "Будь ласка, надішліть вашу локацію кнопкою нижче — і я покажу погоду для вашого місця.",
                 ru: "Пожалуйста, отправьте вашу локацию кнопкой ниже — и я покажу погоду для вашего места.",
                 en: "Please share your location using the button below — I’ll show the weather for your area.",
-                de: "Bitte teile deinen Standort über die Schaltfläche unten – dann zeige ich dir das Wetter für deinen Ort.",
+                de: "Bitte teile deinen Standort über die Schaltfläche unten – dann zeige ich dir das Wetter для deinen Ort.",
                 fr: "Merci d’envoyer ta position via le bouton ci-dessous — je te montrerai la météo pour ta zone.",
               };
               const ask = askMap[lang.slice(0,2)] || askMap.uk;
