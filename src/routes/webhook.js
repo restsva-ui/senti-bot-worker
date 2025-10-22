@@ -24,9 +24,9 @@ import { setUserLocation, getUserLocation } from "../lib/geo.js";
 
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
 const {
-  BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_LEARN,
-  mainKeyboard, ADMIN, energyLinks, sendPlain,
-  askLocationKeyboard
+  BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_LEARN
+  , mainKeyboard, ADMIN, energyLinks, sendPlain
+  , askLocationKeyboard
 } = TG;
 
 // ── Ключі в STATE_KV (тільки для Learn toggle) ──────────────────────────────
@@ -144,6 +144,7 @@ async function getLearnMode(env, userId) {
 async function setLearnMode(env, userId, on) {
   try { await env.STATE_KV.put(KV.learnMode(userId), on ? "on" : "off"); } catch {}
 }
+
 // Drive-режим
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
@@ -180,7 +181,6 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   });
   return true;
 }
-
 // Vision-режим
 async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const att = pickPhoto(msg);
@@ -424,7 +424,7 @@ export async function handleTelegramWebhook(req, env) {
       uk: "✅ Локацію збережено. Тепер я можу показувати погоду для вашого місця.",
       ru: "✅ Локация сохранена. Теперь я смогу показывать погоду для вашего места.",
       en: "✅ Location saved. I can now show weather for your area.",
-      de: "✅ Standort gespeichert. Ich kann dir jetzt Wetter für deinen Ort zeigen.",
+      de: "✅ Standort gespeichert. Ich kann dir jetzt Wetter для deinen Ort zeigen.",
       fr: "✅ Position enregistrée. Je peux maintenant afficher la météo pour ta zone.",
     };
     const ok = okMap[(msg?.from?.language_code || lang || "uk").slice(0,2)] || okMap.uk;
@@ -457,8 +457,9 @@ export async function handleTelegramWebhook(req, env) {
   if (textRaw === "/admin" || textRaw === "/admin@SentiBot" || textRaw === BTN_ADMIN) {
     await safe(async () => {
       const mo = String(env.MODEL_ORDER || "").trim();
+      const { token, accountId } = getCfCreds(env);
       const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY);
-      const hasCF = !!(getCfCreds(env).token && getCfCreds(env).accountId);
+      const hasCF = !!(token && accountId);
       const hasOR = !!(env.OPENROUTER_API_KEY);
       const hasFreeBase = !!(env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL);
       const hasFreeKey = !!(env.FREE_LLM_API_KEY || env.FREE_API_KEY);
@@ -655,7 +656,7 @@ export async function handleTelegramWebhook(req, env) {
       const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand, adminDiag: isAdmin });
 
       await pushTurn(env, userId, "user", textRaw);
-      // автооновлення мовного профілю раз на N реплік (в selfTune всередині є троттл)
+      // автооновлення мовного профілю раз на N реплік (троттл усередині selfTune)
       await autoUpdateSelfTune(env, userId, lang);
       await pushTurn(env, userId, "assistant", full);
 
