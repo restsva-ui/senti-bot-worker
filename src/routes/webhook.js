@@ -8,7 +8,8 @@ import { readStatut } from "../lib/kvChecklist.js";
 import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
 import { json } from "../lib/utils.js";
 import { getEnergy, spendEnergy } from "../lib/energy.js";
-import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
+// ⬇️ заміна dialogMemory → memory
+import { getShortContext, recallFacts, pushContext, contextToTranscript } from "../lib/memory.js";
 import { loadSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
@@ -134,7 +135,8 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
 
   const cur = await getEnergy(env, userId);
   const need = Number(cur.costImage ?? 5);
-  if ((cur.energy ?? 0) < need) {
+  const curBal = Number((cur.energy ?? cur.balance ?? 0));
+  if (curBal < need) {
     const links = energyLinks(env, userId);
     await sendPlain(env, chatId, t(lang, "need_energy_media", need, links.energy));
     return true;
@@ -156,7 +158,8 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
 
   const cur = await getEnergy(env, userId);
   const need = Number(cur.costText ?? 1);
-  if ((cur.energy ?? 0) < need) {
+  const curBal = Number((cur.energy ?? cur.balance ?? 0));
+  if (curBal < need) {
     const links = energyLinks(env, userId);
     await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
     return true;
@@ -181,15 +184,9 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
 // ── SystemHint ───────────────────────────────────────────────────────────────
 async function buildSystemHint(env, chatId, userId) {
   const statut = String((await readStatut(env)) || "").trim();
-  const dlg = await buildDialogHint(env, userId);
   const tune = await loadSelfTune(env, chatId);
 
-  const core = `You are Senti — a thoughtful, self-improving assistant and companion.
-- Never claim to be an AI, model, chatbot, or a product made by any company.
-- Speak naturally and human-like with warmth and clarity.
-- Prefer concise, practical answers; expand only when asked.`;
-
-  // 👇 додамо останні інсайти з Learn
+  // 🔸 додамо останні інсайти з Learn
   let insightsBlock = "";
   try {
     const insights = await getRecentInsights(env, { limit: 5 });
@@ -199,11 +196,27 @@ async function buildSystemHint(env, chatId, userId) {
     }
   } catch {}
 
+  // 🔸 короткий контекст + факти з memory.js
+  let dialogBlock = "";
+  try {
+    const shortCtx = await getShortContext(env, chatId, 8);
+    const transcript = contextToTranscript(shortCtx);
+    const facts = await recallFacts(env, userId);
+    const factsBlock = facts?.length ? `\n[Факти про користувача]\n• ${facts.slice(0, 12).join("\n• ")}` : "";
+    const ctxBlock = transcript ? `[Останній контекст]\n${transcript}` : "";
+    dialogBlock = [ctxBlock, factsBlock].filter(Boolean).join("\n");
+  } catch {}
+
+  const core = `You are Senti — a thoughtful, self-improving assistant and companion.
+- Never claim to be an AI, model, chatbot, or a product made by any company.
+- Speak naturally and human-like with warmth and clarity.
+- Prefer concise, practical answers; expand only when asked.`;
+
   const blocks = [core];
   if (statut) blocks.push(`[Статут/чеклист]\n${statut}`);
   if (tune) blocks.push(`[Self-Tune]\n${tune}`);
   if (insightsBlock) blocks.push(insightsBlock);
-  if (dlg) blocks.push(dlg);
+  if (dialogBlock) blocks.push(dialogBlock);
   return blocks.join("\n\n");
 }
 
@@ -467,17 +480,6 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Показати останні інсайти (адмін)
-  if (isAdmin && textRaw === "/insights") {
-    await safe(async () => {
-      const arr = await listInsights(env, 8);
-      if (!arr.length) { await sendPlain(env, chatId, "Поки немає інсайтів."); return; }
-      const lines = arr.map(i => `• ${i.insight}${i.r2Key ? " [R2]" : ""}`);
-      await sendPlain(env, chatId, `Останні інсайти:\n${lines.join("\n")}`);
-    });
-    return json({ ok: true });
-  }
-
   // /ai
   const aiArg = parseAiCommand(textRaw);
   if (aiArg !== null) {
@@ -486,7 +488,8 @@ export async function handleTelegramWebhook(req, env) {
       if (!q) { await sendPlain(env, chatId, t(lang, "senti_tip")); return; }
       const cur = await getEnergy(env, userId);
       const need = Number(cur.costText ?? 1);
-      if ((cur.energy ?? 0) < need) {
+      const curBal = Number((cur.energy ?? cur.balance ?? 0));
+      if (curBal < need) {
         const links = energyLinks(env, userId);
         await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
         return;
@@ -502,10 +505,11 @@ export async function handleTelegramWebhook(req, env) {
 
       const { short, full } = await callSmartLLM(env, q, { lang, name, systemHint, expand, adminDiag: isAdmin });
 
-      await pushTurn(env, userId, "user", q);
-      await pushTurn(env, userId, "assistant", full);
+      // ⬇️ зберігаємо діалог у memory.js
+      await pushContext(env, chatId, "user", q);
+      await pushContext(env, chatId, "assistant", full);
 
-      const after = (cur.energy - need);
+      const after = curBal - need;
       if (expand && full.length > short.length) { for (const ch of chunkText(full)) await sendPlain(env, chatId, ch); }
       else { await sendPlain(env, chatId, short); }
       if (after <= Number(cur.low ?? 10)) {
@@ -626,7 +630,8 @@ export async function handleTelegramWebhook(req, env) {
 
       const cur = await getEnergy(env, userId);
       const need = Number(cur.costText ?? 1);
-      if ((cur.energy ?? 0) < need) {
+      const curBal = Number((cur.energy ?? cur.balance ?? 0));
+      if (curBal < need) {
         const links = energyLinks(env, userId);
         await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
         return;
@@ -641,10 +646,11 @@ export async function handleTelegramWebhook(req, env) {
       const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
       const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand, adminDiag: isAdmin });
 
-      await pushTurn(env, userId, "user", textRaw);
-      await pushTurn(env, userId, "assistant", full);
+      // ⬇️ зберігаємо діалог у memory.js
+      await pushContext(env, chatId, "user", textRaw);
+      await pushContext(env, chatId, "assistant", full);
 
-      const after = (cur.energy - need);
+      const after = curBal - need;
       if (expand && full.length > short.length) { for (const ch of chunkText(full)) await sendPlain(env, chatId, ch); }
       else { await sendPlain(env, chatId, short); }
       if (after <= Number(cur.low ?? 10)) {
