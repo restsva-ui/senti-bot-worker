@@ -13,7 +13,7 @@ import { getEnergy, spendEnergy } from "../lib/energy.js";
 import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
 import { loadSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
-import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
+import { t, detectFromText } from "../lib/i18n.js"; // ← прибрали pickReplyLanguage
 import { TG } from "../lib/tg.js";
 import { enqueueLearn, listQueued, getRecentInsights } from "../lib/kvLearnQueue.js";
 
@@ -394,7 +394,11 @@ export async function handleTelegramWebhook(req, env) {
   const isAdmin = ADMIN(env, userId);
   const textRaw = String(msg?.text || msg?.caption || "").trim();
 
-  let lang = pickReplyLanguage(msg, textRaw);
+  // === МОВА: спочатку профіль Telegram, потім — детект з тексту ===
+  const supported = new Set(["uk", "ru", "en", "de", "fr"]);
+  const profileLangRaw = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
+  const baseLang = supported.has(profileLangRaw) ? profileLangRaw : "uk";
+  let lang = textRaw ? (detectFromText(textRaw) || baseLang) : baseLang;
 
   const safe = async (fn) => {
     try { await fn(); }
@@ -422,8 +426,7 @@ export async function handleTelegramWebhook(req, env) {
   // /start — спершу мова з Telegram, потім ім'я
   if (textRaw === "/start") {
     await safe(async () => {
-      const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
-      const startLang = ["uk", "ru", "en", "de", "fr"].includes(profileLang) ? profileLang : lang;
+      const startLang = baseLang; // гарантуємо мову профілю на привітанні
       const name = await getPreferredName(env, msg);
       await sendPlain(env, chatId, `${t(startLang, "hello_name", name)} ${t(startLang, "how_help")}`, {
         reply_markup: mainKeyboard(isAdmin)
@@ -663,8 +666,7 @@ export async function handleTelegramWebhook(req, env) {
   }
 
   // Дефолтне привітання (якщо нічого іншого не спрацювало)
-  const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
-  const greetLang = ["uk", "ru", "en", "de", "fr"].includes(profileLang) ? profileLang : lang;
+  const greetLang = baseLang; // мова профілю як дефолт
   const name = await getPreferredName(env, msg);
   await sendPlain(env, chatId, `${t(greetLang, "hello_name", name)} ${t(greetLang, "how_help")}`, {
     reply_markup: mainKeyboard(isAdmin)
