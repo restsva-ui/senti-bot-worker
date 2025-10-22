@@ -70,13 +70,12 @@ function bufToBase64(bytes) {
   return btoa(bin);
 }
 async function ensureInlineImage(image, fallbackMime = "image/jpeg") {
-  // Приймаємо або data: URL, або http(s)-URL; повертаємо data:URL для Gemini
+  // Приймаємо або data: URL, або http(s)-URL; повертаємо data:URL для обох провайдерів
   if (!image) return null;
   const s = String(image);
   if (isDataUrl(s)) return s;
 
   if (/^https?:\/\//i.test(s)) {
-    // Скачуємо і конвертуємо у data: для стабільної роботи Gemini
     const r = await fetch(s);
     if (!r.ok) throw new Error(`image fetch http ${r.status}`);
     const arr = new Uint8Array(await r.arrayBuffer());
@@ -84,7 +83,7 @@ async function ensureInlineImage(image, fallbackMime = "image/jpeg") {
     const b64 = bufToBase64(arr);
     return `data:${mime};base64,${b64}`;
   }
-  // Якщо раптом прилетіло "file_id" або інший маркер — попередньо конвертуй у http(s)/data: на стороні виклику
+  // Якщо прилетів нестандартний тип — просимо конвертувати до http(s)/data:
   throw new Error("Unsupported image input; pass data:URL or http(s) URL");
 }
 
@@ -125,8 +124,12 @@ async function callGemini(env, model, prompt, systemHint) {
 }
 
 async function callCF(env, model, prompt, systemHint) {
-  const token = env.CLOUDFLARE_API_TOKEN;
-  const acc = env.CF_ACCOUNT_ID;
+  // 🔧 Тепер з фолбеками назв
+  const token =
+    env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || env.CLOUDFLARE_TOKEN;
+  const acc =
+    env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID || env.ACCOUNT_ID;
+
   if (!token || !acc) throw new Error("Cloudflare credentials missing");
 
   const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/${encodeURIComponent(model)}`;
@@ -143,7 +146,7 @@ async function callCF(env, model, prompt, systemHint) {
     body: JSON.stringify({ messages }),
   });
   const data = await jsonSafe(r);
-  if (!data?.success) {
+  if (!r.ok || !data?.success) {
     const msg = data?.errors?.[0]?.message || `cf http ${r.status}`;
     throw new Error(msg);
   }
@@ -203,7 +206,7 @@ async function callFree(env, model, prompt, systemHint) {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      ...(key ? { Authorization: `Bearer ${key}` } : {}),
+      ...(key ? { Authorization: `Bearer ${key}` } : {} ),
     },
     body: JSON.stringify({
       model: model || env.FREE_LLM_MODEL || "gpt-3.5-turbo",
@@ -219,7 +222,6 @@ async function callFree(env, model, prompt, systemHint) {
   }
   return txt.trim();
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 /** Провайдери — VISION */
 
@@ -229,12 +231,11 @@ async function callGeminiVision(env, model, { prompt, images = [], systemHint })
   const key = env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY;
   if (!key) throw new Error("GEMINI key missing");
 
-  // Підготуємо parts: текст + inline_data (base64)
   const parts = [];
   const textPrompt = withSystemPrefix(systemHint, prompt || "Describe the image briefly.");
   parts.push({ text: textPrompt });
 
-  // Робимо максимум 4 зображення на запит, щоб не перевантажувати
+  // До 4 зображень
   const maxImg = Math.min(4, images.length || 0);
   for (let i = 0; i < maxImg; i++) {
     const dataUrl = await ensureInlineImage(images[i]);
@@ -267,25 +268,43 @@ async function callGeminiVision(env, model, { prompt, images = [], systemHint })
   return out.trim();
 }
 
+// CF: one-time license agree (silent)
+async function ensureCFVisionAgreed({ accountId, token, model }) {
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${encodeURIComponent(model)}`;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "agree" }),
+    });
+  } catch {}
+}
+
 // Cloudflare Workers AI vision (@cf/*-vision-instruct)
-// Приймає image_url; якщо нам подали data:URL — теж працює.
+// ВАЖЛИВО: image_url має бути у вигляді { url: "data:..." }
 async function callCFVision(env, model, { prompt, images = [], systemHint }) {
-  const token = env.CLOUDFLARE_API_TOKEN;
-  const acc = env.CF_ACCOUNT_ID;
+  const token =
+    env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || env.CLOUDFLARE_TOKEN;
+  const acc =
+    env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID || env.ACCOUNT_ID;
+
   if (!token || !acc) throw new Error("Cloudflare credentials missing");
+
+  // тихий agree
+  await ensureCFVisionAgreed({ accountId: acc, token, model });
 
   const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/${encodeURIComponent(model)}`;
 
-  // Беремо перше зображення (або кілька — але Workers AI стабільніше з 1)
   const img = images[0];
   if (!img) throw new Error("No image provided");
 
+  // конвертуємо у data:
+  const dataUrl = await ensureInlineImage(img);
+
   const content = [];
-  // Текст
   const fullPrompt = withSystemPrefix(systemHint, prompt || "Describe the image briefly.");
   content.push({ type: "input_text", text: fullPrompt });
-  // Картинка (можна data:URL або http URL)
-  content.push({ type: "input_image", image_url: img });
+  content.push({ type: "input_image", image_url: { url: dataUrl } });
 
   const messages = [{ role: "user", content }];
 
@@ -298,7 +317,7 @@ async function callCFVision(env, model, { prompt, images = [], systemHint }) {
     body: JSON.stringify({ messages }),
   });
   const data = await jsonSafe(r);
-  if (!data?.success) {
+  if (!r.ok || !data?.success) {
     const msg = data?.errors?.[0]?.message || `cf-vision http ${r.status}`;
     throw new Error(msg);
   }
@@ -378,12 +397,10 @@ export async function askVision(env, { prompt, images = [], systemHint } = {}) {
     try {
       let out;
       if (provider === "gemini-vision") {
-        // Уніфікуємо input: навіть якщо прийшов http URL — конвертуємо у data:
         const prepared = [];
         for (const img of images || []) prepared.push(await ensureInlineImage(img));
         out = await callGeminiVision(env, model, { prompt, images: prepared, systemHint });
       } else if (provider === "cf-vision") {
-        // CF дозволяє image_url як data: так і http(s)
         out = await callCFVision(env, model, { prompt, images, systemHint });
       } else {
         throw new Error(`unknown vision provider: ${provider}`);
