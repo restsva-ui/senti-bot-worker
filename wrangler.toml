@@ -1,6 +1,8 @@
 name = "senti-bot-worker"
 main = "src/index.js"
 compatibility_date = "2024-09-25"
+
+# Cloudflare account
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
 
 # --- CRONs ---
@@ -20,21 +22,23 @@ DEPLOY_ID = "local-dev"
 # Увімкнення/вимкнення Learn
 LEARN_ENABLED = "on"
 
-# Cloudflare Vision (для @cf/... моделей). ID публічний, токен — у секретах.
+# ===== Cloudflare Workers AI / Vision =====
+# ID акаунта — публічний; токен додаємо як SECRET (див. нижче).
 CF_ACCOUNT_ID = "2cf6e316af8623546c95c0354bc3aa00"
+# Моделі за замовчуванням
+CF_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
+GEMINI_MODEL_VISION = "gemini-2.5-flash"
 
-# ── Доступ до адмін-HTML без секрету (як було "раніше")
+# ── Доступ до адмін-HTML без секрету (як "раніше")
 # "on" -> дозволяє readonly-перегляд без ?s=
-# (також у коді є ?public=1 як форсований readonly)
 ALLOW_PUBLIC_REPO = "on"
 ALLOW_PUBLIC_STATUT = "on"
 ALLOW_PUBLIC_CHECKLIST = "on"
 
 # Секрети для наших HTTP-ендпойнтів і вебхука TG
-# Якщо хочеш відкрити все "як раніше", можеш тимчасово прибрати ці значення,
-# або залишити їх — і ввімкнути ALLOW_PUBLIC_* як вище.
-WEBHOOK_SECRET    = "senti1984"     # використовується у /admin/*, /cron/*
-TG_WEBHOOK_SECRET = "senti1984"     # використовується у /tg/webhook (Telegram secret token)
+# (Значення задаються як Secrets у Cloudflare Dashboard / wrangler secret)
+WEBHOOK_SECRET    = "senti1984"
+TG_WEBHOOK_SECRET = "senti1984"
 
 # Локальна таймзона для UI/логів/дебагу часу
 TIMEZONE = "Europe/Kyiv"
@@ -57,7 +61,7 @@ FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
 FREE_API_PATH     = "/v1/chat/completions"
 
 # --- Керування нічними авто-поліпшеннями ---
-AUTO_IMPROVE     = "on"   # "off" щоб вимкнути
+AUTO_IMPROVE     = "on"
 # Основний добовий запуск агента відбувається на годинному кроні ("0 * * * *"),
 # коли getUTCHours() === NIGHTLY_UTC_HOUR. 23 UTC ~= 02:00 за Києвом.
 NIGHTLY_UTC_HOUR = "23"
@@ -120,15 +124,6 @@ id = "86a54c59ce674a558780c58bf1a47dfd"
 
 # --- R2 buckets (для upload файлів у Learn) ---
 [[r2_buckets]]
-binding = "LEARN_BUCKET"           # використовуй у коді: env.LEARN_BUCKET
+binding = "LEARN_BUCKET"
 bucket_name = "senti-learn"
-# preview_bucket_name = "senti-learn-preview"  # (необов'язково)
-
-# ───────────────────────── ПІДКАЗКИ ПО СЕКРЕТАХ ─────────────────────────
-# Додай ОКРЕМИМИ СЕКРЕТАМИ (не у [vars]):
-#   wrangler secret put GEMINI_API_KEY
-#   wrangler secret put OPENROUTER_API_KEY
-#   wrangler secret put FREE_API_KEY
-#   wrangler secret put TELEGRAM_BOT_TOKEN
-#   wrangler secret put CLOUDFLARE_API_TOKEN
-# Якщо щось з цього відсутнє — відповідні можливості будуть обмежені.
+# preview_bucket_name = "senti-learn-preview"
