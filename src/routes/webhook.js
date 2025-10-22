@@ -1,4 +1,6 @@
 // src/routes/webhook.js
+// (rev) Без вітального відео; тихе перемикання режимів; фікс мови на /start;
+// перевірка підключення Google Drive; дружній фолбек для медіа в Senti.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -26,11 +28,9 @@ const {
   askLocationKeyboard
 } = TG;
 
-// ── Ключі в STATE_KV ────────────────────────────────────────────────────────
+// ── Ключі в STATE_KV (тільки для Learn toggle) ──────────────────────────────
 const KV = {
-  greetingVideoId: "greet:video:file_id",
-  greetedFlag: (uid) => `greet:done:${uid}`,
-  learnMode:   (uid) => `learn:mode:${uid}`, // "on" | "off"
+  learnMode: (uid) => `learn:mode:${uid}`, // "on" | "off"
 };
 
 // ── Telegram UX helpers (індикатор як у GPT) ────────────────────────────────
@@ -139,7 +139,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
   if (!att) return false;
 
-  // Переконатися, що підключений Drive
+  // Перевіряємо, чи підключено Drive
   let hasTokens = false;
   try {
     const tokens = await getUserTokens(env, userId);
@@ -373,41 +373,6 @@ async function listInsights(env, limit = 5) {
   try { return await getRecentInsights(env, { limit }) || []; } catch { return []; }
 }
 
-// ── Вітальне відео ──────────────────────────────────────────────────────────
-async function setGreetingVideo(env, file_id) {
-  try { await env.STATE_KV.put(KV.greetingVideoId, file_id); return true; } catch { return false; }
-}
-async function getGreetingVideo(env) {
-  try { return await env.STATE_KV.get(KV.greetingVideoId); } catch { return null; }
-}
-async function markGreeted(env, userId) {
-  try { await env.STATE_KV.put(KV.greetedFlag(userId), "1", { expirationTtl: 60 * 60 * 24 * 400 }); } catch {}
-}
-async function wasGreeted(env, userId) {
-  try { return !!(await env.STATE_KV.get(KV.greetedFlag(userId))); } catch { return false; }
-}
-async function sendGreetingIfNeeded(env, chatId, userId, lang) {
-  if (!chatId || !userId) return;
-  if (await wasGreeted(env, userId)) return;
-
-  const fileId = await getGreetingVideo(env);
-  if (!fileId) return;
-
-  try {
-    const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
-    await fetch(`https://api.telegram.org/bot${token}/sendVideo`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        video: fileId,
-        caption: t(lang, "hello_name", await getPreferredName(env, { from: { id: userId } })) + " " + t(lang, "how_help")
-      })
-    });
-    await markGreeted(env, userId);
-  } catch {}
-}
-
 // ── MAIN ────────────────────────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "POST") {
@@ -454,25 +419,26 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /start — вітальне відео (1 раз на користувача)
+  // /start — спершу мова з Telegram, потім ім'я
   if (textRaw === "/start") {
     await safe(async () => {
-      await sendGreetingIfNeeded(env, chatId, userId, lang);
+      const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
+      const startLang = ["uk", "ru", "en", "de", "fr"].includes(profileLang) ? profileLang : lang;
       const name = await getPreferredName(env, msg);
-      await sendPlain(env, chatId, `${t(lang, "hello_name", name)} ${t(lang, "how_help")}`, { reply_markup: mainKeyboard(isAdmin) });
+      await sendPlain(env, chatId, `${t(startLang, "hello_name", name)} ${t(startLang, "how_help")}`, {
+        reply_markup: mainKeyboard(isAdmin)
+      });
     });
     return json({ ok: true });
   }
 
-  // Вмик/вимик Drive-режим (кнопки)
+  // ТИХИЙ перемикач режимів (без повідомлень)
   if (textRaw === BTN_DRIVE || /^(google\s*drive)$/i.test(textRaw)) {
     await setDriveMode(env, userId, true);
-    await sendPlain(env, chatId, "🟢 Режим збереження у Google Drive увімкнено. Надішли файл або фото — збережу у твій Drive.", { reply_markup: mainKeyboard(isAdmin) });
     return json({ ok: true });
   }
   if (textRaw === BTN_SENTI || /^(senti|сенті)$/i.test(textRaw)) {
     await setDriveMode(env, userId, false);
-    await sendPlain(env, chatId, "🔵 Режим Senti увімкнено. Фото спробую описати (якщо доступна Vision), інші файли — не зберігатиму автоматично.", { reply_markup: mainKeyboard(isAdmin) });
     return json({ ok: true });
   }
 
@@ -571,15 +537,6 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Налаштування вітального відео (адмін): надішли відео з підписом #set_greeting
-  if (isAdmin && msg?.video && /#set_greeting\b/i.test(textRaw)) {
-    await safe(async () => {
-      const ok = await setGreetingVideo(env, msg.video.file_id);
-      await sendPlain(env, chatId, ok ? "✅ Вітальне відео збережено. Надсилатиметься новим користувачам при /start." : "❌ Не вдалось зберегти відео.");
-    });
-    return json({ ok: true });
-  }
-
   // ===== Learn enqueue (адмін, тільки коли Learn ON) =====
   if (isAdmin && await getLearnMode(env, userId)) {
     const urlInText = extractFirstUrl(textRaw);
@@ -616,7 +573,12 @@ export async function handleTelegramWebhook(req, env) {
       if (await handleVisionMedia(env, chatId, userId, msg, lang, msg?.caption)) return json({ ok: true });
     }
     if (!driveOn && (msg?.video || msg?.document || msg?.audio || msg?.voice || msg?.video_note)) {
-      await sendPlain(env, chatId, "Поки що не аналізую такі файли в цьому режимі. Хочеш — увімкну збереження у Google Drive кнопкою «Google Drive».", { reply_markup: mainKeyboard(ADMIN(env, userId)) });
+      await sendPlain(
+        env,
+        chatId,
+        "Поки що не аналізую такі файли в цьому режимі. Хочеш — увімкни збереження у Google Drive кнопкою «Google Drive».",
+        { reply_markup: mainKeyboard(ADMIN(env, userId)) }
+      );
       return json({ ok: true });
     }
   } catch (e) {
@@ -700,7 +662,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Дефолтне привітання (на випадок інших тригерів)
+  // Дефолтне привітання (якщо нічого іншого не спрацювало)
   const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
   const greetLang = ["uk", "ru", "en", "de", "fr"].includes(profileLang) ? profileLang : lang;
   const name = await getPreferredName(env, msg);
