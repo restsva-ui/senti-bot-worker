@@ -1,6 +1,6 @@
 // src/routes/adminRepo.js
 // Repo / Архіви: HTML-UI, завантаження ZIP, автопромоут після upload,
-// а також ручний авто-промоут через кнопку в адмінці.
+// ручний авто-промоут, видалення архівів та автоприбирання (prune).
 
 import { saveArchive, listArchives, appendChecklist } from "../lib/kvChecklist.js";
 import { runSelfTestLocalDirect } from "./selfTestLocal.js";
@@ -38,6 +38,43 @@ function bytesToBase64(u8) {
   return btoa(res);
 }
 
+// читання JSON-значення архіву (щоб дістати r2Key, якщо є)
+async function getArchiveJSON(env, key) {
+  try {
+    const raw = await env.CHECKLIST_KV.get(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+// видалити архів із KV (+ спробувати з R2, якщо є r2Key)
+async function deleteArchive(env, key) {
+  const val = await getArchiveJSON(env, key);
+  try {
+    await env.CHECKLIST_KV.delete(key);
+  } catch {}
+  const r2Key = val?.r2Key;
+  if (r2Key && env.REPO_BUCKET?.delete) {
+    try { await env.REPO_BUCKET.delete(r2Key); } catch {}
+  }
+  await appendChecklist(env, `🗑️ repo:delete → ${key}${r2Key ? ` (and R2:${r2Key})` : ""}`);
+  return { ok: true, key, r2Key: r2Key || null };
+}
+
+// автоприбирання (залишити N найновіших)
+async function pruneArchives(env, keep = 5) {
+  const keepN = Math.max(1, Number(keep) || 5);
+  const items = await listArchives(env); // від нового до старого
+  const toDelete = items.slice(keepN);
+  const results = [];
+  for (const k of toDelete) {
+    results.push(await deleteArchive(env, k));
+  }
+  await appendChecklist(env, `🧹 repo:prune keep=${keepN} → deleted ${results.length}`);
+  return { ok: true, kept: keepN, deleted: results.length, items: results };
+}
+
 // компактний html (мобільний-френдлі)
 function pageShell({ title, body }) {
   return `<!doctype html>
@@ -52,12 +89,24 @@ function pageShell({ title, body }) {
   .name{ word-break: break-all; flex:1; }
   .mark{ color:#22c55e; font-weight:600; margin-left:6px }
   .btn{ padding:8px 12px; border-radius:10px; text-decoration:none; border:1px solid color-mix(in oklab, CanvasText 20%, Canvas 80%); background: color-mix(in oklab, Canvas 96%, CanvasText 6%); color:inherit }
-  .actions{ display:flex; gap:6px; }
+  .btn:hover{ background: color-mix(in oklab, Canvas 92%, CanvasText 10%); }
+  .btn.danger{ background: color-mix(in oklab, #ffebee 90%, #b71c1c 10%); border-color: color-mix(in oklab, #b71c1c 40%, Canvas 60%) }
+  .btn.danger:hover{ background: color-mix(in oklab, #ffebee 85%, #b71c1c 15%); }
+  .actions{ display:flex; gap:6px; flex-wrap:wrap }
   form.upl{ display:grid; gap:8px; grid-template-columns: 1fr auto; align-items:center; padding:12px; border:1px dashed color-mix(in oklab, CanvasText 20%, Canvas 80%); border-radius:12px; margin:14px 0 }
   input[type=file]{ padding:8px; border:1px solid color-mix(in oklab, CanvasText 20%, Canvas 80%); border-radius:10px }
   .note{ opacity:.75; font-size:12px }
+  .bar{ display:flex; gap:8px; flex-wrap:wrap; margin:8px 0 12px }
 </style>
 ${body}`;
+}
+
+function esc(s = "") {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 async function htmlList(env, url) {
@@ -67,21 +116,35 @@ async function htmlList(env, url) {
 
   const rows = items.map((k) => {
     const isCur = k === cur;
+
     const ap = new URL("/admin/repo/auto-promote", url.origin);
     if (env.WEBHOOK_SECRET) ap.searchParams.set("s", env.WEBHOOK_SECRET);
     ap.searchParams.set("key", k);
 
+    const del = new URL("/admin/repo/delete", url.origin);
+    if (env.WEBHOOK_SECRET) del.searchParams.set("s", env.WEBHOOK_SECRET);
+    del.searchParams.set("key", k);
+
     return `
     <div class="row">
-      <div class="name">${k}${isCur ? '<span class="mark">● current</span>' : ""}</div>
+      <div class="name">${esc(k)}${isCur ? '<span class="mark">● current</span>' : ""}</div>
       <div class="actions">
         <a class="btn" href="${ap.toString()}">Auto-promote</a>
+        <a class="btn danger" href="${del.toString()}" onclick="return confirm('Видалити архів?')">🗑️ Delete</a>
       </div>
     </div>`;
   }).join("") || `<p class="note">Немає архівів.</p>`;
 
   const autoLatest = new URL("/admin/repo/auto-promote", url.origin);
   if (env.WEBHOOK_SECRET) autoLatest.searchParams.set("s", env.WEBHOOK_SECRET);
+
+  const prune5 = new URL("/admin/repo/prune", url.origin);
+  if (env.WEBHOOK_SECRET) prune5.searchParams.set("s", env.WEBHOOK_SECRET);
+  prune5.searchParams.set("keep", "5");
+
+  const prune10 = new URL("/admin/repo/prune", url.origin);
+  if (env.WEBHOOK_SECRET) prune10.searchParams.set("s", env.WEBHOOK_SECRET);
+  prune10.searchParams.set("keep", "10");
 
   const body = `
   <h1>Repo / Архіви</h1>
@@ -92,9 +155,11 @@ async function htmlList(env, url) {
     <div class="note">Після успішного завантаження виконується selftest і, якщо все ок — архів стає current.</div>
   </form>
 
-  <div style="display:flex; gap:8px; margin:8px 0;">
+  <div class="bar">
     <a class="btn" href="${autoLatest.toString()}">Auto-promote latest</a>
     <a class="btn" href="/api/brain/current?s=${s}">Перевірити current</a>
+    <a class="btn" href="${prune5.toString()}" onclick="return confirm('Залишити лише останні 5 архівів?')">Prune to last 5</a>
+    <a class="btn" href="${prune10.toString()}" onclick="return confirm('Залишити лише останні 10 архівів?')">Prune to last 10</a>
   </div>
 
   ${rows}
@@ -183,6 +248,35 @@ export async function handleAdminRepo(req, env, url) {
     } catch (e) {
       console.error("[repo.auto-promote]", e?.message || e);
       await appendChecklist(env, `❌ auto-promote error: ${String(e)}`);
+      return json({ ok: false, error: String(e) }, 500);
+    }
+  }
+
+  // GET /admin/repo/delete?key=... — видалити конкретний архів
+  if (p === "/admin/repo/delete" && req.method === "GET") {
+    const key = url.searchParams.get("key");
+    if (!key) return json({ ok: false, error: "missing key" }, 400);
+    try {
+      const res = await deleteArchive(env, key);
+      return new Response(await htmlList(env, url), {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    } catch (e) {
+      console.error("[repo.delete]", e?.message || e);
+      return json({ ok: false, error: String(e) }, 500);
+    }
+  }
+
+  // GET /admin/repo/prune?keep=N — залишити тільки найновіші N
+  if (p === "/admin/repo/prune" && req.method === "GET") {
+    const keep = Number(url.searchParams.get("keep") || 5);
+    try {
+      await pruneArchives(env, keep);
+      return new Response(await htmlList(env, url), {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    } catch (e) {
+      console.error("[repo.prune]", e?.message || e);
       return json({ ok: false, error: String(e) }, 500);
     }
   }
