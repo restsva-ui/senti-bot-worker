@@ -96,14 +96,18 @@ async function ensureImageDataUrl(input) {
   throw new Error("Unsupported image input for CF Vision");
 }
 
-// one-time license agree (silent)
+// one-time license agree (silent) — через messages, як вимагає Workers AI
 async function ensureCFVisionAgreed({ accountId, token, model }) {
   const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${encodeURIComponent(model)}`;
+  const messages = [{
+    role: "user",
+    content: [{ type: "input_text", text: "agree" }]
+  }];
   try {
     await fetch(url, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: "agree" }),
+      body: JSON.stringify({ messages }),
     });
   } catch {}
 }
@@ -124,7 +128,7 @@ async function cfVisionDescribe(env, imageUrlOrObj, userPrompt = "", lang = "uk"
     role: "user",
     content: [
       { type: "input_text", text: `${userPrompt || "Describe the image briefly."} Reply in ${lang}.` },
-      { type: "input_image", image_url: { url: dataUrl } }
+      { type: "input_image", image_url: dataUrl }
     ]
   }];
 
@@ -142,6 +146,7 @@ async function cfVisionDescribe(env, imageUrlOrObj, userPrompt = "", lang = "uk"
   const result = data.result?.response || data.result?.output_text || data.result?.text || "";
   return String(result || "").trim();
 }
+
 // ── Media helpers ───────────────────────────────────────────────────────────
 function pickPhoto(msg) {
   const arr = Array.isArray(msg?.photo) ? msg.photo : null;
@@ -420,6 +425,7 @@ ${control}`;
   const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
 }
+
 // ── маленькі адмін-хелпери для Learn ────────────────────────────────────────
 async function runLearnNow(env) {
   const secret = env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || "";
@@ -449,7 +455,7 @@ async function runCfVisionSelfTest(env) {
     role: "user",
     content: [
       { type: "input_text", text: "What color is this image? reply one word." },
-      { type: "input_image", image_url: { url: tinyWhite } }
+      { type: "input_image", image_url: tinyWhite }
     ]
   }];
   const r = await fetch(url, {
@@ -772,4 +778,3 @@ export async function handleTelegramWebhook(req, env) {
   });
   return json({ ok: true });
 }
-
