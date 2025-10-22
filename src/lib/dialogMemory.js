@@ -1,99 +1,54 @@
 // src/lib/dialogMemory.js
-// Простий KV-бекенд короткострокової пам’яті діалогу.
-// Зберігає останні N реплік і віддає їх у компактному форматі
-// для system prompt, щоб модель "пам’ятала" контекст.
+// Adapter-шар для зворотної сумісності.
+// Проксі до memory.js, щоб старі імпорти не ламалися.
 //
-// API:
+// API (як і було):
 //   await pushTurn(env, userId, role, text)
 //   await getRecentTurns(env, userId, limit?)
 //   await buildDialogHint(env, userId, opts?)
 
-const TURN_LIMIT_DEFAULT = 14;   // скільки реплік тримати у KV (user+assistant разом)
-const HINT_TURNS_DEFAULT = 8;    // скільки з останніх реплік підкладати у підказку
+import { getShortContext, pushContext } from "./memory.js";
 
-function kv(env) {
-  return env.STATE_KV || env.CHECKLIST_KV || env.ENERGY_LOG_KV || env.LEARN_QUEUE_KV;
-}
+const TURN_LIMIT_DEFAULT = 14;   // збережено для сумісності (не використовується тут)
+const HINT_TURNS_DEFAULT = 8;
 
-function keyLog(userId) {
-  return `dlg:${userId}:log`;
-}
-
-function toEntry(role, text) {
-  return {
-    role: role === "assistant" ? "assistant" : "user",
-    text: String(text || "").slice(0, 8000), // хард-обмеження від дурних дампів
-    ts: Date.now()
-  };
-}
-
-/**
- * Додати чергову репліку у круговий буфер.
- */
-export async function pushTurn(env, userIdRaw, role, text, limit = TURN_LIMIT_DEFAULT) {
-  const store = kv(env);
-  if (!store) return { ok: false, error: "kv_not_bound" };
-
-  const userId = String(userIdRaw || env.TELEGRAM_ADMIN_ID || "0");
-  let arr = [];
-
+// Додати репліку у пам'ять (використовуємо userId як chatId — як у Telegram це збігається)
+export async function pushTurn(env, userIdRaw, role, text, _limit = TURN_LIMIT_DEFAULT) {
+  const chatId = String(userIdRaw || env.TELEGRAM_ADMIN_ID || "0");
   try {
-    const raw = await store.get(keyLog(userId), "json");
-    if (Array.isArray(raw)) arr = raw;
-  } catch {}
-
-  // додати і підрізати
-  arr.push(toEntry(role, text));
-  if (arr.length > Math.max(4, Number(limit || TURN_LIMIT_DEFAULT))) {
-    arr = arr.slice(-Math.max(4, Number(limit || TURN_LIMIT_DEFAULT)));
+    await pushContext(env, chatId, role === "assistant" ? "assistant" : "user", String(text || ""));
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
   }
-
-  try {
-    await store.put(keyLog(userId), JSON.stringify(arr));
-  } catch {}
-
-  return { ok: true, size: arr.length };
 }
 
-/**
- * Отримати останні N реплік у хронології (старі → нові).
- */
+// Повернути останні N реплік (у форматі {role,text,ts?})
 export async function getRecentTurns(env, userIdRaw, limit = HINT_TURNS_DEFAULT) {
-  const store = kv(env);
-  if (!store) return [];
-
-  const userId = String(userIdRaw || env.TELEGRAM_ADMIN_ID || "0");
+  const chatId = String(userIdRaw || env.TELEGRAM_ADMIN_ID || "0");
   try {
-    const raw = await store.get(keyLog(userId), "json");
-    if (!Array.isArray(raw) || !raw.length) return [];
-    const n = Math.max(2, Number(limit || HINT_TURNS_DEFAULT));
-    return raw.slice(-n);
+    const ctx = await getShortContext(env, chatId, Math.max(2, Number(limit || HINT_TURNS_DEFAULT)));
+    // ctx вже містить {role,text,ts}; повертаємо як є
+    return Array.isArray(ctx) ? ctx : [];
   } catch {
     return [];
   }
 }
 
-/**
- * Зібрати блок для system prompt:
- * - останні репліки у форматі «[Dialog memory]»
- * - без зайвих деталей, лаконічно
- */
+// Побудувати компактний блок діалогу для system prompt
 export async function buildDialogHint(env, userIdRaw, opts = {}) {
   const maxTurns = Math.max(2, Number(opts.maxTurns || HINT_TURNS_DEFAULT));
-  const turns = await getRecentTurns(env, userIdRaw, maxTurns);
+  const chatId = String(userIdRaw || env.TELEGRAM_ADMIN_ID || "0");
 
-  if (!turns.length) return ""; // нічого не підкладати — модель не вигадуватиме «я не пам’ятаю», бо тексту немає
+  const turns = await getShortContext(env, chatId, maxTurns);
+  if (!turns?.length) return "";
 
-  const lines = [];
-  lines.push("[Dialog memory — recent turns]");
-  for (const t of turns) {
-    const role = t.role === "assistant" ? "assistant" : "user";
-    // коротко: 300 символів на репліку, щоб не роздувати prompt
-    const s = String(t.text || "").replace(/\s+/g, " ").trim().slice(0, 300);
-    // маркуємо ролі, щоб модель розуміла хто говорив
+  const lines = ["[Dialog memory — recent turns]"];
+  for (const m of turns) {
+    const role = m.role === "assistant" ? "assistant" : "user";
+    const s = String(m.text || "").replace(/\s+/g, " ").trim().slice(0, 300);
     lines.push(`${role}: ${s}`);
   }
   lines.push("— End of dialog memory. Keep answers consistent with it.");
-
   return lines.join("\n");
 }
