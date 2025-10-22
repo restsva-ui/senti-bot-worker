@@ -1,7 +1,7 @@
 // src/routes/webhook.js
 // (rev) Без вітального відео; тихе перемикання режимів; фікс мови на /start;
-// перевірка підключення Google Drive; дружній фолбек для медіа в Senti;
-// авто-самотюнінг стилю (мовні профілі) через selfTune.
+// дружній фолбек для медіа в Senti; авто-selfTune; Cloudflare Vision з фолбеками
+// по змінних оточення (CF_VISION, CLOUDFLARE_ACCOUNT_ID, CF_MODEL).
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -12,7 +12,7 @@ import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
 import { json } from "../lib/utils.js";
 import { getEnergy, spendEnergy } from "../lib/energy.js";
 import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
-import { loadSelfTune, autoUpdateSelfTune } from "../lib/selfTune.js"; // ⬅️ додано
+import { loadSelfTune, autoUpdateSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
@@ -25,7 +25,7 @@ import { setUserLocation, getUserLocation } from "../lib/geo.js";
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
 const {
   BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_LEARN,
-  mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand,
+  mainKeyboard, ADMIN, energyLinks, sendPlain,
   askLocationKeyboard
 } = TG;
 
@@ -51,12 +51,22 @@ function pulseTyping(env, chatId, times = 4, intervalMs = 4000) {
   for (let i = 1; i < times; i++) setTimeout(() => sendTyping(env, chatId), i * intervalMs);
 }
 
-// ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
-async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
-  if (!env.CLOUDFLARE_API_TOKEN || !env.CF_ACCOUNT_ID) throw new Error("CF credentials missing");
-  const model = "@cf/llama-3.2-11b-vision-instruct";
-  const url = `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/ai/run/${model}`;
+// ── CF Vision (Cloudflare) з фолбеками на назви змінних ─────────────────────
+function getCfCreds(env) {
+  // Токен: спочатку CLOUDFLARE_API_TOKEN, потім CF_VISION
+  const token = env.CLOUDFLARE_API_TOKEN || env.CF_VISION;
+  // Аккаунт: спочатку CF_ACCOUNT_ID, потім CLOUDFLARE_ACCOUNT_ID
+  const accountId = env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID;
+  // Модель: CF_MODEL або дефолт
+  const model = (env.CF_MODEL || "@cf/llama-3.2-11b-vision-instruct").trim();
+  return { token, accountId, model };
+}
 
+async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
+  const { token, accountId, model } = getCfCreds(env);
+  if (!token || !accountId) throw new Error("CF credentials missing");
+
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`;
   const messages = [{
     role: "user",
     content: [
@@ -67,7 +77,7 @@ async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
 
   const r = await fetch(url, {
     method: "POST",
-    headers: { "Authorization": `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "Content-Type": "application/json" },
+    headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ messages })
   });
 
@@ -134,7 +144,6 @@ async function getLearnMode(env, userId) {
 async function setLearnMode(env, userId, on) {
   try { await env.STATE_KV.put(KV.learnMode(userId), on ? "on" : "off"); } catch {}
 }
-
 // Drive-режим
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
@@ -171,6 +180,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   });
   return true;
 }
+
 // Vision-режим
 async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const att = pickPhoto(msg);
@@ -210,10 +220,10 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
 }
 
 // ── SystemHint ───────────────────────────────────────────────────────────────
-async function buildSystemHint(env, chatId, userId, preferredLang) { // ⬅️ додано preferredLang
+async function buildSystemHint(env, chatId, userId, preferredLang) {
   const statut = String((await readStatut(env)) || "").trim();
   const dlg = await buildDialogHint(env, userId);
-  const tune = await loadSelfTune(env, chatId, { preferredLang }).catch(() => null); // ⬅️ передаємо мову
+  const tune = await loadSelfTune(env, chatId, preferredLang);
 
   const core = `You are Senti — a thoughtful, self-improving assistant and companion.
 - Never claim to be an AI, model, chatbot, or a product made by any company.
@@ -393,7 +403,11 @@ export async function handleTelegramWebhook(req, env) {
   const isAdmin = ADMIN(env, userId);
   const textRaw = String(msg?.text || msg?.caption || "").trim();
 
-  let lang = pickReplyLanguage(msg, textRaw);
+  // Мова: пріоритет — з профілю Telegram, інакше — авто/контент
+  const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
+  let lang = ["uk", "ru", "en", "de", "fr"].includes(profileLang)
+    ? profileLang
+    : pickReplyLanguage(msg, textRaw);
 
   const safe = async (fn) => {
     try { await fn(); }
@@ -421,10 +435,8 @@ export async function handleTelegramWebhook(req, env) {
   // /start — спершу мова з Telegram, потім ім'я
   if (textRaw === "/start") {
     await safe(async () => {
-      const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
-      const startLang = ["uk", "ru", "en", "de", "fr"].includes(profileLang) ? profileLang : lang;
       const name = await getPreferredName(env, msg);
-      await sendPlain(env, chatId, `${t(startLang, "hello_name", name)} ${t(startLang, "how_help")}`, {
+      await sendPlain(env, chatId, `${t(lang, "hello_name", name)} ${t(lang, "how_help")}`, {
         reply_markup: mainKeyboard(isAdmin)
       });
     });
@@ -446,7 +458,7 @@ export async function handleTelegramWebhook(req, env) {
     await safe(async () => {
       const mo = String(env.MODEL_ORDER || "").trim();
       const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY);
-      const hasCF = !!(env.CLOUDFLARE_API_TOKEN && env.CF_ACCOUNT_ID);
+      const hasCF = !!(getCfCreds(env).token && getCfCreds(env).accountId);
       const hasOR = !!(env.OPENROUTER_API_KEY);
       const hasFreeBase = !!(env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL);
       const hasFreeKey = !!(env.FREE_LLM_API_KEY || env.FREE_API_KEY);
@@ -454,7 +466,7 @@ export async function handleTelegramWebhook(req, env) {
         t(lang, "admin_header"),
         `MODEL_ORDER: ${mo || "(not set)"}`,
         `GEMINI key: ${hasGemini ? "✅" : "❌"}`,
-        `Cloudflare (CF_ACCOUNT_ID + CLOUDFLARE_API_TOKEN): ${hasCF ? "✅" : "❌"}`,
+        `Cloudflare (account+token): ${hasCF ? "✅" : "❌"}`,
         `OpenRouter key: ${hasOR ? "✅" : "❌"}`,
         `FreeLLM (BASE_URL + KEY): ${hasFreeBase && hasFreeKey ? "✅" : "❌"}`
       ];
@@ -514,7 +526,6 @@ export async function handleTelegramWebhook(req, env) {
     await sendPlain(env, chatId, "🔴 Learn-режим вимкнено. Медіа знову обробляються як зазвичай (Drive/Vision).");
     return json({ ok: true });
   }
-  // Швидке додавання одного URL в Learn
   if (isAdmin && textRaw.startsWith("/learn_add")) {
     const u = extractFirstUrl(textRaw);
     if (!u) { await sendPlain(env, chatId, "Дай посилання після команди, напр.: /learn_add https://..."); return json({ ok: true }); }
@@ -522,8 +533,6 @@ export async function handleTelegramWebhook(req, env) {
     await sendPlain(env, chatId, "✅ Додано в чергу Learn.");
     return json({ ok: true });
   }
-
-  // Швидкий запуск Learn без браузера (адмін)
   if (isAdmin && textRaw === "/learn_run") {
     await safe(async () => {
       const res = await runLearnNow(env);
@@ -562,12 +571,10 @@ export async function handleTelegramWebhook(req, env) {
     const driveOn = await getDriveMode(env, userId);
     const hasAnyMedia = !!detectAttachment(msg) || !!pickPhoto(msg);
 
-    // 1) Увімкнений Drive → будь-які медіа зберігаємо у Google Drive
     if (driveOn && hasAnyMedia) {
       if (await handleIncomingMedia(env, chatId, userId, msg, lang)) return json({ ok: true });
     }
 
-    // 2) Без Drive: фото → Vision (якщо є ключі), інше медіа → дружній фолбек
     if (!driveOn && pickPhoto(msg)) {
       if (await handleVisionMedia(env, chatId, userId, msg, lang, msg?.caption)) return json({ ok: true });
     }
@@ -642,15 +649,14 @@ export async function handleTelegramWebhook(req, env) {
 
       pulseTyping(env, chatId);
 
-      // ⬇️ записуємо репліку користувача раніше, щоб авто-тюн бачив найсвіжчий контекст
-      await pushTurn(env, userId, "user", textRaw);
-      await autoUpdateSelfTune(env, userId, lang).catch(() => {}); // тихий гачок
-
-      const systemHint = await buildSystemHint(env, chatId, userId, lang); // ⬅️ передаємо мову
+      const systemHint = await buildSystemHint(env, chatId, userId, lang);
       const name = await getPreferredName(env, msg);
       const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
       const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand, adminDiag: isAdmin });
 
+      await pushTurn(env, userId, "user", textRaw);
+      // автооновлення мовного профілю раз на N реплік (в selfTune всередині є троттл)
+      await autoUpdateSelfTune(env, userId, lang);
       await pushTurn(env, userId, "assistant", full);
 
       const after = (cur.energy - need);
@@ -665,10 +671,8 @@ export async function handleTelegramWebhook(req, env) {
   }
 
   // Дефолтне привітання (якщо нічого іншого не спрацювало)
-  const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
-  const greetLang = ["uk", "ru", "en", "de", "fr"].includes(profileLang) ? profileLang : lang;
   const name = await getPreferredName(env, msg);
-  await sendPlain(env, chatId, `${t(greetLang, "hello_name", name)} ${t(greetLang, "how_help")}`, {
+  await sendPlain(env, chatId, `${t(lang, "hello_name", name)} ${t(lang, "how_help")}`, {
     reply_markup: mainKeyboard(isAdmin)
   });
   return json({ ok: true });
