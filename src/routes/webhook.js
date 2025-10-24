@@ -24,6 +24,8 @@ import { setUserLocation, getUserLocation } from "../lib/geo.js";
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
 const {
   BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_LEARN,
+  // ⬇️ додано для керування кодовим режимом
+  BTN_CODE_ON, BTN_CODE_OFF,
   mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand,
   askLocationKeyboard
 } = TG;
@@ -31,7 +33,7 @@ const {
 // ── Ключі в STATE_KV ────────────────────────────────────────────────────────
 const KV = {
   learnMode: (uid) => `learn:mode:${uid}`, // "on" | "off"
-  codeMode:  (uid) => `mode:code:${uid}`,  // "on" | "off" — ⬅️ ДОДАНО
+  codeMode:  (uid) => `mode:code:${uid}`,  // "on" | "off"
 };
 
 // ── Telegram UX helpers (індикатор як у GPT) ────────────────────────────────
@@ -461,12 +463,12 @@ export async function handleTelegramWebhook(req, env) {
   }
 
   // ── Code-mode toggle (адмін) ──────────────────────────────────────────────
-  if (isAdmin && textRaw === "/code_on") {
+  if (isAdmin && (textRaw === "/code_on" || textRaw === BTN_CODE_ON)) {
     await setCodeMode(env, userId, true);
     // тихо, без відправки повідомлення
     return json({ ok: true });
   }
-  if (isAdmin && textRaw === "/code_off") {
+  if (isAdmin && (textRaw === "/code_off" || textRaw === BTN_CODE_OFF)) {
     await setCodeMode(env, userId, false);
     return json({ ok: true });
   }
