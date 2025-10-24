@@ -1,7 +1,6 @@
 // src/routes/webhook.js
-// (rev) Без вітального відео; тихе перемикання режимів; фікс мови на /start;
-// перевірка підключення Google Drive; дружній фолбек для медіа в Senti;
-// авто-самотюнінг стилю (мовні профілі) через selfTune.
+// (rev++) Code-mode (KV toggle), безкоштовні дефолт-моделі, динамічний MODEL_ORDER,
+// авто-тюн, Vision/Drive фолбеки — без зламу існуючої логіки.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -12,7 +11,7 @@ import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
 import { json } from "../lib/utils.js";
 import { getEnergy, spendEnergy } from "../lib/energy.js";
 import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
-import { loadSelfTune, autoUpdateSelfTune } from "../lib/selfTune.js"; // ⬅️ додано
+import { loadSelfTune, autoUpdateSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
@@ -29,9 +28,10 @@ const {
   askLocationKeyboard
 } = TG;
 
-// ── Ключі в STATE_KV (тільки для Learn toggle) ──────────────────────────────
+// ── Ключі в STATE_KV ────────────────────────────────────────────────────────
 const KV = {
   learnMode: (uid) => `learn:mode:${uid}`, // "on" | "off"
+  codeMode:  (uid) => `mode:code:${uid}`,  // "on" | "off" — ⬅️ ДОДАНО
 };
 
 // ── Telegram UX helpers (індикатор як у GPT) ────────────────────────────────
@@ -135,12 +135,20 @@ async function setLearnMode(env, userId, on) {
   try { await env.STATE_KV.put(KV.learnMode(userId), on ? "on" : "off"); } catch {}
 }
 
+// ── Code-mode KV ────────────────────────────────────────────────────────────
+async function getCodeMode(env, userId) {
+  try { return (await env.STATE_KV.get(KV.codeMode(userId))) === "on"; } catch { return false; }
+}
+async function setCodeMode(env, userId, on) {
+  try { await env.STATE_KV.put(KV.codeMode(userId), on ? "on" : "off"); } catch {}
+}
+
 // Drive-режим
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
   if (!att) return false;
 
-  // Перевіряємо, чи підключено Drive
+  // Перевірка підключення Drive
   let hasTokens = false;
   try {
     const tokens = await getUserTokens(env, userId);
@@ -196,7 +204,6 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
     if (ADMIN(env, userId)) {
       await sendPlain(env, chatId, `❌ Vision error: ${String(e.message || e).slice(0, 180)}`);
     } else {
-      // дружній фолбек
       const connectUrl = abs(env, "/auth/drive");
       await sendPlain(
         env,
@@ -210,10 +217,10 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
 }
 
 // ── SystemHint ───────────────────────────────────────────────────────────────
-async function buildSystemHint(env, chatId, userId, preferredLang) { // ⬅️ додано preferredLang
+async function buildSystemHint(env, chatId, userId, preferredLang) {
   const statut = String((await readStatut(env)) || "").trim();
   const dlg = await buildDialogHint(env, userId);
-  const tune = await loadSelfTune(env, chatId, { preferredLang }).catch(() => null); // ⬅️ передаємо мову
+  const tune = await loadSelfTune(env, chatId, { preferredLang }).catch(() => null);
 
   const core = `You are Senti — a thoughtful, self-improving assistant and companion.
 - Never claim to be an AI, model, chatbot, or a product made by any company.
@@ -297,6 +304,18 @@ function stripProviderSignature(s = "") {
   return String(s).replace(/^[ \t]*(?:—|--)?\s*via\s+[^\n]*\n?/gim, "").trim();
 }
 
+// ── Вибір порядку моделей (безкоштовні дефолти) ─────────────────────────────
+function pickModelOrder(env, { code }) {
+  const textOrder = env.MODEL_ORDER_TEXT || env.MODEL_ORDER || "";
+  const codeOrder = env.MODEL_ORDER_CODE || "";
+
+  const DEF_TEXT = "cf:@cf/meta/llama-3.1-8b-instruct, free";
+  const DEF_CODE = "openrouter:qwen/qwen3-coder:free, cf:@cf/meta/llama-3.1-8b-instruct, free";
+
+  if (code) return (codeOrder || DEF_CODE);
+  return (textOrder || DEF_TEXT);
+}
+
 // ── Відповідь AI + захист ───────────────────────────────────────────────────
 function limitMsg(s, max = 220) { if (!s) return s; return s.length <= max ? s : s.slice(0, max - 1); }
 function chunkText(s, size = 3500) { const out = []; let t = String(s || ""); while (t.length) { out.push(t.slice(0, size)); t = t.slice(size); } return out; }
@@ -357,7 +376,6 @@ ${control}`;
   const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
 }
-
 // ── маленькі адмін-хелпери для Learn ────────────────────────────────────────
 async function runLearnNow(env) {
   const secret = env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || "";
@@ -372,6 +390,7 @@ async function runLearnNow(env) {
 async function listInsights(env, limit = 5) {
   try { return await getRecentInsights(env, { limit }) || []; } catch { return []; }
 }
+
 // ── MAIN ────────────────────────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "POST") {
@@ -441,6 +460,17 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
+  // ── Code-mode toggle (адмін) ──────────────────────────────────────────────
+  if (isAdmin && textRaw === "/code_on") {
+    await setCodeMode(env, userId, true);
+    // тихо, без відправки повідомлення
+    return json({ ok: true });
+  }
+  if (isAdmin && textRaw === "/code_off") {
+    await setCodeMode(env, userId, false);
+    return json({ ok: true });
+  }
+
   // /admin
   if (textRaw === "/admin" || textRaw === "/admin@SentiBot" || textRaw === BTN_ADMIN) {
     await safe(async () => {
@@ -450,14 +480,20 @@ export async function handleTelegramWebhook(req, env) {
       const hasOR = !!(env.OPENROUTER_API_KEY);
       const hasFreeBase = !!(env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL);
       const hasFreeKey = !!(env.FREE_LLM_API_KEY || env.FREE_API_KEY);
+
+      const code = await getCodeMode(env, userId);
       const lines = [
         t(lang, "admin_header"),
-        `MODEL_ORDER: ${mo || "(not set)"}`,
+        `MODEL_ORDER (runtime): ${mo || "(not set)"}`,
+        `MODEL_ORDER_TEXT (env): ${env.MODEL_ORDER_TEXT || "(default CF/free)"}`,
+        `MODEL_ORDER_CODE (env): ${env.MODEL_ORDER_CODE || "(default OR:free→CF→free)"}`,
+        `Code-mode: ${code ? "ON" : "OFF"}`,
         `GEMINI key: ${hasGemini ? "✅" : "❌"}`,
         `Cloudflare (CF_ACCOUNT_ID + CLOUDFLARE_API_TOKEN): ${hasCF ? "✅" : "❌"}`,
         `OpenRouter key: ${hasOR ? "✅" : "❌"}`,
         `FreeLLM (BASE_URL + KEY): ${hasFreeBase && hasFreeKey ? "✅" : "❌"}`
       ];
+
       const entries = mo ? mo.split(",").map(s => s.trim()).filter(Boolean) : [];
       if (entries.length) {
         const health = await getAiHealthSummary(env, entries);
@@ -514,7 +550,6 @@ export async function handleTelegramWebhook(req, env) {
     await sendPlain(env, chatId, "🔴 Learn-режим вимкнено. Медіа знову обробляються як зазвичай (Drive/Vision).");
     return json({ ok: true });
   }
-  // Швидке додавання одного URL в Learn
   if (isAdmin && textRaw.startsWith("/learn_add")) {
     const u = extractFirstUrl(textRaw);
     if (!u) { await sendPlain(env, chatId, "Дай посилання після команди, напр.: /learn_add https://..."); return json({ ok: true }); }
@@ -522,8 +557,6 @@ export async function handleTelegramWebhook(req, env) {
     await sendPlain(env, chatId, "✅ Додано в чергу Learn.");
     return json({ ok: true });
   }
-
-  // Швидкий запуск Learn без браузера (адмін)
   if (isAdmin && textRaw === "/learn_run") {
     await safe(async () => {
       const res = await runLearnNow(env);
@@ -562,12 +595,9 @@ export async function handleTelegramWebhook(req, env) {
     const driveOn = await getDriveMode(env, userId);
     const hasAnyMedia = !!detectAttachment(msg) || !!pickPhoto(msg);
 
-    // 1) Увімкнений Drive → будь-які медіа зберігаємо у Google Drive
     if (driveOn && hasAnyMedia) {
       if (await handleIncomingMedia(env, chatId, userId, msg, lang)) return json({ ok: true });
     }
-
-    // 2) Без Drive: фото → Vision (якщо є ключі), інше медіа → дружній фолбек
     if (!driveOn && pickPhoto(msg)) {
       if (await handleVisionMedia(env, chatId, userId, msg, lang, msg?.caption)) return json({ ok: true });
     }
@@ -642,14 +672,23 @@ export async function handleTelegramWebhook(req, env) {
 
       pulseTyping(env, chatId);
 
-      // ⬇️ записуємо репліку користувача раніше, щоб авто-тюн бачив найсвіжчий контекст
       await pushTurn(env, userId, "user", textRaw);
-      await autoUpdateSelfTune(env, userId, lang).catch(() => {}); // тихий гачок
+      await autoUpdateSelfTune(env, userId, lang).catch(() => {});
 
-      const systemHint = await buildSystemHint(env, chatId, userId, lang); // ⬅️ передаємо мову
+      const systemHint = await buildSystemHint(env, chatId, userId, lang);
       const name = await getPreferredName(env, msg);
       const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
+
+      // ⬇️ Вибираємо безкоштовний порядок моделей та тимчасово підміняємо env.MODEL_ORDER
+      const code = await getCodeMode(env, userId);
+      const mo = pickModelOrder(env, { code });
+      const prev = env.MODEL_ORDER;
+      env.MODEL_ORDER = mo;
+
       const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand, adminDiag: isAdmin });
+
+      // відновлюємо попередній порядок
+      env.MODEL_ORDER = prev;
 
       await pushTurn(env, userId, "assistant", full);
 
@@ -664,7 +703,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Дефолтне привітання (якщо нічого іншого не спрацювало)
+  // Дефолтне привітання (fallback)
   const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
   const greetLang = ["uk", "ru", "en", "de", "fr"].includes(profileLang) ? profileLang : lang;
   const name = await getPreferredName(env, msg);
