@@ -47,7 +47,7 @@ MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, openr
 
 # --- ДОДАНО: окремі порядки для тексту/коду (зберігаються у vars) ---
 # Текст (дефолт — повністю безкоштовні провайдери: CF → free):
-MODEL_ORDER_TEXT = "cf:@cf/meta/llama-3.1-8b-instruct, free"
+MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, free"
 # Код (спочатку безкоштовний OpenRouter qwen3-coder, потім CF → free):
 MODEL_ORDER_CODE = "openrouter:qwen/qwen3-coder:free, cf:@cf/meta/llama-3.1-8b-instruct, free"
 
