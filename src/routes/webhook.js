@@ -1,5 +1,6 @@
 // src/routes/webhook.js
-// (rev++) Code-mode (KV toggle), безкоштовні дефолт-моделі, динамічний MODEL_ORDER,
+// (rev+++) One-button Code mode; Gemini-first (якщо ключ є);
+// виправлений дефолт для free (без помилки "free is not a valid model ID");
 // авто-тюн, Vision/Drive фолбеки — без зламу існуючої логіки.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
@@ -23,9 +24,7 @@ import { setUserLocation, getUserLocation } from "../lib/geo.js";
 
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
 const {
-  BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_LEARN,
-  // ⬇️ додано для керування кодовим режимом
-  BTN_CODE_ON, BTN_CODE_OFF,
+  BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_LEARN, BTN_CODE,
   mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand,
   askLocationKeyboard
 } = TG;
@@ -308,14 +307,23 @@ function stripProviderSignature(s = "") {
 
 // ── Вибір порядку моделей (безкоштовні дефолти) ─────────────────────────────
 function pickModelOrder(env, { code }) {
-  const textOrder = env.MODEL_ORDER_TEXT || env.MODEL_ORDER || "";
-  const codeOrder = env.MODEL_ORDER_CODE || "";
+  const textOrderEnv = env.MODEL_ORDER_TEXT || env.MODEL_ORDER || "";
+  const codeOrderEnv = env.MODEL_ORDER_CODE || "";
 
-  const DEF_TEXT = "cf:@cf/meta/llama-3.1-8b-instruct, free";
-  const DEF_CODE = "openrouter:qwen/qwen3-coder:free, cf:@cf/meta/llama-3.1-8b-instruct, free";
+  // валідний free-фолбек через OpenRouter-сумісний gateway
+  const FREE_FALLBACK = "free:meta-llama/llama-4-scout:free";
 
-  if (code) return (codeOrder || DEF_CODE);
-  return (textOrder || DEF_TEXT);
+  // якщо є Gemini — ставимо його першим у текстовому порядку
+  const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY);
+
+  const DEF_TEXT = hasGemini
+    ? `gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, ${FREE_FALLBACK}`
+    : `cf:@cf/meta/llama-3.1-8b-instruct, ${FREE_FALLBACK}`;
+
+  const DEF_CODE = `openrouter:qwen/qwen3-coder:free, cf:@cf/meta/llama-3.1-8b-instruct, ${FREE_FALLBACK}`;
+
+  if (code) return (codeOrderEnv || DEF_CODE);
+  return (textOrderEnv || DEF_TEXT);
 }
 
 // ── Відповідь AI + захист ───────────────────────────────────────────────────
@@ -457,19 +465,15 @@ export async function handleTelegramWebhook(req, env) {
     await setDriveMode(env, userId, true);
     return json({ ok: true });
   }
+  // Повернення в Senti — також вимикає код-режим
   if (textRaw === BTN_SENTI || /^(senti|сенті)$/i.test(textRaw)) {
     await setDriveMode(env, userId, false);
-    return json({ ok: true });
-  }
-
-  // ── Code-mode toggle (адмін) ──────────────────────────────────────────────
-  if (isAdmin && (textRaw === "/code_on" || textRaw === BTN_CODE_ON)) {
-    await setCodeMode(env, userId, true);
-    // тихо, без відправки повідомлення
-    return json({ ok: true });
-  }
-  if (isAdmin && (textRaw === "/code_off" || textRaw === BTN_CODE_OFF)) {
     await setCodeMode(env, userId, false);
+    return json({ ok: true });
+  }
+  // Одна кнопка Code — просто вмикає код-режим (вимикається кнопкою Senti)
+  if (isAdmin && textRaw === BTN_CODE) {
+    await setCodeMode(env, userId, true);
     return json({ ok: true });
   }
 
@@ -487,8 +491,8 @@ export async function handleTelegramWebhook(req, env) {
       const lines = [
         t(lang, "admin_header"),
         `MODEL_ORDER (runtime): ${mo || "(not set)"}`,
-        `MODEL_ORDER_TEXT (env): ${env.MODEL_ORDER_TEXT || "(default CF/free)"}`,
-        `MODEL_ORDER_CODE (env): ${env.MODEL_ORDER_CODE || "(default OR:free→CF→free)"}`,
+        `MODEL_ORDER_TEXT (env): ${env.MODEL_ORDER_TEXT || "(auto CF/Gemini + free)"}`,
+        `MODEL_ORDER_CODE (env): ${env.MODEL_ORDER_CODE || "(OR:qwen-coder → CF → free)"}`,
         `Code-mode: ${code ? "ON" : "OFF"}`,
         `GEMINI key: ${hasGemini ? "✅" : "❌"}`,
         `Cloudflare (CF_ACCOUNT_ID + CLOUDFLARE_API_TOKEN): ${hasCF ? "✅" : "❌"}`,
@@ -646,7 +650,7 @@ export async function handleTelegramWebhook(req, env) {
                 ru: "Пожалуйста, отправьте вашу локацию кнопкой ниже — и я покажу погоду для вашего места.",
                 en: "Please share your location using the button below — I’ll show the weather for your area.",
                 de: "Bitte teile deinen Standort über die Schaltfläche unten – dann zeige ich dir das Wetter für deinen Ort.",
-                fr: "Merci d’envoyer ta position via le bouton ci-dessous — je te montrerai la météo pour ta zone.",
+                fr: "Merci d’envoyer ta position via le bouton ci-dessous — je te montrerai la météo для ta zone.",
               };
               const ask = askMap[lang.slice(0,2)] || askMap.uk;
               await sendPlain(env, chatId, ask, { reply_markup: askLocationKeyboard() });
@@ -681,7 +685,7 @@ export async function handleTelegramWebhook(req, env) {
       const name = await getPreferredName(env, msg);
       const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
 
-      // ⬇️ Вибираємо безкоштовний порядок моделей та тимчасово підміняємо env.MODEL_ORDER
+      // ⬇️ Обираємо порядок моделей: якщо Code-mode ON — кодовий, інакше текстовий
       const code = await getCodeMode(env, userId);
       const mo = pickModelOrder(env, { code });
       const prev = env.MODEL_ORDER;
