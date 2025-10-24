@@ -6,23 +6,18 @@ export const BTN_DRIVE = "Google Drive";
 export const BTN_SENTI = "Senti";
 export const BTN_LEARN = "Learn";   // показуємо тільки адмінам
 export const BTN_ADMIN = "Admin";
-// ⬇️ додано для керування кодовим режимом
-export const BTN_CODE_ON  = "Code ON";
-export const BTN_CODE_OFF = "Code OFF";
+export const BTN_CODE  = "Code";    // одна кнопка для ввімкнення код-режиму
 
 /* ───────────────── ГОЛОВНА КЛАВІАТУРА ───────────── */
 export const mainKeyboard = (isAdmin = false) => {
-  // 1-й ряд: базові кнопки
-  const row = [{ text: BTN_DRIVE }, { text: BTN_SENTI }];
-  if (isAdmin) row.push({ text: BTN_LEARN });
+  // 1-й ряд: базові кнопки (+ Code для адміна)
+  const row1 = [{ text: BTN_DRIVE }, { text: BTN_SENTI }];
+  if (isAdmin) row1.push({ text: BTN_CODE });
 
-  const rows = [row];
+  const rows = [row1];
 
-  // 2-й ряд: Admin
-  if (isAdmin) rows.push([{ text: BTN_ADMIN }]);
-
-  // 3-й ряд: Code ON/OFF (лише для адміна)
-  if (isAdmin) rows.push([{ text: BTN_CODE_ON }, { text: BTN_CODE_OFF }]);
+  // 2-й ряд: Learn + Admin (лише для адміна)
+  if (isAdmin) rows.push([{ text: BTN_LEARN }, { text: BTN_ADMIN }]);
 
   return { keyboard: rows, resize_keyboard: true };
 };
@@ -183,9 +178,7 @@ export const TG = {
   BTN_SENTI,
   BTN_LEARN,
   BTN_ADMIN,
-  // ⬇️ експорт нових кнопок
-  BTN_CODE_ON,
-  BTN_CODE_OFF,
+  BTN_CODE,
   mainKeyboard,
   ADMIN,
   energyLinks,
