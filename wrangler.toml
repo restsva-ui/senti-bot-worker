@@ -45,6 +45,12 @@ DIAG_TAGS = "on"
 # --- Порядок fallback-моделей ---
 MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:deepseek/deepseek-chat, free:meta-llama/llama-4-scout:free"
 
+# --- ДОДАНО: окремі порядки для тексту/коду (зберігаються у vars) ---
+# Текст (дефолт — повністю безкоштовні провайдери: CF → free):
+MODEL_ORDER_TEXT = "cf:@cf/meta/llama-3.1-8b-instruct, free"
+# Код (спочатку безкоштовний OpenRouter qwen3-coder, потім CF → free):
+MODEL_ORDER_CODE = "openrouter:qwen/qwen3-coder:free, cf:@cf/meta/llama-3.1-8b-instruct, free"
+
 # --- Дефолтні моделі (необов'язково) ---
 GEMINI_MODEL = "gemini-2.5-flash"
 CF_MODEL     = "@cf/meta/llama-3.1-8b-instruct"
