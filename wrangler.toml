@@ -30,17 +30,15 @@ TELEGRAM_SECRET_TOKEN = "senti1984"
 TIMEZONE = "Europe/Kyiv"
 DIAG_TAGS = "on"
 
-# ── БЕЗКОШТОВНІ порядки моделей ────────────────────────────────────────────
-# Текст: CF-Qwen → CF-Llama → OpenRouter Llama4 Scout (free) як запасний
-MODEL_ORDER      = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
-MODEL_ORDER_TEXT = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
+# ── Порядок моделей: Gemini → CF (free) → OpenRouter free ────────────────
+MODEL_ORDER      = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
+MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
+MODEL_ORDER_CODE = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 
-# CODE-mode: ті ж безкоштовні CF-моделі першими; free — в кінці
-MODEL_ORDER_CODE = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
-
-# Дефолтні безкоштовні моделі
-CF_MODEL        = "@cf/qwen/qwen2.5-7b-instruct"
-CF_VISION_MODEL = "@cf/llama-3.2-11b-vision-instruct"  # опис зображень (free)
+# Дефолтні моделі
+GEMINI_MODEL     = "gemini-2.5-flash"
+CF_MODEL         = "@cf/qwen/qwen2.5-7b-instruct"
+CF_VISION_MODEL  = "@cf/llama-3.2-11b-vision-instruct"  # опис зображень (free)
 
 # OpenAI-сумісний fallback через OpenRouter (free)
 FREE_API_BASE_URL = "https://openrouter.ai/api"
@@ -59,7 +57,7 @@ ENERGY_COST_TEXT = "1"
 ENERGY_COST_IMAGE = "5"
 ENERGY_LOW_THRESHOLD = "10"
 
-# ── KV namespaces (ВАЖЛИВО: багаторядковий формат) ─────────────────────────
+# ── KV namespaces (багаторядковий формат, як вимагає TOML) ────────────────
 [[kv_namespaces]]
 binding = "DEDUP_KV"
 id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
@@ -100,7 +98,7 @@ id = "63c0d1e0962a419ca54082893410b28e"
 binding = "LEARN_QUEUE_KV"
 id = "86a54c59ce674a558780c58bf1a47dfd"
 
-# ── R2 bucket для Learn ─────────────────────────────────────────────────────
+# ── R2 bucket для Learn ────────────────────────────────────────────────────
 [[r2_buckets]]
 binding = "LEARN_BUCKET"
 bucket_name = "senti-learn"
