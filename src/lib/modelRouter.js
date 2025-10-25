@@ -1,14 +1,15 @@
 // src/lib/modelRouter.js
 // Узагальнений маршрутизатор моделей + health-метрики + стабільні фолбеки.
-// Пройде по ланцюжку MODEL_ORDER (з webhook), поки не отримає валідну відповідь.
-// Важливо: systemHint завжди враховується (через role:system або префікс у user).
+// Проходить по ланцюжку MODEL_ORDER, поки не отримає валідну відповідь.
+// ВАЖЛИВО: systemHint завжди враховується (через role:system або префікс у user).
 
 /* ───────────────────── НАЛАШТУВАННЯ ───────────────────── */
-const HEALTH_NS = "ai:health";
-const ALPHA = 0.3;      // EWMA коеф.
-const SLOW_MS = 4500;   // поріг "повільно"
-const REQ_TIMEOUT_MS = 22000; // таймаут на запит до провайдера
-const CODE_TOKENS = 4096;     // щоб код не обрізався на провайдерах з max_tokens
+const HEALTH_NS      = "ai:health";
+const ALPHA          = 0.3;        // EWMA коеф.
+const SLOW_MS        = 4500;       // поріг "повільно"
+const REQ_TIMEOUT_MS = 22000;      // таймаут на запит до провайдера
+const CODE_TOKENS    = 4096;       // щоб код не обрізався на провайдерах з max_tokens
+const RETRIES        = 2;          // м’які повтори на 429/5xx/timeout
 
 /* ───────────────────── УТИЛІТИ ───────────────────── */
 function nowMs() { return Date.now(); }
@@ -52,6 +53,27 @@ async function withTimeout(promise, ms = REQ_TIMEOUT_MS, tag = "req") {
   }
 }
 
+// М’які повтори для тимчасових збоїв (429/5xx/timeout)
+async function callWithRetries(fn, { tries = RETRIES, delayMs = 600 } = {}) {
+  let lastErr;
+  for (let i = 0; i < Math.max(1, tries); i++) {
+    try { return await fn(); }
+    catch (e) {
+      lastErr = e;
+      const msg = String(e?.message || "");
+      const transient =
+        /timeout/i.test(msg) ||
+        /rate limit/i.test(msg) ||
+        /429/.test(msg) ||
+        /5\d\d/.test(msg) ||
+        /temporar/i.test(msg);
+      if (!transient || i === tries - 1) break;
+      await new Promise(r => setTimeout(r, delayMs * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 /* ───────────────────── ПАРСЕР ЗАПИСІВ ─────────────────────
    Підтримує:
    - "gemini:gemini-2.5-flash"
@@ -90,7 +112,7 @@ async function callGemini(env, model, prompt, systemHint) {
     env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY;
   if (!key) throw new Error("GEMINI key missing");
 
-  // Найнадійніший варіант — одним промптом (prefixed system)
+  // надсилаємо одним промптом з префіксом (стабільніше)
   const user = withSystemPrefix(systemHint, prompt);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
   const body = {
@@ -118,7 +140,7 @@ async function callGemini(env, model, prompt, systemHint) {
 // Cloudflare Workers AI (CF)
 async function callCF(env, model, prompt, systemHint) {
   const token = env.CLOUDFLARE_API_TOKEN;
-  const acc = env.CF_ACCOUNT_ID;
+  const acc   = env.CF_ACCOUNT_ID;
   if (!token || !acc) throw new Error("Cloudflare credentials missing");
 
   const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/${encodeURIComponent(model)}`;
@@ -146,7 +168,7 @@ async function callCF(env, model, prompt, systemHint) {
   return out.trim();
 }
 
-// OpenRouter (OSS/ринок моделей; тут — Qwen Coder (free) тощо)
+// OpenRouter (ринок моделей; приклад — Qwen Coder free)
 async function callOpenRouter(env, model, prompt, systemHint) {
   const key = env.OPENROUTER_API_KEY;
   if (!key) throw new Error("OpenRouter key missing");
@@ -160,7 +182,6 @@ async function callOpenRouter(env, model, prompt, systemHint) {
     Authorization: `Bearer ${key}`,
     "content-type": "application/json",
   };
-  // За бажанням можеш додати своє ім'я додатку/сайт:
   if (env.OPENROUTER_SITE_URL) headers["HTTP-Referer"] = env.OPENROUTER_SITE_URL;
   if (env.OPENROUTER_APP_NAME) headers["X-Title"] = env.OPENROUTER_APP_NAME;
 
@@ -170,8 +191,8 @@ async function callOpenRouter(env, model, prompt, systemHint) {
     body: JSON.stringify({
       model,
       messages,
-      temperature: 0.4,   // трохи нижче для коду
-      max_tokens: CODE_TOKENS,
+      temperature: 0.4,      // трохи нижче — краще для коду
+      max_tokens: CODE_TOKENS
     }),
   }), REQ_TIMEOUT_MS, "openrouter");
 
@@ -241,12 +262,13 @@ export async function askAnyModel(env, modelOrder, prompt, { systemHint } = {}) 
 
     const t0 = nowMs();
     try {
-      let out;
-      if (provider === "gemini")      out = await callGemini(env, model, prompt, systemHint);
-      else if (provider === "cf")     out = await callCF(env, model, prompt, systemHint);
-      else if (provider === "openrouter") out = await callOpenRouter(env, model, prompt, systemHint);
-      else if (provider === "free")   out = await callFree(env, model, prompt, systemHint);
-      else                            out = await callFree(env, model, prompt, systemHint); // невідоме -> free
+      const out = await callWithRetries(async () => {
+        if (provider === "gemini")        return await callGemini(env, model, prompt, systemHint);
+        if (provider === "cf")            return await callCF(env, model, prompt, systemHint);
+        if (provider === "openrouter")    return await callOpenRouter(env, model, prompt, systemHint);
+                                           // невідоме -> вважаємо OpenAI-сумісний free
+        return await callFree(env, model, prompt, systemHint);
+      });
 
       const ms = nowMs() - t0;
       updateHealth(env, { provider, model, ms, ok: true }).catch(() => {});
@@ -275,8 +297,8 @@ export async function getAiHealthSummary(env, entriesRaw) {
     let rec = null;
     try { rec = kv ? JSON.parse((await kv.get(key, "text")) || "null") : null; } catch {}
     const ewmaMs = rec?.ewmaMs || null;
-    const slow = ewmaMs != null ? ewmaMs > SLOW_MS : false;
-    const cool = rec?.failStreak >= 3; // якщо >=3 підряд помилок — червоне світло
+    const slow   = ewmaMs != null ? ewmaMs > SLOW_MS : false;
+    const cool   = rec?.failStreak >= 3; // якщо >=3 підряд помилок — червоне світло
     out.push({
       provider: ent.provider,
       model: ent.model,
