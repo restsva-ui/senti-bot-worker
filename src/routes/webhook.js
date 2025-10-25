@@ -440,17 +440,17 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  /* ───── ТИХІ перемикачі (без повідомлень) ───── */
-  if (textRaw === BTN_DRIVE || /^(google\s*drive)$/i.test(textRaw)) {
+  /* ───── ТИХІ перемикачі (кнопки й слеш-команди) ───── */
+  if (textRaw === BTN_DRIVE || /^(google\s*drive)$/i.test(textRaw) || /^\/drive\b/i.test(textRaw)) {
     await setDriveMode(env, userId, true);
     return json({ ok: true });
   }
-  if (textRaw === BTN_SENTI || /^(senti|сенті)$/i.test(textRaw)) {
+  if (textRaw === BTN_SENTI || /^(senti|сенті)$/i.test(textRaw) || /^\/senti\b/i.test(textRaw)) {
     await setDriveMode(env, userId, false);
     await setCodeMode(env, userId, false); // вихід з code-mode при поверненні до Senti
     return json({ ok: true });
   }
-  if (textRaw === BTN_CODE || /^code$/i.test(textRaw)) {
+  if (textRaw === BTN_CODE || /^code$/i.test(textRaw) || /^\/code\b/i.test(textRaw)) {
     await setCodeMode(env, userId, true);
     return json({ ok: true });
   }
