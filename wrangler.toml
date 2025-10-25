@@ -47,7 +47,7 @@ MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf
 
 # CODE: першим спеціалізований безкоштовний Qwen3 Coder через OpenRouter,
 # далі CF як безкоштовний фолбек, потім загальний free-фолбек
-MODEL_ORDER_CODE = "openrouter:qwen/qwen3-coder:free, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
+MODEL_ORDER_CODE = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
 
 # RUNTIME дефолт: якщо код у webhook не підміняє порядок — беремо текстовий
 MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
