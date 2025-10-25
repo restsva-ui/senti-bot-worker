@@ -1,30 +1,32 @@
 // src/lib/modelRouter.js
-// Узагальнений маршрутизатор моделей + health-метрики.
-// ВАЖЛИВО: systemHint завжди додається. Якщо API не має поля system —
-// підмішуємо як префікс до user-повідомлення.
+// Узагальнений маршрутизатор моделей + health-метрики + стабільні фолбеки.
+// Пройде по ланцюжку MODEL_ORDER (з webhook), поки не отримає валідну відповідь.
+// Важливо: systemHint завжди враховується (через role:system або префікс у user).
 
+/* ───────────────────── НАЛАШТУВАННЯ ───────────────────── */
 const HEALTH_NS = "ai:health";
-const ALPHA = 0.3; // EWMA коеф.
-const SLOW_MS = 4500; // поріг "повільно"
+const ALPHA = 0.3;      // EWMA коеф.
+const SLOW_MS = 4500;   // поріг "повільно"
+const REQ_TIMEOUT_MS = 22000; // таймаут на запит до провайдера
+const CODE_TOKENS = 4096;     // щоб код не обрізався на провайдерах з max_tokens
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-
+/* ───────────────────── УТИЛІТИ ───────────────────── */
 function nowMs() { return Date.now(); }
-async function jsonSafe(r) {
-  try { return await r.json(); } catch { return null; }
-}
+async function jsonSafe(r) { try { return await r.json(); } catch { return null; } }
+
+// Якщо API не має поля system — підмішуємо як префікс до user
 function withSystemPrefix(systemHint, userPrompt) {
   const s = (systemHint || "").trim();
   if (!s) return String(userPrompt || "");
   return `[SYSTEM]\n${s}\n\n[USER]\n${String(userPrompt || "")}`;
 }
+
+// KV під health
 function pickKV(env) {
   return env.STATE_KV || env.CHECKLIST_KV || env.ENERGY_LOG_KV || env.LEARN_QUEUE_KV;
 }
-function hkey(provider, model) {
-  return `${HEALTH_NS}:${provider}:${model}`;
-}
+function hkey(provider, model) { return `${HEALTH_NS}:${provider}:${model}`; }
+
 async function updateHealth(env, { provider, model, ms, ok }) {
   const kv = pickKV(env);
   if (!kv) return;
@@ -36,57 +38,75 @@ async function updateHealth(env, { provider, model, ms, ok }) {
   const data = { ewmaMs, failStreak, lastTs: new Date().toISOString() };
   try { await kv.put(key, JSON.stringify(data)); } catch {}
 }
+
+// Обгортка з таймаутом
+async function withTimeout(promise, ms = REQ_TIMEOUT_MS, tag = "req") {
+  let timer;
+  try {
+    const timeout = new Promise((_, rej) =>
+      (timer = setTimeout(() => rej(new Error(`${tag} timeout ${ms}ms`)), ms))
+    );
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* ───────────────────── ПАРСЕР ЗАПИСІВ ─────────────────────
+   Підтримує:
+   - "gemini:gemini-2.5-flash"
+   - "cf:@cf/meta/llama-3.1-8b-instruct" або "@cf/meta/llama-3.1-8b-instruct"
+   - "openrouter:qwen/qwen3-coder:free", "openrouter:deepseek/deepseek-chat"
+   - "free:meta-llama/llama-4-scout:free" або просто "free"
+   - "a/b" -> за замовчуванням openrouter
+*/
 function parseEntry(raw) {
-  // Підтримувані форми:
-  // - "gemini:gemini-2.5-flash"
-  // - "cf:@cf/meta/llama-3.1-8b-instruct" або просто "@cf/meta/llama-3.1-8b-instruct"
-  // - "openrouter:deepseek/deepseek-chat"
-  // - "free:meta-llama/llama-4-scout:free" або просто "free"
   const s = String(raw || "").trim();
   if (!s) return null;
 
   if (s.startsWith("@cf/")) return { provider: "cf", model: s };
+
   const m = s.split(":");
   if (m.length >= 2) {
     const provider = m[0].trim();
     const model = m.slice(1).join(":").trim();
     return { provider, model };
   }
-  // якщо явно не вказано — вважаємо, що це openrouter-модель (вигляд a/b)
   if (s.includes("/")) return { provider: "openrouter", model: s };
   return { provider: "free", model: s };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Провайдери
+// Нормалізація випадку "free" без моделі
+function normalizeFreeModel(env, model) {
+  const fallback = env.FREE_API_MODEL || env.FREE_LLM_MODEL || "meta-llama/llama-4-scout:free";
+  const m = String(model || "").trim();
+  return m === "free" || m === "" ? fallback : m;
+}
 
+/* ───────────────────── ПРОВАЙДЕРИ ───────────────────── */
+// Gemini (Google)
 async function callGemini(env, model, prompt, systemHint) {
   const key =
     env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY;
   if (!key) throw new Error("GEMINI key missing");
 
-  // Надійніше — одним промптом з префіксом (бо різні ревізії API іменують поле по-різному)
+  // Найнадійніший варіант — одним промптом (prefixed system)
   const user = withSystemPrefix(systemHint, prompt);
-
-  // generateContent (v1beta) формат
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(
-    key
-  )}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
   const body = {
-    contents: [
-      { role: "user", parts: [{ text: user }] },
-    ],
+    contents: [{ role: "user", parts: [{ text: user }]}],
     safetySettings: [{ category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }],
   };
 
-  const r = await fetch(url, {
+  const r = await withTimeout(fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
-  });
+  }), REQ_TIMEOUT_MS, "gemini");
+
   const data = await jsonSafe(r);
   if (!r.ok) throw new Error(`gemini ${r.status} ${data?.error?.message || ""}`);
-  // Витягуємо текст
+
   const text =
     data?.candidates?.[0]?.content?.parts?.map(p => p?.text).filter(Boolean).join("\n").trim() ||
     data?.candidates?.[0]?.content?.parts?.[0]?.text ||
@@ -95,25 +115,23 @@ async function callGemini(env, model, prompt, systemHint) {
   return text.trim();
 }
 
+// Cloudflare Workers AI (CF)
 async function callCF(env, model, prompt, systemHint) {
   const token = env.CLOUDFLARE_API_TOKEN;
   const acc = env.CF_ACCOUNT_ID;
   if (!token || !acc) throw new Error("Cloudflare credentials missing");
 
-  // Workers AI підтримує chat messages (system + user)
   const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/${encodeURIComponent(model)}`;
   const messages = [];
   if (systemHint?.trim()) messages.push({ role: "system", content: systemHint.trim() });
   messages.push({ role: "user", content: prompt });
 
-  const r = await fetch(url, {
+  const r = await withTimeout(fetch(url, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-    },
+    headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ messages }),
-  });
+  }), REQ_TIMEOUT_MS, "cf");
+
   const data = await jsonSafe(r);
   if (!data?.success) {
     const msg = data?.errors?.[0]?.message || `cf http ${r.status}`;
@@ -128,6 +146,7 @@ async function callCF(env, model, prompt, systemHint) {
   return out.trim();
 }
 
+// OpenRouter (OSS/ринок моделей; тут — Qwen Coder (free) тощо)
 async function callOpenRouter(env, model, prompt, systemHint) {
   const key = env.OPENROUTER_API_KEY;
   if (!key) throw new Error("OpenRouter key missing");
@@ -137,18 +156,25 @@ async function callOpenRouter(env, model, prompt, systemHint) {
   if (systemHint?.trim()) messages.push({ role: "system", content: systemHint.trim() });
   messages.push({ role: "user", content: String(prompt || "") });
 
-  const r = await fetch(url, {
+  const headers = {
+    Authorization: `Bearer ${key}`,
+    "content-type": "application/json",
+  };
+  // За бажанням можеш додати своє ім'я додатку/сайт:
+  if (env.OPENROUTER_SITE_URL) headers["HTTP-Referer"] = env.OPENROUTER_SITE_URL;
+  if (env.OPENROUTER_APP_NAME) headers["X-Title"] = env.OPENROUTER_APP_NAME;
+
+  const r = await withTimeout(fetch(url, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "content-type": "application/json",
-    },
+    headers,
     body: JSON.stringify({
       model,
       messages,
-      temperature: 0.6,
+      temperature: 0.4,   // трохи нижче для коду
+      max_tokens: CODE_TOKENS,
     }),
-  });
+  }), REQ_TIMEOUT_MS, "openrouter");
+
   const data = await jsonSafe(r);
   const txt = data?.choices?.[0]?.message?.content || "";
   if (!r.ok || !txt) {
@@ -158,33 +184,32 @@ async function callOpenRouter(env, model, prompt, systemHint) {
   return txt.trim();
 }
 
+// Будь-який OpenAI-сумісний "free" бекенд (твій FREE_API_BASE_URL)
 async function callFree(env, model, prompt, systemHint) {
-  const base =
-    env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL || "";
+  const base = env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL || "";
   if (!base) throw new Error("FREE base url missing");
 
-  const key =
-    env.FREE_LLM_API_KEY || env.FREE_API_KEY || "";
+  const key = env.FREE_LLM_API_KEY || env.FREE_API_KEY || "";
   const endpoint = base.replace(/\/+$/, "") + "/v1/chat/completions";
 
-  // OpenAI-сумісний чат. Якщо системний промпт не підтримується — усе одно
-  // моделі його «бачитимуть», бо ми додаємо role:system.
   const messages = [];
   if (systemHint?.trim()) messages.push({ role: "system", content: systemHint.trim() });
   messages.push({ role: "user", content: String(prompt || "") });
 
-  const r = await fetch(endpoint, {
+  const r = await withTimeout(fetch(endpoint, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       ...(key ? { Authorization: `Bearer ${key}` } : {}),
     },
     body: JSON.stringify({
-      model: model || env.FREE_LLM_MODEL || "gpt-3.5-turbo",
+      model: normalizeFreeModel(env, model) || "gpt-3.5-turbo",
       messages,
       temperature: 0.6,
+      max_tokens: CODE_TOKENS,
     }),
-  });
+  }), REQ_TIMEOUT_MS, "free");
+
   const data = await jsonSafe(r);
   const txt = data?.choices?.[0]?.message?.content || "";
   if (!r.ok || !txt) {
@@ -194,9 +219,7 @@ async function callFree(env, model, prompt, systemHint) {
   return txt.trim();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Головна точка: послідовний перебір за modelOrder.
-
+/* ───────────────────── МАРШРУТИЗАТОР ───────────────────── */
 export async function askAnyModel(env, modelOrder, prompt, { systemHint } = {}) {
   const entries = String(modelOrder || "")
     .split(",")
@@ -204,11 +227,8 @@ export async function askAnyModel(env, modelOrder, prompt, { systemHint } = {}) 
     .filter(Boolean);
 
   if (!entries.length) {
-    // Якщо порядок не задано — спробуємо мінімальний FREE як запасний варіант
-    const p = withSystemPrefix(systemHint, prompt);
-    // Або, якщо у твоєму проекті є think(), можеш підмінити тут.
-    // Але щоб файл був самодостатній — йдемо на free-гілку:
-    return await callFree(env, env.FREE_LLM_MODEL || "gpt-3.5-turbo", p, "");
+    // Якщо порядок не задано — мінімальний безкоштовний запасний варіант
+    return await callFree(env, normalizeFreeModel(env, ""), withSystemPrefix(systemHint, prompt), "");
   }
 
   let lastErr = null;
@@ -216,19 +236,18 @@ export async function askAnyModel(env, modelOrder, prompt, { systemHint } = {}) 
   for (const raw of entries) {
     const ent = parseEntry(raw);
     if (!ent) continue;
-    const { provider, model } = ent;
+    const { provider } = ent;
+    const model = provider === "free" ? normalizeFreeModel(env, ent.model) : ent.model;
 
     const t0 = nowMs();
     try {
       let out;
-      if (provider === "gemini") out = await callGemini(env, model, prompt, systemHint);
-      else if (provider === "cf") out = await callCF(env, model, prompt, systemHint);
+      if (provider === "gemini")      out = await callGemini(env, model, prompt, systemHint);
+      else if (provider === "cf")     out = await callCF(env, model, prompt, systemHint);
       else if (provider === "openrouter") out = await callOpenRouter(env, model, prompt, systemHint);
-      else if (provider === "free") out = await callFree(env, model, prompt, systemHint);
-      else {
-        // невідомий провайдер — пробуємо як Free (OpenAI-сумісний)
-        out = await callFree(env, model, prompt, systemHint);
-      }
+      else if (provider === "free")   out = await callFree(env, model, prompt, systemHint);
+      else                            out = await callFree(env, model, prompt, systemHint); // невідоме -> free
+
       const ms = nowMs() - t0;
       updateHealth(env, { provider, model, ms, ok: true }).catch(() => {});
       return out;
@@ -236,7 +255,7 @@ export async function askAnyModel(env, modelOrder, prompt, { systemHint } = {}) 
       const ms = nowMs() - t0;
       updateHealth(env, { provider, model, ms, ok: false }).catch(() => {});
       lastErr = e;
-      // пробуємо наступний у ланцюжку
+      // йдемо на наступний запис у ланцюжку
       continue;
     }
   }
@@ -245,9 +264,7 @@ export async function askAnyModel(env, modelOrder, prompt, { systemHint } = {}) 
   throw lastErr || new Error("All providers failed");
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Health summary для /admin
-
+/* ───────────────────── HEALTH SUMMARY ДЛЯ /admin ───────────────────── */
 export async function getAiHealthSummary(env, entriesRaw) {
   const entries = (entriesRaw || []).map(parseEntry).filter(Boolean);
   const kv = pickKV(env);
