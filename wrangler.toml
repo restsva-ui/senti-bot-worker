@@ -3,125 +3,71 @@ main = "src/index.js"
 compatibility_date = "2024-09-25"
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
 
-# ── CRONи ───────────────────────────────────────────────────────────────────
 [triggers]
-# 1) heartbeat кожні 15 хв (для живості/логів)
-# 2) evolve щогодини рівно о :00 (UTC)
-# 3) додатковий тригер нічного агента о 02:10 UTC
 crons = ["*/15 * * * *", "0 * * * *", "10 2 * * *"]
 
-# ── ПУБЛІЧНІ VARS (НЕ секрети) ──────────────────────────────────────────────
 [vars]
 SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
-
-# Google Drive (дефолтна папка для збереження)
 DRIVE_FOLDER_ID = "root"
-
-# Адмін телеграм-аккаунт (для кнопок/діагностики)
 TELEGRAM_ADMIN_ID = "784869835"
-
-# Деплой-мітка (для діагностики)
 DEPLOY_ID = "local-dev"
 
-# Режим Learn за замовчуванням
 LEARN_ENABLED = "on"
 
-# Cloudflare Vision / Text (ID публічний; токен — у секретах)
+# Cloudflare Workers AI (безкоштовно)
 CF_ACCOUNT_ID = "2cf6e316af8623546c95c0354bc3aa00"
 
-# Доступ до адмін-HTML без секрету у readonly
 ALLOW_PUBLIC_REPO = "on"
 ALLOW_PUBLIC_STATUT = "on"
 ALLOW_PUBLIC_CHECKLIST = "on"
 
-# Секрети для /admin/*, /cron/* та /tg/webhook (значення лишаються тут, бо вже використовуєш)
-WEBHOOK_SECRET    = "senti1984"
+WEBHOOK_SECRET = "senti1984"
 TG_WEBHOOK_SECRET = "senti1984"
-# Деякі інсталляції читають і це ім’я; залишимо дзеркало:
 TELEGRAM_SECRET_TOKEN = "senti1984"
 
-# Локальна таймзона (для UI/логів)
 TIMEZONE = "Europe/Kyiv"
-
-# Діагностичні “теги” у відповідях (прибираєш — стане чистіше)
 DIAG_TAGS = "on"
 
-# ── ПОРЯДОК МОДЕЛЕЙ (пріоритети) ────────────────────────────────────────────
-# ВАЖЛИВО: жодної “голої” 'free' — тільки конкретні free-моделі як fallback.
-# TEXT (звичайні відповіді)
-MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, free:meta-llama/llama-4-scout:free"
-MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, free:meta-llama/llama-4-scout:free"
+# ── БЕЗКОШТОВНІ порядки моделей ────────────────────────────────────────────
+# Текст: CF-Qwen → CF-Llama → OpenRouter Llama4 Scout (free) як запасний
+MODEL_ORDER      = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
+MODEL_ORDER_TEXT = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 
-# CODE (повноцінний код у кілька частин): спочатку Gemini, далі CF, далі free — щоб уникати rate-limit’ів на free
-MODEL_ORDER_CODE = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, free:meta-llama/llama-4-scout:free"
+# CODE-mode: ті ж безкоштовні CF-моделі першими; free — в самому кінці
+MODEL_ORDER_CODE = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 
-# Дефолтні ідентифікатори моделей (не обов’язково, але зручно)
-GEMINI_MODEL = "gemini-2.5-flash"
-CF_MODEL     = "@cf/qwen/qwen2.5-7b-instruct"
+# Дефолтні ідентифікатори безкоштовних моделей
+CF_MODEL = "@cf/qwen/qwen2.5-7b-instruct"
+# Vision (опис зображень) — теж безкоштовно
+CF_VISION_MODEL = "@cf/llama-3.2-11b-vision-instruct"
 
-# ── OpenAI-сумісний безкоштовний fallback (через OpenRouter) ────────────────
-# Ключ додається як секрет: wrangler secret put FREE_API_KEY
+# OpenAI-сумісний fallback через OpenRouter (free)
 FREE_API_BASE_URL = "https://openrouter.ai/api"
 FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
 FREE_API_PATH     = "/v1/chat/completions"
 
-# ── Нічні авто-покращення / самотюн ─────────────────────────────────────────
-AUTO_IMPROVE     = "on"
+AUTO_IMPROVE = "on"
 NIGHTLY_UTC_HOUR = "23"
-
-SELF_REGULATE      = "on"
+SELF_REGULATE = "on"
 SELF_TUNING_FACTOR = "0.3"
 
-# ── ⚡ ЕНЕРГІЯ ───────────────────────────────────────────────────────────────
 ENERGY_MAX = "100"
 ENERGY_RECOVER_PER_MIN = "1"
 ENERGY_COST_TEXT = "1"
 ENERGY_COST_IMAGE = "5"
 ENERGY_LOW_THRESHOLD = "10"
 
-# ── KV bindings ─────────────────────────────────────────────────────────────
-[[kv_namespaces]]
-binding = "DEDUP_KV"
-id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
+[[kv_namespaces]] binding = "DEDUP_KV"       id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
+[[kv_namespaces]] binding = "OAUTH_KV"       id = "e2a8d3941b4e41728318781e739a4d47"
+[[kv_namespaces]] binding = "STATE_KV"       id = "7b32e2d1f60846ddb1c653eb52180bf7"
+[[kv_namespaces]] binding = "TODO_KV"        id = "497eac980691495ea2a0bc8611892d65"
+[[kv_namespaces]] binding = "USER_OAUTH_KV"  id = "470d4f5c164a4a828c569eb9a52a5133"
+[[kv_namespaces]] binding = "CHECKLIST_KV"   id = "497eac980691495ea2a0bc8611892d65"
+[[kv_namespaces]] binding = "LIKES_KV"       id = "f7d480c281ad47d2bdf270fadf4de021"
+[[kv_namespaces]] binding = "ENERGY_LOG_KV"  id = "9e6f0ed5bf2544a9a63d57455900a844"
+[[kv_namespaces]] binding = "DIALOG_KV"      id = "63c0d1e0962a419ca54082893410b28e"
+[[kv_namespaces]] binding = "LEARN_QUEUE_KV" id = "86a54c59ce674a558780c58bf1a47dfd"
 
-[[kv_namespaces]]
-binding = "OAUTH_KV"
-id = "e2a8d3941b4e41728318781e739a4d47"
-
-[[kv_namespaces]]
-binding = "STATE_KV"
-id = "7b32e2d1f60846ddb1c653eb52180bf7"
-
-[[kv_namespaces]]
-binding = "TODO_KV"
-id = "497eac980691495ea2a0bc8611892d65"
-
-[[kv_namespaces]]
-binding = "USER_OAUTH_KV"
-id = "470d4f5c164a4a828c569eb9a52a5133"
-
-[[kv_namespaces]]
-binding = "CHECKLIST_KV"
-id = "497eac980691495ea2a0bc8611892d65"
-
-[[kv_namespaces]]
-binding = "LIKES_KV"
-id = "f7d480c281ad47d2bdf270fadf4de021"
-
-[[kv_namespaces]]
-binding = "ENERGY_LOG_KV"
-id = "9e6f0ed5bf2544a9a63d57455900a844"
-
-[[kv_namespaces]]
-binding = "DIALOG_KV"
-id = "63c0d1e0962a419ca54082893410b28e"
-
-[[kv_namespaces]]
-binding = "LEARN_QUEUE_KV"
-id = "86a54c59ce674a558780c58bf1a47dfd"
-
-# ── R2 buckets для Learn (upload/зберігання) ───────────────────────────────
 [[r2_buckets]]
 binding = "LEARN_BUCKET"
 bucket_name = "senti-learn"
-# preview_bucket_name = "senti-learn-preview"
