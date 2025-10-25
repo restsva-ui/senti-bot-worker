@@ -17,10 +17,12 @@ LEARN_ENABLED = "on"
 # Cloudflare Workers AI (безкоштовно)
 CF_ACCOUNT_ID = "2cf6e316af8623546c95c0354bc3aa00"
 
+# Публічні перегляди адмін-HTML (readonly)
 ALLOW_PUBLIC_REPO = "on"
 ALLOW_PUBLIC_STATUT = "on"
 ALLOW_PUBLIC_CHECKLIST = "on"
 
+# Секретні токени для ендпойнтів / вебхука TG (значення в прикладі)
 WEBHOOK_SECRET = "senti1984"
 TG_WEBHOOK_SECRET = "senti1984"
 TELEGRAM_SECRET_TOKEN = "senti1984"
@@ -33,19 +35,19 @@ DIAG_TAGS = "on"
 MODEL_ORDER      = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 MODEL_ORDER_TEXT = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 
-# CODE-mode: ті ж безкоштовні CF-моделі першими; free — в самому кінці
+# CODE-mode: ті ж безкоштовні CF-моделі першими; free — в кінці
 MODEL_ORDER_CODE = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 
-# Дефолтні ідентифікатори безкоштовних моделей
-CF_MODEL = "@cf/qwen/qwen2.5-7b-instruct"
-# Vision (опис зображень) — теж безкоштовно
-CF_VISION_MODEL = "@cf/llama-3.2-11b-vision-instruct"
+# Дефолтні безкоштовні моделі
+CF_MODEL        = "@cf/qwen/qwen2.5-7b-instruct"
+CF_VISION_MODEL = "@cf/llama-3.2-11b-vision-instruct"  # опис зображень (free)
 
 # OpenAI-сумісний fallback через OpenRouter (free)
 FREE_API_BASE_URL = "https://openrouter.ai/api"
 FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
 FREE_API_PATH     = "/v1/chat/completions"
 
+# Нічні авто-імпруви / саморегуляція / енергія
 AUTO_IMPROVE = "on"
 NIGHTLY_UTC_HOUR = "23"
 SELF_REGULATE = "on"
@@ -57,17 +59,48 @@ ENERGY_COST_TEXT = "1"
 ENERGY_COST_IMAGE = "5"
 ENERGY_LOW_THRESHOLD = "10"
 
-[[kv_namespaces]] binding = "DEDUP_KV"       id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
-[[kv_namespaces]] binding = "OAUTH_KV"       id = "e2a8d3941b4e41728318781e739a4d47"
-[[kv_namespaces]] binding = "STATE_KV"       id = "7b32e2d1f60846ddb1c653eb52180bf7"
-[[kv_namespaces]] binding = "TODO_KV"        id = "497eac980691495ea2a0bc8611892d65"
-[[kv_namespaces]] binding = "USER_OAUTH_KV"  id = "470d4f5c164a4a828c569eb9a52a5133"
-[[kv_namespaces]] binding = "CHECKLIST_KV"   id = "497eac980691495ea2a0bc8611892d65"
-[[kv_namespaces]] binding = "LIKES_KV"       id = "f7d480c281ad47d2bdf270fadf4de021"
-[[kv_namespaces]] binding = "ENERGY_LOG_KV"  id = "9e6f0ed5bf2544a9a63d57455900a844"
-[[kv_namespaces]] binding = "DIALOG_KV"      id = "63c0d1e0962a419ca54082893410b28e"
-[[kv_namespaces]] binding = "LEARN_QUEUE_KV" id = "86a54c59ce674a558780c58bf1a47dfd"
+# ── KV namespaces (ВАЖЛИВО: багаторядковий формат) ─────────────────────────
+[[kv_namespaces]]
+binding = "DEDUP_KV"
+id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
 
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "e2a8d3941b4e41728318781e739a4d47"
+
+[[kv_namespaces]]
+binding = "STATE_KV"
+id = "7b32e2d1f60846ddb1c653eb52180bf7"
+
+[[kv_namespaces]]
+binding = "TODO_KV"
+id = "497eac980691495ea2a0bc8611892d65"
+
+[[kv_namespaces]]
+binding = "USER_OAUTH_KV"
+id = "470d4f5c164a4a828c569eb9a52a5133"
+
+[[kv_namespaces]]
+binding = "CHECKLIST_KV"
+id = "497eac980691495ea2a0bc8611892d65"
+
+[[kv_namespaces]]
+binding = "LIKES_KV"
+id = "f7d480c281ad47d2bdf270fadf4de021"
+
+[[kv_namespaces]]
+binding = "ENERGY_LOG_KV"
+id = "9e6f0ed5bf2544a9a63d57455900a844"
+
+[[kv_namespaces]]
+binding = "DIALOG_KV"
+id = "63c0d1e0962a419ca54082893410b28e"
+
+[[kv_namespaces]]
+binding = "LEARN_QUEUE_KV"
+id = "86a54c59ce674a558780c58bf1a47dfd"
+
+# ── R2 bucket для Learn ─────────────────────────────────────────────────────
 [[r2_buckets]]
 binding = "LEARN_BUCKET"
 bucket_name = "senti-learn"
