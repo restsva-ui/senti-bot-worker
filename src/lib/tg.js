@@ -48,23 +48,57 @@ export function energyLinks(env, userId) {
   };
 }
 
-/* ───────────────────── ВІДПРАВКА ТЕКСТУ ─────────── */
+/* ─────────────── РОЗУМНЕ НАРІЗАННЯ ДОВГИХ ТЕКСТІВ ───────────────
+   Telegram має ліміт ~4096 символів на повідомлення.
+   Ми ріжемо з запасом (3900) і намагаємось знайти "мʼяку" межу:
+   спершу \n\n, потім \n, потім пробіл; якщо нічого — жорсткий зріз.
+------------------------------------------------------------------ */
+function splitForTelegram(text = "", limit = 3900) {
+  const s = String(text ?? "");
+  if (s.length <= limit) return [s];
+
+  const chunks = [];
+  let rest = s;
+  while (rest.length > limit) {
+    let cut = rest.lastIndexOf("\n\n", limit);
+    if (cut < 0) cut = rest.lastIndexOf("\n", limit);
+    if (cut < 0) cut = rest.lastIndexOf(" ", limit);
+    if (cut < 0 || cut < limit * 0.6) cut = limit; // жорсткий зріз, якщо "мʼякої" межі близько нема
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^\s+/, ""); // прибрати початкові пробіли/переноси
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
+}
+
+/* ───────────────────── ВІДПРАВКА ТЕКСТУ ───────────
+   ТЕПЕР: автоматично ділить довгі відповіді на серію повідомлень.
+   reply_markup (клавіатура) додається лише в ПЕРШЕ повідомлення.  */
 export async function sendPlain(env, chatId, text, extra = {}) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const body = {
-    chat_id: chatId,
-    text,
-    disable_web_page_preview: true,
-  };
-  if (extra.parse_mode)  body.parse_mode  = extra.parse_mode;
-  if (extra.reply_markup) body.reply_markup = extra.reply_markup;
 
-  await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  }).catch(() => {});
+  const chunks = splitForTelegram(text, 3900); // трохи менше 4096 для безпеки
+  for (let i = 0; i < chunks.length; i++) {
+    const body = {
+      chat_id: chatId,
+      text: chunks[i],
+      disable_web_page_preview: true,
+    };
+    if (extra.parse_mode)  body.parse_mode  = extra.parse_mode;
+    // клавіатуру даємо лише для першого повідомлення, щоб не дублювати
+    if (i === 0 && extra.reply_markup) body.reply_markup = extra.reply_markup;
+
+    try {
+      await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch {
+      // проковтнути, щоб не падала вся відповідь; в адмін-каналі помилки ловляться вище
+    }
+  }
 }
 
 /* ──────────────── ДІЇ ЧАТУ (typing/uploading) ───── */
