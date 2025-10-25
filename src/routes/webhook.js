@@ -1,6 +1,7 @@
 // src/routes/webhook.js
-// (rev++++) One-button Code-mode, нормалізація 'free', дефолтні безкоштовні моделі,
-// авто-тюн, Vision/Drive фолбеки, підтвердження Drive-mode, розумний чанкер коду.
+// (rev++++) One-button Code-mode (тихий вихід через Senti), нормалізація 'free',
+// дефолтні безкоштовні моделі (CF → qwen2.5-7b), авто-тюн, Vision/Drive фолбеки,
+// розумний чанкер коду, повернуті загублені хелпери.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -34,29 +35,6 @@ const KV = {
   codeMode:  (uid) => `mode:code:${uid}`,  // "on" | "off"
   profileName: (uid) => `profile:name:${uid}`,
 };
-
-// ── Просте збереження/читання імені (fix: getPreferredName) ────────────────
-async function getPreferredName(env, msg) {
-  const uid = msg?.from?.id;
-  if (!uid) return "друже";
-  try {
-    const saved = await env.STATE_KV.get(KV.profileName(uid));
-    if (saved) return saved;
-  } catch {}
-  return msg?.from?.first_name || msg?.from?.username || "друже";
-}
-function tryParseUserNamedAs(text = "") {
-  const s = String(text || "").trim();
-  const rx = /\b(?:мене\s+звати|меня\s+зовут|my\s+name\s+is|ich\s+hei(?:s|ß)e|je\s+m'?appelle)\s+([A-Za-zÀ-ÿĀ-žЀ-ӿʼ'`\-\s]{2,30})/i;
-  const m = s.match(rx);
-  return m?.[1]?.trim() || null;
-}
-async function rememberNameFromText(env, userId, text) {
-  const name = tryParseUserNamedAs(text);
-  if (!name) return null;
-  try { await env.STATE_KV.put(KV.profileName(userId), name); } catch {}
-  return name;
-}
 
 // ── Telegram UX helpers (індикатор як у GPT) ────────────────────────────────
 async function sendTyping(env, chatId) {
@@ -147,7 +125,7 @@ async function tgFileUrl(env, file_id) {
   return `https://api.telegram.org/file/bot${token}/${path}`;
 }
 
-// ===== Learn helpers (admin-only, ручний режим) =============================
+// ===== Learn helpers ========================================================
 function extractFirstUrl(text = "") {
   const m = String(text || "").match(/https?:\/\/\S+/i);
   return m ? m[0] : null;
@@ -159,7 +137,7 @@ async function setLearnMode(env, userId, on) {
   try { await env.STATE_KV.put(KV.learnMode(userId), on ? "on" : "off"); } catch {}
 }
 
-// ── Code-mode KV ────────────────────────────────────────────────────────────
+// ===== Code-mode KV =========================================================
 async function getCodeMode(env, userId) {
   try { return (await env.STATE_KV.get(KV.codeMode(userId))) === "on"; } catch { return false; }
 }
@@ -167,7 +145,65 @@ async function setCodeMode(env, userId, on) {
   try { await env.STATE_KV.put(KV.codeMode(userId), on ? "on" : "off"); } catch {}
 }
 
-// ── Нормалізація MODEL_ORDER: заміна голого 'free' → конкретна модель ───────
+// ── User name helpers ───────────────────────────────────────────────────────
+function tryParseUserNamedAs(text) {
+  const s = (text || "").trim();
+  const NAME_RX = "([A-Za-zÀ-ÿĀ-žЀ-ӿʼ'`\\-\\s]{2,30})";
+  const patterns = [
+    new RegExp(`\\bмене\\s+звати\\s+${NAME_RX}`, "iu"),
+    new RegExp(`\\bменя\\s+зовут\\s+${NAME_RX}`, "iu"),
+    new RegExp(`\\bmy\\s+name\\s+is\\s+${NAME_RX}`, "iu"),
+    new RegExp(`\\bich\\s+hei(?:s|ß)e\\s+${NAME_RX}`, "iu"),
+    new RegExp(`\\bje\\s+m'?appelle\\s+${NAME_RX}`, "iu")
+  ];
+  for (const r of patterns) { const m = s.match(r); if (m?.[1]) return m[1].trim(); }
+  return null;
+}
+async function getPreferredName(env, msg) {
+  const uid = msg?.from?.id;
+  if (!uid) return msg?.from?.first_name || msg?.from?.username || "друже";
+  try {
+    const v = await env.STATE_KV.get(KV.profileName(uid));
+    if (v) return v;
+  } catch {}
+  return msg?.from?.first_name || msg?.from?.username || "друже";
+}
+async function rememberNameFromText(env, userId, text) {
+  const name = tryParseUserNamedAs(text);
+  if (!name) return null;
+  try { await env.STATE_KV.put(KV.profileName(userId), name); } catch {}
+  return name;
+}
+
+// ── SystemHint ───────────────────────────────────────────────────────────────
+async function buildSystemHint(env, chatId, userId, preferredLang) {
+  const statut = String((await readStatut(env)) || "").trim();
+  const dlg = await buildDialogHint(env, userId);
+  const tune = await loadSelfTune(env, chatId, { preferredLang }).catch(() => null);
+
+  const core = `You are Senti — a thoughtful, self-improving assistant and companion.
+- Never claim to be an AI, model, chatbot, or a product made by any company.
+- Speak naturally and human-like with warmth and clarity.
+- Prefer concise, practical answers; expand only when asked.`;
+
+  let insightsBlock = "";
+  try {
+    const insights = await getRecentInsights(env, { limit: 5 });
+    if (insights?.length) {
+      const lines = insights.map(i => `• ${i.insight}${i.r2Key ? " [R2]" : ""}`);
+      insightsBlock = `[Нещодавні знання]\n${lines.join("\n")}`;
+    }
+  } catch {}
+
+  const blocks = [core];
+  if (statut) blocks.push(`[Статут/чеклист]\n${statut}`);
+  if (tune) blocks.push(`[Self-Tune]\n${tune}`);
+  if (insightsBlock) blocks.push(insightsBlock);
+  if (dlg) blocks.push(dlg);
+  return blocks.join("\n\n");
+}
+
+// ── Нормалізація MODEL_ORDER: 'free' → конкретна модель ---------------------
 function normalizeOrder(env, order) {
   const modelId = env.FREE_API_MODEL || "meta-llama/llama-4-scout:free";
   return String(order || "")
@@ -183,8 +219,9 @@ function pickModelOrder(env, { code }) {
   const textOrderEnv = env.MODEL_ORDER_TEXT || env.MODEL_ORDER || "";
   const codeOrderEnv = env.MODEL_ORDER_CODE || "";
 
-  const DEF_TEXT = "cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free";
-  const DEF_CODE = "openrouter:qwen/qwen3-coder:free, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free";
+  // CF дефолт: більш стабільний qwen2.5-7b замість meta/llama-3.1-8b
+  const DEF_TEXT = "cf:@cf/qwen/qwen2.5-7b-instruct, free:meta-llama/llama-4-scout:free";
+  const DEF_CODE = "openrouter:qwen/qwen3-coder:free, cf:@cf/qwen/qwen2.5-7b-instruct, free:meta-llama/llama-4-scout:free";
 
   const chosen = code ? (codeOrderEnv || DEF_CODE) : (textOrderEnv || DEF_TEXT);
   return normalizeOrder(env, chosen);
@@ -220,25 +257,24 @@ function splitCodeSmart(text, size = 3500) {
   const m = s.match(/```([a-z0-9+-]*)\s/i);
   const lang = m?.[1] || "";
 
-  // розбиваємо по рядках, не перевищуючи ліміт
+  // різання по рядках із збереженням fenced-блоків
   const parts = [];
   let buf = "";
-  const lines = s.split("\n");
-  for (const line of lines) {
-    const cand = (buf ? buf + "\n" : "") + line;
-    if (cand.length > size) {
-      if (buf) parts.push(buf);
+  for (const line of s.split("\n")) {
+    const next = (buf ? buf + "\n" : "") + line;
+    if (next.length > size) {
+      parts.push(buf);
       buf = line;
     } else {
-      buf = cand;
+      buf = next;
     }
   }
   if (buf) parts.push(buf);
 
   // обгортаємо шматки, щоб TG не ламав розмітку
   return parts.map((p) => {
-    if (/```/.test(p)) return p;
-    const looksCode = /[{;]\s*$|^\s*(def|class|function|#|\/\/)/m.test(p) || !!lang;
+    if (p.includes("```")) return p;
+    const looksCode = /[{;]\s*$|^\s*(def|class|function|#|\/\/)/m.test(p) || lang;
     return looksCode ? "```" + (lang || "") + "\n" + p + "\n```" : p;
   });
 }
@@ -283,8 +319,7 @@ ${control}`;
     if (cleaned) out = cleaned;
   }
   if (!/^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(out)) {
-    const em = "💡";
-    out = `${em} ${out}`;
+    out = `💡 ${out}`;
   }
 
   const detected = detectFromText(out);
@@ -301,6 +336,22 @@ ${control}`;
   return { short, full: out };
 }
 
+// Допоміжний сендер: лаконічно/повністю/кодом
+async function sendSmart(env, chatId, { full, short, expand, codeMode }) {
+  const looksCode = /```/.test(full) || codeMode;
+  if (looksCode) {
+    for (const part of splitCodeSmart(full)) {
+      await sendPlain(env, chatId, part);
+    }
+    return;
+  }
+  if (expand && full.length > short.length) {
+    for (const ch of chunkText(full)) await sendPlain(env, chatId, ch);
+    return;
+  }
+  await sendPlain(env, chatId, short);
+}
+
 // ── маленькі адмін-хелпери для Learn ────────────────────────────────────────
 async function runLearnNow(env) {
   const secret = env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || "";
@@ -314,108 +365,6 @@ async function runLearnNow(env) {
 }
 async function listInsights(env, limit = 5) {
   try { return await getRecentInsights(env, { limit }) || []; } catch { return []; }
-}
-
-// ── Drive-режим: збереження в Диск ──────────────────────────────────────────
-async function handleIncomingMedia(env, chatId, userId, msg, lang) {
-  const att = detectAttachment(msg);
-  if (!att) return false;
-
-  // Перевірка підключення Drive
-  let hasTokens = false;
-  try {
-    const tokens = await getUserTokens(env, userId);
-    hasTokens = !!tokens;
-  } catch {}
-  if (!hasTokens) {
-    const connectUrl = abs(env, "/auth/drive");
-    await sendPlain(env, chatId,
-      t(lang, "drive_connect_hint") || "Щоб зберігати файли, підключи Google Drive.",
-      { reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn") || "Підключити Drive", url: connectUrl }]] } }
-    );
-    return true;
-  }
-
-  const cur = await getEnergy(env, userId);
-  const need = Number(cur.costImage ?? 5);
-  if ((cur.energy ?? 0) < need) {
-    const links = energyLinks(env, userId);
-    await sendPlain(env, chatId, t(lang, "need_energy_media", need, links.energy));
-    return true;
-  }
-  await spendEnergy(env, userId, need, "media");
-
-  const url = await tgFileUrl(env, att.file_id);
-  const saved = await driveSaveFromUrl(env, userId, url, att.name);
-  await sendPlain(env, chatId, `✅ ${t(lang, "saved_to_drive")}: ${saved?.name || att.name}`, {
-    reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn"), url: "https://drive.google.com/drive/my-drive" }]] }
-  });
-  return true;
-}
-
-// ── Vision-режим: короткий опис фото ────────────────────────────────────────
-async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
-  const att = pickPhoto(msg);
-  if (!att) return false;
-
-  const cur = await getEnergy(env, userId);
-  const need = Number(cur.costText ?? 1);
-  if ((cur.energy ?? 0) < need) {
-    const links = energyLinks(env, userId);
-    await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
-    return true;
-  }
-  await spendEnergy(env, userId, need, "vision");
-
-  pulseTyping(env, chatId);
-
-  const url = await tgFileUrl(env, att.file_id);
-  const prompt = caption || "Опиши, що на зображенні, коротко і по суті.";
-  try {
-    const resp = await cfVisionDescribe(env, url, prompt, lang);
-    await sendPlain(env, chatId, `🖼️ ${resp}`);
-  } catch (e) {
-    if (ADMIN(env, userId)) {
-      await sendPlain(env, chatId, `❌ Vision error: ${String(e.message || e).slice(0, 180)}`);
-    } else {
-      const connectUrl = abs(env, "/auth/drive");
-      await sendPlain(
-        env,
-        chatId,
-        "Поки що не можу аналізувати фото. Можу зберегти його у Google Drive — натисни «Google Drive» або підключи Drive.",
-        { reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn") || "Підключити Drive", url: connectUrl }]] } }
-      );
-    }
-  }
-  return true;
-}
-
-// ── SystemHint ───────────────────────────────────────────────────────────────
-async function buildSystemHint(env, chatId, userId, preferredLang) {
-  const statut = String((await readStatut(env)) || "").trim();
-  const dlg = await buildDialogHint(env, userId);
-  const tune = await loadSelfTune(env, chatId, { preferredLang }).catch(() => null);
-
-  const core = `You are Senti — a thoughtful, self-improving assistant and companion.
-- Never claim to be an AI, model, chatbot, or a product made by any company.
-- Speak naturally and human-like with warmth and clarity.
-- Prefer concise, practical answers; expand only when asked.`;
-
-  let insightsBlock = "";
-  try {
-    const insights = await getRecentInsights(env, { limit: 5 });
-    if (insights?.length) {
-      const lines = insights.map(i => `• ${i.insight}${i.r2Key ? " [R2]" : ""}`);
-      insightsBlock = `[Нещодавні знання]\n${lines.join("\n")}`;
-    }
-  } catch {}
-
-  const blocks = [core];
-  if (statut) blocks.push(`[Статут/чеклист]\n${statut}`);
-  if (tune) blocks.push(`[Self-Tune]\n${tune}`);
-  if (insightsBlock) blocks.push(insightsBlock);
-  if (dlg) blocks.push(dlg);
-  return blocks.join("\n\n");
 }
 
 // ── MAIN ────────────────────────────────────────────────────────────────────
@@ -477,35 +426,19 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // ТИХІ перемикачі режимів + короткі підтвердження для Drive
+  // ТИХІ перемикачі режимів (без повідомлень)
   if (textRaw === BTN_DRIVE || /^(google\s*drive)$/i.test(textRaw)) {
     await setDriveMode(env, userId, true);
-    // підтвердження + підказка підключення
-    try {
-      const tokens = await getUserTokens(env, userId);
-      if (tokens) {
-        await sendPlain(env, chatId, "🗂️ Режим Google Drive увімкнено. Надішли файл/фото — збережу в Диск.", { reply_markup: mainKeyboard(isAdmin) });
-      } else {
-        await sendPlain(env, chatId, "🗂️ Режим Google Drive увімкнено, але підключення не знайдено. Підключи нижче та повтори відправку файлу.", {
-          reply_markup: { inline_keyboard: [[{ text: "Підключити Drive", url: abs(env, "/auth/drive") }]] }
-        });
-      }
-    } catch {
-      await sendPlain(env, chatId, "🗂️ Режим Google Drive увімкнено. Якщо не підключено — натисни «Підключити Drive».", {
-        reply_markup: { inline_keyboard: [[{ text: "Підключити Drive", url: abs(env, "/auth/drive") }]] }
-      });
-    }
     return json({ ok: true });
   }
   if (textRaw === BTN_SENTI || /^(senti|сенті)$/i.test(textRaw)) {
     await setDriveMode(env, userId, false);
     await setCodeMode(env, userId, false); // вихід із code-mode
-    await sendPlain(env, chatId, "🤝 Режим Senti активовано.", { reply_markup: mainKeyboard(isAdmin) });
     return json({ ok: true });
   }
   if (textRaw === BTN_CODE || /^code$/i.test(textRaw)) {
     await setCodeMode(env, userId, true);
-    await sendPlain(env, chatId, "🧑‍💻 Code-mode ON. Пиши, який код потрібен.", { reply_markup: mainKeyboard(isAdmin) });
+    // можемо мовчати або коротко підтвердити; робимо тихо
     return json({ ok: true });
   }
 
@@ -532,9 +465,9 @@ export async function handleTelegramWebhook(req, env) {
         `FreeLLM (BASE_URL + KEY): ${hasFreeBase && hasFreeKey ? "✅" : "❌"}`
       ];
 
-      const entries = mo ? mo.split(",").map(s => s.trim()).filter(Boolean) : [];
-      if (entries.length) {
-        const health = await getAiHealthSummary(env, entries);
+      const orderToProbe = (env.MODEL_ORDER_TEXT || env.MODEL_ORDER || "").split(",").map(s => s.trim()).filter(Boolean);
+      if (orderToProbe.length) {
+        const health = await getAiHealthSummary(env, orderToProbe);
         lines.push("\n— Health:");
         for (const h of health) {
           const light = h.cool ? "🟥" : (h.slow ? "🟨" : "🟩");
@@ -682,7 +615,7 @@ export async function handleTelegramWebhook(req, env) {
                 ru: "Пожалуйста, отправьте вашу локацию кнопкой ниже — и я покажу погоду для вашего места.",
                 en: "Please share your location using the button below — I’ll show the weather for your area.",
                 de: "Bitte teile deinen Standort über die Schaltfläche unten – dann zeige ich dir das Wetter für deinen Ort.",
-                fr: "Merci d’envoyer ta position via le bouton ci-dessous — je te montrerai la météo pour ta zone.",
+                fr: "Merci d’envoyer ta position via le bouton ci-dessous — je te montrerai la météo для ta zone.",
               };
               const ask = askMap[lang.slice(0,2)] || askMap.uk;
               await sendPlain(env, chatId, ask, { reply_markup: askLocationKeyboard() });
@@ -717,7 +650,7 @@ export async function handleTelegramWebhook(req, env) {
       const name = await getPreferredName(env, msg);
       const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
 
-      // Вибираємо безкоштовний порядок моделей та тимчасово підміняємо env.MODEL_ORDER
+      // Порядок моделей (безкоштовний by default)
       const code = await getCodeMode(env, userId);
       const mo = pickModelOrder(env, { code });
       const prev = env.MODEL_ORDER;
@@ -725,21 +658,13 @@ export async function handleTelegramWebhook(req, env) {
 
       const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand, adminDiag: isAdmin });
 
-      // відновлюємо попередній порядок
       env.MODEL_ORDER = prev;
 
       await pushTurn(env, userId, "assistant", full);
 
-      const after = (cur.energy - need);
-      if (code) {
-        // довгі кодові відповіді — шматками з збереженням форматування
-        for (const ch of splitCodeSmart(full)) await sendPlain(env, chatId, ch);
-      } else if (expand && full.length > short.length) {
-        for (const ch of chunkText(full)) await sendPlain(env, chatId, ch);
-      } else {
-        await sendPlain(env, chatId, short);
-      }
+      await sendSmart(env, chatId, { full, short, expand, codeMode: code });
 
+      const after = (cur.energy - need);
       if (after <= Number(cur.low ?? 10)) {
         const links = energyLinks(env, userId);
         await sendPlain(env, chatId, t(lang, "low_energy_notice", after, links.energy));
