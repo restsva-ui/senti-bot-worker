@@ -10,6 +10,7 @@ export const BTN_CODE  = "Code";
 
 /* ───────────────── ГОЛОВНА КЛАВІАТУРА ─────────────
    ВАЖЛИВО: і Senti, і Code показуємо завжди, щоб не губилися.
+   «Code» просто вмикає код-режим, «Senti» його вимикає.
 */
 export const mainKeyboard = (isAdmin = false) => {
   const row1 = [{ text: BTN_DRIVE }, { text: BTN_SENTI }, { text: BTN_CODE }];
@@ -44,44 +45,53 @@ export function energyLinks(env, userId) {
   };
 }
 
-/* ─────────────── РОЗУМНЕ НАРІЗАННЯ ДОВГИХ ТЕКСТІВ ───────────────
-   Ліміт TG ≈4096. Ріжемо на ~3900 з «мʼякими» кордонами.
------------------------------------------------------------------- */
-function splitForTelegram(text = "", limit = 3900) {
-  const s = String(text ?? "");
-  if (s.length <= limit) return [s];
-
-  const chunks = [];
-  let rest = s;
-  while (rest.length > limit) {
-    let cut = rest.lastIndexOf("\n\n", limit);
-    if (cut < 0) cut = rest.lastIndexOf("\n", limit);
-    if (cut < 0) cut = rest.lastIndexOf(" ", limit);
-    if (cut < 0 || cut < limit * 0.6) cut = limit;
-    chunks.push(rest.slice(0, cut));
-    rest = rest.slice(cut).replace(/^\s+/, "");
-  }
-  if (rest) chunks.push(rest);
-  return chunks;
-}
-
-/* ───────────────────── ВІДПРАВКА ТЕКСТУ ───────────
-   Автоматично ділить довгі відповіді на серію повідомлень.
-   reply_markup додається лише в ПЕРШЕ повідомлення.
+/* ───────────────────── ХЕЛПЕР РОЗБИТТЯ ────────────
+   - maxLen: 4096 для plain, 1024 для MarkdownV2/HTML (з запасом).
+   - намагаємось різати по \n, потім по пробілах, інакше — жорстко.
+   - НЕ додаємо parse_mode до всіх шматків, лише до першого (щоб не ламати code-block на межі).
 */
+function splitForTelegram(text = "", parse_mode) {
+  const s = String(text || "");
+  if (!s) return [""];
+  const hardMax = parse_mode ? 1000 : 3900; // запас від 4096/1024
+  if (s.length <= hardMax) return [s];
+
+  const out = [];
+  let rest = s;
+  while (rest.length) {
+    if (rest.length <= hardMax) { out.push(rest); break; }
+    // Спершу шукаємо \n у вікні
+    let cut = rest.lastIndexOf("\n", hardMax);
+    if (cut < 0 || cut < hardMax - 400) {
+      // потім пробіли
+      cut = rest.lastIndexOf(" ", hardMax);
+    }
+    if (cut < 0 || cut < hardMax - 400) {
+      cut = hardMax;
+    }
+    out.push(rest.slice(0, cut).trimEnd());
+    rest = rest.slice(cut).trimStart();
+  }
+  return out;
+}
+/* ───────────────────── ВІДПРАВКА ТЕКСТУ ─────────── */
 export async function sendPlain(env, chatId, text, extra = {}) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
 
-  const chunks = splitForTelegram(text, 3900);
+  // Розбиваємо довгі повідомлення на декілька
+  const chunks = splitForTelegram(text, extra?.parse_mode);
+
   for (let i = 0; i < chunks.length; i++) {
     const body = {
       chat_id: chatId,
       text: chunks[i],
       disable_web_page_preview: true,
     };
-    if (extra.parse_mode) body.parse_mode = extra.parse_mode;
-    if (i === 0 && extra.reply_markup) body.reply_markup = extra.reply_markup;
+    // parse_mode даємо лише першому шматку, щоб не ламати Markdown/HTML на межах
+    if (i === 0 && extra.parse_mode)  body.parse_mode  = extra.parse_mode;
+    // reply_markup додаємо лише якщо 1 повідомлення, аби клавіатура не дублювалась
+    if (i === 0 && extra.reply_markup && chunks.length === 1) body.reply_markup = extra.reply_markup;
 
     try {
       await fetch(url, {
@@ -89,7 +99,9 @@ export async function sendPlain(env, chatId, text, extra = {}) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-    } catch {}
+    } catch {
+      // тихий фейл — не валимо увесь флоу
+    }
   }
 }
 
@@ -107,9 +119,12 @@ export async function sendChatAction(env, chatId, action = "typing") {
   } catch {}
 }
 
+/** Обгортач: увімкнути "друкує…" на час довгої операції */
 export async function withTyping(env, chatId, fn, { pingMs = 4000 } = {}) {
   let alive = true;
+  // миттєвий ping
   sendChatAction(env, chatId, "typing").catch(()=>{});
+  // періодичні пінги, доки триває операція
   const timer = setInterval(() => {
     if (!alive) return clearInterval(timer);
     sendChatAction(env, chatId, "typing").catch(()=>{});
@@ -122,6 +137,7 @@ export async function withTyping(env, chatId, fn, { pingMs = 4000 } = {}) {
   }
 }
 
+/** Обгортач: індикатор “йде завантаження…” */
 export async function withUploading(env, chatId, fn, { action = "upload_document", pingMs = 4000 } = {}) {
   let alive = true;
   sendChatAction(env, chatId, action).catch(()=>{});
@@ -136,8 +152,9 @@ export async function withUploading(env, chatId, fn, { action = "upload_document
     clearInterval(timer);
   }
 }
-
-/* ───────────── Спінер через редагування повідомлення ──────────── */
+/* ───────────── Спінер через редагування повідомлення ────────────
+   (опційно; дає UX на кшталт GPT — "Думаю…" з крапками)
+*/
 export async function startSpinner(env, chatId, base = "Думаю над відповіддю") {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
 
