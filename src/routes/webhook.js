@@ -1,7 +1,9 @@
 // src/routes/webhook.js
-// (rev++++) One-button Code-mode (тихий вихід через Senti), нормалізація 'free',
+// (rev+++++)
+// One-button Code-mode (тихий вихід через Senti), нормалізація 'free',
 // дефолтні безкоштовні моделі (CF → qwen2.5-7b), авто-тюн, Vision/Drive фолбеки,
-// розумний чанкер коду, повернуті загублені хелпери.
+// розумний чанкер коду, повернуті загублені хелпери, реалізовані
+// handleIncomingMedia() та handleVisionMedia().
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -219,7 +221,6 @@ function pickModelOrder(env, { code }) {
   const textOrderEnv = env.MODEL_ORDER_TEXT || env.MODEL_ORDER || "";
   const codeOrderEnv = env.MODEL_ORDER_CODE || "";
 
-  // CF дефолт: більш стабільний qwen2.5-7b замість meta/llama-3.1-8b
   const DEF_TEXT = "cf:@cf/qwen/qwen2.5-7b-instruct, free:meta-llama/llama-4-scout:free";
   const DEF_CODE = "openrouter:qwen/qwen3-coder:free, cf:@cf/qwen/qwen2.5-7b-instruct, free:meta-llama/llama-4-scout:free";
 
@@ -253,11 +254,9 @@ function splitCodeSmart(text, size = 3500) {
   const s = String(text || "");
   if (!s.includes("```") && s.length <= size) return [s];
 
-  // спробуємо зберегти мову з першого блока
   const m = s.match(/```([a-z0-9+-]*)\s/i);
   const lang = m?.[1] || "";
 
-  // різання по рядках із збереженням fenced-блоків
   const parts = [];
   let buf = "";
   for (const line of s.split("\n")) {
@@ -271,7 +270,6 @@ function splitCodeSmart(text, size = 3500) {
   }
   if (buf) parts.push(buf);
 
-  // обгортаємо шматки, щоб TG не ламав розмітку
   return parts.map((p) => {
     if (p.includes("```")) return p;
     const looksCode = /[{;]\s*$|^\s*(def|class|function|#|\/\/)/m.test(p) || lang;
@@ -336,13 +334,11 @@ ${control}`;
   return { short, full: out };
 }
 
-// Допоміжний сендер: лаконічно/повністю/кодом
+// ---- SEND helpers ----------------------------------------------------------
 async function sendSmart(env, chatId, { full, short, expand, codeMode }) {
   const looksCode = /```/.test(full) || codeMode;
   if (looksCode) {
-    for (const part of splitCodeSmart(full)) {
-      await sendPlain(env, chatId, part);
-    }
+    for (const part of splitCodeSmart(full)) await sendPlain(env, chatId, part);
     return;
   }
   if (expand && full.length > short.length) {
@@ -350,6 +346,58 @@ async function sendSmart(env, chatId, { full, short, expand, codeMode }) {
     return;
   }
   await sendPlain(env, chatId, short);
+}
+
+// ---- MEDIA ROUTERS (реалізації) -------------------------------------------
+async function handleIncomingMedia(env, chatId, userId, msg, lang) {
+  const att = detectAttachment(msg) || pickPhoto(msg);
+  if (!att?.file_id) return false;
+
+  // Перевіряємо, чи підключено Drive
+  let tokens;
+  try { tokens = await getUserTokens(env, userId); } catch {}
+  if (!tokens) {
+    await sendPlain(env, chatId,
+      "Режим Google Drive увімкнено, але підключення не знайдено. Підключи нижче і повтори відправку файлу.",
+      { reply_markup: { inline_keyboard: [[{ text: "Підключити Drive", url: abs(env, "/auth/drive") }]] } }
+    );
+    return true;
+  }
+
+  // Скачуємо файл із TG та пишемо у Drive
+  const url = await tgFileUrl(env, att.file_id);
+  let saved;
+  try {
+    saved = await driveSaveFromUrl(env, userId, url, att.name || "file");
+  } catch (e) {
+    await sendPlain(env, chatId, `❌ Не вдалось зберегти у Drive: ${String(e?.message || e).slice(0,120)}`);
+    return true;
+  }
+
+  const openUrl = abs(env, "/drive");
+  await sendPlain(
+    env,
+    chatId,
+    `✅ Збережено на Диск: ${att.name || saved?.name || "файл"}`,
+    { reply_markup: { inline_keyboard: [[{ text: "Відкрити Диск", url: openUrl }]] } }
+  );
+  return true;
+}
+
+async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
+  const ph = pickPhoto(msg);
+  if (!ph?.file_id) return false;
+  const url = await tgFileUrl(env, ph.file_id);
+
+  let descr;
+  try {
+    descr = await cfVisionDescribe(env, url, caption || "", lang);
+  } catch (e) {
+    await sendPlain(env, chatId, `❌ Vision не доступний зараз. ${t(lang, "default_reply")}`);
+    return true;
+  }
+  await sendPlain(env, chatId, descr);
+  return true;
 }
 
 // ── маленькі адмін-хелпери для Learn ────────────────────────────────────────
@@ -405,7 +453,7 @@ export async function handleTelegramWebhook(req, env) {
       uk: "✅ Локацію збережено. Тепер я можу показувати погоду для вашого місця.",
       ru: "✅ Локация сохранена. Теперь я смогу показывать погоду для вашего места.",
       en: "✅ Location saved. I can now show weather for your area.",
-      de: "✅ Standort gespeichert. Ich kann dir jetzt Wetter для deinen Ort zeigen.",
+      de: "✅ Standort gespeichert. Ich kann dir jetzt Wetter für deinen Ort zeigen.",
       fr: "✅ Position enregistrée. Je peux maintenant afficher la météo pour ta zone.",
     };
     const ok = okMap[(msg?.from?.language_code || lang || "uk").slice(0,2)] || okMap.uk;
@@ -438,7 +486,6 @@ export async function handleTelegramWebhook(req, env) {
   }
   if (textRaw === BTN_CODE || /^code$/i.test(textRaw)) {
     await setCodeMode(env, userId, true);
-    // можемо мовчати або коротко підтвердити; робимо тихо
     return json({ ok: true });
   }
 
