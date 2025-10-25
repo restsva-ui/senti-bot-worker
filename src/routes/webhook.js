@@ -1,7 +1,7 @@
 // src/routes/webhook.js
-// (rev CODE-ONE) Senti як одна особистість, тихі перемикачі Senti/Drive,
-// Code-mode через одну кнопку, безкоштовні моделі (TEXT/CODE окремо),
-// Vision через CF (fallback гнучкий), авто-тюн, енергія, довгі відповіді — через TG.sendPlain.
+// (rev CODE-ONE++) Senti як одна особистість, ТИХІ перемикачі Senti/Drive/Code,
+// Code-mode однією кнопкою (повний код, з контекстом), безкоштовні моделі TEXT/CODE,
+// Vision через CF, авто-тюн, енергія, довгі відповіді — через TG.sendPlain.
 
 /* ───────────────────── ІМПОРТИ ───────────────────── */
 import { driveSaveFromUrl } from "../lib/drive.js";
@@ -26,14 +26,14 @@ import { setUserLocation, getUserLocation } from "../lib/geo.js";
 /* ───────────────────── АЛІАСИ З TG ───────────────────── */
 const {
   BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_LEARN, BTN_CODE,
-  mainKeyboard, ADMIN, energyLinks, sendPlain, parseAiCommand,
+  mainKeyboard, ADMIN, energyLinks, sendPlain,
   askLocationKeyboard
 } = TG;
 
 /* ───────────────────── KV-КЛЮЧІ ───────────────────── */
 const KV = {
-  learnMode: (uid) => `learn:mode:${uid}`, // "on" | "off"
-  codeMode:  (uid) => `mode:code:${uid}`,  // "on" | "off"
+  learnMode:   (uid) => `learn:mode:${uid}`,   // "on" | "off"
+  codeMode:    (uid) => `mode:code:${uid}`,    // "on" | "off"
   profileName: (uid) => `profile:name:${uid}`,
 };
 
@@ -57,7 +57,7 @@ function pulseTyping(env, chatId, times = 4, intervalMs = 4000) {
 /* ───────────────────── CF Vision (безкоштовно) ───────────────────── */
 async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
   if (!env.CLOUDFLARE_API_TOKEN || !env.CF_ACCOUNT_ID) throw new Error("CF credentials missing");
-  const model = "@cf/llama-3.2-11b-vision-instruct";
+  const model = env.CF_VISION_MODEL || "@cf/llama-3.2-11b-vision-instruct";
   const url = `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/ai/run/${model}`;
 
   const messages = [{
@@ -204,8 +204,7 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   try {
     const resp = await cfVisionDescribe(env, url, prompt, lang);
     await sendPlain(env, chatId, `🖼️ ${resp}`);
-  } catch (e) {
-    // дружній фолбек
+  } catch {
     const connectUrl = abs(env, "/auth/drive");
     await sendPlain(
       env,
@@ -218,16 +217,18 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
 }
 
 /* ───────────────────── SystemHint ───────────────────── */
-async function buildSystemHint(env, chatId, userId, preferredLang) {
+async function buildSystemHint(env, chatId, userId, preferredLang, { code }) {
   const statut = String((await readStatut(env)) || "").trim();
   const dlg = await buildDialogHint(env, userId);
   const tune = await loadSelfTune(env, chatId, { preferredLang }).catch(() => null);
 
-  const core = `You are Senti — a thoughtful, self-improving single-persona assistant and companion.
+  const baseCore = `You are Senti — a thoughtful, self-improving single-persona assistant and companion.
 - Never claim to be an AI, model, chatbot, or a product made by any company.
 - Speak naturally and human-like with warmth and clarity.
-- Prefer concise, practical answers; expand only when asked.
-- When in CODE mode, proactively write COMPLETE, runnable code and keep context across turns.`;
+- Prefer concise, practical answers; expand only when asked.`;
+
+  const codeCore = code ? `
+- You are in CODE MODE: produce COMPLETE, runnable code with clear project structure, file boundaries, and step-by-step reasoning kept internal; do not mention being a model; keep responses in ${preferredLang}.` : "";
 
   let insightsBlock = "";
   try {
@@ -238,7 +239,7 @@ async function buildSystemHint(env, chatId, userId, preferredLang) {
     }
   } catch {}
 
-  const blocks = [core];
+  const blocks = [baseCore + codeCore];
   if (statut) blocks.push(`[Статут/чеклист]\n${statut}`);
   if (tune) blocks.push(`[Self-Tune]\n${tune}`);
   if (insightsBlock) blocks.push(insightsBlock);
@@ -449,7 +450,6 @@ export async function handleTelegramWebhook(req, env) {
     await setCodeMode(env, userId, false); // вихід з code-mode при поверненні до Senti
     return json({ ok: true });
   }
-  // Code-mode: можна підтверджувати коротко, але залишимо тихо — за вимогою мінімум шуму:
   if (textRaw === BTN_CODE || /^code$/i.test(textRaw)) {
     await setCodeMode(env, userId, true);
     return json({ ok: true });
@@ -632,24 +632,23 @@ export async function handleTelegramWebhook(req, env) {
       await pushTurn(env, userId, "user", textRaw);
       await autoUpdateSelfTune(env, userId, lang).catch(() => {});
 
-      // Будуємо єдиний hint (Senti одна особистість)
-      const systemHint = await buildSystemHint(env, chatId, userId, lang);
+      const code = await getCodeMode(env, userId);
+      const systemHint = await buildSystemHint(env, chatId, userId, lang, { code });
       const name = await getPreferredName(env, msg);
       const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
 
-      // Обираємо порядок моделей за Code-mode
-      const code = await getCodeMode(env, userId);
-      const prev = env.MODEL_ORDER;
+      // Тимчасово підміняємо порядок моделей за режимом
+      const prevOrder = env.MODEL_ORDER;
       env.MODEL_ORDER = pickModelOrder(env, { code });
 
       const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand, adminDiag: isAdmin });
 
       // Відновити попередній порядок
-      env.MODEL_ORDER = prev;
+      env.MODEL_ORDER = prevOrder;
 
       await pushTurn(env, userId, "assistant", full);
 
-      // Відправка: sendPlain сам поріже довгі відповіді
+      // Відправка: TG.sendPlain сам поріже довгі відповіді (в т.ч. код)
       if (expand && full.length > short.length) {
         await sendPlain(env, chatId, full);
       } else {
