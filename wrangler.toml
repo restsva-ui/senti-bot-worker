@@ -43,14 +43,14 @@ TIMEZONE = "Europe/Kyiv"
 DIAG_TAGS = "on"
 
 # --- Порядок fallback-моделей (runtime дефолт) ---
-# (Корисно як загальний бекап. У роутері все одно береться MODEL_ORDER_TEXT / MODEL_ORDER_CODE)
-MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, openrouter:deepseek/deepseek-chat, free:meta-llama/llama-4-scout:free"
+MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, free:meta-llama/llama-4-scout:free"
 
-# --- Окремі порядки для тексту/коду (зберігаються у vars) ---
-# Текст: якщо є GEMINI_API_KEY — Gemini першим; далі стабільний CF qwen2.5-7b; потім валідний free-фолбек.
+# --- Окремі порядки для тексту/коду ---
 MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, free:meta-llama/llama-4-scout:free"
-# Код: безкоштовний OpenRouter qwen3-coder, потім CF qwen2.5-7b, потім валідний free-фолбек.
-MODEL_ORDER_CODE = "openrouter:qwen/qwen3-coder:free, cf:@cf/qwen/qwen2.5-7b-instruct, free:meta-llama/llama-4-scout:free"
+
+# ВАЖЛИВО: прибираємо free з першого місця!
+MODEL_ORDER_CODE = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, free:meta-llama/llama-4-scout:free"
+
 
 # --- Дефолтні моделі (необов'язково) ---
 GEMINI_MODEL = "gemini-2.5-flash"
