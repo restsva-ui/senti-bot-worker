@@ -4,21 +4,17 @@ import { abs } from "../utils/url.js";
 /* ───────────────────── КНОПКИ ───────────────────── */
 export const BTN_DRIVE = "Google Drive";
 export const BTN_SENTI = "Senti";
-export const BTN_LEARN = "Learn";   // показуємо тільки адмінам
+export const BTN_LEARN = "Learn";
 export const BTN_ADMIN = "Admin";
-export const BTN_CODE  = "Code";    // одна кнопка для ввімкнення код-режиму
+export const BTN_CODE  = "Code";
 
 /* ───────────────── ГОЛОВНА КЛАВІАТУРА ───────────── */
-export const mainKeyboard = (isAdmin = false) => {
-  // 1-й ряд: базові кнопки (+ Code для адміна)
-  const row1 = [{ text: BTN_DRIVE }, { text: BTN_SENTI }];
-  if (isAdmin) row1.push({ text: BTN_CODE });
-
+export const mainKeyboard = (isAdmin = false, codeMode = false) => {
+  const row1 = [{ text: BTN_DRIVE }];
+  if (codeMode) row1.push({ text: BTN_SENTI });
+  else row1.push({ text: BTN_CODE });
   const rows = [row1];
-
-  // 2-й ряд: Learn + Admin (лише для адміна)
   if (isAdmin) rows.push([{ text: BTN_LEARN }, { text: BTN_ADMIN }]);
-
   return { keyboard: rows, resize_keyboard: true };
 };
 
@@ -48,139 +44,90 @@ export function energyLinks(env, userId) {
   };
 }
 
-/* ─────────────── РОЗУМНЕ НАРІЗАННЯ ДОВГИХ ТЕКСТІВ ───────────────
-   Telegram має ліміт ~4096 символів на повідомлення.
-   Ми ріжемо з запасом (3900) і намагаємось знайти "мʼяку" межу:
-   спершу \n\n, потім \n, потім пробіл; якщо нічого — жорсткий зріз.
------------------------------------------------------------------- */
+/* ─────────────── РОЗУМНЕ НАРІЗАННЯ ТЕКСТІВ ─────────────── */
 function splitForTelegram(text = "", limit = 3900) {
   const s = String(text ?? "");
   if (s.length <= limit) return [s];
-
   const chunks = [];
   let rest = s;
   while (rest.length > limit) {
     let cut = rest.lastIndexOf("\n\n", limit);
     if (cut < 0) cut = rest.lastIndexOf("\n", limit);
     if (cut < 0) cut = rest.lastIndexOf(" ", limit);
-    if (cut < 0 || cut < limit * 0.6) cut = limit; // жорсткий зріз, якщо "мʼякої" межі близько нема
+    if (cut < 0 || cut < limit * 0.6) cut = limit;
     chunks.push(rest.slice(0, cut));
-    rest = rest.slice(cut).replace(/^\s+/, ""); // прибрати початкові пробіли/переноси
+    rest = rest.slice(cut).replace(/^\s+/, "");
   }
   if (rest) chunks.push(rest);
   return chunks;
 }
 
-/* ───────────────────── ВІДПРАВКА ТЕКСТУ ───────────
-   ТЕПЕР: автоматично ділить довгі відповіді на серію повідомлень.
-   reply_markup (клавіатура) додається лише в ПЕРШЕ повідомлення.  */
+/* ───────────────────── ВІДПРАВКА ТЕКСТУ ─────────── */
 export async function sendPlain(env, chatId, text, extra = {}) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
-
-  const chunks = splitForTelegram(text, 3900); // трохи менше 4096 для безпеки
+  const chunks = splitForTelegram(text, 3900);
   for (let i = 0; i < chunks.length; i++) {
     const body = {
       chat_id: chatId,
       text: chunks[i],
       disable_web_page_preview: true,
+      parse_mode: extra.parse_mode || "Markdown",
     };
-    if (extra.parse_mode)  body.parse_mode  = extra.parse_mode;
-    // клавіатуру даємо лише для першого повідомлення, щоб не дублювати
     if (i === 0 && extra.reply_markup) body.reply_markup = extra.reply_markup;
-
     try {
       await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-    } catch {
-      // проковтнути, щоб не падала вся відповідь; в адмін-каналі помилки ловляться вище
-    }
+    } catch {}
   }
 }
 
-/* ──────────────── ДІЇ ЧАТУ (typing/uploading) ───── */
+/* ──────────────── ДІЇ ЧАТУ ─────────────── */
 export async function sendChatAction(env, chatId, action = "typing") {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
-  const url = `https://api.telegram.org/bot${token}/sendChatAction`;
-  const body = { chat_id: chatId, action };
   try {
-    await fetch(url, {
+    await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ chat_id: chatId, action }),
     });
   } catch {}
 }
 
-/** Обгортач: увімкнути "друкує…" на час довгої операції */
 export async function withTyping(env, chatId, fn, { pingMs = 4000 } = {}) {
   let alive = true;
-  // миттєвий ping
   sendChatAction(env, chatId, "typing").catch(()=>{});
-  // періодичні пінги, доки триває операція
   const timer = setInterval(() => {
     if (!alive) return clearInterval(timer);
     sendChatAction(env, chatId, "typing").catch(()=>{});
   }, Math.max(2000, pingMs));
-  try {
-    return await fn();
-  } finally {
-    alive = false;
-    clearInterval(timer);
-  }
+  try { return await fn(); }
+  finally { alive = false; clearInterval(timer); }
 }
 
-/** Обгортач: індикатор “йде завантаження…” */
-export async function withUploading(env, chatId, fn, { action = "upload_document", pingMs = 4000 } = {}) {
-  let alive = true;
-  sendChatAction(env, chatId, action).catch(()=>{});
-  const timer = setInterval(() => {
-    if (!alive) return clearInterval(timer);
-    sendChatAction(env, chatId, action).catch(()=>{});
-  }, Math.max(2000, pingMs));
-  try {
-    return await fn();
-  } finally {
-    alive = false;
-    clearInterval(timer);
-  }
-}
-
-/* ───────────── Спінер через редагування повідомлення ────────────
-   (опційно; дає UX на кшталт GPT — "Думаю…" з крапками)
-*/
+/* ───────────── Спінер "Думаю…" ─────────── */
 export async function startSpinner(env, chatId, base = "Думаю над відповіддю") {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
-
   async function send(text) {
-    try {
-      const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text })
-      });
-      const j = await r.json().catch(()=>null);
-      return j?.result?.message_id || null;
-    } catch { return null; }
+    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text })
+    });
+    const j = await r.json().catch(()=>null);
+    return j?.result?.message_id || null;
   }
-
   async function edit(message_id, text) {
     if (!message_id) return;
-    try {
-      await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, message_id, text })
-      });
-    } catch {}
+    await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, message_id, text })
+    }).catch(()=>{});
   }
-
   const messageId = await send(base + "…");
   if (!messageId) return { stop: async () => {} };
-
   let i = 0, alive = true;
   const dots = ["", ".", "..", "..."];
   const timer = setInterval(() => {
@@ -188,7 +135,6 @@ export async function startSpinner(env, chatId, base = "Думаю над від
     i = (i + 1) % dots.length;
     edit(messageId, base + dots[i]);
   }, 1200);
-
   return {
     stop: async (finalText) => {
       alive = false; clearInterval(timer);
@@ -198,7 +144,7 @@ export async function startSpinner(env, chatId, base = "Думаю над від
   };
 }
 
-/* ───────────────────── Розбір /ai ────────────────── */
+/* ──────────────── Парсер /ai ─────────────── */
 export function parseAiCommand(text = "") {
   const s = String(text).trim();
   const m = s.match(/^\/ai(?:@[\w_]+)?(?:\s+([\s\S]+))?$/i);
@@ -206,7 +152,7 @@ export function parseAiCommand(text = "") {
   return (m[1] || "").trim();
 }
 
-/* ─────────────────── Експорт one-stop TG ─────────── */
+/* ──────────────── Експорт ─────────────── */
 export const TG = {
   BTN_DRIVE,
   BTN_SENTI,
@@ -219,9 +165,7 @@ export const TG = {
   sendPlain,
   parseAiCommand,
   askLocationKeyboard,
-  // нові
   sendChatAction,
   withTyping,
-  withUploading,
   startSpinner,
 };
