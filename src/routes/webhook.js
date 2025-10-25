@@ -405,7 +405,7 @@ export async function handleTelegramWebhook(req, env) {
       uk: "✅ Локацію збережено. Тепер я можу показувати погоду для вашого місця.",
       ru: "✅ Локация сохранена. Теперь я смогу показывать погоду для вашего места.",
       en: "✅ Location saved. I can now show weather for your area.",
-      de: "✅ Standort gespeichert. Ich kann dir jetzt Wetter für deinen Ort zeigen.",
+      de: "✅ Standort gespeichert. Ich kann dir jetzt Wetter для deinen Ort zeigen.",
       fr: "✅ Position enregistrée. Je peux maintenant afficher la météo pour ta zone.",
     };
     const ok = okMap[(msg?.from?.language_code || lang || "uk").slice(0,2)] || okMap.uk;
