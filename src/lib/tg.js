@@ -9,8 +9,7 @@ export const BTN_ADMIN = "Admin";
 export const BTN_CODE  = "Code";
 
 /* ───────────────── ГОЛОВНА КЛАВІАТУРА ─────────────
-   ВАЖЛИВО: і Senti, і Code показуємо завжди, щоб не губилися.
-   «Code» просто вмикає код-режим, «Senti» його вимикає.
+   «Code» вмикає код-режим, «Senti» його вимикає (повернення до базового).
 */
 export const mainKeyboard = (isAdmin = false) => {
   const row1 = [{ text: BTN_DRIVE }, { text: BTN_SENTI }, { text: BTN_CODE }];
@@ -45,42 +44,174 @@ export function energyLinks(env, userId) {
   };
 }
 
-/* ───────────────────── ХЕЛПЕР РОЗБИТТЯ ────────────
-   - maxLen: 4096 для plain, 1024 для MarkdownV2/HTML (з запасом).
-   - намагаємось різати по \n, потім по пробілах, інакше — жорстко.
-   - НЕ додаємо parse_mode до всіх шматків, лише до першого (щоб не ламати code-block на межі).
-*/
-function splitForTelegram(text = "", parse_mode) {
+/* ───────────────────── ХЕЛПЕРИ СПЛІТУ ───────────────────── */
+
+/** Пошук безпечного розрізу для plain/Markdown: \n, далі пробіл, інакше жорстко. */
+function findSoftCut(s, limit, minSoft = 400) {
+  let cut = s.lastIndexOf("\n", limit);
+  if (cut < 0 || cut < limit - minSoft) cut = s.lastIndexOf(" ", limit);
+  if (cut < 0 || cut < limit - minSoft) cut = limit;
+  return cut;
+}
+
+/** Примітивний сканер HTML, щоб не різати всередині тегу. */
+function findHtmlSafeCut(s, limit, minSoft = 200) {
+  // шукаємо позицію <= limit, де не всередині <...>
+  let inTag = false, quote = null;
+  let lastSafe = -1;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (!inTag) {
+      if (ch === "<") { inTag = true; quote = null; }
+      // запам'ятовуємо "приємні" місця різу
+      if (i <= limit) {
+        if (s[i] === "\n") lastSafe = i;
+        else if (s[i] === " ") lastSafe = Math.max(lastSafe, i);
+      }
+    } else {
+      if (quote) {
+        // вихід з лапок
+        if (ch === quote) quote = null;
+      } else {
+        if (ch === '"' || ch === "'") quote = ch;
+        else if (ch === ">") inTag = false;
+      }
+    }
+    if (i === limit) break;
+  }
+  // якщо останній safe занадто далеко, повертаємось до plain-логіки
+  if (lastSafe < 0 || lastSafe < limit - minSoft) lastSafe = limit;
+  return lastSafe;
+}
+
+/** Спліт Markdown з повагою до ```кодблоків```; дуже довгі блоки — ріжемо з повторними огорожами. */
+function splitMarkdownSmart(text, maxLen = 3900) {
   const s = String(text || "");
-  if (!s) return [""];
-  const hardMax = parse_mode ? 1000 : 3900; // запас від 4096/1024
-  if (s.length <= hardMax) return [s];
+  if (s.length <= maxLen) return [s];
+
+  const fenceRx = /```([a-z0-9_+\-.]*)\s*([\s\S]*?)```/gi;
+  const parts = [];
+  let last = 0, m;
+
+  while ((m = fenceRx.exec(s)) != null) {
+    const before = s.slice(last, m.index);
+    if (before) parts.push({ type: "text", body: before });
+    const lang = m[1] || "";
+    const body = m[2] || "";
+    parts.push({ type: "code", lang, body });
+    last = fenceRx.lastIndex;
+  }
+  if (last < s.length) parts.push({ type: "text", body: s.slice(last) });
 
   const out = [];
-  let rest = s;
-  while (rest.length) {
-    if (rest.length <= hardMax) { out.push(rest); break; }
-    // Спершу шукаємо \n у вікні
-    let cut = rest.lastIndexOf("\n", hardMax);
-    if (cut < 0 || cut < hardMax - 400) {
-      // потім пробіли
-      cut = rest.lastIndexOf(" ", hardMax);
+  let buf = "";
+
+  function flush(force = false) {
+    if (!buf) return;
+    if (force || buf.length >= maxLen) {
+      // нарізаємо buf на «мʼяких» межах
+      let rest = buf;
+      while (rest.length > maxLen) {
+        const cut = findSoftCut(rest, maxLen);
+        out.push(rest.slice(0, cut).trimEnd());
+        rest = rest.slice(cut).trimStart();
+      }
+      if (rest) out.push(rest);
+      buf = "";
     }
-    if (cut < 0 || cut < hardMax - 400) {
-      cut = hardMax;
-    }
-    out.push(rest.slice(0, cut).trimEnd());
-    rest = rest.slice(cut).trimStart();
   }
+
+  for (const p of parts) {
+    if (p.type === "text") {
+      // додаємо текст до буфера
+      if ((buf + p.body).length > maxLen) flush(true);
+      buf += (buf ? "" : "") + p.body;
+      if (buf.length > maxLen) flush(true);
+    } else {
+      // code-блок: спочатку виштовхнемо буфер
+      flush(true);
+      const full = "```" + (p.lang || "") + "\n" + p.body + "\n```";
+      if (full.length <= maxLen) {
+        out.push(full);
+      } else {
+        // дуже великий блок — ріжемо усередині, огортаємо кожен шматок окремими ```
+        let rest = p.body;
+        while (rest.length) {
+          // намагаємось різати по новому рядку
+          const sliceLimit = Math.max(100, maxLen - 16 - (p.lang ? p.lang.length : 0));
+          let cut = rest.lastIndexOf("\n", sliceLimit);
+          if (cut < 0 || cut < sliceLimit * 0.6) cut = sliceLimit;
+          const chunk = rest.slice(0, cut);
+          out.push("```" + (p.lang || "") + "\n" + chunk + "\n```");
+          rest = rest.slice(cut).replace(/^\s+/, "");
+        }
+      }
+    }
+  }
+  flush(true);
   return out;
 }
-/* ───────────────────── ВІДПРАВКА ТЕКСТУ ─────────── */
+
+/** Загальний спліттер: обирає режим на основі parse_mode та наявності ``` */
+function splitForTelegramSmart(text = "", parse_mode) {
+  const s = String(text || "");
+  const hardMax = parse_mode ? 1000 : 3900; // запас від офіційних 1024/4096
+  if (!s) return [""];
+  // Markdown з кодблоками
+  if (!parse_mode && s.includes("```")) {
+    const mdChunks = splitMarkdownSmart(s, 3900);
+    // перестраховка: якщо раптом якийсь > 3900 — розріжемо plain-логікою
+    const repaired = [];
+    for (const c of mdChunks) {
+      if (c.length <= 3900) repaired.push(c);
+      else {
+        let rest = c;
+        while (rest.length) {
+          const cut = findSoftCut(rest, 3900);
+          repaired.push(rest.slice(0, cut).trimEnd());
+          rest = rest.slice(cut).trimStart();
+        }
+      }
+    }
+    return repaired;
+  }
+
+  // HTML: не ріжемо в середині тегів
+  if (parse_mode === "HTML") {
+    if (s.length <= 1000) return [s];
+    const chunks = [];
+    let rest = s;
+    while (rest.length) {
+      if (rest.length <= 1000) { chunks.push(rest); break; }
+      const cut = findHtmlSafeCut(rest, 1000, 200);
+      chunks.push(rest.slice(0, cut).trimEnd());
+      rest = rest.slice(cut).trimStart();
+    }
+    return chunks;
+  }
+
+  // MarkdownV2 або plain без кодблоків
+  const limit = parse_mode === "MarkdownV2" ? 1000 : 3900;
+  if (s.length <= limit) return [s];
+  const chunks = [];
+  let rest = s;
+  while (rest.length) {
+    if (rest.length <= limit) { chunks.push(rest); break; }
+    const cut = findSoftCut(rest, limit);
+    chunks.push(rest.slice(0, cut).trimEnd());
+    rest = rest.slice(cut).trimStart();
+  }
+  return chunks;
+}
+/* ───────────────────── ВІДПРАВКА ТЕКСТУ ───────────
+   - Авто-спліт на серію повідомлень (Markdown/HTML-safe).
+   - reply_markup додається тільки до ПЕРШОГО повідомлення.
+*/
 export async function sendPlain(env, chatId, text, extra = {}) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
 
-  // Розбиваємо довгі повідомлення на декілька
-  const chunks = splitForTelegram(text, extra?.parse_mode);
+  const chunks = splitForTelegramSmart(text, extra?.parse_mode);
 
   for (let i = 0; i < chunks.length; i++) {
     const body = {
@@ -88,10 +219,10 @@ export async function sendPlain(env, chatId, text, extra = {}) {
       text: chunks[i],
       disable_web_page_preview: true,
     };
-    // parse_mode даємо лише першому шматку, щоб не ламати Markdown/HTML на межах
-    if (i === 0 && extra.parse_mode)  body.parse_mode  = extra.parse_mode;
-    // reply_markup додаємо лише якщо 1 повідомлення, аби клавіатура не дублювалась
-    if (i === 0 && extra.reply_markup && chunks.length === 1) body.reply_markup = extra.reply_markup;
+    // parse_mode: даємо кожному шматку, бо ми вже розрізали безпечно для обраного режиму
+    if (extra.parse_mode) body.parse_mode = extra.parse_mode;
+    // клавіатура — лише у першому шматку (щоб не дублювати)
+    if (i === 0 && extra.reply_markup) body.reply_markup = extra.reply_markup;
 
     try {
       await fetch(url, {
@@ -122,9 +253,7 @@ export async function sendChatAction(env, chatId, action = "typing") {
 /** Обгортач: увімкнути "друкує…" на час довгої операції */
 export async function withTyping(env, chatId, fn, { pingMs = 4000 } = {}) {
   let alive = true;
-  // миттєвий ping
   sendChatAction(env, chatId, "typing").catch(()=>{});
-  // періодичні пінги, доки триває операція
   const timer = setInterval(() => {
     if (!alive) return clearInterval(timer);
     sendChatAction(env, chatId, "typing").catch(()=>{});
@@ -228,3 +357,4 @@ export const TG = {
   withUploading,
   startSpinner,
 };
+ 
