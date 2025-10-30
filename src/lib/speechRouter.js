@@ -1,7 +1,8 @@
 // src/lib/speechRouter.js
-// STT router v3.2
-// ✔ Telegram-voice-фікси: sniff заголовка (OggS/ID3/ftyp), коректний MIME,
-//   CF fallback field: file→audio, Gemini v1↔v1beta, -latest↔без.
+// STT router v3.3
+// ✔ Телеграм-voice фікси: sniff заголовка (OggS/ID3/ftyp), коректний MIME,
+//   FORCE_AUDIO_TYPE через env, CF fallback field: file→audio,
+//   Gemini v1↔v1beta, -latest↔без.
 // ✔ Каскад: Cloudflare → Gemini → OpenRouter → FREE (OpenAI-compat).
 
 /* ───────────── Utils ───────────── */
@@ -20,20 +21,10 @@ function guessLang(s = "") {
   return "en";
 }
 
-async function fetchWithType(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`stt: fetch ${r.status}`);
-  const ab = await r.arrayBuffer();
-  // Telegram часто віддає octet-stream; визначаємо тип самі
-  const sniffed = sniffAudioType(new Uint8Array(ab));
-  const ct = r.headers.get("content-type") || sniffed || "application/octet-stream";
-  return { ab, contentType: normalizeMime(ct, new Uint8Array(ab)) };
-}
-
 /* ───────────── MIME helpers ───────────── */
 // Визначаємо реальний тип за «магічними» байтами
 function sniffAudioType(u8) {
-  if (!u8 || u8.length < 4) return "";
+  if (!u8 || u8.length < 8) return "";
   // OGG/Opus: "OggS"
   if (u8[0] === 0x4f && u8[1] === 0x67 && u8[2] === 0x67 && u8[3] === 0x53)
     return "audio/ogg; codecs=opus";
@@ -47,7 +38,7 @@ function sniffAudioType(u8) {
   return "";
 }
 
-// Виправляємо «Octet-stream» і добудовуємо codecs для OGG
+// Виправляємо «octet-stream» і добудовуємо codecs для OGG
 function normalizeMime(ct, u8) {
   let t = (ct || "").toLowerCase();
   const sniff = sniffAudioType(u8);
@@ -56,12 +47,28 @@ function normalizeMime(ct, u8) {
   return t;
 }
 
+async function fetchWithType(url, env) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`stt: fetch ${r.status}`);
+  const ab = await r.arrayBuffer();
+  const u8 = new Uint8Array(ab);
+
+  // 1) env override → 2) header → 3) sniff → 4) safe default
+  const forced = (env && env.FORCE_AUDIO_TYPE) ? String(env.FORCE_AUDIO_TYPE) : "";
+  const header = r.headers.get("content-type") || "";
+  const sniffed = sniffAudioType(u8);
+  const initial = forced || header || sniffed || "application/octet-stream";
+  const contentType = normalizeMime(initial, u8);
+
+  return { ab, contentType };
+}
+
 /* ───────────── OpenAI-compat (OpenRouter / FREE) ───────────── */
-async function transcribeViaOpenAICompat({ baseUrl, apiKey, model, fileUrl, extraHeaders = {} }) {
+async function transcribeViaOpenAICompat({ baseUrl, apiKey, model, fileUrl, env, extraHeaders = {} }) {
   if (!baseUrl) throw new Error("stt: compat baseUrl missing");
-  const { ab, contentType } = await fetchWithType(fileUrl);
+  const { ab, contentType } = await fetchWithType(fileUrl, env);
   const form = new FormData();
-  form.append("file", new Blob([ab], { type: contentType }), "voice");
+  form.append("file", new Blob([ab], { type: contentType }), "voice.ogg");
   form.append("model", model || "whisper-1");
 
   const r = await fetch(baseUrl.replace(/\/+$/, "") + "/v1/audio/transcriptions", {
@@ -79,10 +86,10 @@ async function transcribeViaOpenAICompat({ baseUrl, apiKey, model, fileUrl, extr
 }
 
 /* ───────────── Cloudflare Whisper (@cf/openai/whisper) ───────────── */
-async function cfWhisperOnce({ acc, token, fileUrl, fieldName }) {
-  const { ab, contentType } = await fetchWithType(fileUrl);
+async function cfWhisperOnce({ acc, token, fileUrl, fieldName, env }) {
+  const { ab, contentType } = await fetchWithType(fileUrl, env);
   const form = new FormData();
-  form.append(fieldName, new Blob([ab], { type: contentType }), "voice");
+  form.append(fieldName, new Blob([ab], { type: contentType }), "voice.ogg");
   const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/@cf/openai/whisper`;
   const r = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
   const data = await r.json().catch(() => null);
@@ -101,32 +108,36 @@ async function cfWhisperOnce({ acc, token, fileUrl, fieldName }) {
 async function transcribeViaCloudflare(env, fileUrl) {
   const acc = env.CF_ACCOUNT_ID, token = env.CLOUDFLARE_API_TOKEN;
   if (!acc || !token) throw new Error("stt: cf creds missing");
-  try { return await cfWhisperOnce({ acc, token, fileUrl, fieldName: "file" }); }
+  try { return await cfWhisperOnce({ acc, token, fileUrl, fieldName: "file", env }); }
   catch (e) {
     // Якщо 4xx / invalid audio → спробуємо поле "audio"
     if ((e && e.status && e.status < 500) || /invalid audio/i.test(String(e.message))) {
-      return await cfWhisperOnce({ acc, token, fileUrl, fieldName: "audio" });
+      return await cfWhisperOnce({ acc, token, fileUrl, fieldName: "audio", env });
     }
     throw e;
   }
 }
+
 /* ───────────── Gemini (inline audio parts) ───────────── */
 function normGeminiModel(m) {
+  // Безпечний дефолт без суфікса -latest (щоб уникати "model not found")
   let model = (m || "").trim();
-  if (!model) model = "gemini-1.5-flash-latest";
-  if (/^gemini-1\.5-(pro|flash)\b/i.test(model) && !/-latest\b/i.test(model)) model += "-latest";
-  if (!/^gemini-/.test(model)) model = "gemini-1.5-flash-latest";
+  if (!model) model = "gemini-1.5-flash";
+  if (/^gemini-1\.5-(pro|flash)\b/i.test(model) && /-latest\b/i.test(model)) {
+    model = model.replace(/-latest\b/i, "");
+  }
+  if (!/^gemini-/.test(model)) model = "gemini-1.5-flash";
   return model;
 }
 function geminiBaseFor(model) {
-  // 1.5 зазвичай доступний у v1, але аудіо інколи працює лише у v1beta
+  // 1.5 зазвичай у v1; інколи аудіо приймається лише у v1beta — пробуємо обидва
   return /^gemini-1\.5-/i.test(model)
     ? "https://generativelanguage.googleapis.com/v1"
     : "https://generativelanguage.googleapis.com/v1beta";
 }
 
-async function geminiOnce({ key, model, fileUrl, apiBase }) {
-  const { ab, contentType } = await fetchWithType(fileUrl);
+async function geminiOnce({ key, model, fileUrl, apiBase, env }) {
+  const { ab, contentType } = await fetchWithType(fileUrl, env);
   const b64 = bufToBase64(ab);
   const url = `${apiBase}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
   const body = {
@@ -152,27 +163,24 @@ async function geminiOnce({ key, model, fileUrl, apiBase }) {
 async function transcribeViaGemini(env, fileUrl) {
   const key = env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY;
   if (!key) throw new Error("stt: gemini key missing");
+
   let model = normGeminiModel(env.GEMINI_STT_MODEL);
   let base = geminiBaseFor(model);
 
-  try { return await geminiOnce({ key, model, fileUrl, apiBase: base }); }
+  // a) configured (без -latest)
+  try { return await geminiOnce({ key, model, fileUrl, apiBase: base, env }); }
   catch (e1) {
-    // v1 ↔ v1beta
+    // b) v1 ↔ v1beta
     const altBase = base.includes("/v1beta") ? "https://generativelanguage.googleapis.com/v1"
                                              : "https://generativelanguage.googleapis.com/v1beta";
-    try { return await geminiOnce({ key, model, fileUrl, apiBase: altBase }); }
+    try { return await geminiOnce({ key, model, fileUrl, apiBase: altBase, env }); }
     catch (e2) {
-      // -latest → без -latest (іноді каталоги моделей відстають)
-      if (/-latest\b/i.test(model)) {
-        try {
-          const m2 = model.replace(/-latest\b/i, "");
-          return await geminiOnce({ key, model: m2, fileUrl, apiBase: "https://generativelanguage.googleapis.com/v1" });
-        } catch (e3) { /* fallthrough */ }
-      }
-      // Безпечні дефолти
-      const candidates = ["gemini-1.5-pro", "gemini-1.5-flash"];
+      // c) Спробувати явні варіанти
+      const candidates = ["gemini-1.5-flash", "gemini-1.5-pro"];
       for (const m of candidates) {
-        try { return await geminiOnce({ key, model: m, fileUrl, apiBase: "https://generativelanguage.googleapis.com/v1beta" }); }
+        try { return await geminiOnce({ key, model: m, fileUrl, apiBase: "https://generativelanguage.googleapis.com/v1", env }); }
+        catch (_) {}
+        try { return await geminiOnce({ key, model: m, fileUrl, apiBase: "https://generativelanguage.googleapis.com/v1beta", env }); }
         catch (_) {}
       }
       throw e2;
@@ -200,6 +208,7 @@ export async function transcribeVoice(env, fileUrl) {
         apiKey: env.OPENROUTER_API_KEY,
         model: "openai/whisper-large-v3",
         fileUrl,
+        env,
         extraHeaders: {
           "HTTP-Referer": env.OPENROUTER_SITE_URL || env.OPENROUTER_SITE || "https://senti.restsva.app",
           "X-Title": env.OPENROUTER_APP_NAME || "Senti Bot Worker",
@@ -216,6 +225,7 @@ export async function transcribeVoice(env, fileUrl) {
         apiKey: env.FREE_STT_API_KEY || "",
         model: env.FREE_STT_MODEL || "whisper-1",
         fileUrl,
+        env,
       });
     } catch (e) { errors.push(String(e?.message || e)); }
   }
