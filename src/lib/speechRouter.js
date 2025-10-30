@@ -1,8 +1,8 @@
 // src/lib/speechRouter.js
-// STT router v3.3
+// STT router v3.4
 // ✔ Telegram-voice фікси: sniff магічних байтів (OggS/ID3/ftyp), форс MIME,
-//   безпечні імена файлів ("voice.ogg"), CF field=file→fallback, Gemini v1↔v1beta,
-//   -latest↔без, multi-MIME ретрай для CF.
+//   безпечні імена файлів ("voice.ogg"), CF field=file→fallback, multi-MIME ретраї,
+//   Gemini v1↔v1beta, правильна назва моделі -001 для STT.
 // ✔ Каскад: Cloudflare → Gemini → OpenRouter → FREE (OpenAI-compat).
 
 /* ───────────── Utils ───────────── */
@@ -109,7 +109,7 @@ async function transcribeViaCloudflare(env, fileUrl) {
   const acc = env.CF_ACCOUNT_ID, token = env.CLOUDFLARE_API_TOKEN;
   if (!acc || !token) throw new Error("stt: cf creds missing");
 
-  // 1) file + detected MIME
+  // 1) file + detected/forced MIME
   try { return await cfWhisperOnce({ acc, token, fileUrl, env, fieldName: "file", mimeVariant: "auto" }); }
   catch (e1) {
     // 2) file + "audio/ogg" (деякі акаунти не люблять codecs=opus)
@@ -127,14 +127,14 @@ async function transcribeViaCloudflare(env, fileUrl) {
 /* ───────────── Gemini (inline audio parts) ───────────── */
 function normGeminiModel(m) {
   let model = (m || "").trim();
-  if (!model) model = "gemini-1.5-flash";             // стабільний дефолт
-  if (/^gemini-1\.5-(pro|flash)\b/i.test(model) && /-latest\b/i.test(model)) {
-    model = model.replace(/-latest\b/i, "");          // у STT часто більш стабільно без -latest
-  }
-  if (!/^gemini-/.test(model)) model = "gemini-1.5-flash";
+  // Стабільний STT саме на -001
+  if (!model) model = "gemini-1.5-flash-001";
+  if (/^gemini-1\.5-(pro|flash)\b(?!-001)\b/i.test(model)) model = model + "-001";
+  if (!/^gemini-/.test(model)) model = "gemini-1.5-flash-001";
   return model;
 }
 function geminiBaseFor(model) {
+  // 1.5 — як правило v1; у разі помилки зробимо ретрай на v1beta
   return /^gemini-1\.5-/i.test(model)
     ? "https://generativelanguage.googleapis.com/v1"
     : "https://generativelanguage.googleapis.com/v1beta";
@@ -171,16 +171,14 @@ async function transcribeViaGemini(env, fileUrl) {
   let model = normGeminiModel(env.GEMINI_STT_MODEL);
   let base = geminiBaseFor(model);
 
-  // a) base
   try { return await geminiOnce({ key, model, fileUrl, apiBase: base, env }); }
   catch (e1) {
-    // b) v1 ↔ v1beta
     const altBase = base.includes("/v1beta") ? "https://generativelanguage.googleapis.com/v1"
                                              : "https://generativelanguage.googleapis.com/v1beta";
     try { return await geminiOnce({ key, model, fileUrl, apiBase: altBase, env }); }
     catch (e2) {
-      // c) інші стабільні назви
-      const fallbacks = ["gemini-1.5-pro", "gemini-1.5-flash-latest"];
+      // додаткові стабільні назви
+      const fallbacks = ["gemini-1.5-pro-001", "gemini-1.5-flash"];
       for (const m of fallbacks) {
         try { return await geminiOnce({ key, model: m, fileUrl, apiBase: "https://generativelanguage.googleapis.com/v1beta", env }); }
         catch (_) {}
