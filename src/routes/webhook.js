@@ -2,26 +2,29 @@
 // (rev) Без вітального відео; тихе перемикання режимів; фікс мови на /start;
 // перевірка підключення Google Drive; дружній фолбек для медіа в Senti;
 // авто-самотюнінг стилю (мовні профілі) через selfTune.
-// (upd) Vision через каскад моделей askVision() + base64 із Telegram файлів.
+// (upd) Vision через каскад моделей (мультимовний) + base64 із Telegram файлів.
+// (new) Vision Memory у KV: зберігаємо останні 20 фото з описами.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
 import { abs } from "../utils/url.js";
 import { think } from "../lib/brain.js";
 import { readStatut } from "../lib/kvChecklist.js";
-import { askAnyModel, getAiHealthSummary, askVision } from "../lib/modelRouter.js"; // ⬅️ додано askVision
+import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
 import { json } from "../lib/utils.js";
 import { getEnergy, spendEnergy } from "../lib/energy.js";
 import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
-import { loadSelfTune, autoUpdateSelfTune } from "../lib/selfTune.js"; // ⬅️
+import { loadSelfTune, autoUpdateSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
 import { enqueueLearn, listQueued, getRecentInsights } from "../lib/kvLearnQueue.js";
-
 import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from "../apis/time.js";
 import { weatherIntent, weatherSummaryByPlace, weatherSummaryByCoords } from "../apis/weather.js";
 import { setUserLocation, getUserLocation } from "../lib/geo.js";
+
+// ⬇️ мультимовний vision-оркестратор
+import { describeImage } from "../flows/visionDescribe.js";
 
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
 const {
@@ -34,6 +37,32 @@ const {
 const KV = {
   learnMode: (uid) => `learn:mode:${uid}`, // "on" | "off"
 };
+
+// ── Vision Memory у KV ──────────────────────────────────────────────────────
+const VISION_MEM_KEY = (uid) => `vision:mem:${uid}`;
+async function loadVisionMem(env, userId) {
+  try {
+    const raw = await (env.STATE_KV || env.CHECKLIST_KV)?.get(VISION_MEM_KEY(userId), "text");
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+async function saveVisionMem(env, userId, entry) {
+  const kv = env.STATE_KV || env.CHECKLIST_KV;
+  if (!kv) return;
+  try {
+    const arr = await loadVisionMem(env, userId);
+    arr.unshift({
+      id: entry.id,
+      url: entry.url,
+      caption: entry.caption || "",
+      desc: entry.desc || "",
+      ts: Date.now()
+    });
+    // тримаємо останні 20
+    const trimmed = arr.slice(0, 20);
+    await kv.put(VISION_MEM_KEY(userId), JSON.stringify(trimmed), { expirationTtl: 60 * 60 * 24 * 180 }); // 180 днів
+  } catch {}
+}
 
 // ── Telegram UX helpers (індикатор як у GPT) ────────────────────────────────
 async function sendTyping(env, chatId) {
@@ -60,30 +89,7 @@ async function urlToBase64(url) {
   const bytes = new Uint8Array(ab);
   let bin = "";
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  // btoa працює в Workers для бінарного рядка
-  return btoa(bin);
-}
-
-// ── Vision через каскад моделей (askVision) ─────────────────────────────────
-async function visionDescribe(env, { imageUrl, userPrompt = "", lang = "uk", systemHint }) {
-  // Визначаємо порядок моделей: спеціальний для vision або загальний
-  const modelOrder =
-    String(env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "@cf/meta/llama-3.2-11b-vision-instruct").trim();
-
-  // Telegram → base64
-  const imageBase64 = await urlToBase64(imageUrl);
-  const prompt = `${userPrompt || "Опиши зображення коротко і по суті."} Відповідай ${lang.toUpperCase()} мовою.`;
-
-  // askVision нормалізує провайдери: gemini / cf / openrouter(:free) і т.д.
-  const out = await askVision(
-    env,
-    modelOrder,
-    prompt,
-    { systemHint, imageBase64, imageMime: "image/jpeg", temperature: 0.2 }
-  );
-
-  // askVision повертає текст (для cf/gemini) — забезпечимо рядок
-  return String(out || "").trim();
+  return btoa(bin); // btoa працює в Workers для бінарного рядка
 }
 
 // ── Media helpers ───────────────────────────────────────────────────────────
@@ -177,7 +183,8 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   });
   return true;
 }
-// Vision-режим
+
+// Vision-режим (мультимовний + пам'ять)
 async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const att = pickPhoto(msg);
   if (!att) return false;
@@ -194,18 +201,24 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   pulseTyping(env, chatId);
 
   const url = await tgFileUrl(env, att.file_id);
-  const prompt = caption || "Опиши, що на зображенні, коротко і по суті.";
+  const imageBase64 = await urlToBase64(url);
+  const prompt = caption || (lang.startsWith("uk") ? "Опиши, що на зображенні, коротко і по суті." : "Describe the image briefly and to the point.");
 
   try {
-    // Подаємо systemHint, щоб відповідь відповідала стилю/мові Senti
-    const systemHint = await buildSystemHint(env, chatId, userId, lang);
-    const resp = await visionDescribe(env, { imageUrl: url, userPrompt: prompt, lang, systemHint });
-    await sendPlain(env, chatId, `🖼️ ${resp}`);
+    // SystemHint будується всередині describeImage() з урахуванням мови користувача.
+    const { text } = await describeImage(env, {
+      chatId, tgLang: msg.from?.language_code, imageBase64, question: prompt,
+      modelOrder: (env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "@cf/meta/llama-3.2-11b-vision-instruct")
+    });
+
+    // збережемо в пам'ять vision
+    await saveVisionMem(env, userId, { id: att.file_id, url, caption, desc: text });
+
+    await sendPlain(env, chatId, `🖼️ ${text}`);
   } catch (e) {
     if (ADMIN(env, userId)) {
       await sendPlain(env, chatId, `❌ Vision error: ${String(e.message || e).slice(0, 180)}`);
     } else {
-      // дружній фолбек
       const connectUrl = abs(env, "/auth/drive");
       await sendPlain(
         env,
@@ -219,10 +232,10 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
 }
 
 // ── SystemHint ───────────────────────────────────────────────────────────────
-async function buildSystemHint(env, chatId, userId, preferredLang) { // ⬅️ додано preferredLang
+async function buildSystemHint(env, chatId, userId, preferredLang) {
   const statut = String((await readStatut(env)) || "").trim();
   const dlg = await buildDialogHint(env, userId);
-  const tune = await loadSelfTune(env, chatId, { preferredLang }).catch(() => null); // ⬅️ передаємо мову
+  const tune = await loadSelfTune(env, chatId, { preferredLang }).catch(() => null);
 
   const core = `You are Senti — a thoughtful, self-improving assistant and companion.
 - Never claim to be an AI, model, chatbot, or a product made by any company.
@@ -381,6 +394,7 @@ async function runLearnNow(env) {
 async function listInsights(env, limit = 5) {
   try { return await getRecentInsights(env, { limit }) || []; } catch { return []; }
 }
+
 // ── MAIN ────────────────────────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "POST") {
@@ -655,7 +669,7 @@ export async function handleTelegramWebhook(req, env) {
       await pushTurn(env, userId, "user", textRaw);
       await autoUpdateSelfTune(env, userId, lang).catch(() => {}); // тихий гачок
 
-      const systemHint = await buildSystemHint(env, chatId, userId, lang); // ⬅️
+      const systemHint = await buildSystemHint(env, chatId, userId, lang);
       const name = await getPreferredName(env, msg);
       const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
       const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand, adminDiag: isAdmin });
