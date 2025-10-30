@@ -40,14 +40,18 @@ TIMEZONE = "Europe/Kyiv"
 DIAG_TAGS = "on"
 
 # ────────────────────────────────────────────────────────────────────────────
-#                ПОРЯДКИ МОДЕЛЕЙ (TEXT / CODE) + RUNTIME DEFAULT
+#                ПОРЯДКИ МОДЕЛЕЙ (TEXT / CODE / VISION) + RUNTIME DEFAULT
 # ────────────────────────────────────────────────────────────────────────────
 # TEXT: першим йде Gemini (якщо є ключ), далі CF безкоштовні, потім free-фолбек
 MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 
-# CODE: першим спеціалізований безкоштовний Qwen3 Coder через OpenRouter,
-# далі CF як безкоштовний фолбек, потім загальний free-фолбек
+# CODE: Qwen (CF) → Llama (CF) → OpenRouter free → Free-фолбек
 MODEL_ORDER_CODE = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
+
+# VISION: CF Llama Vision → (за наявності) Gemini Vision → Free (OpenAI-сумісний)
+# Використовується у flows/visionDescribe.js або у webhook через describeImage()
+VISION_ORDER = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.0-flash-exp, free"
+MODEL_ORDER_VISION = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.0-flash-exp, free"
 
 # RUNTIME дефолт: якщо код у webhook не підміняє порядок — беремо текстовий
 MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
@@ -56,22 +60,46 @@ MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/
 GEMINI_MODEL    = "gemini-2.5-flash"
 CF_MODEL        = "@cf/qwen/qwen2.5-7b-instruct"
 # Vision-модель CF (безкоштовний опис зображень)
-CF_VISION_MODEL = "@cf/llama-3.2-11b-vision-instruct"
+CF_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
 
 # ────────────────────────────────────────────────────────────────────────────
 #          OpenAI-сумісний fallback (через OpenRouter як "free")
 # ────────────────────────────────────────────────────────────────────────────
-# ВАЖЛИВО: ключ додати окремо як секрет:
+# ВАЖЛИВО: ці ключі додати окремо як секрети:
 #   wrangler secret put OPENROUTER_API_KEY
+#   wrangler secret put FREE_LLM_API_KEY       # (необов’язково; можна повторити OPENROUTER_API_KEY)
 FREE_API_BASE_URL = "https://openrouter.ai/api"
 FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
 FREE_API_PATH     = "/v1/chat/completions"
+
+# Для callFree() у modelRouter.js (OpenAI-сумісний вхід)
+FREE_LLM_BASE_URL = "https://openrouter.ai/api"
+FREE_LLM_MODEL    = "meta-llama/llama-4-scout:free"
+# FREE_LLM_API_KEY задається як секрет (див. вище)
 
 # (необов'язково) Ідентифікатори застосунку для OpenRouter заголовків
 # використовуються у modelRouter.js, якщо задані
 OPENROUTER_SITE_URL = "https://senti.restsva.app"
 OPENROUTER_APP_NAME = "Senti Bot Worker"
 
+# ────────────────────────────────────────────────────────────────────────────
+#                                VOICE (TTS/STT)
+# ────────────────────────────────────────────────────────────────────────────
+# Каскад TTS для synthesizeVoice(): Aura (ogg/opus → TG voice) → MeloTTS (mp3) → Free
+TTS_ORDER = "@cf/deepgram/aura-1,@cf/myshell-ai/melotts,free"
+# Дефолтний голос Aura (можеш змінити під укр-чоловічий tone)
+VOICE_SPEAKER = "angus"
+# Початковий стан тумблера голосових відповідей (/voice_on | /voice_off)
+VOICE_REPLY_DEFAULT = "off"
+
+# Free TTS endpoint (OpenAI-speech-сумісний /v1/audio/speech)
+# Якщо маєш власний TTS сервер або OpenRouter/інший сервіс з цим шляхом.
+FREE_TTS_BASE_URL = ""
+FREE_TTS_MODEL    = "tts-1"
+FREE_TTS_VOICE    = "alloy"
+# FREE_TTS_API_KEY задається як секрет (за потреби)
+
+# ────────────────────────────────────────────────────────────────────────────
 # --- Керування нічними авто-поліпшеннями ---
 AUTO_IMPROVE     = "on"   # "off" щоб вимкнути
 # Основний добовий запуск агента відбувається на годинному кроні ("0 * * * *"),
