@@ -1,8 +1,8 @@
 // src/lib/speechRouter.js
 // STT router v3.3
-// ✔ Телеграм-voice фікси: sniff заголовка (OggS/ID3/ftyp), коректний MIME,
-//   FORCE_AUDIO_TYPE через env, CF fallback field: file→audio,
-//   Gemini v1↔v1beta, -latest↔без.
+// ✔ Telegram-voice фікси: sniff магічних байтів (OggS/ID3/ftyp), форс MIME,
+//   безпечні імена файлів ("voice.ogg"), CF field=file→fallback, Gemini v1↔v1beta,
+//   -latest↔без, multi-MIME ретрай для CF.
 // ✔ Каскад: Cloudflare → Gemini → OpenRouter → FREE (OpenAI-compat).
 
 /* ───────────── Utils ───────────── */
@@ -22,7 +22,6 @@ function guessLang(s = "") {
 }
 
 /* ───────────── MIME helpers ───────────── */
-// Визначаємо реальний тип за «магічними» байтами
 function sniffAudioType(u8) {
   if (!u8 || u8.length < 8) return "";
   // OGG/Opus: "OggS"
@@ -38,8 +37,8 @@ function sniffAudioType(u8) {
   return "";
 }
 
-// Виправляємо «octet-stream» і добудовуємо codecs для OGG
-function normalizeMime(ct, u8) {
+function normalizeMime(ct, u8, forced = "") {
+  if (forced) return forced; // жорстке форсування через ENV
   let t = (ct || "").toLowerCase();
   const sniff = sniffAudioType(u8);
   if (!t || /octet-stream/.test(t)) t = sniff || "audio/ogg; codecs=opus";
@@ -52,15 +51,10 @@ async function fetchWithType(url, env) {
   if (!r.ok) throw new Error(`stt: fetch ${r.status}`);
   const ab = await r.arrayBuffer();
   const u8 = new Uint8Array(ab);
-
-  // 1) env override → 2) header → 3) sniff → 4) safe default
-  const forced = (env && env.FORCE_AUDIO_TYPE) ? String(env.FORCE_AUDIO_TYPE) : "";
-  const header = r.headers.get("content-type") || "";
-  const sniffed = sniffAudioType(u8);
-  const initial = forced || header || sniffed || "application/octet-stream";
-  const contentType = normalizeMime(initial, u8);
-
-  return { ab, contentType };
+  const headerCt = r.headers.get("content-type") || "";
+  const forced = String(env?.FORCE_AUDIO_TYPE || "").trim();
+  const contentType = normalizeMime(headerCt, u8, forced);
+  return { ab, u8, contentType };
 }
 
 /* ───────────── OpenAI-compat (OpenRouter / FREE) ───────────── */
@@ -86,10 +80,16 @@ async function transcribeViaOpenAICompat({ baseUrl, apiKey, model, fileUrl, env,
 }
 
 /* ───────────── Cloudflare Whisper (@cf/openai/whisper) ───────────── */
-async function cfWhisperOnce({ acc, token, fileUrl, fieldName, env }) {
+async function cfWhisperOnce({ acc, token, fileUrl, env, fieldName, mimeVariant = "auto" }) {
   const { ab, contentType } = await fetchWithType(fileUrl, env);
+  const ct = mimeVariant === "ogg-only"
+    ? "audio/ogg"
+    : mimeVariant === "opus"
+      ? "audio/ogg; codecs=opus"
+      : contentType;
+
   const form = new FormData();
-  form.append(fieldName, new Blob([ab], { type: contentType }), "voice.ogg");
+  form.append(fieldName, new Blob([ab], { type: ct }), "voice.ogg");
   const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/@cf/openai/whisper`;
   const r = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
   const data = await r.json().catch(() => null);
@@ -108,29 +108,33 @@ async function cfWhisperOnce({ acc, token, fileUrl, fieldName, env }) {
 async function transcribeViaCloudflare(env, fileUrl) {
   const acc = env.CF_ACCOUNT_ID, token = env.CLOUDFLARE_API_TOKEN;
   if (!acc || !token) throw new Error("stt: cf creds missing");
-  try { return await cfWhisperOnce({ acc, token, fileUrl, fieldName: "file", env }); }
-  catch (e) {
-    // Якщо 4xx / invalid audio → спробуємо поле "audio"
-    if ((e && e.status && e.status < 500) || /invalid audio/i.test(String(e.message))) {
-      return await cfWhisperOnce({ acc, token, fileUrl, fieldName: "audio", env });
+
+  // 1) file + detected MIME
+  try { return await cfWhisperOnce({ acc, token, fileUrl, env, fieldName: "file", mimeVariant: "auto" }); }
+  catch (e1) {
+    // 2) file + "audio/ogg" (деякі акаунти не люблять codecs=opus)
+    try { return await cfWhisperOnce({ acc, token, fileUrl, env, fieldName: "file", mimeVariant: "ogg-only" }); }
+    catch (e2) {
+      // 3) audio + "audio/ogg; codecs=opus"
+      if ((e2 && e2.status && e2.status < 500) || /invalid audio/i.test(String(e2.message))) {
+        return await cfWhisperOnce({ acc, token, fileUrl, env, fieldName: "audio", mimeVariant: "opus" });
+      }
+      throw e2;
     }
-    throw e;
   }
 }
 
 /* ───────────── Gemini (inline audio parts) ───────────── */
 function normGeminiModel(m) {
-  // Безпечний дефолт без суфікса -latest (щоб уникати "model not found")
   let model = (m || "").trim();
-  if (!model) model = "gemini-1.5-flash";
+  if (!model) model = "gemini-1.5-flash";             // стабільний дефолт
   if (/^gemini-1\.5-(pro|flash)\b/i.test(model) && /-latest\b/i.test(model)) {
-    model = model.replace(/-latest\b/i, "");
+    model = model.replace(/-latest\b/i, "");          // у STT часто більш стабільно без -latest
   }
   if (!/^gemini-/.test(model)) model = "gemini-1.5-flash";
   return model;
 }
 function geminiBaseFor(model) {
-  // 1.5 зазвичай у v1; інколи аудіо приймається лише у v1beta — пробуємо обидва
   return /^gemini-1\.5-/i.test(model)
     ? "https://generativelanguage.googleapis.com/v1"
     : "https://generativelanguage.googleapis.com/v1beta";
@@ -167,7 +171,7 @@ async function transcribeViaGemini(env, fileUrl) {
   let model = normGeminiModel(env.GEMINI_STT_MODEL);
   let base = geminiBaseFor(model);
 
-  // a) configured (без -latest)
+  // a) base
   try { return await geminiOnce({ key, model, fileUrl, apiBase: base, env }); }
   catch (e1) {
     // b) v1 ↔ v1beta
@@ -175,11 +179,9 @@ async function transcribeViaGemini(env, fileUrl) {
                                              : "https://generativelanguage.googleapis.com/v1beta";
     try { return await geminiOnce({ key, model, fileUrl, apiBase: altBase, env }); }
     catch (e2) {
-      // c) Спробувати явні варіанти
-      const candidates = ["gemini-1.5-flash", "gemini-1.5-pro"];
-      for (const m of candidates) {
-        try { return await geminiOnce({ key, model: m, fileUrl, apiBase: "https://generativelanguage.googleapis.com/v1", env }); }
-        catch (_) {}
+      // c) інші стабільні назви
+      const fallbacks = ["gemini-1.5-pro", "gemini-1.5-flash-latest"];
+      for (const m of fallbacks) {
         try { return await geminiOnce({ key, model: m, fileUrl, apiBase: "https://generativelanguage.googleapis.com/v1beta", env }); }
         catch (_) {}
       }
@@ -200,7 +202,7 @@ export async function transcribeVoice(env, fileUrl) {
   try { return await transcribeViaGemini(env, fileUrl); }
   catch (e) { errors.push(String(e?.message || e)); }
 
-  // 3) OpenRouter (якщо є ключ)
+  // 3) OpenRouter
   if (env.OPENROUTER_API_KEY) {
     try {
       return await transcribeViaOpenAICompat({
@@ -217,7 +219,7 @@ export async function transcribeVoice(env, fileUrl) {
     } catch (e) { errors.push(String(e?.message || e)); }
   }
 
-  // 4) Власний FREE STT (опційно)
+  // 4) FREE STT (опційно)
   if (env.FREE_STT_BASE_URL) {
     try {
       return await transcribeViaOpenAICompat({
