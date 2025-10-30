@@ -1,199 +1,202 @@
 // src/lib/speechRouter.js
-// Каскад STT: Gemini → Cloudflare Workers AI (Whisper) → OpenAI-compatible fallback.
-// На вхід: URL на Telegram voice (.ogg, opus). На вихід: { text }.
-//
-// Виклик: const { text } = await transcribeVoice(env, oggUrl, { lang: "uk" });
+// STT-роутер Senti: Cloudflare Whisper → Gemini (inline audio) → OpenAI-compatible backend.
+// Виправлення: коректні ендпоінти Gemini (v1 для 1.5-*), нормалізація назв моделей (-latest),
+// авторетрай при 404, збереження попередньої логіки.
 
-function b64FromBytes(bytes) {
+// ───────────── Helpers ─────────────
+function bufToBase64(ab) {
+  const bytes = new Uint8Array(ab);
   let bin = "";
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
   return btoa(bin);
 }
-
-async function fetchAsBase64(url) {
+async function fetchWithType(url) {
   const r = await fetch(url);
-  if (!r.ok) throw new Error(`fetch audio ${r.status}`);
+  if (!r.ok) throw new Error(`stt: fetch ${r.status}`);
+  const ct = r.headers.get("content-type") || "application/octet-stream";
   const ab = await r.arrayBuffer();
-  const bytes = new Uint8Array(ab);
-  return { base64: b64FromBytes(bytes), bytes };
+  return { ab, contentType: ct };
+}
+function guessLang(s = "") {
+  const t = String(s || "").trim();
+  if (!t) return null;
+  const ua = /[їЇєЄіІґҐ]/;
+  const cyr = /[А-Яа-яЁёЇїІіЄєҐґ]/;
+  const de = /[ÄäÖöÜüß]/;
+  const fr = /[À-ÿ]/;
+  if (ua.test(t)) return "uk";
+  if (cyr.test(t)) return "ru";
+  if (de.test(t)) return "de";
+  if (fr.test(t)) return "fr";
+  return "en";
 }
 
-function pickLang(envLang, fallback = "uk") {
-  const s = String(envLang || "").trim().toLowerCase();
-  const allow = ["uk", "ru", "en", "de", "fr"];
-  if (allow.includes(s)) return s;
-  if (s.startsWith("uk")) return "uk";
-  if (s.startsWith("ru")) return "ru";
-  if (s.startsWith("en")) return "en";
-  if (s.startsWith("de")) return "de";
-  if (s.startsWith("fr")) return "fr";
-  return fallback;
-}
-
-/* ───────────────────────────── Gemini 1.5 (multimodal) ──────────────────── */
-async function sttGemini(env, { base64, mime, lang }) {
-  const key =
-    env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY || "";
-  if (!key) throw new Error("Gemini key missing");
-
-  // Для транскрипції віддаємо один parts: inline_data (audio) + інструкція.
-  // Модель: 1.5-pro працює надійніше для аудіо.
-  const model = env.GEMINI_STT_MODEL || "models/gemini-1.5-pro";
-  const url = `https://generativelanguage.googleapis.com/v1beta/${model}:generateContent?key=${encodeURIComponent(
-    key
-  )}`;
-
-  const systemHint = `You transcribe speech to plain text only. 
-Return ${lang.toUpperCase()} language if possible. 
-Do not add explanations or emojis.`;
-
-  const body = {
-    contents: [
-      {
-        role: "user",
-        parts: [
-          { text: systemHint },
-          {
-            inline_data: {
-              mime_type: mime,
-              data: base64,
-            },
-          },
-        ],
-      },
-    ],
-  };
-
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) {
-    const err = await r.text().catch(() => "");
-    throw new Error(`gemini http ${r.status} ${err.slice(0, 300)}`);
-  }
-  const data = await r.json();
-  const txt =
-    data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
-  const out = String(txt || "").trim();
-  if (!out) throw new Error("gemini empty");
-  return { text: out };
-}
-
-/* ─────────────────── Cloudflare Workers AI (@cf/openai/whisper-1) ───────── */
-async function sttCloudflare(env, { base64, mime, lang }) {
-  const accountId = env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID;
+// ───────────── Cloudflare Whisper (@cf/openai/whisper) ─────────────
+async function transcribeViaCloudflare(env, fileUrl) {
+  const acc = env.CF_ACCOUNT_ID;
   const token = env.CLOUDFLARE_API_TOKEN;
-  if (!accountId || !token) throw new Error("CF credentials missing");
+  if (!acc || !token) throw new Error("stt: cf creds missing");
 
-  // Використовуємо AI Run endpoint. Для openai/whisper-1 ключ — "audio".
-  // mime використаємо як підказку. Деякі ревізії приймають також audio_format.
-  const model = env.CF_STT_MODEL || "@cf/openai/whisper-1";
-  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${encodeURIComponent(
-    model
-  )}`;
+  const { ab, contentType } = await fetchWithType(fileUrl);
 
-  const payload = {
-    // Основне поле, яке очікує CF whisper-1
-    audio: base64,
-    // Підказка мови: не обов'язково, але не завадить
-    language: lang,
-    // Додатково інформаційно (не критично)
-    mime_type: mime,
-  };
+  const form = new FormData();
+  // ВАЖЛИВО: ключ має бути "audio", не "file"
+  form.append("audio", new Blob([ab], { type: contentType || "audio/ogg" }), "voice");
 
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-  if (!r.ok) {
-    const err = await r.text().catch(() => "");
-    throw new Error(`cf http ${r.status} ${err.slice(0, 300)}`);
-  }
-  const data = await r.json();
-  // У Workers AI дані можуть прийти як { result: { text: "..." } } або просто { text: ... }.
+  const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/@cf/openai/whisper`;
+  const r = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
+  const data = await r.json().catch(() => null);
+
   const text =
-    data?.result?.text || data?.text || data?.result || data?.output || "";
-  const out = String(text || "").trim();
-  if (!out) throw new Error("cf empty");
-  return { text: out };
+    data?.result?.text ||
+    (Array.isArray(data?.result?.segments) ? data.result.segments.map(s => s?.text || "").join(" ") : "");
+
+  if (!r.ok || !data?.success || !text) {
+    const msg = data?.errors?.[0]?.message || data?.messages?.[0] || `cf http ${r.status}`;
+    throw new Error(`stt: cf ${msg}`);
+  }
+  return { text: String(text).trim(), lang: guessLang(text) };
 }
 
-/* ───────────────── OpenAI-compatible /audio/transcriptions fallback ─────── */
-async function sttOpenAICompat(env, { base64, mime, lang }) {
-  const base = env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL || env.OPENAI_BASE_URL;
-  const key = env.FREE_LLM_API_KEY || env.FREE_API_KEY || env.OPENAI_API_KEY;
-  if (!base || !key) throw new Error("openai-compat creds missing");
+// ───────────── Gemini (inline audio) ─────────────
+// Нормалізація назв моделей і вибір ендпойнта.
+function normalizeGeminiModel(m) {
+  let model = (m || "").trim() || "gemini-1.5-flash-latest";
+  // Якщо вказано без -latest — додамо.
+  if (/^gemini-1\.5-(pro|flash)(?:$|[^a-z])/i.test(model)) {
+    if (!/-latest\b/i.test(model)) model = model.replace(/^(gemini-1\.5-(?:pro|flash)).*$/i, "$1-latest");
+  }
+  // Базовий дефолт
+  if (!/^gemini-/.test(model)) model = "gemini-1.5-flash-latest";
+  return model;
+}
+function geminiApiBaseFor(model) {
+  // Для гілки 1.5-* — стабільний v1; інакше — v1beta для сумісності
+  if (/^gemini-1\.5-/i.test(model)) return "https://generativelanguage.googleapis.com/v1";
+  return "https://generativelanguage.googleapis.com/v1beta";
+}
 
-  // Більшість сумісних бекендів приймають multipart/form-data.
-  // Але у Workers середовищі простіше JSON: деякі сумісні сервіси мають JSON шлях.
-  // Спробуємо стандартний OpenAI JSON для /v1/audio/transcriptions (якщо бекенд підтримує).
-  const url = `${base.replace(/\/+$/,"")}/v1/audio/transcriptions`;
+async function transcribeViaGeminiOnce({ key, model, fileUrl, apiBase }) {
+  const { ab, contentType } = await fetchWithType(fileUrl);
+  const b64 = bufToBase64(ab);
 
+  const url = `${apiBase}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
   const body = {
-    model: "whisper-1",
-    // Декотрі сумісні бекенди дозволяють "file" як base64
-    // Якщо твій бекенд вимагає multipart — замінимо реалізацію під нього за потреби.
-    file: `data:${mime};base64,${base64}`,
-    language: lang,
-    response_format: "json",
+    contents: [{
+      parts: [
+        { text: "Transcribe the following audio to plain text. Return only the transcript." },
+        { inline_data: { data: b64, mime_type: contentType || "audio/ogg" } }
+      ]
+    }],
+    generationConfig: { temperature: 0.0 }
   };
 
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) {
-    const err = await r.text().catch(() => "");
-    throw new Error(`openai-compat http ${r.status} ${err.slice(0, 300)}`);
+  const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const data = await r.json().catch(() => null);
+  const text = data?.candidates?.[0]?.content?.parts?.map(p => p?.text || "").join("").trim();
+
+  if (!r.ok || !text) {
+    const err = data?.error?.message || `gemini http ${r.status}`;
+    const e = new Error(`stt: gemini ${err}`);
+    e.status = r.status;
+    throw e;
   }
-  const data = await r.json();
-  const out = String(data?.text || data?.result || "").trim();
-  if (!out) throw new Error("openai-compat empty");
-  return { text: out };
+  return { text, lang: guessLang(text) };
 }
 
-/* ────────────────────────────── Public API ───────────────────────────────── */
-export async function transcribeVoice(env, tgFileUrl, opts = {}) {
-  // 1) качаємо файл як байти → base64
-  const { base64 } = await fetchAsBase64(tgFileUrl);
-  // Telegram voice — зазвичай OGG/OPUS
-  const mime = String(opts?.mime || "audio/ogg");
-  const lang = pickLang(opts?.lang || env.DEFAULT_LANGUAGE || "uk");
+async function transcribeViaGemini(env, fileUrl) {
+  const key = env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY;
+  if (!key) throw new Error("stt: gemini key missing");
 
+  // 1) нормалізуємо модель
+  const configured = normalizeGeminiModel(env.GEMINI_STT_MODEL);
+  let model = configured;
+  let apiBase = geminiApiBaseFor(model);
+
+  try {
+    return await transcribeViaGeminiOnce({ key, model, fileUrl, apiBase });
+  } catch (e) {
+    // Якщо 404 (як на твоєму скріні) — пробуємо альтернативи автоматично
+    const is404 = (e && (e.status === 404 || /(^| )404( |$)/.test(String(e.message))));
+    if (!is404) throw e;
+
+    // Спроба №2: якщо стояв v1beta — перемкнемось на v1; якщо v1 — навпаки.
+    apiBase = apiBase.includes("/v1beta") ? "https://generativelanguage.googleapis.com/v1" : "https://generativelanguage.googleapis.com/v1beta";
+    try {
+      return await transcribeViaGeminiOnce({ key, model, fileUrl, apiBase });
+    } catch {}
+
+    // Спроба №3: безпечна модель за замовчуванням (flash-latest) на v1
+    try {
+      model = "gemini-1.5-flash-latest";
+      apiBase = "https://generativelanguage.googleapis.com/v1";
+      return await transcribeViaGeminiOnce({ key, model, fileUrl, apiBase });
+    } catch (e2) {
+      throw e2; // віддамо останню помилку вгору
+    }
+  }
+}
+
+// ───────────── OpenAI-compatible (FREE / OpenRouter) ─────────────
+async function transcribeViaOpenAICompat({ baseUrl, apiKey, model, fileUrl, extraHeaders = {} }) {
+  if (!baseUrl) throw new Error("stt: compat baseUrl missing");
+
+  const { ab, contentType } = await fetchWithType(fileUrl);
+  const form = new FormData();
+  form.append("file", new Blob([ab], { type: contentType || "audio/ogg" }), "voice.ogg");
+  form.append("model", model || "whisper-1");
+
+  const r = await fetch(baseUrl.replace(/\/+$/, "") + "/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}), ...extraHeaders },
+    body: form,
+  });
+  const data = await r.json().catch(() => null);
+  const text = data?.text || data?.result || data?.transcription || "";
+  if (!r.ok || !text) {
+    const msg = data?.error?.message || data?.message || `http ${r.status}`;
+    throw new Error(`stt: openai-compat ${msg}`);
+  }
+  return { text: String(text).trim(), lang: guessLang(text) };
+}
+
+// ───────────── Main router ─────────────
+export async function transcribeVoice(env, fileUrl) {
   const errors = [];
 
-  // 2) Каскад провайдерів
-  // 2.1) Gemini
-  try {
-    return await sttGemini(env, { base64, mime, lang });
-  } catch (e) {
-    errors.push(`stt: gemini ${e.message || e}`);
+  // 1) Cloudflare Whisper — швидкий, безкоштовний
+  try { return await transcribeViaCloudflare(env, fileUrl); }
+  catch (e) { errors.push(String(e?.message || e)); }
+
+  // 2) Gemini (inline audio) — з авто-ретраями по версіях/моделях
+  try { return await transcribeViaGemini(env, fileUrl); }
+  catch (e) { errors.push(String(e?.message || e)); }
+
+  // 3) OpenRouter або власний OpenAI-compatible бекенд
+  if (env.OPENROUTER_API_KEY) {
+    try {
+      return await transcribeViaOpenAICompat({
+        baseUrl: "https://openrouter.ai/api",
+        apiKey: env.OPENROUTER_API_KEY,
+        model: "openai/whisper-large-v3",
+        fileUrl,
+        extraHeaders: {
+          "HTTP-Referer": env.OPENROUTER_SITE || "https://senti.bot",
+          "X-Title": "Senti Bot",
+        },
+      });
+    } catch (e) { errors.push(String(e?.message || e)); }
+  }
+  if (env.FREE_STT_BASE_URL) {
+    try {
+      return await transcribeViaOpenAICompat({
+        baseUrl: env.FREE_STT_BASE_URL,
+        apiKey: env.FREE_STT_API_KEY || "",
+        model: env.FREE_STT_MODEL || "whisper-1",
+        fileUrl,
+      });
+    } catch (e) { errors.push(String(e?.message || e)); }
   }
 
-  // 2.2) Cloudflare Workers AI (Whisper)
-  try {
-    return await sttCloudflare(env, { base64, mime, lang });
-  } catch (e) {
-    errors.push(`stt: cf ${e.message || e}`);
-  }
-
-  // 2.3) OpenAI-compatible fallback
-  try {
-    return await sttOpenAICompat(env, { base64, mime, lang });
-  } catch (e) {
-    errors.push(`stt: openai-compat ${e.message || e}`);
-  }
-
-  // Якщо все зламалося — піднімаємо узагальнену помилку для адміна
-  throw new Error(`STT providers failed | ${errors.join(" ; ")}`);
+  throw new Error("STT providers failed | " + errors.join(" ; "));
 }
