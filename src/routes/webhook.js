@@ -4,6 +4,8 @@
 // авто-самотюнінг стилю (мовні профілі) через selfTune.
 // (upd) Vision через каскад моделей (мультимовний) + base64 із Telegram файлів.
 // (new) Vision Memory у KV: зберігаємо останні 20 фото з описами.
+// (new) Voice: STT (Whisper) + TTS (Aura/MeloTTS/Free), тумблери /voice_on /voice_off,
+//        відповіді голосом тією ж мовою, що у користувача.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -25,6 +27,12 @@ import { setUserLocation, getUserLocation } from "../lib/geo.js";
 
 // ⬇️ мультимовний vision-оркестратор
 import { describeImage } from "../flows/visionDescribe.js";
+
+// ⬇️ Голос: STT/TTS + тумблер
+import {
+  transcribeVoice, synthesizeVoice, sendTgVoiceOrAudio,
+  isVoiceReplyOn, setVoiceReply, tgFileToBytes
+} from "../lib/voice.js";
 
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
 const {
@@ -258,7 +266,6 @@ async function buildSystemHint(env, chatId, userId, preferredLang) {
   if (dlg) blocks.push(dlg);
   return blocks.join("\n\n");
 }
-
 // ── Emoji + ім’я ─────────────────────────────────────────────────────────────
 function guessEmoji(text = "") {
   const tt = text.toLowerCase();
@@ -395,6 +402,51 @@ async function listInsights(env, limit = 5) {
   try { return await getRecentInsights(env, { limit }) || []; } catch { return []; }
 }
 
+// ── VOICE: обробка голосових ────────────────────────────────────────────────
+async function handleVoiceInput(env, chatId, userId, msg, lang) {
+  const v = msg?.voice;
+  if (!v?.file_id) return false;
+
+  // Енергія
+  const cur = await getEnergy(env, userId);
+  const need = Number(cur.costText ?? 1);
+  if ((cur.energy ?? 0) < need) {
+    const links = energyLinks(env, userId);
+    await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
+    return true;
+  }
+  await spendEnergy(env, userId, need, "voice");
+
+  pulseTyping(env, chatId);
+
+  try {
+    // 1) TG → байти → STT
+    const bytes = await tgFileToBytes(env, v.file_id);
+    const { text: userText } = await transcribeVoice(env, bytes, { langHint: lang.slice(0,2) });
+    const finalUserText = (userText || "").trim() || (lang.startsWith("uk") ? "Порожнє аудіо" : "Empty audio");
+
+    // 2) LLM-відповідь
+    await pushTurn(env, userId, "user", finalUserText);
+    await autoUpdateSelfTune(env, userId, lang).catch(() => {});
+    const systemHint = await buildSystemHint(env, msg.chat?.id, userId, lang);
+    const name = await getPreferredName(env, msg);
+    const { short, full } = await callSmartLLM(env, finalUserText, { lang, name, systemHint, expand: false, adminDiag: ADMIN(env, userId) });
+    await pushTurn(env, userId, "assistant", full);
+
+    // 3) TTS тією ж мовою
+    const voiceResp = await synthesizeVoice(env, { text: short, lang });
+    await sendTgVoiceOrAudio(env, chatId, { bytes: voiceResp.bytes, mime: voiceResp.mime, caption: undefined });
+
+  } catch (e) {
+    if (ADMIN(env, userId)) {
+      await sendPlain(env, chatId, `❌ Voice error: ${String(e.message || e).slice(0, 180)}`);
+    } else {
+      await sendPlain(env, chatId, t(lang, "default_reply"));
+    }
+  }
+  return true;
+}
+
 // ── MAIN ────────────────────────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "POST") {
@@ -461,6 +513,18 @@ export async function handleTelegramWebhook(req, env) {
   }
   if (textRaw === BTN_SENTI || /^(senti|сенті)$/i.test(textRaw)) {
     await setDriveMode(env, userId, false);
+    return json({ ok: true });
+  }
+
+  // ── VOICE toggle ───────────────────────────────────────────────────────────
+  if (textRaw === "/voice_on") {
+    await setVoiceReply(env, userId, true);
+    await sendPlain(env, chatId, lang.startsWith("uk") ? "🔊 Голосові відповіді увімкнено." : "🔊 Voice replies enabled.");
+    return json({ ok: true });
+  }
+  if (textRaw === "/voice_off") {
+    await setVoiceReply(env, userId, false);
+    await sendPlain(env, chatId, lang.startsWith("uk") ? "🔇 Голосові відповіді вимкнено." : "🔇 Voice replies disabled.");
     return json({ ok: true });
   }
 
@@ -559,30 +623,15 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // ===== Learn enqueue (адмін, тільки коли Learn ON) =====
-  if (isAdmin && await getLearnMode(env, userId)) {
-    const urlInText = extractFirstUrl(textRaw);
-    if (urlInText) {
-      await safe(async () => {
-        await enqueueLearn(env, String(userId), { url: urlInText, name: urlInText });
-        await sendPlain(env, chatId, "✅ Додано в чергу Learn.");
-      });
-      return json({ ok: true });
-    }
-    const anyAtt = detectAttachment(msg);
-    if (anyAtt?.file_id) {
-      await safe(async () => {
-        const fUrl = await tgFileUrl(env, anyAtt.file_id);
-        await enqueueLearn(env, String(userId), { url: fUrl, name: anyAtt.name || "file" });
-        await sendPlain(env, chatId, "✅ Додано в чергу Learn.");
-      });
-      return json({ ok: true });
-    }
-  }
-
-  // ── MEDIA ROUTING (Senti vs Drive vs Vision) ──────────────────────────────
+  // ── MEDIA ROUTING (Senti vs Drive vs Vision vs Voice) ─────────────────────
   try {
     const driveOn = await getDriveMode(env, userId);
+
+    // 0) Якщо прийшов voice — завжди обробляємо як голосовий діалог (не в Drive)
+    if (!driveOn && msg?.voice?.file_id) {
+      if (await handleVoiceInput(env, chatId, userId, msg, lang)) return json({ ok: true });
+    }
+
     const hasAnyMedia = !!detectAttachment(msg) || !!pickPhoto(msg);
 
     // 1) Увімкнений Drive → будь-які медіа зберігаємо у Google Drive
@@ -594,7 +643,7 @@ export async function handleTelegramWebhook(req, env) {
     if (!driveOn && pickPhoto(msg)) {
       if (await handleVisionMedia(env, chatId, userId, msg, lang, msg?.caption)) return json({ ok: true });
     }
-    if (!driveOn && (msg?.video || msg?.document || msg?.audio || msg?.voice || msg?.video_note)) {
+    if (!driveOn && (msg?.video || msg?.document || msg?.audio || msg?.video_note)) {
       await sendPlain(
         env,
         chatId,
@@ -649,7 +698,7 @@ export async function handleTelegramWebhook(req, env) {
     }
   }
 
-  // Звичайний текст → AI
+  // Звичайний текст → AI (+ опційна відповідь голосом)
   if (textRaw && !textRaw.startsWith("/")) {
     await safe(async () => {
       await rememberNameFromText(env, userId, textRaw);
@@ -676,9 +725,19 @@ export async function handleTelegramWebhook(req, env) {
 
       await pushTurn(env, userId, "assistant", full);
 
+      // Текстова відповідь
       const after = (cur.energy - need);
       if (expand && full.length > short.length) { for (const ch of chunkText(full)) await sendPlain(env, chatId, ch); }
       else { await sendPlain(env, chatId, short); }
+
+      // Якщо увімкнено голосові відповіді — надішлемо voice тією ж мовою
+      if (await isVoiceReplyOn(env, userId)) {
+        try {
+          const voiceResp = await synthesizeVoice(env, { text: short, lang });
+          await sendTgVoiceOrAudio(env, chatId, { bytes: voiceResp.bytes, mime: voiceResp.mime, caption: undefined });
+        } catch {}
+      }
+
       if (after <= Number(cur.low ?? 10)) {
         const links = energyLinks(env, userId);
         await sendPlain(env, chatId, t(lang, "low_energy_notice", after, links.energy));
