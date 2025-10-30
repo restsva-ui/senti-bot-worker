@@ -6,6 +6,7 @@
 // (new) Vision Memory у KV: зберігаємо останні 20 фото з описами.
 // (new) Language Enforcer: жорстка гарантія відповіді мовою користувача.
 // (new) Voice UX: placeholder + edit (онлайн-діалог як у GPT/Gemini).
+// (fix) Voice обробляється ДО загального медіа-фолбеку; не блокується.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -25,9 +26,7 @@ import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from "../a
 import { weatherIntent, weatherSummaryByPlace, weatherSummaryByCoords } from "../apis/weather.js";
 import { setUserLocation, getUserLocation } from "../lib/geo.js";
 
-// мультимовний vision-оркестратор
 import { describeImage } from "../flows/visionDescribe.js";
-// збереження мовної переваги
 import { getUserLang, setUserLang } from "../lib/langPref.js";
 
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
@@ -348,11 +347,9 @@ function seemsWrongLanguage(s, lang) {
   if (!letters) return false;
   const matchCount = (s.match(rx) || []).length;
   const ratio = matchCount / letters.length;
-  // якщо < 0.35 відповідних символів — вважаємо не тією мовою
   return ratio < 0.35;
 }
 
-// ── Анти-розкриття “я AI/LLM” + чистка підписів ─────────────────────────────
 function revealsAiSelf(out = "") {
   const s = out.toLowerCase();
   return (
@@ -369,7 +366,6 @@ function stripProviderSignature(s = "") {
   return String(s).replace(/^[ \t]*(?:—|--)?\s*via\s+[^\n]*\n?/gim, "").trim();
 }
 
-// ── Відповідь AI + захист ───────────────────────────────────────────────────
 function limitMsg(s, max = 220) { if (!s) return s; return s.length <= max ? s : s.slice(0, max - 1); }
 function chunkText(s, size = 3500) { const out = []; let t = String(s || ""); while (t.length) { out.push(t.slice(0, size)); t = t.slice(size); } return out; }
 function looksLikeModelDump(s = "") {
@@ -412,7 +408,6 @@ ${control}`;
     if (cleaned) out = cleaned;
   }
 
-  // — Language Enforcer —
   if (seemsWrongLanguage(out, lang)) {
     const hardPrompt = `STRICT LANGUAGE MODE: Rewrite the answer ONLY in ${lang}. Do NOT switch languages. Keep it concise and natural.`;
     let fixed = modelOrder
@@ -518,6 +513,22 @@ export async function handleTelegramWebhook(req, env) {
   }
   if (textRaw === BTN_SENTI || /^(senti|сенті)$/i.test(textRaw)) {
     await setDriveMode(env, userId, false);
+    return json({ ok: true });
+  }
+
+  // ==== Voice UX (обробляємо ДО загального медіа-фолбеку) ====
+  if (msg?.voice) {
+    await sendVoiceAction(env, chatId);
+    let ph = await sendOrEdit(env, chatId, null, "🎙️ Обробляю голос…");
+    await safe(async () => {
+      const systemHint = await buildSystemHint(env, chatId, userId, lang);
+      const name = await getPreferredName(env, msg);
+      const { short } = await callSmartLLM(env,
+        "Відповідай коротко: я надіслав голосове, підтвердь отримання і запропонуй допомогу.",
+        { lang, name, systemHint, expand: false }
+      );
+      ph = await sendOrEdit(env, chatId, ph, short);
+    });
     return json({ ok: true });
   }
 
@@ -648,7 +659,8 @@ export async function handleTelegramWebhook(req, env) {
     if (!driveOn && pickPhoto(msg)) {
       if (await handleVisionMedia(env, chatId, userId, msg, lang, msg?.caption)) return json({ ok: true });
     }
-    if (!driveOn && (msg?.video || msg?.document || msg?.audio || msg?.voice || msg?.video_note)) {
+    // ВАЖЛИВО: voice тут НЕ перевіряємо — він уже оброблений вище
+    if (!driveOn && (msg?.video || msg?.document || msg?.audio || msg?.video_note)) {
       await sendPlain(
         env,
         chatId,
@@ -664,7 +676,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // ==== Vision memory usage on natural questions (без нового фото) ==========
+  // ==== Використання vision-пам'яті на природні питання (без нового фото) ===
   if (!pickPhoto(msg) && /на\s+(цьому|цьому саме|цьому ж|цьому попередньому|минулому|попередньому)\s+фото|що\s+на\s+фото/i.test(textRaw)) {
     const mem = await loadVisionMem(env, userId);
     if (mem.length) {
@@ -672,22 +684,6 @@ export async function handleTelegramWebhook(req, env) {
       await sendPlain(env, chatId, `🖼️ ${last.desc || (lang.startsWith("uk") ? "Немає збереженого опису." : "No saved description.")}`);
       return json({ ok: true });
     }
-  }
-
-  // Вхідне VOICE → UX як онлайн-діалог
-  if (msg?.voice) {
-    // лише UX/візуал: індикатор запису + placeholder, потім заміна на відповідь
-    await sendVoiceAction(env, chatId);
-    let ph = await sendOrEdit(env, chatId, null, "🎙️ Обробляю голос…");
-    // далі — твій існуючий пайплайн ASR + LLM + TTS.
-    // Щоб не ламати, просто відповімо коротким текстом (з фіксацією мови).
-    await safe(async () => {
-      const systemHint = await buildSystemHint(env, chatId, userId, lang);
-      const name = await getPreferredName(env, msg);
-      const { short } = await callSmartLLM(env, "Відповідай коротко: я надіслав голосове, підтвердь отримання і запропонуй допомогу.", { lang, name, systemHint, expand: false });
-      ph = await sendOrEdit(env, chatId, ph, short);
-    });
-    return json({ ok: true });
   }
 
   // Локальні інтенти: дата/час/погода
