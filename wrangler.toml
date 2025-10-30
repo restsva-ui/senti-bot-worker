@@ -3,85 +3,65 @@ main = "src/index.js"
 compatibility_date = "2024-09-25"
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
 
-# --- CRONs ---
-# 1) heartbeat кожні 15 хв (для логів/живості)
-# 2) evolve щогодини рівно о :00 (UTC)
-# 3) додатковий тригер нічного агента о 02:10 UTC (опційний)
 [triggers]
 crons = ["*/15 * * * *", "0 * * * *", "10 2 * * *"]
 
-# --- Публічні змінні середовища (НЕ секрети) ---
 [vars]
 SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
 DRIVE_FOLDER_ID = "root"
 TELEGRAM_ADMIN_ID = "784869835"
 DEPLOY_ID = "local-dev"
 
-# Увімкнення/вимкнення Learn
 LEARN_ENABLED = "on"
-
-# Cloudflare Workers AI (безкоштовно)
 CF_ACCOUNT_ID = "2cf6e316af8623546c95c0354bc3aa00"
 
-# ── Публічні перегляди адмін-HTML (readonly)
 ALLOW_PUBLIC_REPO = "on"
 ALLOW_PUBLIC_STATUT = "on"
 ALLOW_PUBLIC_CHECKLIST = "on"
 
-# Секретні токени для ендпойнтів / вебхука TG
 WEBHOOK_SECRET = "senti1984"
 TG_WEBHOOK_SECRET = "senti1984"
 TELEGRAM_SECRET_TOKEN = "senti1984"
 
-# Локальна таймзона
 TIMEZONE = "Europe/Kyiv"
-
-# Діагностичні теги
 DIAG_TAGS = "on"
 
-# ───────────────────────────────────────────────────────────────
-#                МОДЕЛІ (TEXT / CODE / VISION)
-# ───────────────────────────────────────────────────────────────
-MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
-MODEL_ORDER_CODE = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
-VISION_ORDER = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.0-flash-exp, free"
+# ─────────────── МОДЕЛІ ───────────────
+MODEL_ORDER_TEXT   = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
+MODEL_ORDER_CODE   = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
+VISION_ORDER       = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.0-flash-exp, free"
 MODEL_ORDER_VISION = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.0-flash-exp, free"
-MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
+MODEL_ORDER        = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 
-# --- Дефолтні моделі ---
-GEMINI_MODEL = "gemini-2.5-flash"
-CF_MODEL = "@cf/qwen/qwen2.5-7b-instruct"
-CF_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
+# Дефолтні моделі
+GEMINI_MODEL     = "gemini-2.5-flash"
+CF_MODEL         = "@cf/qwen/qwen2.5-7b-instruct"
+CF_VISION_MODEL  = "@cf/meta/llama-3.2-11b-vision-instruct"
 
-# ───────────────────────────────────────────────────────────────
-#                OpenAI-compat fallback (OpenRouter)
-# ───────────────────────────────────────────────────────────────
+# OpenAI-compat fallback (OpenRouter)
 FREE_API_BASE_URL = "https://openrouter.ai/api"
-FREE_API_MODEL = "meta-llama/llama-4-scout:free"
-FREE_API_PATH = "/v1/chat/completions"
+FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
+FREE_API_PATH     = "/v1/chat/completions"
 FREE_LLM_BASE_URL = "https://openrouter.ai/api"
-FREE_LLM_MODEL = "meta-llama/llama-4-scout:free"
+FREE_LLM_MODEL    = "meta-llama/llama-4-scout:free"
 OPENROUTER_SITE_URL = "https://senti.restsva.app"
 OPENROUTER_APP_NAME = "Senti Bot Worker"
 
-# ───────────────────────────────────────────────────────────────
-#                     VOICE (TTS / STT)
-# ───────────────────────────────────────────────────────────────
+# ─────────────── VOICE ───────────────
 TTS_ORDER = "@cf/deepgram/aura-1,@cf/myshell-ai/melotts,free"
 VOICE_SPEAKER = "angus"
 VOICE_REPLY_DEFAULT = "off"
-
 FREE_TTS_BASE_URL = ""
 FREE_TTS_MODEL = "tts-1"
 FREE_TTS_VOICE = "alloy"
 
-# --- СТАБІЛІЗАТОРИ ДЛЯ STT (нові) ---
-GEMINI_STT_MODEL = "gemini-1.5-flash"          # стабільний без -latest
-FORCE_AUDIO_TYPE = "audio/ogg; codecs=opus"    # фікс для Telegram voice
+# СТАБІЛІЗАТОРИ STT
+# 1) Gemini STT потребує точну назву версії -001
+GEMINI_STT_MODEL = "gemini-1.5-flash-001"
+# 2) Для CF Whisper простіший ogg без codecs — зменшує "Invalid audio input"
+FORCE_AUDIO_TYPE = "audio/ogg"
 
-# ───────────────────────────────────────────────────────────────
-#           АВТО-ІМПРУВ / РЕГУЛЯЦІЯ / ЕНЕРГІЯ
-# ───────────────────────────────────────────────────────────────
+# ─────────────── АВТО-ІМПРУВ/ЕНЕРГІЯ ───────────────
 AUTO_IMPROVE = "on"
 NIGHTLY_UTC_HOUR = "23"
 SELF_REGULATE = "on"
@@ -93,9 +73,7 @@ ENERGY_COST_TEXT = "1"
 ENERGY_COST_IMAGE = "5"
 ENERGY_LOW_THRESHOLD = "10"
 
-# ───────────────────────────────────────────────────────────────
-#                         KV STORAGE
-# ───────────────────────────────────────────────────────────────
+# ─────────────── KV ───────────────
 [[kv_namespaces]]
 binding = "DEDUP_KV"
 id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
@@ -136,9 +114,7 @@ id = "63c0d1e0962a419ca54082893410b28e"
 binding = "LEARN_QUEUE_KV"
 id = "86a54c59ce674a558780c58bf1a47dfd"
 
-# ───────────────────────────────────────────────────────────────
-#                         R2 BUCKET
-# ───────────────────────────────────────────────────────────────
+# R2
 [[r2_buckets]]
 binding = "LEARN_BUCKET"
 bucket_name = "senti-learn"
