@@ -28,102 +28,74 @@ ALLOW_PUBLIC_REPO = "on"
 ALLOW_PUBLIC_STATUT = "on"
 ALLOW_PUBLIC_CHECKLIST = "on"
 
-# Секретні токени для ендпойнтів / вебхука TG (значення прикладні)
+# Секретні токени для ендпойнтів / вебхука TG
 WEBHOOK_SECRET = "senti1984"
 TG_WEBHOOK_SECRET = "senti1984"
 TELEGRAM_SECRET_TOKEN = "senti1984"
 
-# Локальна таймзона для UI/логів/дебагу часу
+# Локальна таймзона
 TIMEZONE = "Europe/Kyiv"
 
-# ДІАГНОСТИЧНІ ТЕГИ: "on" — показує [via ...], "off" — ховає
+# Діагностичні теги
 DIAG_TAGS = "on"
 
-# ────────────────────────────────────────────────────────────────────────────
-#                ПОРЯДКИ МОДЕЛЕЙ (TEXT / CODE / VISION) + RUNTIME DEFAULT
-# ────────────────────────────────────────────────────────────────────────────
-# TEXT: першим йде Gemini (якщо є ключ), далі CF безкоштовні, потім free-фолбек
+# ───────────────────────────────────────────────────────────────
+#                МОДЕЛІ (TEXT / CODE / VISION)
+# ───────────────────────────────────────────────────────────────
 MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
-
-# CODE: Qwen (CF) → Llama (CF) → OpenRouter free → Free-фолбек
 MODEL_ORDER_CODE = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
-
-# VISION: CF Llama Vision → (за наявності) Gemini Vision → Free (OpenAI-сумісний)
-# Використовується у flows/visionDescribe.js або у webhook через describeImage()
 VISION_ORDER = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.0-flash-exp, free"
 MODEL_ORDER_VISION = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.0-flash-exp, free"
-
-# RUNTIME дефолт: якщо код у webhook не підміняє порядок — беремо текстовий
 MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 
-# --- Дефолтні моделі (необов'язково, але зручно для читабельності) ---
-GEMINI_MODEL    = "gemini-2.5-flash"
-CF_MODEL        = "@cf/qwen/qwen2.5-7b-instruct"
-# Vision-модель CF (безкоштовний опис зображень)
+# --- Дефолтні моделі ---
+GEMINI_MODEL = "gemini-2.5-flash"
+CF_MODEL = "@cf/qwen/qwen2.5-7b-instruct"
 CF_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
 
-# ────────────────────────────────────────────────────────────────────────────
-#          OpenAI-сумісний fallback (через OpenRouter як "free")
-# ────────────────────────────────────────────────────────────────────────────
-# ВАЖЛИВО: ці ключі додати окремо як секрети:
-#   wrangler secret put OPENROUTER_API_KEY
-#   wrangler secret put FREE_LLM_API_KEY       # (необов’язково; можна повторити OPENROUTER_API_KEY)
+# ───────────────────────────────────────────────────────────────
+#                OpenAI-compat fallback (OpenRouter)
+# ───────────────────────────────────────────────────────────────
 FREE_API_BASE_URL = "https://openrouter.ai/api"
-FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
-FREE_API_PATH     = "/v1/chat/completions"
-
-# Для callFree() у modelRouter.js (OpenAI-сумісний вхід)
+FREE_API_MODEL = "meta-llama/llama-4-scout:free"
+FREE_API_PATH = "/v1/chat/completions"
 FREE_LLM_BASE_URL = "https://openrouter.ai/api"
-FREE_LLM_MODEL    = "meta-llama/llama-4-scout:free"
-# FREE_LLM_API_KEY задається як секрет (див. вище)
-
-# (необов'язково) Ідентифікатори застосунку для OpenRouter заголовків
-# використовуються у modelRouter.js, якщо задані
+FREE_LLM_MODEL = "meta-llama/llama-4-scout:free"
 OPENROUTER_SITE_URL = "https://senti.restsva.app"
 OPENROUTER_APP_NAME = "Senti Bot Worker"
 
-# ────────────────────────────────────────────────────────────────────────────
-#                                VOICE (TTS/STT)
-# ────────────────────────────────────────────────────────────────────────────
-# Каскад TTS для synthesizeVoice(): Aura (ogg/opus → TG voice) → MeloTTS (mp3) → Free
+# ───────────────────────────────────────────────────────────────
+#                     VOICE (TTS / STT)
+# ───────────────────────────────────────────────────────────────
 TTS_ORDER = "@cf/deepgram/aura-1,@cf/myshell-ai/melotts,free"
-# Дефолтний голос Aura (можеш змінити під укр-чоловічий tone)
 VOICE_SPEAKER = "angus"
-# Початковий стан тумблера голосових відповідей (/voice_on | /voice_off)
 VOICE_REPLY_DEFAULT = "off"
 
-# Free TTS endpoint (OpenAI-speech-сумісний /v1/audio/speech)
-# Якщо маєш власний TTS сервер або OpenRouter/інший сервіс з цим шляхом.
 FREE_TTS_BASE_URL = ""
-FREE_TTS_MODEL    = "tts-1"
-FREE_TTS_VOICE    = "alloy"
-# FREE_TTS_API_KEY задається як секрет (за потреби)
+FREE_TTS_MODEL = "tts-1"
+FREE_TTS_VOICE = "alloy"
 
-# ────────────────────────────────────────────────────────────────────────────
-# --- Керування нічними авто-поліпшеннями ---
-AUTO_IMPROVE     = "on"   # "off" щоб вимкнути
-# Основний добовий запуск агента відбувається на годинному кроні ("0 * * * *"),
-# коли getUTCHours() === NIGHTLY_UTC_HOUR. 23 UTC ~= 02:00 за Києвом.
+# --- СТАБІЛІЗАТОРИ ДЛЯ STT (нові) ---
+GEMINI_STT_MODEL = "gemini-1.5-flash"          # стабільний без -latest
+FORCE_AUDIO_TYPE = "audio/ogg; codecs=opus"    # фікс для Telegram voice
+
+# ───────────────────────────────────────────────────────────────
+#           АВТО-ІМПРУВ / РЕГУЛЯЦІЯ / ЕНЕРГІЯ
+# ───────────────────────────────────────────────────────────────
+AUTO_IMPROVE = "on"
 NIGHTLY_UTC_HOUR = "23"
-
-# --- Self-Regulation (ввімк/вимк та сила тюнінгу) ---
-SELF_REGULATE      = "on"
+SELF_REGULATE = "on"
 SELF_TUNING_FACTOR = "0.3"
 
-# --- ⚡ ЕНЕРГІЯ (щоб не зникали на деплої) ---
 ENERGY_MAX = "100"
 ENERGY_RECOVER_PER_MIN = "1"
 ENERGY_COST_TEXT = "1"
 ENERGY_COST_IMAGE = "5"
 ENERGY_LOW_THRESHOLD = "10"
 
-# ─────── НОВІ КЛЮЧІ ДЛЯ СТАБІЛЬНОГО STT ───────
-# 1) Стабільний дефолт для Gemini STT (без '-latest')
-GEMINI_STT_MODEL = "gemini-1.5-flash"
-# 2) Форсований MIME для voice з Telegram (лікує 'Invalid audio input' у CF)
-FORCE_AUDIO_TYPE = "audio/ogg; codecs=opus"
-
-# --- KV bindings ---
+# ───────────────────────────────────────────────────────────────
+#                         KV STORAGE
+# ───────────────────────────────────────────────────────────────
 [[kv_namespaces]]
 binding = "DEDUP_KV"
 id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
@@ -148,27 +120,25 @@ id = "470d4f5c164a4a828c569eb9a52a5133"
 binding = "CHECKLIST_KV"
 id = "497eac980691495ea2a0bc8611892d65"
 
-# Пам'ять/лайки/нічні імпруви
 [[kv_namespaces]]
 binding = "LIKES_KV"
 id = "f7d480c281ad47d2bdf270fadf4de021"
 
-# ➕ Журнал енергії
 [[kv_namespaces]]
 binding = "ENERGY_LOG_KV"
 id = "9e6f0ed5bf2544a9a63d57455900a844"
 
-# ➕ Діалоги (коротка пам'ять між сесіями)
 [[kv_namespaces]]
 binding = "DIALOG_KV"
 id = "63c0d1e0962a419ca54082893410b28e"
 
-# ➕ Черга навчання (для Learn)
 [[kv_namespaces]]
 binding = "LEARN_QUEUE_KV"
 id = "86a54c59ce674a558780c58bf1a47dfd"
 
-# --- R2 buckets (для upload файлів у Learn) ---
+# ───────────────────────────────────────────────────────────────
+#                         R2 BUCKET
+# ───────────────────────────────────────────────────────────────
 [[r2_buckets]]
-binding = "LEARN_BUCKET"           # використовуй у коді: env.LEARN_BUCKET
+binding = "LEARN_BUCKET"
 bucket_name = "senti-learn"
