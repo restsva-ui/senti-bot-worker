@@ -2,17 +2,18 @@
 // (rev) Без вітального відео; тихе перемикання режимів; фікс мови на /start;
 // перевірка підключення Google Drive; дружній фолбек для медіа в Senti;
 // авто-самотюнінг стилю (мовні профілі) через selfTune.
+// (upd) Vision через каскад моделей askVision() + base64 із Telegram файлів.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
 import { abs } from "../utils/url.js";
 import { think } from "../lib/brain.js";
 import { readStatut } from "../lib/kvChecklist.js";
-import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
+import { askAnyModel, getAiHealthSummary, askVision } from "../lib/modelRouter.js"; // ⬅️ додано askVision
 import { json } from "../lib/utils.js";
 import { getEnergy, spendEnergy } from "../lib/energy.js";
 import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
-import { loadSelfTune, autoUpdateSelfTune } from "../lib/selfTune.js"; // ⬅️ додано
+import { loadSelfTune, autoUpdateSelfTune } from "../lib/selfTune.js"; // ⬅️
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
@@ -51,33 +52,38 @@ function pulseTyping(env, chatId, times = 4, intervalMs = 4000) {
   for (let i = 1; i < times; i++) setTimeout(() => sendTyping(env, chatId), i * intervalMs);
 }
 
-// ── CF Vision (безкоштовно) ─────────────────────────────────────────────────
-async function cfVisionDescribe(env, imageUrl, userPrompt = "", lang = "uk") {
-  if (!env.CLOUDFLARE_API_TOKEN || !env.CF_ACCOUNT_ID) throw new Error("CF credentials missing");
-  const model = "@cf/llama-3.2-11b-vision-instruct";
-  const url = `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/ai/run/${model}`;
+// ── Binary → base64 helper (для Telegram файлів) ────────────────────────────
+async function urlToBase64(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`fetch image ${r.status}`);
+  const ab = await r.arrayBuffer();
+  const bytes = new Uint8Array(ab);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  // btoa працює в Workers для бінарного рядка
+  return btoa(bin);
+}
 
-  const messages = [{
-    role: "user",
-    content: [
-      { type: "input_text", text: `${userPrompt || "Describe the image briefly."} Reply in ${lang}.` },
-      { type: "input_image", image_url: imageUrl }
-    ]
-  }];
+// ── Vision через каскад моделей (askVision) ─────────────────────────────────
+async function visionDescribe(env, { imageUrl, userPrompt = "", lang = "uk", systemHint }) {
+  // Визначаємо порядок моделей: спеціальний для vision або загальний
+  const modelOrder =
+    String(env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "@cf/meta/llama-3.2-11b-vision-instruct").trim();
 
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ messages })
-  });
+  // Telegram → base64
+  const imageBase64 = await urlToBase64(imageUrl);
+  const prompt = `${userPrompt || "Опиши зображення коротко і по суті."} Відповідай ${lang.toUpperCase()} мовою.`;
 
-  const data = await r.json().catch(() => null);
-  if (!data || !data.success) {
-    const msg = data?.errors?.[0]?.message || `CF vision failed (HTTP ${r.status})`;
-    throw new Error(msg);
-  }
-  const result = data.result?.response || data.result?.output_text || data.result?.text || "";
-  return String(result || "").trim();
+  // askVision нормалізує провайдери: gemini / cf / openrouter(:free) і т.д.
+  const out = await askVision(
+    env,
+    modelOrder,
+    prompt,
+    { systemHint, imageBase64, imageMime: "image/jpeg", temperature: 0.2 }
+  );
+
+  // askVision повертає текст (для cf/gemini) — забезпечимо рядок
+  return String(out || "").trim();
 }
 
 // ── Media helpers ───────────────────────────────────────────────────────────
@@ -189,8 +195,11 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
 
   const url = await tgFileUrl(env, att.file_id);
   const prompt = caption || "Опиши, що на зображенні, коротко і по суті.";
+
   try {
-    const resp = await cfVisionDescribe(env, url, prompt, lang);
+    // Подаємо systemHint, щоб відповідь відповідала стилю/мові Senti
+    const systemHint = await buildSystemHint(env, chatId, userId, lang);
+    const resp = await visionDescribe(env, { imageUrl: url, userPrompt: prompt, lang, systemHint });
     await sendPlain(env, chatId, `🖼️ ${resp}`);
   } catch (e) {
     if (ADMIN(env, userId)) {
@@ -567,7 +576,7 @@ export async function handleTelegramWebhook(req, env) {
       if (await handleIncomingMedia(env, chatId, userId, msg, lang)) return json({ ok: true });
     }
 
-    // 2) Без Drive: фото → Vision (якщо є ключі), інше медіа → дружній фолбек
+    // 2) Без Drive: фото → Vision (каскад моделей), інше медіа → дружній фолбек
     if (!driveOn && pickPhoto(msg)) {
       if (await handleVisionMedia(env, chatId, userId, msg, lang, msg?.caption)) return json({ ok: true });
     }
@@ -646,7 +655,7 @@ export async function handleTelegramWebhook(req, env) {
       await pushTurn(env, userId, "user", textRaw);
       await autoUpdateSelfTune(env, userId, lang).catch(() => {}); // тихий гачок
 
-      const systemHint = await buildSystemHint(env, chatId, userId, lang); // ⬅️ передаємо мову
+      const systemHint = await buildSystemHint(env, chatId, userId, lang); // ⬅️
       const name = await getPreferredName(env, msg);
       const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
       const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand, adminDiag: isAdmin });
