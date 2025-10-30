@@ -117,6 +117,12 @@ ENERGY_COST_TEXT = "1"
 ENERGY_COST_IMAGE = "5"
 ENERGY_LOW_THRESHOLD = "10"
 
+# ─────── НОВІ КЛЮЧІ ДЛЯ СТАБІЛЬНОГО STT ───────
+# 1) Стабільний дефолт для Gemini STT (без '-latest')
+GEMINI_STT_MODEL = "gemini-1.5-flash"
+# 2) Форсований MIME для voice з Telegram (лікує 'Invalid audio input' у CF)
+FORCE_AUDIO_TYPE = "audio/ogg; codecs=opus"
+
 # --- KV bindings ---
 [[kv_namespaces]]
 binding = "DEDUP_KV"
