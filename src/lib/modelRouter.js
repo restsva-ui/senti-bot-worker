@@ -1,5 +1,5 @@
 // src/lib/modelRouter.js
-// Узагальнений маршрутизатор моделей + health-метрики.
+// Узагальнений маршрутизатор моделей + health-метрики + мультирежими (text/vision/stt/tts).
 // ВАЖЛИВО: systemHint завжди додається. Якщо API не має поля system —
 // підмішуємо як префікс до user-повідомлення.
 
@@ -39,7 +39,7 @@ async function updateHealth(env, { provider, model, ms, ok }) {
 function parseEntry(raw) {
   // Підтримувані форми:
   // - "gemini:gemini-2.5-flash"
-  // - "cf:@cf/meta/llama-3.1-8b-instruct" або просто "@cf/meta/llama-3.1-8b-instruct"
+  // - "cf:@cf/meta/llama-3.2-11b-instruct" або просто "@cf/meta/llama-3.2-11b-instruct"
   // - "openrouter:deepseek/deepseek-chat"
   // - "free:meta-llama/llama-4-scout:free" або просто "free"
   const s = String(raw || "").trim();
@@ -57,25 +57,38 @@ function parseEntry(raw) {
   return { provider: "free", model: s };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Провайдери
+// Розпізнавання режиму за опціями
+function detectMode(opts = {}) {
+  if (opts?.ttsText) return "tts";               // text -> audio
+  if (opts?.audioBase64) return "stt";           // audio -> text
+  if (opts?.imageBase64) return "vision";        // image -> text
+  return "text";                                 // text -> text (у т.ч. код)
+}
 
-async function callGemini(env, model, prompt, systemHint) {
-  const key =
-    env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY;
+// ─────────────────────────────────────────────────────────────────────────────
+// Провайдери — текст/vision/stt/tts
+
+// GEMINI (text + vision)
+async function callGemini(env, model, prompt, systemHint, opts = {}) {
+  const key = env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY;
   if (!key) throw new Error("GEMINI key missing");
 
-  // Надійніше — одним промптом з префіксом (бо різні ревізії API іменують поле по-різному)
+  const mode = detectMode(opts);
   const user = withSystemPrefix(systemHint, prompt);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
 
-  // generateContent (v1beta) формат
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(
-    key
-  )}`;
+  // parts: text + (опціонально) inline image
+  const parts = [{ text: user }];
+  if (mode === "vision" && opts.imageBase64) {
+    // За замовчуванням припускаємо PNG; змінюй mime_type за потреби.
+    parts.push({
+      inline_data: { mime_type: opts.imageMime || "image/png", data: opts.imageBase64 }
+    });
+  }
+
   const body = {
-    contents: [
-      { role: "user", parts: [{ text: user }] },
-    ],
+    contents: [{ role: "user", parts }],
+    generationConfig: { temperature: opts.temperature ?? 0.2 },
     safetySettings: [{ category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }],
   };
 
@@ -86,25 +99,51 @@ async function callGemini(env, model, prompt, systemHint) {
   });
   const data = await jsonSafe(r);
   if (!r.ok) throw new Error(`gemini ${r.status} ${data?.error?.message || ""}`);
-  // Витягуємо текст
+
   const text =
     data?.candidates?.[0]?.content?.parts?.map(p => p?.text).filter(Boolean).join("\n").trim() ||
     data?.candidates?.[0]?.content?.parts?.[0]?.text ||
     "";
+
   if (!text) throw new Error("gemini: empty response");
   return text.trim();
 }
 
-async function callCF(env, model, prompt, systemHint) {
-  const token = env.CLOUDFLARE_API_TOKEN;
-  const acc = env.CF_ACCOUNT_ID;
+// CLOUDFLARE WORKERS AI (chat/vision/stt/tts)
+async function callCF(env, model, prompt, systemHint, opts = {}) {
+  const token = env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN;
+  const acc = env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID;
   if (!token || !acc) throw new Error("Cloudflare credentials missing");
 
-  // Workers AI підтримує chat messages (system + user)
   const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/${encodeURIComponent(model)}`;
-  const messages = [];
-  if (systemHint?.trim()) messages.push({ role: "system", content: systemHint.trim() });
-  messages.push({ role: "user", content: prompt });
+  const mode = detectMode(opts);
+
+  let inputs;
+  if (mode === "vision") {
+    // CF vision формат: content = [{type:"input_text"},{type:"input_image", image: BASE64}]
+    inputs = {
+      messages: [{
+        role: "user",
+        content: [
+          { type: "input_text", text: String(prompt || "") },
+          ...(opts.imageBase64 ? [{ type: "input_image", image: opts.imageBase64 }] : [])
+        ]
+      }],
+      temperature: opts.temperature ?? 0.2
+    };
+  } else if (mode === "stt") {
+    inputs = {
+      audio: { buffer: opts.audioBase64, format: opts.audioFormat || "mp3" }
+    };
+  } else if (mode === "tts") {
+    inputs = { text: opts.ttsText, voice: opts.voice || "male" };
+  } else {
+    // text/chat
+    const messages = [];
+    if (systemHint?.trim()) messages.push({ role: "system", content: systemHint.trim() });
+    messages.push({ role: "user", content: String(prompt || "") });
+    inputs = { messages, temperature: opts.temperature ?? 0.2 };
+  }
 
   const r = await fetch(url, {
     method: "POST",
@@ -112,23 +151,49 @@ async function callCF(env, model, prompt, systemHint) {
       Authorization: `Bearer ${token}`,
       "content-type": "application/json",
     },
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify(inputs),
   });
+
   const data = await jsonSafe(r);
   if (!data?.success) {
     const msg = data?.errors?.[0]?.message || `cf http ${r.status}`;
     throw new Error(msg);
   }
+
+  // Нормалізуємо вихід
+  if (mode === "tts") {
+    const res = data?.result || {};
+    const audioBase64 = res?.audio ?? res?.output?.audio ?? res?.result ?? null;
+    const format = res?.format ?? res?.output?.format ?? "mp3";
+    if (!audioBase64) throw new Error("cf tts: no audio");
+    return { audioBase64, format };
+  }
+
+  if (mode === "stt") {
+    const res = data?.result || {};
+    const text = res?.text ?? res?.transcript ?? res?.response ?? res?.result ?? "";
+    if (!text) throw new Error("cf stt: empty transcript");
+    return String(text).trim();
+  }
+
+  // text / vision → текст
   const out =
     data?.result?.response?.trim?.() ||
     data?.result?.text?.trim?.() ||
     data?.result?.output_text?.trim?.() ||
+    data?.result?.output?.text?.trim?.() ||
+    data?.result?.result?.trim?.() ||
     "";
+
   if (!out) throw new Error("cf: empty response");
   return out.trim();
 }
 
-async function callOpenRouter(env, model, prompt, systemHint) {
+// OPENROUTER (text тільки; якщо vision/stt/tts — пропускаємо)
+async function callOpenRouter(env, model, prompt, systemHint, opts = {}) {
+  const mode = detectMode(opts);
+  if (mode !== "text") throw new Error("openrouter: unsupported mode for this call");
+
   const key = env.OPENROUTER_API_KEY;
   if (!key) throw new Error("OpenRouter key missing");
 
@@ -146,7 +211,7 @@ async function callOpenRouter(env, model, prompt, systemHint) {
     body: JSON.stringify({
       model,
       messages,
-      temperature: 0.6,
+      temperature: opts.temperature ?? 0.6,
     }),
   });
   const data = await jsonSafe(r);
@@ -158,17 +223,16 @@ async function callOpenRouter(env, model, prompt, systemHint) {
   return txt.trim();
 }
 
-async function callFree(env, model, prompt, systemHint) {
-  const base =
-    env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL || "";
-  if (!base) throw new Error("FREE base url missing");
+// FREE (OpenAI-сумісний endpoint; тільки text)
+async function callFree(env, model, prompt, systemHint, opts = {}) {
+  const mode = detectMode(opts);
+  if (mode !== "text") throw new Error("free: unsupported mode for this call");
 
-  const key =
-    env.FREE_LLM_API_KEY || env.FREE_API_KEY || "";
+  const base = env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL || "";
+  if (!base) throw new Error("FREE base url missing");
+  const key = env.FREE_LLM_API_KEY || env.FREE_API_KEY || "";
   const endpoint = base.replace(/\/+$/, "") + "/v1/chat/completions";
 
-  // OpenAI-сумісний чат. Якщо системний промпт не підтримується — усе одно
-  // моделі його «бачитимуть», бо ми додаємо role:system.
   const messages = [];
   if (systemHint?.trim()) messages.push({ role: "system", content: systemHint.trim() });
   messages.push({ role: "user", content: String(prompt || "") });
@@ -182,7 +246,7 @@ async function callFree(env, model, prompt, systemHint) {
     body: JSON.stringify({
       model: model || env.FREE_LLM_MODEL || "gpt-3.5-turbo",
       messages,
-      temperature: 0.6,
+      temperature: opts.temperature ?? 0.6,
     }),
   });
   const data = await jsonSafe(r);
@@ -196,23 +260,23 @@ async function callFree(env, model, prompt, systemHint) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Головна точка: послідовний перебір за modelOrder.
+// Розширено: тепер приймає опції режимів (imageBase64 / audioBase64 / ttsText / voice / temperature).
 
-export async function askAnyModel(env, modelOrder, prompt, { systemHint } = {}) {
+export async function askAnyModel(env, modelOrder, prompt, { systemHint, imageBase64, imageMime, audioBase64, audioFormat, ttsText, voice, temperature } = {}) {
   const entries = String(modelOrder || "")
     .split(",")
     .map(s => s.trim())
     .filter(Boolean);
 
+  // Якщо порядок не задано — спробуємо мінімальний FREE як запасний варіант (text only)
   if (!entries.length) {
-    // Якщо порядок не задано — спробуємо мінімальний FREE як запасний варіант
     const p = withSystemPrefix(systemHint, prompt);
-    // Або, якщо у твоєму проекті є think(), можеш підмінити тут.
-    // Але щоб файл був самодостатній — йдемо на free-гілку:
-    return await callFree(env, env.FREE_LLM_MODEL || "gpt-3.5-turbo", p, "");
+    return await callFree(env, env.FREE_LLM_MODEL || "gpt-3.5-turbo", p, "", { temperature });
   }
 
-  let lastErr = null;
+  const mode = detectMode({ imageBase64, audioBase64, ttsText });
 
+  let lastErr = null;
   for (const raw of entries) {
     const ent = parseEntry(raw);
     if (!ent) continue;
@@ -221,14 +285,24 @@ export async function askAnyModel(env, modelOrder, prompt, { systemHint } = {}) 
     const t0 = nowMs();
     try {
       let out;
-      if (provider === "gemini") out = await callGemini(env, model, prompt, systemHint);
-      else if (provider === "cf") out = await callCF(env, model, prompt, systemHint);
-      else if (provider === "openrouter") out = await callOpenRouter(env, model, prompt, systemHint);
-      else if (provider === "free") out = await callFree(env, model, prompt, systemHint);
-      else {
-        // невідомий провайдер — пробуємо як Free (OpenAI-сумісний)
-        out = await callFree(env, model, prompt, systemHint);
+      if (provider === "gemini") {
+        // Gemini підтримує text і vision (inline_data)
+        out = await callGemini(env, model, prompt, systemHint, { imageBase64, imageMime, temperature });
+      } else if (provider === "cf") {
+        // CF підтримує text/vision/stt/tts
+        out = await callCF(env, model, prompt, systemHint, { imageBase64, imageMime, audioBase64, audioFormat, ttsText, voice, temperature });
+      } else if (provider === "openrouter") {
+        if (mode !== "text") throw new Error("openrouter: only text mode supported here");
+        out = await callOpenRouter(env, model, prompt, systemHint, { temperature });
+      } else if (provider === "free") {
+        if (mode !== "text") throw new Error("free: only text mode supported here");
+        out = await callFree(env, model, prompt, systemHint, { temperature });
+      } else {
+        // невідомий провайдер — пробуємо як Free (text only)
+        if (mode !== "text") throw new Error("unknown provider: only text mode fallback available");
+        out = await callFree(env, model, prompt, systemHint, { temperature });
       }
+
       const ms = nowMs() - t0;
       updateHealth(env, { provider, model, ms, ok: true }).catch(() => {});
       return out;
@@ -236,13 +310,37 @@ export async function askAnyModel(env, modelOrder, prompt, { systemHint } = {}) 
       const ms = nowMs() - t0;
       updateHealth(env, { provider, model, ms, ok: false }).catch(() => {});
       lastErr = e;
-      // пробуємо наступний у ланцюжку
-      continue;
+      continue; // пробуємо наступний у ланцюжку
     }
   }
 
   // Якщо усі впали — кидаємо останню помилку
   throw lastErr || new Error("All providers failed");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Спеціалізовані “цукрові” функції для зручності інтеграції
+
+// text/code
+export async function askText(env, modelOrder, prompt, { systemHint, temperature } = {}) {
+  return await askAnyModel(env, modelOrder, prompt, { systemHint, temperature });
+}
+
+// vision: image(base64) + prompt → text
+export async function askVision(env, modelOrder, prompt, { systemHint, imageBase64, imageMime = "image/png", temperature } = {}) {
+  return await askAnyModel(env, modelOrder, prompt, { systemHint, imageBase64, imageMime, temperature });
+}
+
+// stt: audio(base64) → transcript
+export async function transcribe(env, modelOrder, { audioBase64, audioFormat = "mp3" }, { systemHint } = {}) {
+  return await askAnyModel(env, modelOrder, "(audio)", { systemHint, audioBase64, audioFormat });
+}
+
+// tts: text → { audioBase64, format }
+export async function speak(env, modelOrder, text, { voice = "male", systemHint } = {}) {
+  const out = await askAnyModel(env, modelOrder, "(tts)", { systemHint, ttsText: text, voice });
+  // для TTS ми повертаємо об'єкт {audioBase64, format} з callCF
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
