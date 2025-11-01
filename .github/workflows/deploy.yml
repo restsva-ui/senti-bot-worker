@@ -8,7 +8,6 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     permissions:
       contents: read
 
@@ -20,18 +19,18 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'npm'
 
-      - name: 🧩 Ensure package.json exists
+      # Якщо lock-файл є — ігноруємо його, щоб не ловити EUSAGE
+      - name: 🧹 Remove stale lock if present
         run: |
-          if [ ! -f package.json ]; then
-            echo "Creating minimal package.json..."
-            echo '{}' > package.json
+          if [ -f package-lock.json ]; then
+            echo "Found package-lock.json → removing (out-of-sync with package.json)"
+            rm -f package-lock.json
           fi
 
-      - name: 📦 Install Wrangler + deps
-        run: |
-          npm install wrangler@3 @cloudflare/kv-asset-handler@0.3.4 \
-            esbuild@0.17.19 path-to-regexp@6.3.0 mime@3.0.0
+      - name: 📦 Install deps from package.json
+        run: npm install --no-audit --no-fund
 
       - name: 🚀 Deploy to Cloudflare
         env:
