@@ -1,11 +1,10 @@
 // src/routes/webhook.js
-// rev4.1 — Vision language fix, UA TTS mapping, voice reply, balanced braces.
-//
-// - Vision: strict "ONLY in <lang>" + translate on-image text → user language.
-// - MIME hardening for images (no octet-stream leaks).
-// - TTS: chooseVoice() by language, sendAudio MP3 via CF @cf/myshell-ai/melotts.
-// - STT: via transcribeVoice() cascade (CF → Gemini → OpenRouter → FREE).
-// - Text answers: hard enforce reply language; voice reply immediately when VOICE_REPLY_DEFAULT="on".
+// rev4.2 — повний файл, без обрізань.
+// - Vision: строгий режим мови + опис і (за потреби) розпізнавання місця з лінком Google Maps.
+// - STT: каскад CF Whisper → Gemini (v1beta) → OpenRouter/FREE, без небезпечних RegExp.
+// - TTS: CF MeloTTS (mp3) з мапінгом голосів за мовою, автоголос при VOICE_REPLY_DEFAULT="on".
+// - Дата/час/погода (простий хендл), Drive-режим збереження медіа, пам’ять останнього фото.
+// - Жорстка нормалізація мови відповіді (не перемикаємось на англ).
 
 /* ───────────── Imports ───────────── */
 import { driveSaveFromUrl } from "../lib/drive.js";
@@ -21,10 +20,10 @@ import { loadSelfTune, autoUpdateSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
-import { enqueueLearn, getRecentInsights, listQueued } from "../lib/kvLearnQueue.js";
+import { enqueueLearn, getRecentInsights } from "../lib/kvLearnQueue.js";
 import { transcribeVoice } from "../lib/speechRouter.js";
 import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from "../apis/time.js";
-import { weatherIntent, weatherSummaryByPlace, weatherSummaryByCoords } from "../apis/weather.js";
+import { weatherSummaryByPlace, weatherSummaryByCoords } from "../apis/weather.js";
 import { setUserLocation, getUserLocation } from "../lib/geo.js";
 
 /* ───────────── Telegram helpers & UI ───────────── */
@@ -34,7 +33,10 @@ const {
   askLocationKeyboard
 } = TG;
 
-const KV = { learnMode: (uid) => `learn:mode:${uid}` };
+const KV = {
+  learnMode: (uid) => `learn:mode:${uid}`,
+  lastPhotoUrl: (chatId) => `last:photo:url:${chatId}`,
+};
 
 async function sendTyping(env, chatId) {
   try {
@@ -43,18 +45,19 @@ async function sendTyping(env, chatId) {
     await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, action: "typing" })
+      body: JSON.stringify({ chat_id: chatId, action: "typing" }),
     });
   } catch {}
 }
-function pulseTyping(env, chatId, times = 4, intervalMs = 4000) {
+function pulseTyping(env, chatId, times = 4, intervalMs = 3500) {
   sendTyping(env, chatId);
   for (let i = 1; i < times; i++) setTimeout(() => sendTyping(env, chatId), i * intervalMs);
 }
+
 /* ───────────── Image MIME helpers (no octet-stream) ───────────── */
 function sniffImageMime(u8) {
   if (!u8 || u8.length < 12) return "";
-  if (u8[0] === 0xff && u8[1] === 0xd8 && u8[2] === 0xff) return "image/jpeg"; // JPEG
+  if (u8[0] === 0xff && u8[1] === 0xd8 && u8[2] === 0xff) return "image/jpeg";
   if (u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4e && u8[3] === 0x47 && u8[4] === 0x0d && u8[5] === 0x0a && u8[6] === 0x1a && u8[7] === 0x0a) return "image/png";
   if (u8[0] === 0x52 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x38 && u8[8] === 0x57 && u8[9] === 0x45 && u8[10] === 0x42 && u8[11] === 0x50) return "image/webp";
   if (u8[0] === 0x47 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x38) return "image/gif";
@@ -95,7 +98,7 @@ function filterVisionOrder(orderStr = "") {
 
 /* ───────────── Language helpers ───────────── */
 function langNameFor(code = "uk") {
-  const c = String(code || "uk").slice(0,2).toLowerCase();
+  const c = String(code || "uk").slice(0, 2).toLowerCase();
   const map = { uk: "українською", ru: "російською", en: "English", de: "Deutsch", fr: "français" };
   return map[c] || "українською";
 }
@@ -117,9 +120,11 @@ async function visionDescribe(env, { imageUrl, userPrompt = "", lang = "uk", sys
 
   const { b64, mime } = await fetchToBase64WithMime(imageUrl, "image/jpeg");
   const langName = langNameFor(lang);
-  const task = `Опиши зображення коротко і по суті. Відповідай **лише ${langName}**.
-Якщо на фото є текст іншою мовою — коротко **передай зміст ${langName}**. Уникай зайвих деталей.`;
-  const prompt = userPrompt ? `${task}\n\nДодатковий контекст від користувача: «${userPrompt}».` : task;
+  const baseTask =
+`Опиши зображення коротко та по суті ${langName}. Якщо на фото є текст іншою мовою — передай його сенс ${langName}.
+Не вигадуй деталей, якщо не впевнений.`;
+
+  const prompt = userPrompt ? `${baseTask}\n\nДодатковий контекст від користувача: «${userPrompt}».` : baseTask;
 
   const strongSystem =
     (systemHint ? `${systemHint}\n\n` : "") +
@@ -133,10 +138,40 @@ async function visionDescribe(env, { imageUrl, userPrompt = "", lang = "uk", sys
   );
   return String(out || "").trim();
 }
-/* ===== Learn helpers (admin-only) ======================================== */
+
+/* ───────────── Place recognition for "Що це за місце?" ───────────── */
+async function visionPlace(env, { imageUrl, lang = "uk", systemHint }) {
+  const rawOrder = String(
+    env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "@cf/meta/llama-3.2-11b-vision-instruct"
+  ).trim();
+  const modelOrder = filterVisionOrder(rawOrder);
+
+  const { b64, mime } = await fetchToBase64WithMime(imageUrl, "image/jpeg");
+  const langName = langNameFor(lang);
+
+  const prompt =
+`Визнач місце/локацію на фото (місто, країна, відома будівля чи локація). Якщо впевнений — дай коротку відповідь ${langName}:
+• Назва місця та країна.
+• На новому рядку додай лінк у форматі: "🔗 https://www.google.com/maps/search/?api=1&query=<назва або координати>".
+Якщо не впевнений — чесно скажи, запропонуй 1–2 найбільш імовірні варіанти, теж додай пошуковий лінк.`;
+
+  const strongSystem =
+    (systemHint ? `${systemHint}\n\n` : "") +
+    `STRICT LANGUAGE POLICY: Answer ONLY in ${langName}.`;
+
+  const out = await askVision(
+    env,
+    modelOrder,
+    prompt,
+    { systemHint: strongSystem, imageBase64: b64, imageMime: mime, temperature: 0.2 }
+  );
+  return String(out || "").trim();
+}
+
+/* ===== Learn helpers ===================================================== */
 function extractFirstUrl(text = "") { const m = String(text || "").match(/https?:\/\/\S+/i); return m ? m[0] : null; }
-async function getLearnMode(env, userId) { try { return (await env.STATE_KV.get(`learn:mode:${userId}`)) === "on"; } catch { return false; } }
-async function setLearnMode(env, userId, on) { try { await env.STATE_KV.put(`learn:mode:${userId}`, on ? "on" : "off"); } catch {} }
+async function getLearnMode(env, userId) { try { return (await env.STATE_KV.get(KV.learnMode(userId))) === "on"; } catch { return false; } }
+async function setLearnMode(env, userId, on) { try { await env.STATE_KV.put(KV.learnMode(userId), on ? "on" : "off"); } catch {} }
 
 /* Drive-режим (збереження медіа) */
 async function tgFileUrl(env, file_id) {
@@ -194,8 +229,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   });
   return true;
 }
-
-/* Vision-режим */
+/* Vision-режим: опис + пам’ять останнього фото */
 async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const att = pickPhoto(msg);
   if (!att) return false;
@@ -206,9 +240,11 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   await spendEnergy(env, userId, need, "vision");
 
   pulseTyping(env, chatId);
-
   const url = await tgFileUrl(env, att.file_id);
   try {
+    // запам’ятаймо останнє фото для подальшого "Що це за місце?"
+    try { await env.STATE_KV.put(KV.lastPhotoUrl(chatId), url, { expirationTtl: 3600 }); } catch {}
+
     const systemHint = await buildSystemHint(env, chatId, userId, lang);
     const resp = await visionDescribe(env, {
       imageUrl: url,
@@ -221,18 +257,19 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
     const raw = String(env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "").trim();
     const filtered = filterVisionOrder(raw);
     if (ADMIN(env, userId)) {
-      await sendPlain(env, chatId, `❌ Vision error: ${String(e?.message || e).slice(0, 300)}\n(modelOrder raw: ${raw || "n/a"})\n(modelOrder used: ${filtered})`);
+      await sendPlain(env, chatId, `❌ Vision error: ${String(e?.message || e).slice(0, 320)}\n(modelOrder raw: ${raw || "n/a"})\n(modelOrder used: ${filtered})`);
     } else {
       const connectUrl = abs(env, "/auth/drive");
       await sendPlain(env, chatId,
-        "Поки що не можу аналізувати фото. Можу зберегти його у Google Drive — натисни «Google Drive».",
+        "Поки що не вдалось проаналізувати фото. Можу зберегти його у Google Drive — натисни «Google Drive».",
         { reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn") || "Підключити Drive", url: connectUrl }]] } }
       );
     }
   }
   return true;
 }
-/* ───────────── TTS (Cloudflare → Telegram sendAudio) ───────────── */
+
+/* ───────────── TTS (CF MeloTTS → Telegram sendAudio) ───────────── */
 async function cfRunTTS(env, text, lang = "uk") {
   const acc = env.CF_ACCOUNT_ID;
   const token = env.CLOUDFLARE_API_TOKEN;
@@ -280,7 +317,7 @@ async function synthAndSendAudio(env, chatId, text, lang = "uk") {
   try {
     const blob = await cfRunTTS(env, text, lang);
     await sendAudioTg(env, chatId, blob, "🎧");
-  } catch (_) { /* текст уже надіслано — мовчки ігноруємо */ }
+  } catch (_) { /* текст вже відправлено — мовчимо */ }
 }
 
 /* Voice/STT */
@@ -297,20 +334,21 @@ async function handleVoiceSTT(env, chatId, userId, msg, lang) {
 
   try {
     const url = await tgFileUrl(env, msg.voice.file_id);
-    const { text: stt } = await transcribeVoice(env, url);
+    const { text: stt, lang: sttLang } = await transcribeVoice(env, url);
+    const effLang = sttLang || lang;
 
     await pushTurn(env, userId, "user", stt);
-    await autoUpdateSelfTune(env, userId, lang).catch(() => {});
+    await autoUpdateSelfTune(env, userId, effLang).catch(() => {});
 
-    const systemHint = await buildSystemHint(env, chatId, userId, lang);
+    const systemHint = await buildSystemHint(env, chatId, userId, effLang);
     const name = await getPreferredName(env, msg);
-    const { short, full } = await callSmartLLM(env, stt, { lang, name, systemHint, expand: false, adminDiag: ADMIN(env, userId) });
+    const { short, full } = await callSmartLLM(env, stt, { lang: effLang, name, systemHint, expand: false, adminDiag: ADMIN(env, userId) });
 
     await pushTurn(env, userId, "assistant", full);
     await sendPlain(env, chatId, short);
 
     if ((env.VOICE_REPLY_DEFAULT || "off").toLowerCase() === "on") {
-      await synthAndSendAudio(env, chatId, short, lang);
+      await synthAndSendAudio(env, chatId, short, effLang);
     }
   } catch (e) {
     if (ADMIN(env, userId)) await sendPlain(env, chatId, `❌ Error: STT providers failed | ${String(e?.message || e).slice(0, 220)}`);
@@ -318,6 +356,7 @@ async function handleVoiceSTT(env, chatId, userId, msg, lang) {
   }
   return true;
 }
+
 /* ───────────── SystemHint / name / language enforcement ───────────── */
 async function buildSystemHint(env, chatId, userId, preferredLang) {
   const statut = String((await readStatut(env)) || "").trim();
@@ -345,6 +384,7 @@ async function buildSystemHint(env, chatId, userId, preferredLang) {
   if (dlg) blocks.push(dlg);
   return blocks.join("\n\n");
 }
+
 function revealsAiSelf(out = "") {
   const s = out.toLowerCase();
   return (
@@ -353,15 +393,14 @@ function revealsAiSelf(out = "") {
     /\bdeveloped by (google|openai|meta|anthropic)\b/.test(s) ||
     /я\s+(є|—|-)?\s*(штучн|модель|мова)/i.test(out) ||
     /я\s+(являюсь|есть)\s+(ии|искусственн|языков)/i.test(out) ||
-    /ich bin (ein|eine) (ki|sprachmodell)/i.test(out) ||
-    /je suis (une|un) (ia|mod[èe]le de langue)/i.test(out)
+    /ich bin (ein|eine) (ki|sprachmodell)/i.test(s) ||
+    /je suis (une|un) (ia|mod[èe]le de langue)/i.test(s)
   );
 }
 function stripProviderSignature(s = "") { return String(s).replace(/^[ \t]*(?:—|--)?\s*via\s+[^\n]*\n?/gim, "").trim(); }
 function guessEmoji(text = "") { const x = text.toLowerCase(); if (x.includes("машин")||x.includes("car"))return"🚗"; if(x.includes("світл")||x.includes("light"))return"☀️"; if(x.includes("вода")||x.includes("water"))return"💧"; return "💡"; }
 function looksLikeModelDump(s=""){const x=s.toLowerCase();return /here(?:'|)s a breakdown|model (aliases|mappings|configurations)/i.test(x)||/gemini-?2\.5|openrouter|deepseek|llama/i.test(x);}
 function limitMsg(s,m=220){if(!s)return s;return s.length<=m?s:s.slice(0,m-1);}
-function chunkText(s,size=3500){const out=[];let t=String(s||"");while(t.length){out.push(t.slice(0,size));t=t.slice(size);}return out;}
 
 async function getPreferredName(env, msg) {
   const uid = msg?.from?.id;
@@ -370,7 +409,6 @@ async function getPreferredName(env, msg) {
   try { v = await kv.get(`profile:name:${uid}`); } catch {}
   return v || msg?.from?.first_name || msg?.username || "друже";
 }
-
 function tryParseUserNamedAs(text) {
   const s = (text || "").trim();
   const NAME_RX = "([A-Za-zÀ-ÿĀ-žЀ-ӿʼ'`\\-\\s]{2,30})";
@@ -379,9 +417,9 @@ function tryParseUserNamedAs(text) {
     new RegExp(`\\bменя\\s+зовут\\s+${NAME_RX}`, "iu"),
     new RegExp(`\\bmy\\s+name\\s+is\\s+${NAME_RX}`, "iu"),
     new RegExp(`\\bich\\s+hei(?:s|ß)e\\s+${NAME_RX}`, "iu"),
-    new RegExp(`\\bje\\s+m'?appelle\\s+${NAME_RX}`, "iu")
+    new RegExp(`\\bje\\s+m'?appelle\\s+${NAME_RX}`, "iu"),
   ];
-  for (const r of patterns) { const m = s.match(r); if (m?.[1]) return m[1].trim(); }
+    for (const r of patterns) { const m = s.match(r); if (m?.[1]) return m[1].trim(); }
   return null;
 }
 async function rememberNameFromText(env, userId, text) {
@@ -397,7 +435,7 @@ async function callSmartLLM(env, userText, { lang, name, systemHint, expand, adm
 
   const control = expand
     ? `You are Senti — a thoughtful, empathetic assistant. **Respond ONLY in ${langName}**. Keep it structured, concise, and helpful.`
-    : `You are Senti. **Answer ONLY in ${langName}**, 1–3 короткі фрази, без зайвого вступу.`;
+    : `You are Senti. **Answer ONLY in ${langName}**, 1–3 короткі фрази, без зайвих вступів.`;
 
   const prompt = `Add one relevant emoji at the start if natural.
 User (${name}) says: ${userText}
@@ -417,14 +455,12 @@ ${control}`;
   if (looksLikeModelDump(out)) {
     out = stripProviderSignature((await think(env, prompt, { systemHint }))?.trim() || out);
   }
-  // Заборона самопрезентації як AI
   if (revealsAiSelf(out)) {
     const fix = `Rewrite the answer as Senti. Do NOT mention being an AI/model or any company. Keep it ${langName}, коротко.`;
     let cleaned = modelOrder ? await askAnyModel(env, modelOrder, fix, { systemHint }) : await think(env, fix, { systemHint });
     cleaned = stripProviderSignature((cleaned || "").trim());
     if (cleaned) out = cleaned;
   }
-  // Жорстка нормалізація мови
   const detected = detectFromText(out);
   if (detected && lang && detected !== lang) {
     const force = `STRICT LANGUAGE MODE: Respond ONLY in ${langName}. Rewrite the previous answer in ${langName} without extra preface.`;
@@ -433,26 +469,11 @@ ${control}`;
     if (fixed) out = fixed;
   }
 
-  if (!/^[\p{Emoji}\p{Extended_Pictographic}]/u.test(out || "")) {
-    out = `${guessEmoji(userText)} ${out}`;
-  }
-
+  if (!/^[\p{Emoji}\p{Extended_Pictographic}]/u.test(out || "")) out = `${guessEmoji(userText)} ${out}`;
   const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
 }
-/* ───────────── Learn admin helpers ───────────── */
-async function runLearnNow(env) {
-  const secret = env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || "";
-  const u = new URL(abs(env, "/admin/learn/run"));
-  if (secret) u.searchParams.set("s", secret);
-  const r = await fetch(u.toString(), { method: "POST" });
-  const ct = r.headers.get("content-type") || "";
-  if (!r.ok) throw new Error(`learn_run http ${r.status}`);
-  if (ct.includes("application/json")) return await r.json();
-  return { ok: true, summary: await r.text() };
-}
-
-/* ───────────── MAIN ───────────── */
+/* ───────────── MAIN WEBHOOK ───────────── */
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "POST") {
     const sec = req.headers.get("x-telegram-bot-api-secret-token");
@@ -466,14 +487,14 @@ export async function handleTelegramWebhook(req, env) {
   const msg = update.message || update.edited_message || update.channel_post || update.callback_query?.message;
   const chatId = msg?.chat?.id || update?.callback_query?.message?.chat?.id;
   const userId = msg?.from?.id || update?.callback_query?.from?.id;
+  if (!chatId) return json({ ok: false }, { status: 200 });
+
   const isAdmin = ADMIN(env, userId);
   const textRaw = String(msg?.text || msg?.caption || "").trim();
-
   let lang = pickReplyLanguage(msg, textRaw);
-  const safe = async (fn) => { try { await fn(); } catch (e) { if (isAdmin) await sendPlain(env, chatId, `❌ Error: ${String(e?.message || e).slice(0, 200)}`); else await sendPlain(env, chatId, t(lang, "default_reply")); } };
 
-  // Location
-  if (msg?.location && userId && chatId) {
+  // handle location save
+  if (msg?.location && userId) {
     await setUserLocation(env, userId, msg.location);
     const okMap = {
       uk: "✅ Локацію збережено. Тепер я показуватиму погоду для вашого місця.",
@@ -482,64 +503,135 @@ export async function handleTelegramWebhook(req, env) {
       de: "✅ Standort gespeichert. Ich kann dir jetzt Wetter für deinen Ort zeigen.",
       fr: "✅ Position enregistrée. Je peux maintenant afficher la météo pour ta zone.",
     };
-    const ok = okMap[(msg?.from?.language_code || lang || "uk").slice(0,2)] || okMap.uk;
-    await sendPlain(env, chatId, ok, { reply_markup: mainKeyboard(isAdmin) });
+    const lc = (msg?.from?.language_code || lang || "uk").slice(0,2);
+    await sendPlain(env, chatId, okMap[lc] || okMap.uk, { reply_markup: mainKeyboard(isAdmin) });
     return json({ ok: true });
   }
 
+  // /start
   if (textRaw === "/start") {
-    await safe(async () => {
-      const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
-      const startLang = ["uk", "ru", "en", "de", "fr"].includes(profileLang) ? profileLang : lang;
-      const name = await getPreferredName(env, msg);
-      await sendPlain(env, chatId, `${t(startLang, "hello_name", name)} ${t(startLang, "how_help")}`, { reply_markup: mainKeyboard(isAdmin) });
-    });
+    const profileLang = (msg?.from?.language_code || "").slice(0,2).toLowerCase();
+    const startLang = ["uk","ru","en","de","fr"].includes(profileLang) ? profileLang : lang;
+    const name = await getPreferredName(env, msg);
+    await sendPlain(env, chatId, `${t(startLang, "hello_name", name)} ${t(startLang, "how_help")}`, { reply_markup: mainKeyboard(isAdmin) });
     return json({ ok: true });
   }
 
-  // mode toggles
-  if (textRaw === BTN_DRIVE || /^(google\s*drive)$/i.test(textRaw)) { await setDriveMode(env, userId, true); return json({ ok: true }); }
-  if (textRaw === BTN_SENTI || /^(senti|сенті)$/i.test(textRaw)) { await setDriveMode(env, userId, false); return json({ ok: true }); }
-
-  // /admin
+  // Admin panel
   if (textRaw === "/admin" || textRaw === "/admin@SentiBot" || textRaw === BTN_ADMIN) {
-    await safe(async () => {
-      const mo = String(env.MODEL_ORDER || "").trim();
-      const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY);
-      const hasCF = !!(env.CLOUDFLARE_API_TOKEN && env.CF_ACCOUNT_ID);
-      const hasOR = !!(env.OPENROUTER_API_KEY);
-      const hasFreeBase = !!(env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL);
-      const hasFreeKey = !!(env.FREE_LLM_API_KEY || env.FREE_API_KEY);
+    const rawVision = String(env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "").trim();
+    const usedVision = filterVisionOrder(rawVision);
+    const mo = String(env.MODEL_ORDER || "").trim();
+    const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY);
+    const hasCF = !!(env.CLOUDFLARE_API_TOKEN && env.CF_ACCOUNT_ID);
+    const hasOR = !!(env.OPENROUTER_API_KEY);
+    const hasFreeBase = !!(env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL);
+    const hasFreeKey = !!(env.FREE_LLM_API_KEY || env.FREE_API_KEY);
 
-      const rawVision = String(env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "").trim();
-      const usedVision = filterVisionOrder(rawVision);
-
-      const lines = [
-        t(lang, "admin_header"),
-        `MODEL_ORDER: ${mo || "(not set)"}`,
-        `VISION_ORDER raw: ${rawVision || "(not set)"}`,
-        `VISION_ORDER used: ${usedVision}`,
-        `GEMINI key: ${hasGemini ? "✅" : "❌"}`,
-        `Cloudflare (CF_ACCOUNT_ID + CLOUDFLARE_API_TOKEN): ${hasCF ? "✅" : "❌"}`,
-        `OpenRouter key: ${hasOR ? "✅" : "❌"}`,
-        `FreeLLM (BASE_URL + KEY): ${hasFreeBase && hasFreeKey ? "✅" : "❌"}`
-      ];
-      const entries = mo ? mo.split(",").map(s => s.trim()).filter(Boolean) : [];
-      if (entries.length) {
-        const health = await getAiHealthSummary(env, entries);
-        lines.push("\n— Health:");
-        for (const h of health) {
-          const light = h.cool ? "🟥" : (h.slow ? "🟨" : "🟩");
-          const ms = h.ewmaMs ? `${Math.round(h.ewmaMs)}ms` : "n/a";
-          lines.push(`${light} ${h.provider}:${h.model} — ewma ${ms}, fails ${h.failStreak || 0}`);
-        }
+    const lines = [
+      t(lang, "admin_header"),
+      `MODEL_ORDER: ${mo || "(not set)"}`,
+      `VISION_ORDER raw: ${rawVision || "(not set)"}\nVISION_ORDER used: ${usedVision}`,
+      `GEMINI key: ${hasGemini ? "✅" : "❌"}`,
+      `Cloudflare (CF_ACCOUNT_ID + CLOUDFLARE_API_TOKEN): ${hasCF ? "✅" : "❌"}`,
+      `OpenRouter key: ${hasOR ? "✅" : "❌"}`,
+      `FreeLLM (BASE_URL + KEY): ${hasFreeBase && hasFreeKey ? "✅" : "❌"}`,
+    ];
+    const entries = mo ? mo.split(",").map(s=>s.trim()).filter(Boolean) : [];
+    if (entries.length) {
+      const health = await getAiHealthSummary(env, entries);
+      lines.push("\n— Health:");
+      for (const h of health) {
+        const light = h.cool ? "🟥" : (h.slow ? "🟨" : "🟩");
+        const ms = h.ewmaMs ? `${Math.round(h.ewmaMs)}ms` : "n/a";
+        lines.push(`${light} ${h.provider}:${h.model} — ewma ${ms}, fails ${h.failStreak || 0}`);
       }
-      const links = energyLinks(env, userId);
-      const markup = { inline_keyboard: [
-        [{ text: "📋 Відкрити Checklist", url: links.checklist }],
-        [{ text: "🧠 Open Learn", url: links.learn }],
-      ]};
-      await sendPlain(env, chatId, lines.join("\n"), { reply_markup: markup });
-    });
+    }
+    await sendPlain(env, chatId, lines.join("\n"), { reply_markup: { inline_keyboard: [[{ text: "🧠 Open Learn", url: abs(env, "/admin/learn") }]] } });
     return json({ ok: true });
   }
+
+  // Drive/Senti toggle
+  if (textRaw === BTN_DRIVE) { await setDriveMode(env, userId, true); await sendPlain(env, chatId, "🔗 Режим: Google Drive", { reply_markup: mainKeyboard(isAdmin) }); return json({ ok:true }); }
+  if (textRaw === BTN_SENTI) { await setDriveMode(env, userId, false); await sendPlain(env, chatId, "🤖 Режим: Senti", { reply_markup: mainKeyboard(isAdmin) }); return json({ ok:true }); }
+
+  const driveMode = await getDriveMode(env, userId);
+
+  // 1) Voice → STT
+  if (msg?.voice) {
+    await handleVoiceSTT(env, chatId, userId, msg, lang);
+    return json({ ok: true });
+  }
+
+  // 2) Media in Drive-mode
+  if (driveMode && (msg?.photo || msg?.document || msg?.video || msg?.audio || msg?.voice || msg?.video_note)) {
+    await handleIncomingMedia(env, chatId, userId, msg, lang);
+    return json({ ok: true });
+  }
+
+  // 3) Photo in Senti-mode → Vision describe
+  if (!driveMode && msg?.photo) {
+    await handleVisionMedia(env, chatId, userId, msg, lang, textRaw);
+    return json({ ok: true });
+  }
+
+  // 4) Place question after a recent photo
+  const askPlace = /\b(що\s+це\s+за\s+місце|де\s+це|what\s+place\s+is\s+this|where\s+is\s+this)\b/iu;
+  if (askPlace.test(textRaw)) {
+    const lastUrl = await env.STATE_KV.get(KV.lastPhotoUrl(chatId));
+    if (lastUrl) {
+      try {
+        pulseTyping(env, chatId);
+        const systemHint = await buildSystemHint(env, chatId, userId, lang);
+        const answer = await visionPlace(env, { imageUrl: lastUrl, lang, systemHint });
+        await sendPlain(env, chatId, `📍 ${answer}`);
+      } catch (e) {
+        await sendPlain(env, chatId, "Не впевнений у локації цього фото. Можу описати, якщо надішлеш ще раз.");
+      }
+      return json({ ok: true });
+    }
+  }
+
+  // 5) Дата/час (короткі швидкі відповіді)
+  if (dateIntent(textRaw)) { await replyCurrentDate(env, chatId, lang); return json({ ok: true }); }
+  if (timeIntent(textRaw)) { await replyCurrentTime(env, chatId, lang); return json({ ok: true }); }
+
+  // 6) Погода (спрощено)
+  if (/^\s*(погода|weather)\b/i.test(textRaw)) {
+    const loc = await getUserLocation(env, userId);
+    if (!loc) {
+      await sendPlain(env, chatId, t(lang, "ask_location") || "Надішли, будь ласка, геолокацію, щоб показати погоду.", { reply_markup: askLocationKeyboard(lang) });
+      return json({ ok: true });
+    }
+    const summary = await weatherSummaryByCoords(env, { lat: loc.latitude, lon: loc.longitude, lang }).catch(() => null);
+    await sendPlain(env, chatId, summary || t(lang, "weather_fail") || "Не вдалося отримати погоду.");
+    return json({ ok: true });
+  }
+
+  // 7) Загальний діалог
+  const name = await getPreferredName(env, msg);
+  if (textRaw) await rememberNameFromText(env, userId, textRaw).catch(()=>{});
+  const systemHint = await buildSystemHint(env, chatId, userId, lang);
+  const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand: false, adminDiag: isAdmin });
+
+  await pushTurn(env, userId, "user", textRaw);
+  await pushTurn(env, userId, "assistant", full);
+
+  await sendPlain(env, chatId, short, { reply_markup: mainKeyboard(isAdmin) });
+  if ((env.VOICE_REPLY_DEFAULT || "off").toLowerCase() === "on") {
+    await synthAndSendAudio(env, chatId, short, lang);
+  }
+
+  return json({ ok: true });
+}
+
+/* ───────────── Cloudflare Worker export ───────────── */
+export default {
+  async fetch(req, env) {
+    const url = new URL(req.url);
+    if (url.pathname.endsWith("/webhook")) {
+      return handleTelegramWebhook(req, env);
+    }
+    return new Response("OK", { status: 200 });
+  }
+};
