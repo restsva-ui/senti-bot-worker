@@ -1,36 +1,30 @@
 // src/lib/speechRouter.js
-// STT router v3.6 (Cloudflare-safe RegEx)
-// ✔ Безпечні для Workers регулярки (без діапазонів типу À-ÿ)
-// ✔ Telegram voice → MIME стабілізація (ogg/opus, mp3, m4a)
-// ✔ Cloudflare Whisper каскад (file → file[ogg] → audio[opus])
-// ✔ Gemini STT: gemini-1.5-pro (v1beta inline)
-// ✔ OpenRouter → FREE fallback (OpenAI-compat /v1/audio/transcriptions)
-// ✔ Автовизначення мови для TTS (uk/ru/en/de/fr) — без небезпечних діапазонів
+// STT router v3.6 (Cloudflare-safe RegEx, без діапазонів типу À-ÿ)
+// - Автовибір постачальника: Cloudflare Whisper → Gemini → OpenRouter → FREE
+// - Нормалізація MIME для voice з Telegram (ogg/opus, mp3, m4a)
+// - Обережний детектор мови: uk/ru/en/de/fr (без небезпечних діапазонів)
+// - Повертає { text, lang }
 
-/* ───────────── Utils ───────────── */
 function bufToBase64(ab) {
   const b = new Uint8Array(ab); let s = "";
   for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
   return btoa(s);
 }
 
-// Обережний детектор мови — без діапазонів типу À-ÿ.
-function guessLang(s = "") {
+// Легкий детектор мови (тільки безпечні класи)
+export function guessLang(s = "") {
   const t = String(s || "");
 
-  // UA — явні українські літери
+  // UA — явні українські
   if (/[їєіґЇЄІҐ]/.test(t)) return "uk";
 
-  // RU — загальна кирилиця (включно з укр), але якщо нема явних UA-символів
-  if (/[А-ЯЁа-яёІіЇїЄєҐґ]/.test(t)) {
-    // якщо знайшли щось явно українське — вже повернули uk; інакше вважаємо ru
-    return "ru";
-  }
+  // RU — кирилиця загалом (якщо не спрацював UA вище)
+  if (/[А-ЯЁа-яёІіЇїЄєҐґ]/.test(t)) return "ru";
 
-  // DE — німецькі специфічні літери або часті слова
+  // DE — Umlaut/ß або часті слова
   if (/[ÄÖÜäöüß]/.test(t) || /\b(der|die|das|und|nicht|ich|mit|für)\b/i.test(t)) return "de";
 
-  // FR — французькі лігатури/акценти або часті слова
+  // FR — акценти/лігатури або часті слова
   if (/[àâçéèêëîïôùûüÿœæ]/i.test(t) || /\b(le|la|les|des|une|et|pour|avec)\b/i.test(t)) return "fr";
 
   // EN — дефолт
@@ -43,7 +37,7 @@ function sniffAudioType(u8) {
   // OGG/Opus: "OggS"
   if (u8[0] === 0x4f && u8[1] === 0x67 && u8[2] === 0x67 && u8[3] === 0x53)
     return "audio/ogg; codecs=opus";
-  // MP3: "ID3" або frame sync 0xFFEx
+  // MP3: "ID3" або frame sync
   if ((u8[0] === 0x49 && u8[1] === 0x44 && u8[2] === 0x33) ||
       (u8[0] === 0xff && (u8[1] & 0xe0) === 0xe0))
     return "audio/mpeg";
@@ -178,7 +172,7 @@ async function transcribeViaGemini(env, fileUrl) {
   catch { return await geminiOnce({ key, model: "gemini-1.5-pro", fileUrl, apiBase: base, env }); }
 }
 
-/* ───────────── Main router ───────────── */
+/* ───────────── Main ───────────── */
 export async function transcribeVoice(env, fileUrl) {
   const errors = [];
 
