@@ -1,41 +1,35 @@
 // src/flows/visionDescribe.js
-// Єдина точка для опису зображення з мультимовністю.
-// Використання: const { text } = await describeImage(env, { chatId, tgLang, imageBase64, question, modelOrder });
+// Опис зображення + проба виявлення місця (PLACE=...) і лінк на Google Maps.
 
 import { askVision } from "../lib/modelRouter.js";
-import { buildVisionHintByLang, makeVisionUserPrompt, postprocessVisionText } from "./visionPolicy.js";
-import { getUserLang, setUserLang } from "../lib/langPref.js";
+import { buildVisionHintByLang, makeVisionUserPrompt } from "./visionPolicy.js";
 
-/**
- * @param {object} env - середовище Cloudflare Worker (з KV, токенами тощо)
- * @param {object} p
- * @param {string|number} p.chatId          - id чату (для KV-переваг)
- * @param {string} [p.tgLang]               - msg.from.language_code з Telegram
- * @param {string} p.imageBase64            - зображення у base64 (без префікса data:)
- * @param {string} [p.question]             - питання користувача (caption або текст)
- * @param {string} [p.modelOrder]           - ланцюжок моделей для vision (наприклад, "gemini:gemini-2.5-flash,@cf/meta/llama-3.2-11b-vision-instruct")
- * @returns {Promise<{ text: string }>}     - нормалізований текст відповіді
- */
-export async function describeImage(env, { chatId, tgLang, imageBase64, question, modelOrder }) {
-  // 1) Визначаємо/зберігаємо мову
-  const lang = await getUserLang(env, chatId, tgLang);
-  if (tgLang && tgLang.toLowerCase() !== lang) {
-    // оновимо, якщо Telegram дав нову/іншу
-    await setUserLang(env, chatId, tgLang);
+function buildMapsLink(placeText) {
+  const q = encodeURIComponent(String(placeText || "").trim());
+  if (!q) return "";
+  return `https://www.google.com/maps/search/?api=1&query=${q}`;
+}
+
+export async function visionDescribe(env, lang, imageUrl, userQuestion = "") {
+  const hint = buildVisionHintByLang(lang);
+  const userPrompt = makeVisionUserPrompt(userQuestion);
+
+  const res = await askVision(env, { imageUrl, systemHint: hint, userPrompt });
+  let text = String(res?.text || "").trim();
+  if (!text) return "Не впевнений.";
+
+  // Спроба виділити PLACE=...
+  let place = "";
+  const m = text.match(/^\s*PLACE\s*=\s*(.+?)\s*$/mi);
+  if (m) {
+    place = m[1].trim();
+    // приберемо техрядок PLACE= з основного тексту, щоб не світити сирим
+    text = text.replace(m[0], "").replace(/\n{2,}/g, "\n").trim();
   }
 
-  // 2) Готуємо system hint та user prompt
-  const systemHint = buildVisionHintByLang(lang);
-  const userPrompt = makeVisionUserPrompt(question, lang);
-
-  // 3) Викликаємо маршрутизатор моделей (vision)
-  const out = await askVision(
-    env,
-    modelOrder,
-    userPrompt,
-    { systemHint, imageBase64, imageMime: "image/png", temperature: 0.2 }
-  );
-
-  // 4) Постпроцес і повернення
-  return { text: postprocessVisionText(out) };
+  if (place) {
+    const maps = buildMapsLink(place);
+    text += `\n\n📍 Місце/орієнтир: ${place}\n🔗 Карта: ${maps}`;
+  }
+  return text;
 }
