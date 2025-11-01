@@ -10,7 +10,7 @@ account_id = "2cf6e316af8623546c95c0354bc3aa00"
 [triggers]
 crons = ["*/15 * * * *", "0 * * * *", "10 2 * * *"]
 
-# --- Публічні змінні середовища (НЕ секрети) ---
+# --- ПУБЛІЧНІ ЗМІННІ (НЕ секрети) ---
 [vars]
 SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
 DRIVE_FOLDER_ID = "root"
@@ -20,7 +20,7 @@ DEPLOY_ID = "local-dev"
 # Увімкнення/вимкнення Learn
 LEARN_ENABLED = "on"
 
-# Cloudflare Workers AI (безкоштовно)
+# Cloudflare Workers AI (безкоштовно через REST)
 CF_ACCOUNT_ID = "2cf6e316af8623546c95c0354bc3aa00"
 
 # ── Публічні перегляди адмін-HTML (readonly)
@@ -28,7 +28,7 @@ ALLOW_PUBLIC_REPO = "on"
 ALLOW_PUBLIC_STATUT = "on"
 ALLOW_PUBLIC_CHECKLIST = "on"
 
-# Секретні токени для ендпойнтів / вебхука TG
+# Секретні токени для ендпойнтів / вебхука TG (збігаються з тим, що у CI)
 WEBHOOK_SECRET = "senti1984"
 TG_WEBHOOK_SECRET = "senti1984"
 TELEGRAM_SECRET_TOKEN = "senti1984"
@@ -42,14 +42,15 @@ DIAG_TAGS = "on"
 # ───────────────────────────────────────────────────────────────
 #                МОДЕЛІ (TEXT / CODE / VISION)
 # ───────────────────────────────────────────────────────────────
+# Рекомендовано: спочатку швидка/дешева, далі фолбеки
 MODEL_ORDER_TEXT   = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 MODEL_ORDER_CODE   = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
 
-# VISION: тільки провайдери, що підтримують зображення (без free)
-VISION_ORDER       = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.0-flash-exp"
-MODEL_ORDER_VISION = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.0-flash-exp"
+# VISION: тільки моделі з підтримкою зображень
+VISION_ORDER       = "gemini:gemini-2.0-flash-exp, cf:@cf/meta/llama-3.2-11b-vision-instruct"
+MODEL_ORDER_VISION = "gemini:gemini-2.0-flash-exp, cf:@cf/meta/llama-3.2-11b-vision-instruct"
 
-# RUNTIME дефолт
+# RUNTIME дефолт (використовується у діалозі)
 MODEL_ORDER        = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 
 # --- Дефолтні моделі ---
@@ -58,7 +59,7 @@ CF_MODEL        = "@cf/qwen/qwen2.5-7b-instruct"
 CF_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
 
 # ───────────────────────────────────────────────────────────────
-#                OpenAI-compat fallback (OpenRouter)
+#           OpenAI-compat fallback (OpenRouter / FREE)
 # ───────────────────────────────────────────────────────────────
 FREE_API_BASE_URL = "https://openrouter.ai/api"
 FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
@@ -71,14 +72,14 @@ OPENROUTER_APP_NAME = "Senti Bot Worker"
 # ───────────────────────────────────────────────────────────────
 #                     VOICE (TTS / STT)
 # ───────────────────────────────────────────────────────────────
-# Порядок фолбеків: Deepgram → MyShell → Free(OpenRouter tts-1)
-TTS_ORDER = "@cf/deepgram/aura-1,@cf/myshell-ai/melotts,free"
+# ⚠️ Щоб уникнути англомовного забарвлення — спершу MeloTTS
+TTS_ORDER = "@cf/myshell-ai/melotts,@cf/deepgram/aura-1,free"
 
-# Дефолтний голос (для EN та як запасний)
+# Дефолтний голос (резерв)
 VOICE_SPEAKER = "angus"
 
-# Мапінг голосів за мовою (налаштуй під доступні у твоєму TTS провайдера)
-VOICE_SPEAKER_UK = "dmytro"   # ← постав будь-який доступний UA-чоловічий голос або лиши англ.
+# Мапінг голосів за мовою (узгоджено з вебхуком)
+VOICE_SPEAKER_UK = "oleksandr"
 VOICE_SPEAKER_RU = "sergei"
 VOICE_SPEAKER_EN = "angus"
 VOICE_SPEAKER_DE = "bernd"
@@ -93,7 +94,7 @@ FREE_TTS_MODEL = "tts-1"
 FREE_TTS_VOICE = "alloy"
 
 # --- СТАБІЛІЗАТОРИ ДЛЯ STT / VISION ---
-# STT: використовуємо доступний безкоштовний Gemini 2.0 flash exp
+# STT: безкоштовний Gemini як fallback у спічроутері
 GEMINI_STT_MODEL = "gemini-2.0-flash-exp"
 # Форсований MIME для Telegram voice (ogg/opus)
 FORCE_AUDIO_TYPE = "audio/ogg; codecs=opus"
