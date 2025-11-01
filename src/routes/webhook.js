@@ -544,3 +544,114 @@ export async function handleTelegramWebhook(req, env) {
     });
     return json({ ok: true });
   }
+// Learn UI + admin toggles
+  if (textRaw === (BTN_LEARN || "Learn") || (isAdmin && textRaw === "/learn")) {
+    if (!isAdmin) { await sendPlain(env, chatId, t(lang, "how_help"), { reply_markup: mainKeyboard(false) }); return json({ ok: true }); }
+    await safe(async () => {
+      let hasQueue = false;
+      try { const r = await listQueued(env, { limit: 1 }); hasQueue = Array.isArray(r) ? r.length > 0 : Array.isArray(r?.items) ? r.items.length > 0 : false; } catch {}
+      const links = energyLinks(env, userId);
+      const hint = "🧠 Режим Learn. Надсилай посилання чи файли — додам у чергу, якщо Learn увімкнено (/learn_on).";
+      const keyboard = [[{ text: "🧠 Відкрити Learn HTML", url: links.learn }]];
+      if (hasQueue) keyboard.push([{ text: "🧠 Прокачай мозок", url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }]);
+      await sendPlain(env, chatId, hint, { reply_markup: { inline_keyboard: keyboard } });
+    });
+    return json({ ok: true });
+  }
+  if (isAdmin && textRaw === "/learn_on")  { await setLearnMode(env, userId, true);  await sendPlain(env, chatId, "🟢 Learn-режим увімкнено.");  return json({ ok: true }); }
+  if (isAdmin && textRaw === "/learn_off") { await setLearnMode(env, userId, false); await sendPlain(env, chatId, "🔴 Learn-режим вимкнено.");  return json({ ok: true }); }
+
+  // Learn enqueue (admin when ON)
+  if (isAdmin && await getLearnMode(env, userId)) {
+    const urlInText = extractFirstUrl(textRaw);
+    if (urlInText) { await enqueueLearn(env, String(userId), { url: urlInText, name: urlInText }); await sendPlain(env, chatId, "✅ Додано в чергу Learn."); return json({ ok: true }); }
+    const anyAtt = detectAttachment(msg);
+    if (anyAtt?.file_id) {
+      const fUrl = await tgFileUrl(env, anyAtt.file_id);
+      await enqueueLearn(env, String(userId), { url: fUrl, name: anyAtt.name || "file" });
+      await sendPlain(env, chatId, "✅ Додано в чергу Learn.");
+      return json({ ok: true });
+    }
+  }
+
+  /* Media routing */
+  try {
+    const driveOn = await getDriveMode(env, userId);
+    const hasAnyMedia = !!detectAttachment(msg) || !!pickPhoto(msg);
+
+    if (driveOn && hasAnyMedia) { if (await handleIncomingMedia(env, chatId, userId, msg, lang)) return json({ ok: true }); }
+    if (!driveOn && msg?.voice) { if (await handleVoiceSTT(env, chatId, userId, msg, lang)) return json({ ok: true }); }
+    if (!driveOn && pickPhoto(msg)) { if (await handleVisionMedia(env, chatId, userId, msg, lang, msg?.caption)) return json({ ok: true }); }
+    if (!driveOn && (msg?.video || msg?.document || msg?.audio || msg?.video_note)) {
+      await sendPlain(env, chatId,
+        "Поки що не аналізую такі файли в цьому режимі. Хочеш — увімкни збереження у Google Drive кнопкою «Google Drive».",
+        { reply_markup: mainKeyboard(ADMIN(env, userId)) }
+      );
+      return json({ ok: true });
+    }
+  } catch (e) {
+    if (ADMIN(env, userId)) await sendPlain(env, chatId, `❌ Media error: ${String(e).slice(0, 180)}`);
+    else await sendPlain(env, chatId, t(lang, "default_reply"));
+    return json({ ok: true });
+  }
+
+  /* Text intents & dialog */
+  if (textRaw) {
+    await rememberNameFromText(env, userId, textRaw);
+
+    if (isAdmin && textRaw === "/learn_run") {
+      await safe(async () => { const r = await runLearnNow(env); await sendPlain(env, chatId, `🧠 Learn run: ${JSON.stringify(r).slice(0, 2000)}`); });
+      return json({ ok: true });
+    }
+
+    if (dateIntent(textRaw)) { await replyCurrentDate(env, chatId, lang); return json({ ok: true }); }
+    if (timeIntent(textRaw)) { await replyCurrentTime(env, chatId, lang); return json({ ok: true }); }
+
+    if (weatherIntent(textRaw)) {
+      const loc = await getUserLocation(env, userId);
+      if (loc?.latitude && loc?.longitude) {
+        const s = await weatherSummaryByCoords(env, loc.latitude, loc.longitude, lang);
+        await sendPlain(env, chatId, s, { reply_markup: mainKeyboard(isAdmin) });
+      } else {
+        await sendPlain(env, chatId, t(lang, "need_location"), { reply_markup: askLocationKeyboard(lang) });
+      }
+      return json({ ok: true });
+    }
+
+    const aiCmd = parseAiCommand(textRaw);
+    if (aiCmd) {
+      await safe(async () => {
+        const systemHint = await buildSystemHint(env, chatId, userId, lang);
+        const name = await getPreferredName(env, msg);
+        const { short, full } = await callSmartLLM(env, aiCmd, { lang, name, systemHint, expand: true, adminDiag: isAdmin });
+        for (const part of chunkText(full)) await sendPlain(env, chatId, part);
+      });
+      return json({ ok: true });
+    }
+
+    await safe(async () => {
+      const systemHint = await buildSystemHint(env, chatId, userId, lang);
+      const name = await getPreferredName(env, msg);
+      const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand: false, adminDiag: isAdmin });
+      await pushTurn(env, userId, "user", textRaw);
+      await pushTurn(env, userId, "assistant", full);
+      await sendPlain(env, chatId, short);
+      if ((env.VOICE_REPLY_DEFAULT || "off").toLowerCase() === "on") {
+        await synthAndSendAudio(env, chatId, short, lang);
+      }
+    });
+    return json({ ok: true });
+  }
+
+  await sendPlain(env, chatId, t(lang, "how_help"), { reply_markup: mainKeyboard(isAdmin) });
+  return json({ ok: true });
+}
+
+/* ───────────── Worker export ───────────── */
+export default {
+  async fetch(req, env) {
+    const url = new URL(req.url);
+    if (url.pathname === "/telegram/webhook") return handleTelegramWebhook(req, env);
+    return json({ ok: true, worker: "Senti" });
+  }
+};
