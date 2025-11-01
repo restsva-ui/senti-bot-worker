@@ -44,8 +44,12 @@ DIAG_TAGS = "on"
 # ───────────────────────────────────────────────────────────────
 MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 MODEL_ORDER_CODE = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
-VISION_ORDER = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.0-flash-exp, free"
-MODEL_ORDER_VISION = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.0-flash-exp, free"
+
+# VISION: тільки провайдери, що підтримують зображення (без free)
+VISION_ORDER = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.0-flash-exp"
+MODEL_ORDER_VISION = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.0-flash-exp"
+
+# RUNTIME дефолт
 MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 
 # --- Дефолтні моделі ---
@@ -69,17 +73,20 @@ OPENROUTER_APP_NAME = "Senti Bot Worker"
 # ───────────────────────────────────────────────────────────────
 TTS_ORDER = "@cf/deepgram/aura-1,@cf/myshell-ai/melotts,free"
 VOICE_SPEAKER = "angus"
-VOICE_REPLY_DEFAULT = "off"
+# одразу вмикаємо голосові відповіді (можеш повернути off)
+VOICE_REPLY_DEFAULT = "on"
 
 FREE_TTS_BASE_URL = ""
 FREE_TTS_MODEL = "tts-1"
 FREE_TTS_VOICE = "alloy"
 
-# --- СТАБІЛІЗАТОРИ ДЛЯ STT (оновлено) ---
-# Використовуємо новий стабільний для STT варіант через v1beta:
-GEMINI_STT_MODEL = "gemini-2.0-flash-exp"
-# Форсований MIME для Telegram voice (ogg/opus) — лікує 'Invalid audio input'
+# --- СТАБІЛІЗАТОРИ ДЛЯ STT / VISION ---
+# STT: стабільний варіант через v1beta
+GEMINI_STT_MODEL = "gemini-1.5-pro"
+# Форсований MIME для Telegram voice (ogg/opus)
 FORCE_AUDIO_TYPE = "audio/ogg; codecs=opus"
+# Форсований MIME для фото з Telegram (лікує application/octet-stream)
+FORCE_IMAGE_TYPE = "image/jpeg"
 
 # ───────────────────────────────────────────────────────────────
 #           АВТО-ІМПРУВ / РЕГУЛЯЦІЯ / ЕНЕРГІЯ
