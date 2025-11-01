@@ -1,7 +1,8 @@
 // src/routes/webhook.js
-// (rev2) Vision: автофільтр не-візуальних моделей (прибирає 'free' та інші text-only)
-//           + показ відфільтрованого порядку в адмін-діагностиці.
-// (rev1) Vision бере MIME з Telegram-файлу; STT через speechRouter (CF → Gemini).
+// (rev3) Vision: жорстке визначення image MIME (JPEG/PNG/WEBP/GIF/HEIC/AVIF) замість octet-stream.
+//             -> виправляє "gemini 400 mimeType application/octet-stream"
+// (rev2) Vision: автофільтр не-візуальних моделей у VISION_ORDER (прибирає 'free' та інші text-only)
+// (rev1) STT: виклик через speechRouter (CF → Gemini), typing pulses, дрібні UX-плюшки.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -16,7 +17,7 @@ import { loadSelfTune, autoUpdateSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage, detectFromText } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
-import { enqueueLearn, listQueued, getRecentInsights } from "../lib/kvLearnQueue.js";
+import { enqueueLearn, getRecentInsights, listQueued } from "../lib/kvLearnQueue.js";
 import { transcribeVoice } from "../lib/speechRouter.js";
 
 import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from "../apis/time.js";
@@ -48,42 +49,71 @@ function pulseTyping(env, chatId, times = 4, intervalMs = 4000) {
   for (let i = 1; i < times; i++) setTimeout(() => sendTyping(env, chatId), i * intervalMs);
 }
 
-/* ── Binary → base64 + MIME helper (для Telegram файлів) ─────────────────── */
-async function fetchToBase64WithMime(url, fallbackMime = "application/octet-stream") {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`fetch media ${r.status}`);
-  const ct = (r.headers.get("content-type") || "").toLowerCase() || fallbackMime;
-  const ab = await r.arrayBuffer();
-  const bytes = new Uint8Array(ab);
-  let bin = "";
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  return { b64: btoa(bin), mime: ct };
+/* ── Binary → base64 + MIME helpers для Telegram файлів ─────────────────── */
+
+function sniffImageMime(u8) {
+  if (!u8 || u8.length < 12) return "";
+  // JPEG: FF D8 FF
+  if (u8[0] === 0xff && u8[1] === 0xd8 && u8[2] === 0xff) return "image/jpeg";
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4e && u8[3] === 0x47 &&
+      u8[4] === 0x0d && u8[5] === 0x0a && u8[6] === 0x1a && u8[7] === 0x0a) return "image/png";
+  // WEBP: "RIFF"...."WEBP"
+  if (u8[0] === 0x52 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x46 &&
+      u8[8] === 0x57 && u8[9] === 0x45 && u8[10] === 0x42 && u8[11] === 0x50) return "image/webp";
+  // GIF: "GIF8"
+  if (u8[0] === 0x47 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x38) return "image/gif";
+  // ISOBMFF (HEIC/AVIF): "ftypheic"/"ftypavif"/"ftypmif1"
+  if (u8[4] === 0x66 && u8[5] === 0x74 && u8[6] === 0x79 && u8[7] === 0x70) {
+    const fourcc = String.fromCharCode(u8[8], u8[9], u8[10], u8[11]);
+    if (fourcc === "heic" || fourcc === "heix" || fourcc === "mif1") return "image/heic";
+    if (fourcc === "avif" || fourcc === "avis") return "image/avif";
+  }
+  return "";
 }
 
-/* ── Vision: фільтр порядку моделей ────────────────────────────────────────
-   Залишаємо тільки джерела, які точно підтримують зображення:
-   - Cloudflare @cf/meta/llama-3.2-11b-vision-instruct
-   - Gemini 2.0 (flash-exp / vision)
-   Все інше (зокрема 'free' OpenAI-compat текстові) прибираємо. */
+function normalizeImageMime(headerCt, u8, fallback = "image/jpeg") {
+  const ct = (headerCt || "").toLowerCase().trim();
+  if (!ct || ct === "application/octet-stream") {
+    return sniffImageMime(u8) || fallback;
+  }
+  // деякі CDN ставлять "image/jpg" — нормалізуємо до "image/jpeg"
+  if (ct === "image/jpg") return "image/jpeg";
+  return ct;
+}
+
+async function fetchToBase64WithMime(url, defaultMime = "image/jpeg") {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`fetch media ${r.status}`);
+  const ab = await r.arrayBuffer();
+  const u8 = new Uint8Array(ab);
+  const headerCt = (r.headers.get("content-type") || "").toLowerCase();
+  const mime = normalizeImageMime(headerCt, u8, defaultMime);
+  // → base64
+  let s = "";
+  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+  return { b64: btoa(s), mime };
+}
+
+/* ── Vision: фільтр порядку моделей ──────────────────────────────────────── */
 function filterVisionOrder(orderStr = "") {
   const raw = String(orderStr || "").split(",").map(s => s.trim()).filter(Boolean);
   const keep = raw.filter(m =>
     /^cf:@cf\/meta\/llama-3\.2-11b-vision-instruct$/i.test(m) ||
     /^gemini:gemini-2\.0-.*(flash|vision).*$/i.test(m)
   );
-  // якщо після фільтру пусто — ставимо безкоштовну CF vision
   if (!keep.length) keep.push("cf:@cf/meta/llama-3.2-11b-vision-instruct");
   return keep.join(", ");
 }
 
-/* ── Vision через каскад моделей (askVision) ─────────────────────────────── */
+/* ── Vision через каскад моделей ─────────────────────────────────────────── */
 async function visionDescribe(env, { imageUrl, userPrompt = "", lang = "uk", systemHint }) {
   const rawOrder = String(
     env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "@cf/meta/llama-3.2-11b-vision-instruct"
   ).trim();
   const modelOrder = filterVisionOrder(rawOrder);
 
-  // Отримуємо реальний MIME із Telegram CDN (jpg/png/webp…)
+  // Отримуємо реальний image MIME (без octet-stream)
   const { b64, mime } = await fetchToBase64WithMime(imageUrl, "image/jpeg");
   const prompt = `${userPrompt || "Опиши зображення коротко і по суті."} Відповідай ${lang.toUpperCase()} мовою.`;
 
@@ -138,11 +168,10 @@ async function tgFileUrl(env, file_id) {
   if (!path) throw new Error("file_path missing");
   return `https://api.telegram.org/file/bot${token}/${path}`;
 }
-
 /* ===== Learn helpers (admin-only) ======================================== */
 function extractFirstUrl(text = "") { const m = String(text || "").match(/https?:\/\/\S+/i); return m ? m[0] : null; }
-async function getLearnMode(env, userId) { try { return (await env.STATE_KV.get(KV.learnMode(userId))) === "on"; } catch { return false; } }
-async function setLearnMode(env, userId, on) { try { await env.STATE_KV.put(KV.learnMode(userId), on ? "on" : "off"); } catch {} }
+async function getLearnMode(env, userId) { try { return (await env.STATE_KV.get(`learn:mode:${userId}`)) === "on"; } catch { return false; } }
+async function setLearnMode(env, userId, on) { try { await env.STATE_KV.put(`learn:mode:${userId}`, on ? "on" : "off"); } catch {} }
 
 /* Drive-режим (збереження медіа) */
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
@@ -204,13 +233,11 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
     if (ADMIN(env, userId)) {
       const raw = String(env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "").trim();
       const filtered = filterVisionOrder(raw);
-      await sendPlain(env, chatId, `❌ Vision error: ${String(e?.message || e).slice(0, 200)}\n(modelOrder raw: ${raw || "n/a"})\n(modelOrder used: ${filtered})`);
+      await sendPlain(env, chatId, `❌ Vision error: ${String(e?.message || e).slice(0, 300)}\n(modelOrder raw: ${raw || "n/a"})\n(modelOrder used: ${filtered})`);
     } else {
       const connectUrl = abs(env, "/auth/drive");
-      await sendPlain(
-        env,
-        chatId,
-        "Поки що не можу аналізувати фото. Можу зберегти його у Google Drive — натисни «Google Drive» або підключи Drive.",
+      await sendPlain(env, chatId,
+        "Поки що не можу аналізувати фото. Можу зберегти його у Google Drive — натисни «Google Drive».",
         { reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn") || "Підключити Drive", url: connectUrl }]] } }
       );
     }
@@ -383,7 +410,7 @@ ${control}`;
     cleaned = stripProviderSignature((cleaned || "").trim());
     if (cleaned) out = cleaned;
   }
-  if (!looksLikeEmojiStart(out)) {
+  if (!/^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(out || "")) {
     const em = guessEmoji(userText);
     out = `${em} ${out}`;
   }
@@ -395,14 +422,14 @@ ${control}`;
       ? await askAnyModel(env, modelOrder, hardPrompt, { systemHint })
       : await think(env, hardPrompt, { systemHint });
     fixed = stripProviderSignature((fixed || "").trim());
-    if (fixed) out = looksLikeEmojiStart(fixed) ? fixed : `${guessEmoji(userText)} ${fixed}`;
+    if (fixed) out = /^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(fixed) ? fixed : `${guessEmoji(userText)} ${fixed}`;
   }
 
   const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
 }
 
-/* ── Learn quick helpers ─────────────────────────────────────────────────── */
+/* ── Learn admin actions ─────────────────────────────────────────────────── */
 async function runLearnNow(env) {
   const secret = env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || "";
   const u = new URL(abs(env, "/admin/learn/run"));
@@ -412,9 +439,6 @@ async function runLearnNow(env) {
   if (!r.ok) throw new Error(`learn_run http ${r.status}`);
   if (ct.includes("application/json")) return await r.json();
   return { ok: true, summary: await r.text() };
-}
-async function listInsights(env, limit = 5) {
-  try { return await getRecentInsights(env, { limit }) || []; } catch { return []; }
 }
 
 /* ── MAIN ────────────────────────────────────────────────────────────────── */
@@ -439,15 +463,9 @@ export async function handleTelegramWebhook(req, env) {
   const textRaw = String(msg?.text || msg?.caption || "").trim();
 
   let lang = pickReplyLanguage(msg, textRaw);
+  const safe = async (fn) => { try { await fn(); } catch (e) { if (isAdmin) await sendPlain(env, chatId, `❌ Error: ${String(e?.message || e).slice(0, 200)}`); else try { await sendPlain(env, chatId, t(lang, "default_reply")); } catch {} } };
 
-  const safe = async (fn) => {
-    try { await fn(); }
-    catch (e) {
-      if (isAdmin) await sendPlain(env, chatId, `❌ Error: ${String(e?.message || e).slice(0, 200)}`);
-      else try { await sendPlain(env, chatId, t(lang, "default_reply")); } catch {}
-    }
-  };
-
+  // збереження гео
   if (msg?.location && userId && chatId) {
     await setUserLocation(env, userId, msg.location);
     const okMap = {
@@ -474,15 +492,9 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // ТИХИЙ перемикач режимів
-  if (textRaw === BTN_DRIVE || /^(google\s*drive)$/i.test(textRaw)) {
-    await setDriveMode(env, userId, true);
-    return json({ ok: true });
-  }
-  if (textRaw === BTN_SENTI || /^(senti|сенті)$/i.test(textRaw)) {
-    await setDriveMode(env, userId, false);
-    return json({ ok: true });
-  }
+  // тихий перемикач режимів
+  if (textRaw === BTN_DRIVE || /^(google\s*drive)$/i.test(textRaw)) { await setDriveMode(env, userId, true); return json({ ok: true }); }
+  if (textRaw === BTN_SENTI || /^(senti|сенті)$/i.test(textRaw)) { await setDriveMode(env, userId, false); return json({ ok: true }); }
 
   // /admin
   if (textRaw === "/admin" || textRaw === "/admin@SentiBot" || textRaw === BTN_ADMIN) {
@@ -528,78 +540,32 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Кнопка LEARN / команда — лише адмін
+  // Learn UI / тумблери / адмін
   if (textRaw === (BTN_LEARN || "Learn") || (isAdmin && textRaw === "/learn")) {
-    if (!isAdmin) {
-      await sendPlain(env, chatId, t(lang, "how_help"), { reply_markup: mainKeyboard(false) });
-      return json({ ok: true });
-    }
+    if (!isAdmin) { await sendPlain(env, chatId, t(lang, "how_help"), { reply_markup: mainKeyboard(false) }); return json({ ok: true }); }
     await safe(async () => {
       let hasQueue = false;
-      try {
-        const r = await listQueued(env, { limit: 1 });
-        hasQueue = Array.isArray(r) ? r.length > 0 : Array.isArray(r?.items) ? r.items.length > 0 : false;
-      } catch {}
+      try { const r = await listQueued(env, { limit: 1 }); hasQueue = Array.isArray(r) ? r.length > 0 : Array.isArray(r?.items) ? r.items.length > 0 : false; } catch {}
       const links = energyLinks(env, userId);
-      const hint =
-        "🧠 Режим Learn.\nНадсилай посилання, файли або архіви — я додам у чергу, **якщо Learn увімкнено** (/learn_on). " +
-        "В HTML-інтерфейсі можна переглянути чергу й підсумки, а також запустити обробку.";
+      const hint = "🧠 Режим Learn.\nНадсилай посилання, файли або архіви — я додам у чергу, **якщо Learn увімкнено** (/learn_on).";
       const keyboard = [[{ text: "🧠 Відкрити Learn HTML", url: links.learn }]];
-      if (hasQueue) {
-        keyboard.push([{ text: "🧠 Прокачай мозок", url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }]);
-      }
+      if (hasQueue) keyboard.push([{ text: "🧠 Прокачай мозок", url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }]);
       await sendPlain(env, chatId, hint, { reply_markup: { inline_keyboard: keyboard } });
     });
     return json({ ok: true });
   }
+  if (isAdmin && textRaw === "/learn_on")  { await setLearnMode(env, userId, true);  await sendPlain(env, chatId, "🟢 Learn-режим увімкнено.");  return json({ ok: true }); }
+  if (isAdmin && textRaw === "/learn_off") { await setLearnMode(env, userId, false); await sendPlain(env, chatId, "🔴 Learn-режим вимкнено.");  return json({ ok: true }); }
 
-  // Явні тумблери Learn
-  if (isAdmin && textRaw === "/learn_on") {
-    await setLearnMode(env, userId, true);
-    await sendPlain(env, chatId, "🟢 Learn-режим увімкнено. Надіслані посилання/файли підуть у чергу.");
-    return json({ ok: true });
-  }
-  if (isAdmin && textRaw === "/learn_off") {
-    await setLearnMode(env, userId, false);
-    await sendPlain(env, chatId, "🔴 Learn-режим вимкнено. Медіа знову обробляються як зазвичай (Drive/Vision).");
-    return json({ ok: true });
-  }
-  if (isAdmin && textRaw.startsWith("/learn_add")) {
-    const u = extractFirstUrl(textRaw);
-    if (!u) { await sendPlain(env, chatId, "Дай посилання після команди, напр.: /learn_add https://..."); return json({ ok: true }); }
-    await enqueueLearn(env, String(userId), { url: u, name: u });
-    await sendPlain(env, chatId, "✅ Додано в чергу Learn.");
-    return json({ ok: true });
-  }
-  if (isAdmin && textRaw === "/learn_run") {
-    await safe(async () => {
-      const res = await runLearnNow(env);
-      const summary = String(res?.summary || "").trim();
-      const out = summary
-        ? `✅ Learn запущено.\n\nКороткий підсумок:\n${summary.slice(0, 1500)}`
-        : "✅ Learn запущено. Підсумок збережено в адмін-панелі.";
-      await sendPlain(env, chatId, out);
-    });
-    return json({ ok: true });
-  }
-
-  // ===== Learn enqueue (адмін, лише коли Learn ON) =====
+  // Learn enqueue (адмін коли Learn ON)
   if (isAdmin && await getLearnMode(env, userId)) {
     const urlInText = extractFirstUrl(textRaw);
-    if (urlInText) {
-      await safe(async () => {
-        await enqueueLearn(env, String(userId), { url: urlInText, name: urlInText });
-        await sendPlain(env, chatId, "✅ Додано в чергу Learn.");
-      });
-      return json({ ok: true });
-    }
+    if (urlInText) { await enqueueLearn(env, String(userId), { url: urlInText, name: urlInText }); await sendPlain(env, chatId, "✅ Додано в чергу Learn."); return json({ ok: true }); }
     const anyAtt = detectAttachment(msg);
     if (anyAtt?.file_id) {
-      await safe(async () => {
-        const fUrl = await tgFileUrl(env, anyAtt.file_id);
-        await enqueueLearn(env, String(userId), { url: fUrl, name: anyAtt.name || "file" });
-        await sendPlain(env, chatId, "✅ Додано в чергу Learn.");
-      });
+      const fUrl = await tgFileUrl(env, anyAtt.file_id);
+      await enqueueLearn(env, String(userId), { url: fUrl, name: anyAtt.name || "file" });
+      await sendPlain(env, chatId, "✅ Додано в чергу Learn.");
       return json({ ok: true });
     }
   }
@@ -620,103 +586,14 @@ export async function handleTelegramWebhook(req, env) {
       if (await handleVisionMedia(env, chatId, userId, msg, lang, msg?.caption)) return json({ ok: true });
     }
     if (!driveOn && (msg?.video || msg?.document || msg?.audio || msg?.video_note)) {
-      await sendPlain(
-        env,
-        chatId,
+      await sendPlain(env, chatId,
         "Поки що не аналізую такі файли в цьому режимі. Хочеш — увімкни збереження у Google Drive кнопкою «Google Drive».",
         { reply_markup: mainKeyboard(ADMIN(env, userId)) }
       );
       return json({ ok: true });
     }
   } catch (e) {
-    const isAdm = ADMIN(env, userId);
-    if (isAdm) await sendPlain(env, chatId, `❌ Media error: ${String(e).slice(0, 180)}`);
+    if (ADMIN(env, userId)) await sendPlain(env, chatId, `❌ Media error: ${String(e).slice(0, 180)}`);
     else await sendPlain(env, chatId, t(lang, "default_reply"));
     return json({ ok: true });
-  }
-
-  /* ── Інтенти: дата/час/погода ─────────────────────────────────────────── */
-  if (textRaw) {
-    const wantsDate = dateIntent(textRaw);
-    const wantsTime = timeIntent(textRaw);
-    const wantsWeather = weatherIntent(textRaw);
-
-    if (wantsDate || wantsTime || wantsWeather) {
-      await safe(async () => {
-        if (wantsDate) await sendPlain(env, chatId, replyCurrentDate(env, lang));
-        if (wantsTime) await sendPlain(env, chatId, replyCurrentTime(env, lang));
-
-        if (wantsWeather) {
-          const byPlace = await weatherSummaryByPlace(env, textRaw, lang);
-          const notFound = /Не вдалося знайти такий населений пункт\./.test(byPlace.text);
-          if (!notFound) {
-            await sendPlain(env, chatId, byPlace.text, { parse_mode: byPlace.mode || undefined });
-          } else {
-            const geo = await getUserLocation(env, userId);
-            if (geo?.lat && geo?.lon) {
-              const byCoords = await weatherSummaryByCoords(geo.lat, geo.lon, lang);
-              await sendPlain(env, chatId, byCoords.text, { parse_mode: byCoords.mode || undefined });
-            } else {
-              const askMap = {
-                uk: "Будь ласка, надішліть вашу локацію кнопкою нижче — і я покажу погоду для вашого місця.",
-                ru: "Пожалуйста, отправьте вашу локацию кнопкой ниже — и я покажу погоду для вашего места.",
-                en: "Please share your location using the button below — I’ll show the weather for your area.",
-                de: "Bitte teile deinen Standort über die Schaltfläche unten – dann zeige ich dir das Wetter für deinen Ort.",
-                fr: "Merci d’envoyer ta position via le bouton ci-dessous — je te montrerai la météo pour ta zone.",
-              };
-              const ask = askMap[lang.slice(0,2)] || askMap.uk;
-              await sendPlain(env, chatId, ask, { reply_markup: askLocationKeyboard() });
-            }
-          }
-        }
-      });
-      return json({ ok: true });
-    }
-  }
-
-  /* ── Звичайний текст → AI ─────────────────────────────────────────────── */
-  if (textRaw && !textRaw.startsWith("/")) {
-    await safe(async () => {
-      await rememberNameFromText(env, userId, textRaw);
-
-      const cur = await getEnergy(env, userId);
-      const need = Number(cur.costText ?? 1);
-      if ((cur.energy ?? 0) < need) {
-        const links = energyLinks(env, userId);
-        await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
-        return;
-      }
-      await spendEnergy(env, userId, need, "text");
-
-      pulseTyping(env, chatId);
-
-      await pushTurn(env, userId, "user", textRaw);
-      await autoUpdateSelfTune(env, userId, lang).catch(() => {});
-
-      const systemHint = await buildSystemHint(env, chatId, userId, lang);
-      const name = await getPreferredName(env, msg);
-      const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(textRaw);
-      const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand, adminDiag: isAdmin });
-
-      await pushTurn(env, userId, "assistant", full);
-
-      const after = (cur.energy - need);
-      if (expand && full.length > short.length) { for (const ch of chunkText(full)) await sendPlain(env, chatId, ch); }
-      else { await sendPlain(env, chatId, short); }
-      if (after <= Number(cur.low ?? 10)) {
-        const links = energyLinks(env, userId);
-        await sendPlain(env, chatId, t(lang, "low_energy_notice", after, links.energy));
-      }
-    });
-    return json({ ok: true });
-  }
-
-  // Дефолтне привітання
-  const profileLang = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
-  const greetLang = ["uk", "ru", "en", "de", "fr"].includes(profileLang) ? profileLang : lang;
-  const name = await getPreferredName(env, msg);
-  await sendPlain(env, chatId, `${t(greetLang, "hello_name", name)} ${t(greetLang, "how_help")}`, {
-    reply_markup: mainKeyboard(isAdmin)
-  });
-  return json({ ok: true });
-}
+ 
