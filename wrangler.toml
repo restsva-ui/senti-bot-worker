@@ -71,8 +71,15 @@ OPENROUTER_APP_NAME = "Senti Bot Worker"
 # ───────────────────────────────────────────────────────────────
 #                     VOICE (TTS / STT)
 # ───────────────────────────────────────────────────────────────
-TTS_ORDER = "@cf/deepgram/aura-1,@cf/myshell-ai/melotts,free"
+# Піднімаємо у пріоритет UA-сумісний движок Melotts → потім Aura.            # ← CHANGED
+TTS_ORDER = "@cf/myshell-ai/melotts,@cf/deepgram/aura-1,free"                # ← CHANGED
+
+# Базовий спікер за замовчуванням (використається для мов без оверрайдів)
 VOICE_SPEAKER = "angus"
+
+# Оверрайд спікера для української (чоловічий голос)                         # ← CHANGED
+VOICE_SPEAKER_UK = "oleksandr"                                               # ← CHANGED
+
 # одразу вмикаємо голосові відповіді (можеш повернути off)
 VOICE_REPLY_DEFAULT = "on"
 
@@ -81,7 +88,7 @@ FREE_TTS_MODEL = "tts-1"
 FREE_TTS_VOICE = "alloy"
 
 # --- СТАБІЛІЗАТОРИ ДЛЯ STT / VISION ---
-# STT: стабільний варіант через v1beta
+# STT: стабільний варіант через v1beta (працює із inline audio)
 GEMINI_STT_MODEL = "gemini-1.5-pro"
 # Форсований MIME для Telegram voice (ogg/opus)
 FORCE_AUDIO_TYPE = "audio/ogg; codecs=opus"
