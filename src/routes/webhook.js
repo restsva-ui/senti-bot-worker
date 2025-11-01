@@ -428,7 +428,6 @@ ${control}`;
   const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
 }
-
 /* ── Learn admin actions ─────────────────────────────────────────────────── */
 async function runLearnNow(env) {
   const secret = env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || "";
@@ -596,4 +595,65 @@ export async function handleTelegramWebhook(req, env) {
     if (ADMIN(env, userId)) await sendPlain(env, chatId, `❌ Media error: ${String(e).slice(0, 180)}`);
     else await sendPlain(env, chatId, t(lang, "default_reply"));
     return json({ ok: true });
- 
+  }
+
+  /* ── QUICK INTENTS (текст) ─────────────────────────────────────────────── */
+  if (textRaw) {
+    // збереження імені з фраз "мене звати ..."
+    await rememberNameFromText(env, userId, textRaw).catch(() => {});
+    // дата / час
+    if (dateIntent(textRaw)) { await replyCurrentDate(env, chatId, lang); return json({ ok: true }); }
+    if (timeIntent(textRaw)) { await replyCurrentTime(env, chatId, lang); return json({ ok: true }); }
+    // погода
+    const win = weatherIntent(textRaw);
+    if (win) {
+      const loc = await getUserLocation(env, userId).catch(() => null);
+      if (loc?.lat && loc?.lon) {
+        await weatherSummaryByCoords(env, chatId, lang, loc.lat, loc.lon);
+      } else {
+        await sendPlain(env, chatId, t(lang, "ask_location") || "Поділись локацією, будь ласка 👇", { reply_markup: askLocationKeyboard() });
+      }
+      return json({ ok: true });
+    }
+  }
+
+  /* ── DEFAULT: текст → LLM ──────────────────────────────────────────────── */
+  const text = textRaw;
+  if (text) {
+    try {
+      const cur = await getEnergy(env, userId);
+      const need = Number(cur.costText ?? 1);
+      if ((cur.energy ?? 0) < need) {
+        const links = energyLinks(env, userId);
+        await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
+        return json({ ok: true });
+      }
+      await spendEnergy(env, userId, need, "text");
+
+      pulseTyping(env, chatId);
+
+      const systemHint = await buildSystemHint(env, chatId, userId, lang);
+      const name = await getPreferredName(env, msg);
+
+      // /expand → довша відповідь
+      const isExpand = /^\/expand\b/i.test(text);
+      const userQuery = isExpand ? text.replace(/^\/expand\b/i, "").trim() : text;
+
+      const { short, full } = await callSmartLLM(env, userQuery, { lang, name, systemHint, expand: isExpand, adminDiag: isAdmin });
+      await pushTurn(env, userId, "user", userQuery);
+      await pushTurn(env, userId, "assistant", full);
+
+      // довгі відповіді — порізати на частини
+      const chunks = chunkText(short, 3800);
+      for (const ch of chunks) await sendPlain(env, chatId, ch);
+    } catch (e) {
+      if (isAdmin) await sendPlain(env, chatId, `❌ LLM error: ${String(e?.message || e).slice(0, 240)}`);
+      else await sendPlain(env, chatId, t(lang, "default_reply"));
+    }
+    return json({ ok: true });
+  }
+
+  // якщо нічого не зрозуміли:
+  await sendPlain(env, chatId, t(lang, "how_help") || "Як можу допомогти?", { reply_markup: mainKeyboard(isAdmin) });
+  return json({ ok: true });
+}
