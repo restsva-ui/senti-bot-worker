@@ -19,18 +19,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
 
-      # Якщо lock-файл є — ігноруємо його, щоб не ловити EUSAGE
-      - name: 🧹 Remove stale lock if present
+      - name: 📦 Install dependencies
         run: |
-          if [ -f package-lock.json ]; then
-            echo "Found package-lock.json → removing (out-of-sync with package.json)"
-            rm -f package-lock.json
-          fi
-
-      - name: 📦 Install deps from package.json
-        run: npm install --no-audit --no-fund
+          echo "Installing dependencies..."
+          npm install --no-audit --no-fund
 
       - name: 🚀 Deploy to Cloudflare
         env:
