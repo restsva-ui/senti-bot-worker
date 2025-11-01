@@ -1,9 +1,6 @@
 // src/lib/speechRouter.js
-// STT router v3.6 (Cloudflare-safe RegEx, без діапазонів типу À-ÿ)
-// - Автовибір постачальника: Cloudflare Whisper → Gemini → OpenRouter → FREE
-// - Нормалізація MIME для voice з Telegram (ogg/opus, mp3, m4a)
-// - Обережний детектор мови: uk/ru/en/de/fr (без небезпечних діапазонів)
-// - Повертає { text, lang }
+// STT router v3.7 (Cloudflare-safe RegEx + короткі voice → одразу Gemini)
+// Повертає: { text, lang }
 
 function bufToBase64(ab) {
   const b = new Uint8Array(ab); let s = "";
@@ -11,39 +8,25 @@ function bufToBase64(ab) {
   return btoa(s);
 }
 
-// Легкий детектор мови (тільки безпечні класи)
+/* ───────────── Language guess (UA / RU / EN / DE / FR) ───────────── */
 export function guessLang(s = "") {
   const t = String(s || "");
-
-  // UA — явні українські
   if (/[їєіґЇЄІҐ]/.test(t)) return "uk";
-
-  // RU — кирилиця загалом (якщо не спрацював UA вище)
   if (/[А-ЯЁа-яёІіЇїЄєҐґ]/.test(t)) return "ru";
-
-  // DE — Umlaut/ß або часті слова
   if (/[ÄÖÜäöüß]/.test(t) || /\b(der|die|das|und|nicht|ich|mit|für)\b/i.test(t)) return "de";
-
-  // FR — акценти/лігатури або часті слова
   if (/[àâçéèêëîïôùûüÿœæ]/i.test(t) || /\b(le|la|les|des|une|et|pour|avec)\b/i.test(t)) return "fr";
-
-  // EN — дефолт
   return "en";
 }
 
-/* ───────────── MIME helpers ───────────── */
+/* ───────────── Audio helpers ───────────── */
 function sniffAudioType(u8) {
   if (!u8 || u8.length < 8) return "";
-  // OGG/Opus: "OggS"
-  if (u8[0] === 0x4f && u8[1] === 0x67 && u8[2] === 0x67 && u8[3] === 0x53)
-    return "audio/ogg; codecs=opus";
-  // MP3: "ID3" або frame sync
-  if ((u8[0] === 0x49 && u8[1] === 0x44 && u8[2] === 0x33) ||
-      (u8[0] === 0xff && (u8[1] & 0xe0) === 0xe0))
-    return "audio/mpeg";
-  // MP4/M4A: "ftyp"
-  if (u8[4] === 0x66 && u8[5] === 0x74 && u8[6] === 0x79 && u8[7] === 0x70)
-    return "audio/mp4";
+  // OGG/Opus
+  if (u8[0] === 0x4f && u8[1] === 0x67 && u8[2] === 0x67 && u8[3] === 0x53) return "audio/ogg; codecs=opus";
+  // MP3
+  if ((u8[0] === 0x49 && u8[1] === 0x44 && u8[2] === 0x33) || (u8[0] === 0xff && (u8[1] & 0xe0) === 0xe0)) return "audio/mpeg";
+  // MP4/M4A
+  if (u8[4] === 0x66 && u8[5] === 0x74 && u8[6] === 0x79 && u8[7] === 0x70) return "audio/mp4";
   return "";
 }
 
@@ -68,11 +51,14 @@ async function fetchWithType(url, env) {
   return { ab, u8, contentType };
 }
 
+function isVeryShortAudio(u8) {
+  // Груба евристика: < 4000 байт ≈ ~0.5–1.0 c для opus voice
+  return !u8 || u8.length < 4000;
+}
+
 /* ───────────── OpenAI-compat (OpenRouter / FREE) ───────────── */
 async function transcribeViaOpenAICompat({ baseUrl, apiKey, model, fileUrl, env, extraHeaders = {} }) {
-  if (!baseUrl) throw new Error("stt: compat baseUrl missing");
   const { ab, contentType } = await fetchWithType(fileUrl, env);
-
   const form = new FormData();
   form.append("file", new Blob([ab], { type: contentType }), "voice.ogg");
   form.append("model", model || "whisper-1");
@@ -93,7 +79,15 @@ async function transcribeViaOpenAICompat({ baseUrl, apiKey, model, fileUrl, env,
 
 /* ───────────── Cloudflare Whisper ───────────── */
 async function cfWhisperOnce({ acc, token, fileUrl, env, fieldName, mimeVariant }) {
-  const { ab, contentType } = await fetchWithType(fileUrl, env);
+  const { ab, u8, contentType } = await fetchWithType(fileUrl, env);
+
+  // Якщо надто короткий voice — пропускаємо CF, одразу кидаємо помилку для фолбеку на Gemini
+  if (isVeryShortAudio(u8)) {
+    const e = new Error("stt: cf short-audio, skip to gemini");
+    e.skip = true;
+    throw e;
+  }
+
   const ct = mimeVariant === "ogg-only"
     ? "audio/ogg"
     : mimeVariant === "opus"
@@ -119,72 +113,77 @@ async function transcribeViaCloudflare(env, fileUrl) {
   const acc = env.CF_ACCOUNT_ID, token = env.CLOUDFLARE_API_TOKEN;
   if (!acc || !token) throw new Error("stt: cf creds missing");
 
-  try { return await cfWhisperOnce({ acc, token, fileUrl, env, fieldName: "file", mimeVariant: "auto" }); }
+  try { return await cfWhisperOnce({ acc, token, fileUrl, env, fieldName: "file",  mimeVariant: "auto" }); }
   catch (e1) {
-    try { return await cfWhisperOnce({ acc, token, fileUrl, env, fieldName: "file", mimeVariant: "ogg-only" }); }
+    if (e1?.skip) throw e1;
+    try { return await cfWhisperOnce({ acc, token, fileUrl, env, fieldName: "file",  mimeVariant: "ogg-only" }); }
     catch (e2) {
-      if ((e2 && e2.status && e2.status < 500) || /invalid audio/i.test(String(e2.message))) {
-        return await cfWhisperOnce({ acc, token, fileUrl, env, fieldName: "audio", mimeVariant: "opus" });
+      if (e2?.skip || (e2 && e2.status && e2.status < 500) || /invalid audio/i.test(String(e2.message))) {
+        const e = new Error("stt: cf invalid, fallback to gemini"); e.skip = true; throw e;
       }
       throw e2;
     }
   }
 }
 
-/* ───────────── Gemini (inline audio, v1beta) ───────────── */
-function normGeminiModel(m) {
-  let model = (m || "").trim();
-  if (!model) model = "gemini-1.5-pro";
-  if (/^gemini-1\.5-flash/i.test(model)) model = "gemini-1.5-pro";
-  return model;
+/* ───────────── Gemini (v1beta) ───────────── */
+function pickGeminiModel(env) {
+  const envModel = String(env?.GEMINI_STT_MODEL || "").trim();
+  if (envModel) return envModel; // поважаємо те, що в env
+  return "gemini-2.0-flash-exp";
 }
-function geminiBaseFor() { return "https://generativelanguage.googleapis.com/v1beta"; }
+function geminiBase() { return "https://generativelanguage.googleapis.com/v1beta"; }
 
-async function geminiOnce({ key, model, fileUrl, apiBase, env }) {
+async function transcribeViaGemini(env, fileUrl) {
+  const key = env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY;
+  if (!key) throw new Error("stt: gemini key missing");
+  const model = pickGeminiModel(env);
   const { ab, contentType } = await fetchWithType(fileUrl, env);
   const b64 = bufToBase64(ab);
-  const url = `${apiBase}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+
+  const url = `${geminiBase()}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
   const body = {
     contents: [{
       parts: [
-        { text: "Transcribe the audio to plain text. Return only the transcript." },
+        { text: "Transcribe the audio to plain text. Return only the transcript without metadata." },
         { inline_data: { data: b64, mime_type: contentType } }
       ]
     }],
     generationConfig: { temperature: 0.0 }
   };
-  const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
   const data = await r.json().catch(() => null);
   const text = data?.candidates?.[0]?.content?.parts?.map(p => p?.text || "").join("").trim();
   if (!r.ok || !text) {
     const err = data?.error?.message || `gemini http ${r.status}`;
-    const e = new Error(`stt: gemini ${err}`); e.status = r.status; throw e;
+    throw new Error(`stt: gemini ${err}`);
   }
   return { text, lang: guessLang(text) };
 }
 
-async function transcribeViaGemini(env, fileUrl) {
-  const key = env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY;
-  if (!key) throw new Error("stt: gemini key missing");
-  const model = normGeminiModel(env.GEMINI_STT_MODEL);
-  const base = geminiBaseFor(model);
-  try { return await geminiOnce({ key, model, fileUrl, apiBase: base, env }); }
-  catch { return await geminiOnce({ key, model: "gemini-1.5-pro", fileUrl, apiBase: base, env }); }
-}
-
-/* ───────────── Main ───────────── */
+/* ───────────── Public API ───────────── */
 export async function transcribeVoice(env, fileUrl) {
   const errors = [];
 
-  // 1) Cloudflare Whisper
+  // 1) Спроба CF (якщо не короткий voice). У разі "skip" → одразу Gemini
   try { return await transcribeViaCloudflare(env, fileUrl); }
-  catch (e) { errors.push(String(e?.message || e)); }
+  catch (e) {
+    errors.push(String(e?.message || e));
+    if (e?.skip) {
+      // йдемо далі без повторних спроб CF
+    }
+  }
 
-  // 2) Gemini
+  // 2) Gemini (2.0-flash-exp за замовчуванням)
   try { return await transcribeViaGemini(env, fileUrl); }
   catch (e) { errors.push(String(e?.message || e)); }
 
-  // 3) OpenRouter
+  // 3) OpenRouter / FREE як крайній фолбек
   if (env.OPENROUTER_API_KEY) {
     try {
       return await transcribeViaOpenAICompat({
@@ -195,21 +194,19 @@ export async function transcribeVoice(env, fileUrl) {
         env,
         extraHeaders: {
           "HTTP-Referer": env.OPENROUTER_SITE_URL || "https://senti.restsva.app",
-          "X-Title": env.OPENROUTER_APP_NAME || "Senti Bot Worker",
-        },
+          "X-Title":      env.OPENROUTER_APP_NAME || "Senti Bot Worker",
+        }
       });
     } catch (e) { errors.push(String(e?.message || e)); }
   }
-
-  // 4) FREE
   if (env.FREE_STT_BASE_URL) {
     try {
       return await transcribeViaOpenAICompat({
         baseUrl: env.FREE_STT_BASE_URL,
-        apiKey: env.FREE_STT_API_KEY || "",
-        model: env.FREE_STT_MODEL || "whisper-1",
+        apiKey:   env.FREE_STT_API_KEY || "",
+        model:   (env.FREE_STT_MODEL || "whisper-1"),
         fileUrl,
-        env,
+        env
       });
     } catch (e) { errors.push(String(e?.message || e)); }
   }
