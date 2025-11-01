@@ -3,41 +3,63 @@ main = "src/index.js"
 compatibility_date = "2024-09-25"
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
 
+# --- CRONs ---
+# 1) heartbeat кожні 15 хв (для логів/живості)
+# 2) evolve щогодини рівно о :00 (UTC)
+# 3) додатковий тригер нічного агента о 02:10 UTC (опційний)
 [triggers]
 crons = ["*/15 * * * *", "0 * * * *", "10 2 * * *"]
 
+# --- Публічні змінні середовища (НЕ секрети) ---
 [vars]
 SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
 DRIVE_FOLDER_ID = "root"
 TELEGRAM_ADMIN_ID = "784869835"
 DEPLOY_ID = "local-dev"
 
+# Увімкнення/вимкнення Learn
 LEARN_ENABLED = "on"
+
+# Cloudflare Workers AI (безкоштовно)
 CF_ACCOUNT_ID = "2cf6e316af8623546c95c0354bc3aa00"
 
+# ── Публічні перегляди адмін-HTML (readonly)
 ALLOW_PUBLIC_REPO = "on"
 ALLOW_PUBLIC_STATUT = "on"
 ALLOW_PUBLIC_CHECKLIST = "on"
 
+# Секретні токени для ендпойнтів / вебхука TG
 WEBHOOK_SECRET = "senti1984"
 TG_WEBHOOK_SECRET = "senti1984"
 TELEGRAM_SECRET_TOKEN = "senti1984"
 
+# Локальна таймзона
 TIMEZONE = "Europe/Kyiv"
+
+# Діагностичні теги
 DIAG_TAGS = "on"
 
-# ── MODELS
+# ───────────────────────────────────────────────────────────────
+#                МОДЕЛІ (TEXT / CODE / VISION)
+# ───────────────────────────────────────────────────────────────
 MODEL_ORDER_TEXT   = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 MODEL_ORDER_CODE   = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
+
+# VISION: тільки провайдери, що підтримують зображення (без free)
 VISION_ORDER       = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.0-flash-exp"
 MODEL_ORDER_VISION = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.0-flash-exp"
+
+# RUNTIME дефолт
 MODEL_ORDER        = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 
+# --- Дефолтні моделі ---
 GEMINI_MODEL    = "gemini-2.5-flash"
 CF_MODEL        = "@cf/qwen/qwen2.5-7b-instruct"
 CF_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
 
-# ── OpenAI-compat fallback (OpenRouter)
+# ───────────────────────────────────────────────────────────────
+#                OpenAI-compat fallback (OpenRouter)
+# ───────────────────────────────────────────────────────────────
 FREE_API_BASE_URL = "https://openrouter.ai/api"
 FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
 FREE_API_PATH     = "/v1/chat/completions"
@@ -46,28 +68,41 @@ FREE_LLM_MODEL    = "meta-llama/llama-4-scout:free"
 OPENROUTER_SITE_URL = "https://senti.restsva.app"
 OPENROUTER_APP_NAME = "Senti Bot Worker"
 
-# ── VOICE (TTS/STT)
+# ───────────────────────────────────────────────────────────────
+#                     VOICE (TTS / STT)
+# ───────────────────────────────────────────────────────────────
+# Порядок фолбеків: Deepgram → MyShell → Free(OpenRouter tts-1)
 TTS_ORDER = "@cf/deepgram/aura-1,@cf/myshell-ai/melotts,free"
-VOICE_SPEAKER = "angus"            # дефолт, якщо нижче не задано
-VOICE_REPLY_DEFAULT = "on"         # озвучка за замовчуванням
 
-# Персональні голоси під мови (використовуються автоматично у коді)
-VOICE_SPEAKER_UK = "oleksandr"
+# Дефолтний голос (для EN та як запасний)
+VOICE_SPEAKER = "angus"
+
+# Мапінг голосів за мовою (налаштуй під доступні у твоєму TTS провайдера)
+VOICE_SPEAKER_UK = "dmytro"   # ← постав будь-який доступний UA-чоловічий голос або лиши англ.
 VOICE_SPEAKER_RU = "sergei"
 VOICE_SPEAKER_EN = "angus"
 VOICE_SPEAKER_DE = "bernd"
 VOICE_SPEAKER_FR = "julie"
 
+# Озвучка за замовчуванням увімкнена
+VOICE_REPLY_DEFAULT = "on"
+
+# FREE TTS (опціонально, якщо немає кредитів на CF)
 FREE_TTS_BASE_URL = ""
 FREE_TTS_MODEL = "tts-1"
 FREE_TTS_VOICE = "alloy"
 
-# STT/VISION стабілізатори
-GEMINI_STT_MODEL = "gemini-1.5-pro"
+# --- СТАБІЛІЗАТОРИ ДЛЯ STT / VISION ---
+# STT: використовуємо доступний безкоштовний Gemini 2.0 flash exp
+GEMINI_STT_MODEL = "gemini-2.0-flash-exp"
+# Форсований MIME для Telegram voice (ogg/opus)
 FORCE_AUDIO_TYPE = "audio/ogg; codecs=opus"
+# Форсований MIME для фото з Telegram (лікує application/octet-stream)
 FORCE_IMAGE_TYPE = "image/jpeg"
 
-# ── AUTO/ENERGY
+# ───────────────────────────────────────────────────────────────
+#           АВТО-ІМПРУВ / РЕГУЛЯЦІЯ / ЕНЕРГІЯ
+# ───────────────────────────────────────────────────────────────
 AUTO_IMPROVE = "on"
 NIGHTLY_UTC_HOUR = "23"
 SELF_REGULATE = "on"
@@ -79,7 +114,9 @@ ENERGY_COST_TEXT = "1"
 ENERGY_COST_IMAGE = "5"
 ENERGY_LOW_THRESHOLD = "10"
 
-# ── KV
+# ───────────────────────────────────────────────────────────────
+#                         KV STORAGE
+# ───────────────────────────────────────────────────────────────
 [[kv_namespaces]]
 binding = "DEDUP_KV"
 id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
@@ -120,7 +157,9 @@ id = "63c0d1e0962a419ca54082893410b28e"
 binding = "LEARN_QUEUE_KV"
 id = "86a54c59ce674a558780c58bf1a47dfd"
 
-# ── R2
+# ───────────────────────────────────────────────────────────────
+#                         R2 BUCKET
+# ───────────────────────────────────────────────────────────────
 [[r2_buckets]]
 binding = "LEARN_BUCKET"
 bucket_name = "senti-learn"
