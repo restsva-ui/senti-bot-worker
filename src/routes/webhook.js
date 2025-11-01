@@ -1,8 +1,8 @@
 // src/routes/webhook.js
-// (rev3) Vision: жорстке визначення image MIME (JPEG/PNG/WEBP/GIF/HEIC/AVIF) замість octet-stream.
-//             -> виправляє "gemini 400 mimeType application/octet-stream"
-// (rev2) Vision: автофільтр не-візуальних моделей у VISION_ORDER (прибирає 'free' та інші text-only)
-// (rev1) STT: виклик через speechRouter (CF → Gemini), typing pulses, дрібні UX-плюшки.
+// (rev3.1) FIX: balanced braces + final export end; no EOF error.
+// (rev3) Vision: жорстке визначення image MIME (JPEG/PNG/WEBP/GIF/HEIC/AVIF).
+// (rev2) Vision: фільтр порядку моделей (прибрано text-only).
+// (rev1) STT: виклик через speechRouter (CF → Gemini), typing pulses.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -77,7 +77,7 @@ function normalizeImageMime(headerCt, u8, fallback = "image/jpeg") {
   if (!ct || ct === "application/octet-stream") {
     return sniffImageMime(u8) || fallback;
   }
-  // деякі CDN ставлять "image/jpg" — нормалізуємо до "image/jpeg"
+  // дехто ставить "image/jpg" — нормалізуємо до "image/jpeg"
   if (ct === "image/jpg") return "image/jpeg";
   return ct;
 }
