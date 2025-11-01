@@ -78,12 +78,17 @@ TTS_ORDER = "@cf/myshell-ai/melotts,@cf/deepgram/aura-1,free"
 # Дефолтний голос (резерв)
 VOICE_SPEAKER = "angus"
 
-# Мапінг голосів за мовою (узгоджено з вебхуком)
+# Мапінг голосів за мовою (використовується вебхуком/voice.js)
 VOICE_SPEAKER_UK = "oleksandr"
 VOICE_SPEAKER_RU = "sergei"
 VOICE_SPEAKER_EN = "angus"
 VOICE_SPEAKER_DE = "bernd"
 VOICE_SPEAKER_FR = "julie"
+
+# Політика вибору мови озвучки:
+#  - "reply_lang" → говоримо мовою відповіді (яка = мові користувача/запиту)
+#  - "detect_only" → покладатися лише на авто-детект
+VOICE_LANG_STRATEGY = "reply_lang"
 
 # Озвучка за замовчуванням увімкнена
 VOICE_REPLY_DEFAULT = "on"
@@ -100,6 +105,24 @@ GEMINI_STT_MODEL = "gemini-2.0-flash-exp"
 FORCE_AUDIO_TYPE = "audio/ogg; codecs=opus"
 # Форсований MIME для фото з Telegram (лікує application/octet-stream)
 FORCE_IMAGE_TYPE = "image/jpeg"
+
+# ───────────────────────────────────────────────────────────────
+#           ВІЗУАЛ / ГЕО (для підказок і лінків на карти)
+# ───────────────────────────────────────────────────────────────
+# Увімкнути спроби розпізнання визначних місць у vision-відповідях
+VISION_PLACE_HINT = "on"
+
+# Шаблон лінка для карт (не потребує API ключа; підставляємо {q})
+MAPS_LINK_TEMPLATE = "https://www.google.com/maps/search/?api=1&query={q}"
+
+# ───────────────────────────────────────────────────────────────
+#           UI/Меню (мʼякі налаштування кнопок у чаті)
+# ───────────────────────────────────────────────────────────────
+# Дозволити публічне меню з «Senti / Learn / Admin»
+TELEGRAM_MENU_PUBLIC = "on"
+
+# Максимальний розмір одного файлу в Learn (МБ)
+LEARN_MAX_FILE_MB = "25"
 
 # ───────────────────────────────────────────────────────────────
 #           АВТО-ІМПРУВ / РЕГУЛЯЦІЯ / ЕНЕРГІЯ
