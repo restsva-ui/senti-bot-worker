@@ -76,9 +76,9 @@ FREE_TTS_MODEL = "tts-1"
 FREE_TTS_VOICE = "alloy"
 
 # --- СТАБІЛІЗАТОРИ ДЛЯ STT (оновлено) ---
-# Стабільна модель для транскрипції у Gemini — 'pro' і тільки через v1beta
-GEMINI_STT_MODEL = "gemini-1.5-pro"
-# Додаємо форсований MIME для Telegram voice (ogg/opus)
+# Використовуємо новий стабільний для STT варіант через v1beta:
+GEMINI_STT_MODEL = "gemini-2.0-flash-exp"
+# Форсований MIME для Telegram voice (ogg/opus) — лікує 'Invalid audio input'
 FORCE_AUDIO_TYPE = "audio/ogg; codecs=opus"
 
 # ───────────────────────────────────────────────────────────────
