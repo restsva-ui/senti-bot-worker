@@ -1,31 +1,49 @@
 // src/lib/speechRouter.js
-// STT router v3.7 (Cloudflare-safe RegEx + короткі voice → одразу Gemini)
+// STT router v3.8 — Cloudflare-safe, без проблемних діапазонів у RegExp.
+// Каскад: Cloudflare Whisper → Gemini → OpenAI-compatible (OpenRouter/FREE)
 // Повертає: { text, lang }
 
 function bufToBase64(ab) {
-  const b = new Uint8Array(ab); let s = "";
+  const b = new Uint8Array(ab);
+  let s = "";
   for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
   return btoa(s);
 }
 
-/* ───────────── Language guess (UA / RU / EN / DE / FR) ───────────── */
+/* ───────────── Language guess (UA / RU / EN / DE / FR) ─────────────
+   Уникаємо сирих кириличних діапазонів, використовуємо Unicode-escape + /u.
+*/
 export function guessLang(s = "") {
   const t = String(s || "");
-  if (/[їєіґЇЄІҐ]/.test(t)) return "uk";
-  if (/[А-ЯЁа-яёІіЇїЄєҐґ]/.test(t)) return "ru";
-  if (/[ÄÖÜäöüß]/.test(t) || /\b(der|die|das|und|nicht|ich|mit|für)\b/i.test(t)) return "de";
-  if (/[àâçéèêëîïôùûüÿœæ]/i.test(t) || /\b(le|la|les|des|une|et|pour|avec)\b/i.test(t)) return "fr";
+
+  // Унікальні для української: ї (0457), є (0454), і (0456), ґ (0491) + їхні великі
+  if (/[ \u0457\u0454\u0456\u0491\u0407\u0404\u0406\u0490]/u.test(t)) return "uk";
+
+  // Будь-яка кирилиця → ru (як запасний варіант, якщо не впіймали uk)
+  if (/\p{Script=Cyrillic}/u.test(t)) return "ru";
+
+  // Німецькі діакритики або типові стоп-слова
+  if (/[\u00C4\u00D6\u00DC\u00E4\u00F6\u00FC\u00DF]/u.test(t) || /\b(der|die|das|und|nicht|ich|mit|für)\b/i.test(t)) {
+    return "de";
+  }
+
+  // Французькі діакритики або типові стоп-слова
+  if (/[\u00E0\u00E2\u00E7\u00E9\u00E8\u00EA\u00EB\u00EE\u00EF\u00F4\u00F9\u00FB\u00FC\u00FF\u0153\u00E6]/u.test(t) ||
+      /\b(le|la|les|des|une|et|pour|avec)\b/i.test(t)) {
+    return "fr";
+  }
+
   return "en";
 }
 
 /* ───────────── Audio helpers ───────────── */
 function sniffAudioType(u8) {
   if (!u8 || u8.length < 8) return "";
-  // OGG/Opus
+  // OGG (Opus)
   if (u8[0] === 0x4f && u8[1] === 0x67 && u8[2] === 0x67 && u8[3] === 0x53) return "audio/ogg; codecs=opus";
-  // MP3
+  // MP3 (ID3 або MPEG frame)
   if ((u8[0] === 0x49 && u8[1] === 0x44 && u8[2] === 0x33) || (u8[0] === 0xff && (u8[1] & 0xe0) === 0xe0)) return "audio/mpeg";
-  // MP4/M4A
+  // MP4 / M4A
   if (u8[4] === 0x66 && u8[5] === 0x74 && u8[6] === 0x79 && u8[7] === 0x70) return "audio/mp4";
   return "";
 }
@@ -52,7 +70,7 @@ async function fetchWithType(url, env) {
 }
 
 function isVeryShortAudio(u8) {
-  // Груба евристика: < 4000 байт ≈ ~0.5–1.0 c для opus voice
+  // ~0.5–1.0 s для opus voice — пропускаємо CF Whisper, одразу фолбек
   return !u8 || u8.length < 4000;
 }
 
@@ -63,11 +81,12 @@ async function transcribeViaOpenAICompat({ baseUrl, apiKey, model, fileUrl, env,
   form.append("file", new Blob([ab], { type: contentType }), "voice.ogg");
   form.append("model", model || "whisper-1");
 
-  const r = await fetch(baseUrl.replace(/\/+$/, "") + "/v1/audio/transcriptions", {
+  const r = await fetch(String(baseUrl).replace(/\/+$/, "") + "/v1/audio/transcriptions", {
     method: "POST",
     headers: { ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}), ...extraHeaders },
     body: form,
   });
+
   const data = await r.json().catch(() => null);
   const text = data?.text || data?.result || data?.transcription || "";
   if (!r.ok || !text) {
@@ -81,7 +100,6 @@ async function transcribeViaOpenAICompat({ baseUrl, apiKey, model, fileUrl, env,
 async function cfWhisperOnce({ acc, token, fileUrl, env, fieldName, mimeVariant }) {
   const { ab, u8, contentType } = await fetchWithType(fileUrl, env);
 
-  // Якщо надто короткий voice — пропускаємо CF, одразу кидаємо помилку для фолбеку на Gemini
   if (isVeryShortAudio(u8)) {
     const e = new Error("stt: cf short-audio, skip to gemini");
     e.skip = true;
@@ -90,9 +108,7 @@ async function cfWhisperOnce({ acc, token, fileUrl, env, fieldName, mimeVariant 
 
   const ct = mimeVariant === "ogg-only"
     ? "audio/ogg"
-    : mimeVariant === "opus"
-      ? "audio/ogg; codecs=opus"
-      : contentType;
+    : (mimeVariant === "opus" ? "audio/ogg; codecs=opus" : contentType);
 
   const form = new FormData();
   form.append(fieldName, new Blob([ab], { type: ct }), "voice.ogg");
@@ -100,7 +116,8 @@ async function cfWhisperOnce({ acc, token, fileUrl, env, fieldName, mimeVariant 
   const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/@cf/openai/whisper`;
   const r = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
   const data = await r.json().catch(() => null);
-  const text = data?.result?.text || (Array.isArray(data?.result?.segments) ? data.result.segments.map(s => s?.text || "").join(" ") : "");
+  const text = data?.result?.text ||
+               (Array.isArray(data?.result?.segments) ? data.result.segments.map(s => s?.text || "").join(" ") : "");
 
   if (!r.ok || !data?.success || !text) {
     const msg = data?.errors?.[0]?.message || data?.messages?.[0] || `cf http ${r.status}`;
@@ -113,11 +130,13 @@ async function transcribeViaCloudflare(env, fileUrl) {
   const acc = env.CF_ACCOUNT_ID, token = env.CLOUDFLARE_API_TOKEN;
   if (!acc || !token) throw new Error("stt: cf creds missing");
 
-  try { return await cfWhisperOnce({ acc, token, fileUrl, env, fieldName: "file",  mimeVariant: "auto" }); }
-  catch (e1) {
+  try {
+    return await cfWhisperOnce({ acc, token, fileUrl, env, fieldName: "file", mimeVariant: "auto" });
+  } catch (e1) {
     if (e1?.skip) throw e1;
-    try { return await cfWhisperOnce({ acc, token, fileUrl, env, fieldName: "file",  mimeVariant: "ogg-only" }); }
-    catch (e2) {
+    try {
+      return await cfWhisperOnce({ acc, token, fileUrl, env, fieldName: "file", mimeVariant: "ogg-only" });
+    } catch (e2) {
       if (e2?.skip || (e2 && e2.status && e2.status < 500) || /invalid audio/i.test(String(e2.message))) {
         const e = new Error("stt: cf invalid, fallback to gemini"); e.skip = true; throw e;
       }
@@ -129,8 +148,7 @@ async function transcribeViaCloudflare(env, fileUrl) {
 /* ───────────── Gemini (v1beta) ───────────── */
 function pickGeminiModel(env) {
   const envModel = String(env?.GEMINI_STT_MODEL || "").trim();
-  if (envModel) return envModel; // поважаємо те, що в env
-  return "gemini-2.0-flash-exp";
+  return envModel || "gemini-2.0-flash-exp";
 }
 function geminiBase() { return "https://generativelanguage.googleapis.com/v1beta"; }
 
@@ -138,6 +156,7 @@ async function transcribeViaGemini(env, fileUrl) {
   const key = env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY;
   if (!key) throw new Error("stt: gemini key missing");
   const model = pickGeminiModel(env);
+
   const { ab, contentType } = await fetchWithType(fileUrl, env);
   const b64 = bufToBase64(ab);
 
@@ -152,11 +171,7 @@ async function transcribeViaGemini(env, fileUrl) {
     generationConfig: { temperature: 0.0 }
   };
 
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
-  });
+  const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   const data = await r.json().catch(() => null);
   const text = data?.candidates?.[0]?.content?.parts?.map(p => p?.text || "").join("").trim();
   if (!r.ok || !text) {
@@ -170,28 +185,25 @@ async function transcribeViaGemini(env, fileUrl) {
 export async function transcribeVoice(env, fileUrl) {
   const errors = [];
 
-  // 1) Спроба CF (якщо не короткий voice). У разі "skip" → одразу Gemini
+  // 1) Cloudflare Whisper
   try { return await transcribeViaCloudflare(env, fileUrl); }
   catch (e) {
     errors.push(String(e?.message || e));
-    if (e?.skip) {
-      // йдемо далі без повторних спроб CF
-    }
+    if (e?.skip) { /* одразу фолбек */ }
   }
 
-  // 2) Gemini (2.0-flash-exp за замовчуванням)
+  // 2) Gemini
   try { return await transcribeViaGemini(env, fileUrl); }
   catch (e) { errors.push(String(e?.message || e)); }
 
-  // 3) OpenRouter / FREE як крайній фолбек
+  // 3) OpenRouter / FREE (OpenAI-compatible)
   if (env.OPENROUTER_API_KEY) {
     try {
       return await transcribeViaOpenAICompat({
         baseUrl: "https://openrouter.ai/api",
-        apiKey: env.OPENROUTER_API_KEY,
-        model: "openai/whisper-large-v3",
-        fileUrl,
-        env,
+        apiKey:  env.OPENROUTER_API_KEY,
+        model:   "openai/whisper-large-v3",
+        fileUrl, env,
         extraHeaders: {
           "HTTP-Referer": env.OPENROUTER_SITE_URL || "https://senti.restsva.app",
           "X-Title":      env.OPENROUTER_APP_NAME || "Senti Bot Worker",
@@ -202,11 +214,10 @@ export async function transcribeVoice(env, fileUrl) {
   if (env.FREE_STT_BASE_URL) {
     try {
       return await transcribeViaOpenAICompat({
-        baseUrl: env.FREE_STT_BASE_URL,
+        baseUrl:  env.FREE_STT_BASE_URL,
         apiKey:   env.FREE_STT_API_KEY || "",
-        model:   (env.FREE_STT_MODEL || "whisper-1"),
-        fileUrl,
-        env
+        model:    env.FREE_STT_MODEL || "whisper-1",
+        fileUrl,  env
       });
     } catch (e) { errors.push(String(e?.message || e)); }
   }
