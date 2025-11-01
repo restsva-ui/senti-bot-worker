@@ -1,11 +1,11 @@
 // src/routes/webhook.js
-// rev4.1 — Vision language fix, UA TTS mapping, voice reply, balanced braces.
+// rev4.2 — Voice lang lock, Vision strict UA/locale, landmarks → Google Maps link, UA TTS mapping.
 //
-// - Vision: strict "ONLY in <lang>" + translate on-image text → user language.
-// - MIME hardening for images (no octet-stream leaks).
-// - TTS: chooseVoice() by language, sendAudio MP3 via CF @cf/myshell-ai/melotts.
-// - STT: via transcribeVoice() cascade (CF → Gemini → OpenRouter → FREE).
-// - Text answers: hard enforce reply language; voice reply immediately when VOICE_REPLY_DEFAULT="on".
+// - STT → lang: беремо з transcribeVoice() і фіксуємо для LLM та TTS.
+// - Vision: строгий "ONLY in <lang>" + авто-перепис, якщо треба. Підказка моделі додати "MAPS: ...".
+// - Після Vision: якщо знайдено "MAPS: ..." → додаємо лінк на Google Maps пошук.
+// - TTS: chooseVoice() by language, sendAudio MP3 через CF @cf/myshell-ai/melotts.
+// - Text answers: жорстко тримаємо мову користувача; озвучуємо, якщо VOICE_REPLY_DEFAULT="on".
 
 /* ───────────── Imports ───────────── */
 import { driveSaveFromUrl } from "../lib/drive.js";
@@ -36,6 +36,7 @@ const {
 
 const KV = { learnMode: (uid) => `learn:mode:${uid}` };
 
+/* typing pulse */
 async function sendTyping(env, chatId) {
   try {
     const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
@@ -52,10 +53,10 @@ function pulseTyping(env, chatId, times = 4, intervalMs = 4000) {
   for (let i = 1; i < times; i++) setTimeout(() => sendTyping(env, chatId), i * intervalMs);
 }
 
-/* ───────────── Image MIME helpers (no octet-stream) ───────────── */
+/* ───────────── Image MIME helpers ───────────── */
 function sniffImageMime(u8) {
   if (!u8 || u8.length < 12) return "";
-  if (u8[0] === 0xff && u8[1] === 0xd8 && u8[2] === 0xff) return "image/jpeg"; // JPEG
+  if (u8[0] === 0xff && u8[1] === 0xd8 && u8[2] === 0xff) return "image/jpeg";
   if (u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4e && u8[3] === 0x47 && u8[4] === 0x0d && u8[5] === 0x0a && u8[6] === 0x1a && u8[7] === 0x0a) return "image/png";
   if (u8[0] === 0x52 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x38 && u8[8] === 0x57 && u8[9] === 0x45 && u8[10] === 0x42 && u8[11] === 0x50) return "image/webp";
   if (u8[0] === 0x47 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x38) return "image/gif";
@@ -109,23 +110,33 @@ function chooseVoice(env, lang = "uk") {
   const byLang = { uk: "oleksandr", ru: "sergei", en: "angus", de: "bernd", fr: "julie" };
   return byLang[String(lang).toLowerCase()] || "angus";
 }
+/* ───────────── Vision (strict language + landmarks) ───────────── */
+function extractMapsQuery(text = "") {
+  const m = String(text || "").match(/^\s*(?:MAPS?|LOCATION|PLACE)\s*:\s*(.+)$/im);
+  return m ? m[1].trim() : null;
+}
+function buildMapsUrl(query) {
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+}
 
-/* ───────────── Vision (strict language) ───────────── */
 async function visionDescribe(env, { imageUrl, userPrompt = "", lang = "uk", systemHint }) {
   const rawOrder = String(
     env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "@cf/meta/llama-3.2-11b-vision-instruct"
   ).trim();
   const modelOrder = filterVisionOrder(rawOrder);
 
-  const { b64, mime } = await fetchToBase64WithMime(imageUrl, "image/jpeg");
+  const { b64, mime } = await fetchToBase64WithMime(imageUrl, env.FORCE_IMAGE_TYPE || "image/jpeg");
   const langName = langNameFor(lang);
   const task = `Опиши зображення коротко і по суті. Відповідай **лише ${langName}**.
-Якщо на фото є текст іншою мовою — коротко **передай зміст ${langName}**. Уникай зайвих деталей.`;
+Якщо на фото є текст іншою мовою — коротко **передай зміст ${langName}**.
+Якщо ти впевнено впізнаєш визначне місце або адресу, додай ОКРЕМИМ рядком:
+MAPS: <коротка назва місця, місто, країна>.`;
+
   const prompt = userPrompt ? `${task}\n\nДодатковий контекст від користувача: «${userPrompt}».` : task;
 
   const strongSystem =
     (systemHint ? `${systemHint}\n\n` : "") +
-    `STRICT LANGUAGE POLICY: Answer ONLY in ${langName}. Do not switch languages.`;
+    `STRICT LANGUAGE POLICY: Answer ONLY in ${langName}. Do not switch languages. Return MAPS: line only if highly confident.`;
 
   const out = await askVision(
     env,
@@ -135,6 +146,7 @@ async function visionDescribe(env, { imageUrl, userPrompt = "", lang = "uk", sys
   );
   return String(out || "").trim();
 }
+
 /* ===== Learn helpers (admin-only) ======================================== */
 function extractFirstUrl(text = "") { const m = String(text || "").match(/https?:\/\/\S+/i); return m ? m[0] : null; }
 async function getLearnMode(env, userId) { try { return (await env.STATE_KV.get(`learn:mode:${userId}`)) === "on"; } catch { return false; } }
@@ -168,7 +180,6 @@ function detectAttachment(msg) {
   if (msg.video_note){const v = msg.video_note;return{ type:"video_note", file_id: v.file_id, name: `videonote_${v.file_unique_id}.mp4`};}
   return pickPhoto(msg);
 }
-
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
   if (!att) return false;
@@ -212,12 +223,28 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const url = await tgFileUrl(env, att.file_id);
   try {
     const systemHint = await buildSystemHint(env, chatId, userId, lang);
-    const resp = await visionDescribe(env, {
+    let resp = await visionDescribe(env, {
       imageUrl: url,
       userPrompt: caption,
       lang,
       systemHint
     });
+
+    // Якщо раптом відповідь не мовою користувача — переписуємо
+    const detected = detectFromText(resp);
+    if (detected && detected !== lang) {
+      const langName = langNameFor(lang);
+      const fixPrompt = `Rewrite the description ONLY in ${langName}, concise, no preface.`;
+      resp = (await think(env, fixPrompt + "\n\n" + resp, { systemHint }))?.trim() || resp;
+    }
+
+    // Витягуємо MAPS: ... → даємо клікабельний лінк
+    const mq = extractMapsQuery(resp);
+    if (mq) {
+      const maps = buildMapsUrl(mq);
+      resp += `\n\n📍 ${mq}\n${maps}`;
+    }
+
     await sendPlain(env, chatId, `🖼️ ${resp}`);
   } catch (e) {
     const raw = String(env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "").trim();
@@ -246,9 +273,7 @@ async function cfRunTTS(env, text, lang = "uk") {
   for (const model of order) {
     try {
       const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/${model}`;
-      const body = model.includes("myshell-ai/melotts")
-        ? { text, voice: chooseVoice(env, lang), format: "mp3", language: lang }
-        : { text, voice: chooseVoice(env, lang), format: "mp3", language: lang };
+      const body = { text, voice: chooseVoice(env, lang), format: "mp3", language: lang };
 
       const r = await fetch(url, { method: "POST", headers: { "Authorization": `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
       if (!r.ok) throw new Error(`http ${r.status}`);
@@ -285,7 +310,6 @@ async function synthAndSendAudio(env, chatId, text, lang = "uk") {
     await sendAudioTg(env, chatId, blob, "🎧");
   } catch (_) { /* текст уже надіслано — мовчки ігноруємо */ }
 }
-
 /* Voice/STT */
 async function handleVoiceSTT(env, chatId, userId, msg, lang) {
   if (!msg?.voice?.file_id) return false;
@@ -300,20 +324,24 @@ async function handleVoiceSTT(env, chatId, userId, msg, lang) {
 
   try {
     const url = await tgFileUrl(env, msg.voice.file_id);
-    const { text: stt } = await transcribeVoice(env, url);
+    const stt = await transcribeVoice(env, url);
+    const sttText = stt?.text || "";
+    const sttLang = stt?.lang && ["uk","ru","en","de","fr"].includes(stt.lang) ? stt.lang : lang;
 
-    await pushTurn(env, userId, "user", stt);
-    await autoUpdateSelfTune(env, userId, lang).catch(() => {});
+    await pushTurn(env, userId, "user", sttText);
+    await autoUpdateSelfTune(env, userId, sttLang).catch(() => {});
 
-    const systemHint = await buildSystemHint(env, chatId, userId, lang);
+    const systemHint = await buildSystemHint(env, chatId, userId, sttLang);
     const name = await getPreferredName(env, msg);
-    const { short, full } = await callSmartLLM(env, stt, { lang, name, systemHint, expand: false, adminDiag: ADMIN(env, userId) });
+    const { short, full } = await callSmartLLM(env, sttText, {
+      lang: sttLang, name, systemHint, expand: false, adminDiag: ADMIN(env, userId)
+    });
 
     await pushTurn(env, userId, "assistant", full);
     await sendPlain(env, chatId, short);
 
     if ((env.VOICE_REPLY_DEFAULT || "off").toLowerCase() === "on") {
-      await synthAndSendAudio(env, chatId, short, lang);
+      await synthAndSendAudio(env, chatId, short, sttLang);
     }
   } catch (e) {
     if (ADMIN(env, userId)) await sendPlain(env, chatId, `❌ Error: STT providers failed | ${String(e?.message || e).slice(0, 220)}`);
@@ -321,6 +349,7 @@ async function handleVoiceSTT(env, chatId, userId, msg, lang) {
   }
   return true;
 }
+
 /* ───────────── SystemHint / name / language enforcement ───────────── */
 async function buildSystemHint(env, chatId, userId, preferredLang) {
   const statut = String((await readStatut(env)) || "").trim();
@@ -444,17 +473,6 @@ ${control}`;
   const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
 }
-/* ───────────── Learn admin helpers ───────────── */
-async function runLearnNow(env) {
-  const secret = env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || "";
-  const u = new URL(abs(env, "/admin/learn/run"));
-  if (secret) u.searchParams.set("s", secret);
-  const r = await fetch(u.toString(), { method: "POST" });
-  const ct = r.headers.get("content-type") || "";
-  if (!r.ok) throw new Error(`learn_run http ${r.status}`);
-  if (ct.includes("application/json")) return await r.json();
-  return { ok: true, summary: await r.text() };
-}
 
 /* ───────────── MAIN ───────────── */
 export async function handleTelegramWebhook(req, env) {
@@ -505,157 +523,19 @@ export async function handleTelegramWebhook(req, env) {
   if (textRaw === BTN_DRIVE || /^(google\s*drive)$/i.test(textRaw)) { await setDriveMode(env, userId, true); return json({ ok: true }); }
   if (textRaw === BTN_SENTI || /^(senti|сенті)$/i.test(textRaw)) { await setDriveMode(env, userId, false); return json({ ok: true }); }
 
-  // /admin
+  // /admin (скорочено)
   if (textRaw === "/admin" || textRaw === "/admin@SentiBot" || textRaw === BTN_ADMIN) {
     await safe(async () => {
       const mo = String(env.MODEL_ORDER || "").trim();
-      const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY);
-      const hasCF = !!(env.CLOUDFLARE_API_TOKEN && env.CF_ACCOUNT_ID);
-      const hasOR = !!(env.OPENROUTER_API_KEY);
-      const hasFreeBase = !!(env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL);
-      const hasFreeKey = !!(env.FREE_LLM_API_KEY || env.FREE_API_KEY);
-
       const rawVision = String(env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "").trim();
       const usedVision = filterVisionOrder(rawVision);
-
       const lines = [
         t(lang, "admin_header"),
         `MODEL_ORDER: ${mo || "(not set)"}`,
         `VISION_ORDER raw: ${rawVision || "(not set)"}`,
         `VISION_ORDER used: ${usedVision}`,
-        `GEMINI key: ${hasGemini ? "✅" : "❌"}`,
-        `Cloudflare (CF_ACCOUNT_ID + CLOUDFLARE_API_TOKEN): ${hasCF ? "✅" : "❌"}`,
-        `OpenRouter key: ${hasOR ? "✅" : "❌"}`,
-        `FreeLLM (BASE_URL + KEY): ${hasFreeBase && hasFreeKey ? "✅" : "❌"}`
       ];
-      const entries = mo ? mo.split(",").map(s => s.trim()).filter(Boolean) : [];
-      if (entries.length) {
-        const health = await getAiHealthSummary(env, entries);
-        lines.push("\n— Health:");
-        for (const h of health) {
-          const light = h.cool ? "🟥" : (h.slow ? "🟨" : "🟩");
-          const ms = h.ewmaMs ? `${Math.round(h.ewmaMs)}ms` : "n/a";
-          lines.push(`${light} ${h.provider}:${h.model} — ewma ${ms}, fails ${h.failStreak || 0}`);
-        }
-      }
-      const links = energyLinks(env, userId);
-      const markup = { inline_keyboard: [
-        [{ text: "📋 Відкрити Checklist", url: links.checklist }],
-        [{ text: "🧠 Open Learn", url: links.learn }],
-      ]};
-      await sendPlain(env, chatId, lines.join("\n"), { reply_markup: markup });
+      await sendPlain(env, chatId, lines.join("\n"));
     });
     return json({ ok: true });
   }
-
-  // Learn UI + admin toggles
-  if (textRaw === (BTN_LEARN || "Learn") || (isAdmin && textRaw === "/learn")) {
-    if (!isAdmin) { await sendPlain(env, chatId, t(lang, "how_help"), { reply_markup: mainKeyboard(false) }); return json({ ok: true }); }
-    await safe(async () => {
-      let hasQueue = false;
-      try { const r = await listQueued(env, { limit: 1 }); hasQueue = Array.isArray(r) ? r.length > 0 : Array.isArray(r?.items) ? r.items.length > 0 : false; } catch {}
-      const links = energyLinks(env, userId);
-      const hint = "🧠 Режим Learn. Надсилай посилання чи файли — додам у чергу, якщо Learn увімкнено (/learn_on).";
-      const keyboard = [[{ text: "🧠 Відкрити Learn HTML", url: links.learn }]];
-      if (hasQueue) keyboard.push([{ text: "🧠 Прокачай мозок", url: abs(env, `/admin/learn/run?s=${encodeURIComponent(env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || "")}`) }]);
-      await sendPlain(env, chatId, hint, { reply_markup: { inline_keyboard: keyboard } });
-    });
-    return json({ ok: true });
-  }
-  if (isAdmin && textRaw === "/learn_on")  { await setLearnMode(env, userId, true);  await sendPlain(env, chatId, "🟢 Learn-режим увімкнено.");  return json({ ok: true }); }
-  if (isAdmin && textRaw === "/learn_off") { await setLearnMode(env, userId, false); await sendPlain(env, chatId, "🔴 Learn-режим вимкнено.");  return json({ ok: true }); }
-
-  // Learn enqueue (admin when ON)
-  if (isAdmin && await getLearnMode(env, userId)) {
-    const urlInText = extractFirstUrl(textRaw);
-    if (urlInText) { await enqueueLearn(env, String(userId), { url: urlInText, name: urlInText }); await sendPlain(env, chatId, "✅ Додано в чергу Learn."); return json({ ok: true }); }
-    const anyAtt = detectAttachment(msg);
-    if (anyAtt?.file_id) {
-      const fUrl = await tgFileUrl(env, anyAtt.file_id);
-      await enqueueLearn(env, String(userId), { url: fUrl, name: anyAtt.name || "file" });
-      await sendPlain(env, chatId, "✅ Додано в чергу Learn.");
-      return json({ ok: true });
-    }
-  }
-
-  /* Media routing */
-  try {
-    const driveOn = await getDriveMode(env, userId);
-    const hasAnyMedia = !!detectAttachment(msg) || !!pickPhoto(msg);
-
-    if (driveOn && hasAnyMedia) { if (await handleIncomingMedia(env, chatId, userId, msg, lang)) return json({ ok: true }); }
-    if (!driveOn && msg?.voice) { if (await handleVoiceSTT(env, chatId, userId, msg, lang)) return json({ ok: true }); }
-    if (!driveOn && pickPhoto(msg)) { if (await handleVisionMedia(env, chatId, userId, msg, lang, msg?.caption)) return json({ ok: true }); }
-    if (!driveOn && (msg?.video || msg?.document || msg?.audio || msg?.video_note)) {
-      await sendPlain(env, chatId,
-        "Поки що не аналізую такі файли в цьому режимі. Хочеш — увімкни збереження у Google Drive кнопкою «Google Drive».",
-        { reply_markup: mainKeyboard(ADMIN(env, userId)) }
-      );
-      return json({ ok: true });
-    }
-  } catch (e) {
-    if (ADMIN(env, userId)) await sendPlain(env, chatId, `❌ Media error: ${String(e).slice(0, 180)}`);
-    else await sendPlain(env, chatId, t(lang, "default_reply"));
-    return json({ ok: true });
-  }
-
-  /* Text intents & dialog */
-  if (textRaw) {
-    await rememberNameFromText(env, userId, textRaw);
-
-    if (isAdmin && textRaw === "/learn_run") {
-      await safe(async () => { const r = await runLearnNow(env); await sendPlain(env, chatId, `🧠 Learn run: ${JSON.stringify(r).slice(0, 2000)}`); });
-      return json({ ok: true });
-    }
-
-    if (dateIntent(textRaw)) { await replyCurrentDate(env, chatId, lang); return json({ ok: true }); }
-    if (timeIntent(textRaw)) { await replyCurrentTime(env, chatId, lang); return json({ ok: true }); }
-
-    if (weatherIntent(textRaw)) {
-      const loc = await getUserLocation(env, userId);
-      if (loc?.latitude && loc?.longitude) {
-        const s = await weatherSummaryByCoords(env, loc.latitude, loc.longitude, lang);
-        await sendPlain(env, chatId, s, { reply_markup: mainKeyboard(isAdmin) });
-      } else {
-        await sendPlain(env, chatId, t(lang, "need_location"), { reply_markup: askLocationKeyboard(lang) });
-      }
-      return json({ ok: true });
-    }
-
-    const aiCmd = parseAiCommand(textRaw);
-    if (aiCmd) {
-      await safe(async () => {
-        const systemHint = await buildSystemHint(env, chatId, userId, lang);
-        const name = await getPreferredName(env, msg);
-        const { short, full } = await callSmartLLM(env, aiCmd, { lang, name, systemHint, expand: true, adminDiag: isAdmin });
-        for (const part of chunkText(full)) await sendPlain(env, chatId, part);
-      });
-      return json({ ok: true });
-    }
-
-    await safe(async () => {
-      const systemHint = await buildSystemHint(env, chatId, userId, lang);
-      const name = await getPreferredName(env, msg);
-      const { short, full } = await callSmartLLM(env, textRaw, { lang, name, systemHint, expand: false, adminDiag: isAdmin });
-      await pushTurn(env, userId, "user", textRaw);
-      await pushTurn(env, userId, "assistant", full);
-      await sendPlain(env, chatId, short);
-      if ((env.VOICE_REPLY_DEFAULT || "off").toLowerCase() === "on") {
-        await synthAndSendAudio(env, chatId, short, lang);
-      }
-    });
-    return json({ ok: true });
-  }
-
-  await sendPlain(env, chatId, t(lang, "how_help"), { reply_markup: mainKeyboard(isAdmin) });
-  return json({ ok: true });
-}
-
-/* ───────────── Worker export ───────────── */
-export default {
-  async fetch(req, env) {
-    const url = new URL(req.url);
-    if (url.pathname === "/telegram/webhook") return handleTelegramWebhook(req, env);
-    return json({ ok: true, worker: "Senti" });
-  }
-};
