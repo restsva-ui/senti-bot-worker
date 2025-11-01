@@ -58,7 +58,6 @@ function isVeryShortAudio(u8) {
   // евристика: < ~4KB для opus → відразу на Gemini (CF Whipser часто лається)
   return !u8 || u8.length < 4000;
 }
-
 /* ───────────── OpenAI-compat (OpenRouter / FREE) ───────────── */
 async function transcribeViaOpenAICompat({ baseUrl, apiKey, model, fileUrl, env, extraHeaders = {} }) {
   const { ab, contentType } = await fetchWithType(fileUrl, env);
