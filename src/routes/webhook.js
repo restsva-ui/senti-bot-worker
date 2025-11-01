@@ -4,6 +4,7 @@
 // авто-самотюнінг стилю (мовні профілі) через selfTune.
 // (upd) Vision через каскад моделей askVision() + base64 із Telegram файлів.
 // (upd2) Voice/STT: обробка voice-повідомлень через speechRouter (CF → Gemini → OpenAI-compat).
+// (upd3) Vision: визначення MIME з Telegram-файлу (jpg/png/webp), а не завжди image/jpeg.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -37,7 +38,7 @@ const KV = {
   learnMode: (uid) => `learn:mode:${uid}`, // "on" | "off"
 };
 
-// ── Telegram UX helpers (індикатор як у GPT) ────────────────────────────────
+// ── Telegram UX helpers (індикатор як у GPT) ─────────────────────────────────
 async function sendTyping(env, chatId) {
   try {
     const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
@@ -54,31 +55,34 @@ function pulseTyping(env, chatId, times = 4, intervalMs = 4000) {
   for (let i = 1; i < times; i++) setTimeout(() => sendTyping(env, chatId), i * intervalMs);
 }
 
-// ── Binary → base64 helper (для Telegram файлів) ────────────────────────────
-async function urlToBase64(url) {
+// ── Binary → base64 + MIME helper (для Telegram файлів) ─────────────────────
+async function fetchToBase64WithMime(url, fallbackMime = "application/octet-stream") {
   const r = await fetch(url);
-  if (!r.ok) throw new Error(`fetch image ${r.status}`);
+  if (!r.ok) throw new Error(`fetch media ${r.status}`);
+  const ct = (r.headers.get("content-type") || "").toLowerCase() || fallbackMime;
   const ab = await r.arrayBuffer();
   const bytes = new Uint8Array(ab);
   let bin = "";
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  // btoa працює в Workers для бінарного рядка
-  return btoa(bin);
+  return { b64: btoa(bin), mime: ct };
 }
 
 // ── Vision через каскад моделей (askVision) ─────────────────────────────────
 async function visionDescribe(env, { imageUrl, userPrompt = "", lang = "uk", systemHint }) {
-  const modelOrder =
-    String(env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "@cf/meta/llama-3.2-11b-vision-instruct").trim();
+  const modelOrder = String(
+    env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "@cf/meta/llama-3.2-11b-vision-instruct"
+  ).trim();
 
-  const imageBase64 = await urlToBase64(imageUrl);
+  // Отримуємо реальний MIME із Telegram CDN (jpg/png/webp…)
+  const { b64, mime } = await fetchToBase64WithMime(imageUrl, "image/jpeg");
+
   const prompt = `${userPrompt || "Опиши зображення коротко і по суті."} Відповідай ${lang.toUpperCase()} мовою.`;
 
   const out = await askVision(
     env,
     modelOrder,
     prompt,
-    { systemHint, imageBase64, imageMime: "image/jpeg", temperature: 0.2 }
+    { systemHint, imageBase64: b64, imageMime: mime, temperature: 0.2 }
   );
   return String(out || "").trim();
 }
@@ -125,6 +129,7 @@ async function tgFileUrl(env, file_id) {
   if (!path) throw new Error("file_path missing");
   return `https://api.telegram.org/file/bot${token}/${path}`;
 }
+
 // ===== Learn helpers (admin-only, ручний режим) =============================
 function extractFirstUrl(text = "") {
   const m = String(text || "").match(/https?:\/\/\S+/i);
@@ -199,7 +204,8 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
     await sendPlain(env, chatId, `🖼️ ${resp}`);
   } catch (e) {
     if (ADMIN(env, userId)) {
-      await sendPlain(env, chatId, `❌ Vision error: ${String(e.message || e).slice(0, 180)}`);
+      const modelOrder = String(env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "").trim();
+      await sendPlain(env, chatId, `❌ Vision error: ${String(e?.message || e).slice(0, 200)}\n(modelOrder: ${modelOrder || "n/a"})`);
     } else {
       const connectUrl = abs(env, "/auth/drive");
       await sendPlain(
@@ -416,6 +422,7 @@ async function runLearnNow(env) {
 async function listInsights(env, limit = 5) {
   try { return await getRecentInsights(env, { limit }) || []; } catch { return []; }
 }
+
 // ── MAIN ────────────────────────────────────────────────────────────────────
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "POST") {
