@@ -8,6 +8,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     permissions:
       contents: read
 
@@ -19,39 +20,30 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: "npm"
 
-      - name: 📦 Install dependencies (if any)
+      - name: 🧩 Ensure package.json exists
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          elif [ -f package.json ]; then
-            npm install
-          else
-            echo "No package.json found — skipping npm install"
+          if [ ! -f package.json ]; then
+            echo "Creating minimal package.json..."
+            echo '{}' > package.json
           fi
 
-      - name: ⚙️ Add Wrangler v4 (dev dependency)
-        run: npm i -D wrangler@4
+      - name: 📦 Install Wrangler + deps
+        run: |
+          npm install wrangler@3 @cloudflare/kv-asset-handler@0.3.4 \
+            esbuild@0.17.19 path-to-regexp@6.3.0 mime@3.0.0
 
-      - name: 🧪 Print Wrangler version
-        run: npx wrangler --version
-
-      - name: 🚀 Deploy to Cloudflare (v4)
+      - name: 🚀 Deploy to Cloudflare
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          # Не обов'язково, бо в wrangler.toml є account_id, але залишаю на випадок override:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          # Корисно для телеметрії/відладки (необов'язково):
-          NODE_OPTIONS: --max_old_space_size=4096
-        run: npx wrangler deploy --experimental-json-config
+        run: npx wrangler deploy
 
-      # ⬇️ Автолог у чеклист після деплою (не блокує пайплайн)
       - name: ✍️ Note deploy to Checklist
         if: always()
         env:
-          WORKER_HOST: ${{ secrets.WORKER_HOST }}          # напр. senti-bot-worker.restsva.workers.dev
-          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}    # має збігатися з WEBHOOK_SECRET у wrangler.toml
+          WORKER_HOST: ${{ secrets.WORKER_HOST }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           COMMIT_SHA: ${{ github.sha }}
           ACTOR: ${{ github.actor }}
           RUN_ID: ${{ github.run_id }}
@@ -64,7 +56,3 @@ jobs:
             --data-urlencode "deploy=${RUN_ID}" \
             --data-urlencode "status=${STATUS}" \
             --data-urlencode "from=github-actions" || true
-
-    concurrency:
-      group: deploy-${{ github.ref }}
-      cancel-in-progress: true
