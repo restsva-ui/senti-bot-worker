@@ -1,11 +1,3 @@
-// src/routes/webhook.js
-// rev4.2 — повний файл, без обрізань.
-// - Vision: строгий режим мови + опис і (за потреби) розпізнавання місця з лінком Google Maps.
-// - STT: каскад CF Whisper → Gemini (v1beta) → OpenRouter/FREE, без небезпечних RegExp.
-// - TTS: CF MeloTTS (mp3) з мапінгом голосів за мовою, автоголос при VOICE_REPLY_DEFAULT="on".
-// - Дата/час/погода (простий хендл), Drive-режим збереження медіа, пам’ять останнього фото.
-// - Жорстка нормалізація мови відповіді (не перемикаємось на англ).
-
 /* ───────────── Imports ───────────── */
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -34,7 +26,8 @@ const {
 } = TG;
 
 const KV = {
-  learnMode: (uid) => `learn:mode:${uid}`,
+  learnMode: (uid) => `learn:mode:${uid}`,           // "on"/"off"
+  learnModeExp: (uid) => `learn:mode:exp:${uid}`,    // timestamp
   lastPhotoUrl: (chatId) => `last:photo:url:${chatId}`,
 };
 
@@ -111,7 +104,7 @@ function chooseVoice(env, lang = "uk") {
   const byLang = { uk: "oleksandr", ru: "sergei", en: "angus", de: "bernd", fr: "julie" };
   return byLang[String(lang).toLowerCase()] || "angus";
 }
-/* ───────────── Vision (strict language) ───────────── */
+
 async function visionDescribe(env, { imageUrl, userPrompt = "", lang = "uk", systemHint }) {
   const rawOrder = String(
     env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "@cf/meta/llama-3.2-11b-vision-instruct"
@@ -139,7 +132,6 @@ async function visionDescribe(env, { imageUrl, userPrompt = "", lang = "uk", sys
   return String(out || "").trim();
 }
 
-/* ───────────── Place recognition for "Що це за місце?" ───────────── */
 async function visionPlace(env, { imageUrl, lang = "uk", systemHint }) {
   const rawOrder = String(
     env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "@cf/meta/llama-3.2-11b-vision-instruct"
@@ -167,11 +159,18 @@ async function visionPlace(env, { imageUrl, lang = "uk", systemHint }) {
   );
   return String(out || "").trim();
 }
-
-/* ===== Learn helpers ===================================================== */
 function extractFirstUrl(text = "") { const m = String(text || "").match(/https?:\/\/\S+/i); return m ? m[0] : null; }
 async function getLearnMode(env, userId) { try { return (await env.STATE_KV.get(KV.learnMode(userId))) === "on"; } catch { return false; } }
-async function setLearnMode(env, userId, on) { try { await env.STATE_KV.put(KV.learnMode(userId), on ? "on" : "off"); } catch {} }
+async function setLearnMode(env, userId, on, ttlSec = 3600) {
+  try {
+    if (on) {
+      await env.STATE_KV.put(KV.learnMode(userId), "on", { expirationTtl: ttlSec });
+      await env.STATE_KV.put(KV.learnModeExp(userId), String(Date.now() + ttlSec * 1000), { expirationTtl: ttlSec });
+    } else {
+      await env.STATE_KV.put(KV.learnMode(userId), "off", { expirationTtl: 60 });
+    }
+  } catch {}
+}
 
 /* Drive-режим (збереження медіа) */
 async function tgFileUrl(env, file_id) {
@@ -229,6 +228,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   });
   return true;
 }
+
 /* Vision-режим: опис + пам’ять останнього фото */
 async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const att = pickPhoto(msg);
@@ -242,7 +242,6 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   pulseTyping(env, chatId);
   const url = await tgFileUrl(env, att.file_id);
   try {
-    // запам’ятаймо останнє фото для подальшого "Що це за місце?"
     try { await env.STATE_KV.put(KV.lastPhotoUrl(chatId), url, { expirationTtl: 3600 }); } catch {}
 
     const systemHint = await buildSystemHint(env, chatId, userId, lang);
@@ -280,9 +279,7 @@ async function cfRunTTS(env, text, lang = "uk") {
   for (const model of order) {
     try {
       const url = `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/${model}`;
-      const body = model.includes("myshell-ai/melotts")
-        ? { text, voice: chooseVoice(env, lang), format: "mp3", language: lang }
-        : { text, voice: chooseVoice(env, lang), format: "mp3", language: lang };
+      const body = { text, voice: chooseVoice(env, lang), format: "mp3", language: lang };
 
       const r = await fetch(url, { method: "POST", headers: { "Authorization": `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
       if (!r.ok) throw new Error(`http ${r.status}`);
@@ -317,9 +314,8 @@ async function synthAndSendAudio(env, chatId, text, lang = "uk") {
   try {
     const blob = await cfRunTTS(env, text, lang);
     await sendAudioTg(env, chatId, blob, "🎧");
-  } catch (_) { /* текст вже відправлено — мовчимо */ }
+  } catch (_) { /* тихий фейл — текст уже відправили */ }
 }
-
 /* Voice/STT */
 async function handleVoiceSTT(env, chatId, userId, msg, lang) {
   if (!msg?.voice?.file_id) return false;
@@ -419,7 +415,7 @@ function tryParseUserNamedAs(text) {
     new RegExp(`\\bich\\s+hei(?:s|ß)e\\s+${NAME_RX}`, "iu"),
     new RegExp(`\\bje\\s+m'?appelle\\s+${NAME_RX}`, "iu"),
   ];
-    for (const r of patterns) { const m = s.match(r); if (m?.[1]) return m[1].trim(); }
+  for (const r of patterns) { const m = s.match(r); if (m?.[1]) return m[1].trim(); }
   return null;
 }
 async function rememberNameFromText(env, userId, text) {
@@ -473,7 +469,6 @@ ${control}`;
   const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
 }
-/* ───────────── MAIN WEBHOOK ───────────── */
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "POST") {
     const sec = req.headers.get("x-telegram-bot-api-secret-token");
@@ -547,15 +542,36 @@ export async function handleTelegramWebhook(req, env) {
         lines.push(`${light} ${h.provider}:${h.model} — ewma ${ms}, fails ${h.failStreak || 0}`);
       }
     }
-    await sendPlain(env, chatId, lines.join("\n"), { reply_markup: { inline_keyboard: [[{ text: "🧠 Open Learn", url: abs(env, "/admin/learn") }]] } });
+    await sendPlain(env, chatId, lines.join("\n"), {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "🧠 Open Learn", url: abs(env, "/admin/learn") },
+          { text: "📋 Checklist", url: abs(env, "/admin/checklist") }
+        ]]
+      }
+    });
     return json({ ok: true });
   }
 
-  // Drive/Senti toggle
-  if (textRaw === BTN_DRIVE) { await setDriveMode(env, userId, true); await sendPlain(env, chatId, "🔗 Режим: Google Drive", { reply_markup: mainKeyboard(isAdmin) }); return json({ ok:true }); }
-  if (textRaw === BTN_SENTI) { await setDriveMode(env, userId, false); await sendPlain(env, chatId, "🤖 Режим: Senti", { reply_markup: mainKeyboard(isAdmin) }); return json({ ok:true }); }
+  // UI кнопки режимів
+  if (textRaw === BTN_DRIVE) { await setDriveMode(env, userId, true);  await setLearnMode(env, userId, false); await sendPlain(env, chatId, "🔗 Режим: Google Drive", { reply_markup: mainKeyboard(isAdmin) }); return json({ ok:true }); }
+  if (textRaw === BTN_SENTI) { await setDriveMode(env, userId, false); await setLearnMode(env, userId, false); await sendPlain(env, chatId, "🤖 Режим: Senti",        { reply_markup: mainKeyboard(isAdmin) }); return json({ ok:true }); }
+
+  // Learn toggle
+  if (textRaw === BTN_LEARN) {
+    const on = !(await getLearnMode(env, userId));
+    await setLearnMode(env, userId, on, 3600);
+    const note = on
+      ? "🧠 Learn-режим увімкнено на 1 годину.\nНадішли посилання або текст — я додам у «Learn». Також можна відкрити панель:"
+      : "🧠 Learn-режим вимкнено.";
+    await sendPlain(env, chatId, note, {
+      reply_markup: { inline_keyboard: [[{ text: "🧠 Open Learn", url: abs(env, "/admin/learn") }]] }
+    });
+    return json({ ok:true });
+  }
 
   const driveMode = await getDriveMode(env, userId);
+  const learnMode = await getLearnMode(env, userId);
 
   // 1) Voice → STT
   if (msg?.voice) {
@@ -563,19 +579,19 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // 2) Media in Drive-mode
+  // 2) Media в Drive-режимі
   if (driveMode && (msg?.photo || msg?.document || msg?.video || msg?.audio || msg?.voice || msg?.video_note)) {
     await handleIncomingMedia(env, chatId, userId, msg, lang);
     return json({ ok: true });
   }
 
-  // 3) Photo in Senti-mode → Vision describe
+  // 3) Фото в Senti-режимі → Vision describe
   if (!driveMode && msg?.photo) {
     await handleVisionMedia(env, chatId, userId, msg, lang, textRaw);
     return json({ ok: true });
   }
 
-  // 4) Place question after a recent photo
+  // 4) «Що це за місце?» після останнього фото
   const askPlace = /\b(що\s+це\s+за\s+місце|де\s+це|what\s+place\s+is\s+this|where\s+is\s+this)\b/iu;
   if (askPlace.test(textRaw)) {
     const lastUrl = await env.STATE_KV.get(KV.lastPhotoUrl(chatId));
@@ -592,11 +608,11 @@ export async function handleTelegramWebhook(req, env) {
     }
   }
 
-  // 5) Дата/час (короткі швидкі відповіді)
+  // 5) Дата/час
   if (dateIntent(textRaw)) { await replyCurrentDate(env, chatId, lang); return json({ ok: true }); }
   if (timeIntent(textRaw)) { await replyCurrentTime(env, chatId, lang); return json({ ok: true }); }
 
-  // 6) Погода (спрощено)
+  // 6) Погода
   if (/^\s*(погода|weather)\b/i.test(textRaw)) {
     const loc = await getUserLocation(env, userId);
     if (!loc) {
@@ -607,8 +623,26 @@ export async function handleTelegramWebhook(req, env) {
     await sendPlain(env, chatId, summary || t(lang, "weather_fail") || "Не вдалося отримати погоду.");
     return json({ ok: true });
   }
+}
+// 7) Learn-режим: автопоглинання URL у повідомленні
+export async function learnAbsorbIfAny(env, chatId, userId, textRaw, lang) {
+  const url = extractFirstUrl(textRaw);
+  if (!url) return false;
+  try {
+    await enqueueLearn(env, { url, userId });
+    await sendPlain(env, chatId, `✅ Додав у Learn: ${url}`, {
+      reply_markup: { inline_keyboard: [[{ text: "🧠 Open Learn", url: abs(env, "/admin/learn") }]] }
+    });
+    return true;
+  } catch {
+    await sendPlain(env, chatId, "Не вдалось додати у Learn. Скинь ще раз або відкрий панель.", {
+      reply_markup: { inline_keyboard: [[{ text: "🧠 Open Learn", url: abs(env, "/admin/learn") }]] }
+    });
+    return true;
+  }
+}
 
-  // 7) Загальний діалог
+export async function finishDialog(env, chatId, userId, textRaw, isAdmin, lang, msg) {
   const name = await getPreferredName(env, msg);
   if (textRaw) await rememberNameFromText(env, userId, textRaw).catch(()=>{});
   const systemHint = await buildSystemHint(env, chatId, userId, lang);
@@ -617,12 +651,19 @@ export async function handleTelegramWebhook(req, env) {
   await pushTurn(env, userId, "user", textRaw);
   await pushTurn(env, userId, "assistant", full);
 
-  await sendPlain(env, chatId, short, { reply_markup: mainKeyboard(isAdmin) });
+  await sendPlain(env, chatId, short, { reply_markup: TG.mainKeyboard(isAdmin) });
   if ((env.VOICE_REPLY_DEFAULT || "off").toLowerCase() === "on") {
     await synthAndSendAudio(env, chatId, short, lang);
   }
+}
 
-  return json({ ok: true });
+export async function handleTextWithLearnAndDialog(env, chatId, userId, textRaw, isAdmin, lang) {
+  const learnMode = await getLearnMode(env, userId);
+  if (learnMode && textRaw) {
+    const done = await learnAbsorbIfAny(env, chatId, userId, textRaw, lang);
+    if (done) return true;
+  }
+  return false;
 }
 
 /* ───────────── Cloudflare Worker export ───────────── */
@@ -630,6 +671,7 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
     if (url.pathname.endsWith("/webhook")) {
+      // основний обробник
       return handleTelegramWebhook(req, env);
     }
     return new Response("OK", { status: 200 });
