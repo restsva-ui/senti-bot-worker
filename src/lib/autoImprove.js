@@ -100,7 +100,6 @@ async function listActiveChats(env) {
 
   return Array.from(sets);
 }
-
 // Системний промпт для екстракції фактів/резюме
 function buildSystemPrompt(dateISO) {
   return (
@@ -120,6 +119,43 @@ function buildSystemPrompt(dateISO) {
   );
 }
 
+// Робастне очищення можливого JSON-виводу моделі
+function sanitizeJsonCandidate(raw) {
+  let s = String(raw || "");
+  s = s.replace(/```json/gi, "")
+       .replace(/```/g, "")
+       .replace(/\uFEFF/g, ""); // BOM
+  // вирізати до першої '{' і після останньої '}'
+  const start = s.indexOf("{");
+  const end = s.lastIndexOf("}");
+  if (start >= 0 && end > start) s = s.slice(start, end + 1);
+  // прибрати підписи "via ..."
+  s = s.replace(/\n+\[via[\s\S]*$/i, "").trim();
+  return s;
+}
+
+/** ── Безпечний виклик LLM з фолбеком ────────────────────────────────────── */
+async function safeAsk(env, modelOrder, prompt, { systemHint, temperature = 0.2, max_tokens = 800 } = {}) {
+  if (modelOrder) {
+    try {
+      return await askAnyModel(env, modelOrder, prompt, { systemHint, temperature, max_tokens });
+    } catch (e) {
+      console.error("[autoImprove] askAnyModel error:", e?.message || e);
+      try {
+        return await coreThink(env, prompt, systemHint);
+      } catch (e2) {
+        console.error("[autoImprove] fallback coreThink error:", e2?.message || e2);
+        return null;
+      }
+    }
+  }
+  try {
+    return await coreThink(env, prompt, systemHint);
+  } catch (e) {
+    console.error("[autoImprove] coreThink error (no modelOrder):", e?.message || e);
+    return null;
+  }
+}
 // Витяг для одного чату
 async function improveOneChat(env, chatId) {
   // беремо останні 14 реплік (user/assistant)
@@ -137,36 +173,40 @@ ${transcript}
 ---
 На її основі побудуй JSON строго за інструкцією вище. Поверни лише JSON.`.trim();
 
-  // Виклик моделі: через MODEL_ORDER, фолбек — coreThink
   const modelOrder = String(env.MODEL_ORDER || "").trim();
 
-  let raw = "";
-  try {
-    if (modelOrder) {
-      raw = await askAnyModel(env, modelOrder, prompt, {
-        systemHint: system,
-        temperature: 0.2,
-        max_tokens: 800
-      });
-    } else {
-      raw = await coreThink(env, prompt, system);
-    }
-  } catch (e) {
-    return { chatId, error: `llm:${String(e?.message || e)}` };
+  // 1) Основна спроба з фолбеком
+  let raw = await safeAsk(env, modelOrder, prompt, {
+    systemHint: system,
+    temperature: 0.2,
+    max_tokens: 800
+  });
+
+  if (!raw) {
+    return { chatId, error: "llm:unavailable" };
   }
 
-  // Робастне очищення перед JSON.parse
-  let clean = String(raw || "")
-    .replace(/```json/gi, "")
-    .replace(/```/g, "")
-    .replace(/^[\s\S]*?\{/, "{")      // відкинути преамбулу до першої "{"
-    .replace(/\}[\s\S]*$/, "}")       // усе після останньої "}" відкинути
-    .replace(/\n+\[via[\s\S]*$/i, "") // прибрати "via ..." підписи
-    .trim();
+  // 2) Санітизація та парсинг JSON
+  let clean = sanitizeJsonCandidate(raw);
+  let parsed = safeJSON(clean);
 
-  const parsed = safeJSON(clean);
+  // 3) Якщо не вдалось — спробуємо примусову переформатизацію однією короткою підказкою
   if (!parsed || typeof parsed !== "object") {
-    return { chatId, error: "model-json-parse" };
+    const repairPrompt =
+`Попередня відповідь не є чистим JSON. Переформатуй її в чистий JSON РІВНО у форматі:
+{"facts":[],"daily_summary":"","suggestions":[]}
+Повертай тільки JSON без жодного пояснення.`;
+    const repaired = await safeAsk(env, modelOrder, repairPrompt, {
+      systemHint: system,
+      temperature: 0,
+      max_tokens: 300
+    });
+    const repairedClean = sanitizeJsonCandidate(repaired);
+    parsed = safeJSON(repairedClean);
+    if (!parsed || typeof parsed !== "object") {
+      console.error("[autoImprove] JSON parse failed:", repairedClean?.slice?.(0, 300));
+      return { chatId, error: "model-json-parse" };
+    }
   }
 
   const facts = Array.isArray(parsed.facts) ? parsed.facts : [];
@@ -175,7 +215,9 @@ ${transcript}
 
   // Оновлюємо довготривалі факти (дедуп — усередині rememberFacts)
   if (facts.length) {
-    try { await rememberFacts(env, chatId, facts); } catch {}
+    try { await rememberFacts(env, chatId, facts); } catch (e) {
+      console.error("[autoImprove] rememberFacts error:", e?.message || e);
+    }
   }
 
   // Пишемо денне резюме (опційно у CHECKLIST_KV)
@@ -207,6 +249,7 @@ export async function nightlyAutoImprove(env, { now = new Date(), reason = "" } 
       // невелика пауза, щоб не створювати спайки
       await new Promise(res => setTimeout(res, 40));
     } catch (e) {
+      console.error("[autoImprove] improveOneChat fatal:", e?.message || e);
       results.push({ chatId, error: String(e?.message || e) });
     }
   }
