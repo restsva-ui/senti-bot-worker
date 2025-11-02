@@ -133,9 +133,8 @@ async function tryVisionJSON(env, modelOrder, jsonUserPrompt, jsonSystemHint, im
     }
   }
 
-  // 2) альтернативний порядок: пробуємо поставити CF-vision першим
-  const cfFirst =
-    "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.5-flash";
+  // 2) альтернативний порядок: CF-vision першим
+  const cfFirst = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.5-flash";
   for (const mime of mimes) {
     try {
       const raw = await askVision(env, cfFirst, jsonUserPrompt, {
@@ -144,6 +143,24 @@ async function tryVisionJSON(env, modelOrder, jsonUserPrompt, jsonSystemHint, im
         imageMime: mime,
         temperature: 0.1,
         max_tokens: 700,
+        json: true,
+      });
+      return { raw: String(raw || ""), forceTextFallback: false };
+    } catch (e) {
+      lastErr = e;
+      if (shouldTextFallback(e)) return { raw: null, forceTextFallback: true, error: e };
+    }
+  }
+
+  // 3) м’який повтор (понижені ліміти) — зменшує частоту фолбеків
+  for (const mime of mimes) {
+    try {
+      const raw = await askVision(env, modelOrder, jsonUserPrompt, {
+        systemHint: jsonSystemHint,
+        imageBase64: base64,
+        imageMime: mime,
+        temperature: 0.0,
+        max_tokens: 350,
         json: true,
       });
       return { raw: String(raw || ""), forceTextFallback: false };
@@ -179,8 +196,7 @@ async function tryVisionPlain(env, modelOrder, userPromptBase, systemHintBase, i
   }
 
   // 2) CF-vision першим
-  const cfFirst =
-    "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.5-flash";
+  const cfFirst = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.5-flash";
   for (const mime of mimes) {
     try {
       const out = await askVision(env, cfFirst, userPromptBase, {
@@ -189,6 +205,23 @@ async function tryVisionPlain(env, modelOrder, userPromptBase, systemHintBase, i
         imageMime: mime,
         temperature: 0.2,
         max_tokens: 500,
+      });
+      return { text: String(out || ""), forceTextFallback: false };
+    } catch (e) {
+      lastErr = e;
+      if (shouldTextFallback(e)) return { text: null, forceTextFallback: true, error: e };
+    }
+  }
+
+  // 3) м’який повтор із пониженими лімітами
+  for (const mime of mimes) {
+    try {
+      const out = await askVision(env, modelOrder, userPromptBase, {
+        systemHint: systemHintBase,
+        imageBase64: base64,
+        imageMime: mime,
+        temperature: 0.0,
+        max_tokens: 320,
       });
       return { text: String(out || ""), forceTextFallback: false };
     } catch (e) {
@@ -306,8 +339,11 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
   if (!forceTextFallback) {
     const f = await tryVisionPlain(env, visionOrder, userPromptBase, systemHintBase, imageBase64);
     if (f.text) {
-      const cleaned = escHtml(postprocessVisionText(f.text));
-      const backup = await detectLandmarks(env, { description: cleaned, ocrText: "", lang });
+      // ВАЖЛИВО: детектор отримує PLAIN, а користувачу віддаємо HTML-екранізований текст
+      const plain   = postprocessVisionText(f.text);
+      const cleaned = escHtml(plain);
+
+      const backup = await detectLandmarks(env, { description: plain, ocrText: "", lang });
       let mapLinks = [];
       if (backup.length) {
         const lines = [cleaned, ...formatLandmarkLines(backup, lang).map(s => {
