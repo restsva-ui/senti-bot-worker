@@ -1,9 +1,5 @@
 // src/flows/visionDescribe.js
 // Єдина точка для опису зображення з мультимовністю.
-// • Якщо на фото НЕМає тексту — не згадуємо про це.
-// • Визначні місця: компактна іконка-лінк (↗︎) через HTML (<a href>), без довгих URL.
-// • JSON-режим з авто-ретраями по MIME (png → jpeg → webp) + надійний текстовий фолбек.
-// • Повертаємо метадані (meta) для автопам’яті фото: mapLinks, ocrText, landmarks.
 
 import { askVision, askText } from "../lib/modelRouter.js";
 import { buildVisionHintByLang, makeVisionUserPrompt, postprocessVisionText } from "./visionPolicy.js";
@@ -34,7 +30,7 @@ function escHtml(s="") {
     .replace(/"/g,"&quot;");
 }
 
-// Нормалізація до прямих Google Maps (без Firebase Dynamic Links)
+// Прямі Google Maps (без Firebase Dynamic Links)
 function toMapsShort(u="") {
   return String(u)
     .replace("https://www.google.com/maps/search/?api=1&query=", "https://maps.google.com/?q=")
@@ -42,7 +38,7 @@ function toMapsShort(u="") {
     .replace("http://maps.app.goo.gl/?q=", "https://maps.google.com/?q=");
 }
 
-// Компактна іконка-лінк на мапу (HTML ↗︎, без довгих URL)
+// Компактна іконка-лінк на мапу
 function mapsIconLink({ name, lat, lon, city, country }) {
   let href;
   if (typeof lat === "number" && typeof lon === "number") {
@@ -63,7 +59,13 @@ function shouldTextFallback(err) {
     m.includes("only text mode supported") ||
     m.includes("unsupported mode") ||
     (m.includes("vision") && m.includes("unsupported")) ||
-    (m.includes("image") && m.includes("not") && m.includes("supported"))
+    (m.includes("image") && m.includes("not") && m.includes("supported")) ||
+    // розширення: перевантаження/квота/сейфті/мережа/429/5xx
+    m.includes("rate limit") || m.includes("quota") || m.includes("exceeded") ||
+    m.includes("safety") || m.includes("blocked") ||
+    m.includes("temporarily unavailable") || m.includes("overloaded") ||
+    m.includes("fetch failed") || m.includes("timeout") ||
+    /\b(429|502|503|504)\b/.test(m)
   );
 }
 
@@ -72,7 +74,6 @@ function isStockWatermark(s = "") {
   const x = s.toLowerCase();
   return /dreamstime|shutterstock|adobe\s*stock|istock|depositphotos|getty\s*images|watermark/.test(x);
 }
-
 // строгий JSON-хінт
 function buildJsonSystemHint(lang) {
   return (
@@ -108,94 +109,133 @@ function buildTextFallbackHint(lang) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Внутрішні ретраї по MIME + альтернативний порядок моделей (із Gemini 1.5)
-
-function isTempError(e) {
-  const s = String(e && (e.message || e)).toLowerCase();
-  return /429|rate|timeout|fetch|network|5\d\d/.test(s);
-}
+// Внутрішні ретраї по MIME + альтернативний порядок моделей
 
 async function tryVisionJSON(env, modelOrder, jsonUserPrompt, jsonSystemHint, imageBase64) {
   const base64 = sanitizeBase64(imageBase64);
-  const mimes  = ["image/png", "image/jpeg", "image/webp"];
-  const orders = [
-    String(modelOrder || ""),
-    "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.5-flash",
-    "gemini:gemini-1.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct"
-  ].filter(Boolean);
-
+  const mimes = ["image/png", "image/jpeg", "image/webp"];
   let lastErr = null;
 
-  for (const order of orders) {
-    for (const mime of mimes) {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          const raw = await askVision(env, order, jsonUserPrompt, {
-            systemHint: jsonSystemHint,
-            imageBase64: base64,
-            imageMime: mime,
-            temperature: attempt === 0 ? 0.1 : 0.0,
-            max_tokens: attempt === 0 ? 700 : 360,
-            json: true,
-          });
-          return { raw: String(raw || ""), forceTextFallback: false };
-        } catch (e) {
-          lastErr = e;
-          if (shouldTextFallback(e)) return { raw: null, forceTextFallback: true, error: e };
-          if (!isTempError(e)) break; // не тимчасова — переходимо далі
-        }
-      }
+  // 1) основний порядок моделей
+  for (const mime of mimes) {
+    try {
+      const raw = await askVision(env, modelOrder, jsonUserPrompt, {
+        systemHint: jsonSystemHint,
+        imageBase64: base64,
+        imageMime: mime,
+        temperature: 0.1,
+        max_tokens: 700,
+        json: true,
+      });
+      return { raw: String(raw || ""), forceTextFallback: false };
+    } catch (e) {
+      lastErr = e;
+      if (shouldTextFallback(e)) return { raw: null, forceTextFallback: true, error: e };
     }
   }
+
+  // 2) альтернативний порядок: CF першим
+  const cfFirst = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.5-flash";
+  for (const mime of mimes) {
+    try {
+      const raw = await askVision(env, cfFirst, jsonUserPrompt, {
+        systemHint: jsonSystemHint,
+        imageBase64: base64,
+        imageMime: mime,
+        temperature: 0.1,
+        max_tokens: 700,
+        json: true,
+      });
+      return { raw: String(raw || ""), forceTextFallback: false };
+    } catch (e) {
+      lastErr = e;
+      if (shouldTextFallback(e)) return { raw: null, forceTextFallback: true, error: e };
+    }
+  }
+
+  // 3) м’який повтор (понижені ліміти)
+  for (const mime of mimes) {
+    try {
+      const raw = await askVision(env, modelOrder, jsonUserPrompt, {
+        systemHint: jsonSystemHint,
+        imageBase64: base64,
+        imageMime: mime,
+        temperature: 0.0,
+        max_tokens: 350,
+        json: true,
+      });
+      return { raw: String(raw || ""), forceTextFallback: false };
+    } catch (e) {
+      lastErr = e;
+      if (shouldTextFallback(e)) return { raw: null, forceTextFallback: true, error: e };
+    }
+  }
+
   return { raw: null, forceTextFallback: false, error: lastErr };
 }
 
 async function tryVisionPlain(env, modelOrder, userPromptBase, systemHintBase, imageBase64) {
   const base64 = sanitizeBase64(imageBase64);
-  const mimes  = ["image/png", "image/jpeg", "image/webp"];
-  const orders = [
-    String(modelOrder || ""),
-    "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.5-flash",
-    "gemini:gemini-1.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct"
-  ].filter(Boolean);
-
+  const mimes = ["image/png", "image/jpeg", "image/webp"];
   let lastErr = null;
 
-  for (const order of orders) {
-    for (const mime of mimes) {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          const out = await askVision(env, order, userPromptBase, {
-            systemHint: systemHintBase,
-            imageBase64: base64,
-            imageMime: mime,
-            temperature: attempt === 0 ? 0.2 : 0.0,
-            max_tokens: attempt === 0 ? 500 : 320,
-          });
-          return { text: String(out || ""), forceTextFallback: false };
-        } catch (e) {
-          lastErr = e;
-          if (shouldTextFallback(e)) return { text: null, forceTextFallback: true, error: e };
-          if (!isTempError(e)) break;
-        }
-      }
+  // 1) основний порядок
+  for (const mime of mimes) {
+    try {
+      const out = await askVision(env, modelOrder, userPromptBase, {
+        systemHint: systemHintBase,
+        imageBase64: base64,
+        imageMime: mime,
+        temperature: 0.2,
+        max_tokens: 500,
+      });
+      return { text: String(out || ""), forceTextFallback: false };
+    } catch (e) {
+      lastErr = e;
+      if (shouldTextFallback(e)) return { text: null, forceTextFallback: true, error: e };
     }
   }
+
+  // 2) CF першим
+  const cfFirst = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.5-flash";
+  for (const mime of mimes) {
+    try {
+      const out = await askVision(env, cfFirst, userPromptBase, {
+        systemHint: systemHintBase,
+        imageBase64: base64,
+        imageMime: mime,
+        temperature: 0.2,
+        max_tokens: 500,
+      });
+      return { text: String(out || ""), forceTextFallback: false };
+    } catch (e) {
+      lastErr = e;
+      if (shouldTextFallback(e)) return { text: null, forceTextFallback: true, error: e };
+    }
+  }
+
+  // 3) м’який повтор із пониженими лімітами
+  for (const mime of mimes) {
+    try {
+      const out = await askVision(env, modelOrder, userPromptBase, {
+        systemHint: systemHintBase,
+        imageBase64: base64,
+        imageMime: mime,
+        temperature: 0.0,
+        max_tokens: 320,
+      });
+      return { text: String(out || ""), forceTextFallback: false };
+    } catch (e) {
+      lastErr = e;
+      if (shouldTextFallback(e)) return { text: null, forceTextFallback: true, error: e };
+    }
+  }
+
   return { text: null, forceTextFallback: false, error: lastErr };
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // Основна
 
-/**
- * @param {object} env
- * @param {object} p
- * @param {string|number} p.chatId
- * @param {string} [p.tgLang]
- * @param {string} p.imageBase64
- * @param {string} [p.question]
- * @param {string} [p.modelOrder]  // якщо не передано — беремо env.MODEL_ORDER_VISION
- * @returns {{ text: string, isHtml: boolean, meta?: { containsText: boolean, ocrText: string, landmarks: any[], mapLinks: string[] } }}
- */
 export async function describeImage(env, { chatId, tgLang, imageBase64, question, modelOrder }) {
   // 1) мова
   const lang0 = await getUserLang(env, chatId, tgLang);
@@ -206,7 +246,7 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
   const systemHintBase = buildVisionHintByLang(lang);
   const userPromptBase = makeVisionUserPrompt(question, lang);
 
-  // 3) вибір порядку моделей: vision за замовчуванням
+  // 3) порядок моделей
   const visionOrder = String(modelOrder || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "");
 
   // 4) JSON-спроба
@@ -243,7 +283,7 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
       const links = unique.slice(0, 4).map((lm) => {
         const icon = mapsIconLink(lm);
         const name = [lm.name, lm.city, lm.country].filter(Boolean).join(", ");
-        // для метаданих збираємо й самі URL
+
         let href;
         if (typeof lm.lat === "number" && typeof lm.lon === "number") {
           href = `https://maps.google.com/?q=${encodeURIComponent(`${lm.lat},${lm.lon}`)}`;
@@ -261,12 +301,11 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
       }
     }
 
-    // бекап-детектор
+    // бекап-детектор (plain → детектор; користувачу — HTML)
     if (added === 0) {
       const backup = await detectLandmarks(env, { description: desc, ocrText: ocrTextRaw, lang });
       if (backup.length) {
         const items = formatLandmarkLines(backup, lang).map(s => {
-          // замінимо довгу URL на іконку
           const m = s.match(/—\s+(https?:\/\/\S+)/);
           const url = m ? toMapsShort(m[1]) : null;
           if (url) mapLinks.push(url);
@@ -278,7 +317,6 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
       }
     }
 
-    // HTML-відповідь + мета для автопам’яті
     return {
       text: lines.join("\n"),
       isHtml: true,
@@ -290,7 +328,7 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
   if (!forceTextFallback) {
     const f = await tryVisionPlain(env, visionOrder, userPromptBase, systemHintBase, imageBase64);
     if (f.text) {
-      // ВАЖЛИВО: детектор отримує PLAIN, а користувачу віддаємо HTML-екранізований текст
+      // ВАЖЛИВО: на вхід детектору даємо PLAIN!
       const plain   = postprocessVisionText(f.text);
       const cleaned = escHtml(plain);
 
