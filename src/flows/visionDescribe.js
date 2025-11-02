@@ -12,6 +12,7 @@
 import { askVision } from "../lib/modelRouter.js";
 import { buildVisionHintByLang, makeVisionUserPrompt, postprocessVisionText } from "./visionPolicy.js";
 import { getUserLang, setUserLang } from "../lib/langPref.js";
+import { detectLandmarks, formatLandmarkLines } from "../lib/landmarkDetect.js"; // ← NEW
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Локальні утиліти
@@ -74,7 +75,6 @@ function buildJsonUserPrompt(basePrompt, lang) {
 Поверни СТРОГО JSON як вище. Без \`\`\`json\`\`\`, без коментарів.`
   );
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Основна функція
 
@@ -112,7 +112,7 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
       imageMime: "image/png",
       temperature: 0.1,
       max_tokens: 700,
-      json: true,                 // ← просимо JSON у маршрутизаторі
+      json: true,                 // ← просимо JSON; зайві поля ігноруються провайдером
     });
 
     // Модель може повернути текстовий JSON — спробуємо пропарсити.
@@ -136,7 +136,8 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
       lines.push(`Текст на фото: "${ocrText.replace(/\s+/g, " ").slice(0, 300)}"`);
     }
 
-    // Ландмарки → лінки на Google Maps
+    // Ландмарки з моделі → лінки
+    let totalAdded = 0;
     if (landmarks.length) {
       const unique = dedupLandmarks(landmarks);
       const links = unique.slice(0, 4).map((lm) => {
@@ -147,6 +148,15 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
       if (links.length) {
         lines.push(lang.startsWith("uk") ? "Посилання на мапу:" : "Map links:");
         lines.push(...links);
+        totalAdded += links.length;
+      }
+    }
+
+    // 🔁 Бекап-детектор: якщо модель не дала ландмарків — спробуємо самі
+    if (totalAdded === 0) {
+      const backup = await detectLandmarks(env, { description: desc, ocrText, lang });
+      if (backup.length) {
+        lines.push(...formatLandmarkLines(backup, lang));
       }
     }
 
@@ -162,8 +172,17 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
     max_tokens: 500,
   });
 
-  return { text: postprocessVisionText(fallbackOut) };
+  // Спроба бекап-детектора і для фолбек-тексту
+  const cleaned = postprocessVisionText(fallbackOut);
+  const backup = await detectLandmarks(env, { description: cleaned, ocrText: "", lang });
+  if (backup.length) {
+    const lines = [cleaned, ...formatLandmarkLines(backup, lang)];
+    return { text: lines.join("\n") };
+  }
+
+  return { text: cleaned };
 }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Допоміжні парсери/дедуп
 
