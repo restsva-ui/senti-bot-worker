@@ -45,7 +45,6 @@ async function kvGetJSON(kv, key, fallback = null) {
 async function kvPutJSON(kv, key, obj) {
   try { await kv.put(key, JSON.stringify(obj)); } catch {}
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Публічний API: читання профілю
 // ─────────────────────────────────────────────────────────────────────────────
@@ -119,8 +118,7 @@ export async function autoUpdateSelfTune(env, userId, preferredLang) {
     const log = await kvGetJSON(kv, DLG_LOG_KEY(userId), []);
     if (!Array.isArray(log) || !log.length) return { updated: false, reason: "no_log" };
 
-    // Визначаємо активну мову: якщо передали — використовуємо її,
-    // інакше приблизно — за останніми репліками (дуже грубо).
+    // Визначаємо активну мову
     const lang = (preferredLang || guessLangFromLog(log) || "any").toLowerCase();
 
     const userTurnsAll = log.filter(x => x?.role === "user" && x?.text).map(x => String(x.text));
@@ -151,7 +149,7 @@ export async function autoUpdateSelfTune(env, userId, preferredLang) {
     const idx = await kvGetJSON(kv, INDEX_KEY(userId), []);
     if (!idx.includes(lang)) {
       idx.push(lang);
-      await kvPutJSON(kv, INDEX_KEY(userId), idx.slice(0, 12)); // невелика «кепка» на індекс
+      await kvPutJSON(kv, INDEX_KEY(userId), idx.slice(0, 12));
     }
 
     // Сумісність: записати текстову версію в legacy-ключ
@@ -170,10 +168,33 @@ export async function autoUpdateSelfTune(env, userId, preferredLang) {
     return { updated: false, reason: String(e?.message || e) };
   }
 }
+// ─────────────────────────────────────────────────────────────────────────────
+// Аналіз стилю через LLM (з безпечним викликом) 
+// ─────────────────────────────────────────────────────────────────────────────
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Аналіз стилю через LLM
-// ─────────────────────────────────────────────────────────────────────────────
+/** Безпечний виклик LLM з фолбеком askAnyModel → coreThink */
+async function safeAsk(env, prompt, { systemHint, temperature = 0.2, max_tokens = 300 } = {}) {
+  const order = String(env.MODEL_ORDER || "").trim();
+  if (order) {
+    try {
+      return await askAnyModel(env, order, prompt, { systemHint, temperature, max_tokens });
+    } catch (e) {
+      console.error("[selfTune] askAnyModel error:", e?.message || e);
+      try {
+        return await coreThink(env, prompt, systemHint);
+      } catch (e2) {
+        console.error("[selfTune] fallback coreThink error:", e2?.message || e2);
+        return null;
+      }
+    }
+  }
+  try {
+    return await coreThink(env, prompt, systemHint);
+  } catch (e) {
+    console.error("[selfTune] coreThink error (no modelOrder):", e?.message || e);
+    return null;
+  }
+}
 
 async function synthesizeProfile(env, samples, lang = "any") {
   const joined = samples
@@ -213,14 +234,10 @@ Notes:
 - Keep total JSON under ~700 chars.
 - Do NOT include explanations outside JSON. Only JSON.`;
 
-  let raw;
-  try {
-    const order = String(env.MODEL_ORDER || "").trim();
-    raw = order
-      ? await askAnyModel(env, order, prompt, { systemHint: sys, temperature: 0.2, max_tokens: 300 })
-      : await coreThink(env, prompt, sys);
-  } catch {
-    // fallback на найпростіший профіль, якщо LLM недоступний
+  // 1) Основна спроба через safeAsk
+  let raw = await safeAsk(env, prompt, { systemHint: sys, temperature: 0.2, max_tokens: 300 });
+  if (!raw) {
+    // страхувальний мінімум
     return {
       tone: "дружній, неформальний",
       rules: ["короткі відповіді", "по суті", "без води"],
@@ -231,19 +248,15 @@ Notes:
 
   const cleaned = sanitizeToJson(raw);
   let obj = safeParse(cleaned, null);
+
+  // 2) Якщо JSON зіпсований — відремонтуємо окремим коротким запитом
   if (!obj || typeof obj !== "object") {
-    // ще одна спроба з fallback-промптом
-    try {
-      const fix = `The previous output was not strict JSON. Respond again with ONLY the JSON as specified.`;
-      const order = String(env.MODEL_ORDER || "").trim();
-      const again = order
-        ? await askAnyModel(env, order, fix, { systemHint: sys, temperature: 0.1, max_tokens: 280 })
-        : await coreThink(env, fix, sys);
-      obj = safeParse(sanitizeToJson(again), null);
-    } catch {}
+    const fix = `The previous output was not strict JSON. Respond again with ONLY the JSON as specified.`;
+    const again = await safeAsk(env, fix, { systemHint: sys, temperature: 0.1, max_tokens: 260 });
+    obj = safeParse(sanitizeToJson(again), null);
   }
 
-  // Страхувальний мінімум
+  // 3) Якщо все ще не вийшло — повертаємо дефолтний профіль
   if (!obj || typeof obj !== "object") {
     return {
       tone: "дружній, неформальний",
@@ -253,7 +266,7 @@ Notes:
     };
   }
 
-  // Обмеження довжин
+  // Обмеження довжин і нормалізація
   const tone = String(obj.tone || "").trim().slice(0, 120);
   const rules = (Array.isArray(obj.rules) ? obj.rules : []).map(s => String(s || "").trim()).filter(Boolean).slice(0, 8);
   const style = obj.style && typeof obj.style === "object"
@@ -277,13 +290,9 @@ Notes:
 // ─────────────────────────────────────────────────────────────────────────────
 
 function guessLangFromLog(log = []) {
-  // Дуже проста евристика: шукаємо маркери кирилиці/латиниці.
-  // Реальна детекція є у i18n.detectFromText, але тут не імпортуємо, щоб уникнути циклів.
-  // Якщо потрібно — можна передати preferredLang із webhook.
   const lastUser = [...log].reverse().find(x => x?.role === "user" && x?.text);
   if (!lastUser) return null;
   const s = String(lastUser.text || "");
-  // Примітивні евристики
   if (/[а-яіїєґ]/i.test(s)) return "uk";
   if (/[а-яё]/i.test(s)) return "ru";
   if (/\bthe\b|\band\b|\bto\b/i.test(s)) return "en";
