@@ -34,24 +34,24 @@ function escHtml(s="") {
     .replace(/"/g,"&quot;");
 }
 
-// Нормалізація до maps.app.goo.gl (goo.gl/app/maps не використовуємо)
+// Нормалізація до прямих Google Maps (без Firebase Dynamic Links)
 function toMapsShort(u="") {
-  return String(u).replace(
-    "https://www.google.com/maps/search/?api=1&query=",
-    "https://maps.app.goo.gl/?q="
-  );
+  return String(u)
+    .replace("https://www.google.com/maps/search/?api=1&query=", "https://maps.google.com/?q=")
+    .replace("https://maps.app.goo.gl/?q=", "https://maps.google.com/?q=")
+    .replace("http://maps.app.goo.gl/?q=", "https://maps.google.com/?q=");
 }
 
-// компактне посилання на мапу (координати → ще коротше), повертає вже HTML-іконку
+// Компактна іконка-лінк на мапу (HTML ↗︎, без довгих URL)
 function mapsIconLink({ name, lat, lon, city, country }) {
   let href;
   if (typeof lat === "number" && typeof lon === "number") {
-    href = `https://maps.app.goo.gl/?q=${encodeURIComponent(`${lat},${lon}`)}`;
+    href = `https://maps.google.com/?q=${encodeURIComponent(`${lat},${lon}`)}`;
   } else {
     const q = [name, city, country].filter(Boolean).join(", ");
-    href = `https://maps.app.goo.gl/?q=${encodeURIComponent(q)}`;
+    href = `https://maps.google.com/?q=${encodeURIComponent(q)}`;
   }
-  return `<a href="${href}">↗︎</a>`;
+  return `<a href="${href}" rel="noopener noreferrer">↗︎</a>`;
 }
 
 // коли точно треба йти у текстовий фолбек (режим vision недоступний технічно)
@@ -64,7 +64,6 @@ function shouldTextFallback(err) {
     m.includes("unsupported mode") ||
     (m.includes("vision") && m.includes("unsupported")) ||
     (m.includes("image") && m.includes("not") && m.includes("supported"))
-    // safety/blocked не форсує текст — дамо шанс іншому провайдеру/MIME
   );
 }
 
@@ -200,7 +199,6 @@ async function tryVisionPlain(env, modelOrder, userPromptBase, systemHintBase, i
 
   return { text: null, forceTextFallback: false, error: lastErr };
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Основна
 
@@ -264,10 +262,10 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
         // для метаданих збираємо й самі URL
         let href;
         if (typeof lm.lat === "number" && typeof lm.lon === "number") {
-          href = `https://maps.app.goo.gl/?q=${encodeURIComponent(`${lm.lat},${lm.lon}`)}`;
+          href = `https://maps.google.com/?q=${encodeURIComponent(`${lm.lat},${lm.lon}`)}`;
         } else {
           const q = [lm.name, lm.city, lm.country].filter(Boolean).join(", ");
-          href = `https://maps.app.goo.gl/?q=${encodeURIComponent(q)}`;
+          href = `https://maps.google.com/?q=${encodeURIComponent(q)}`;
         }
         mapLinks.push(href);
         return `• ${escHtml(name)} — ${icon}`;
@@ -290,7 +288,7 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
           if (url) mapLinks.push(url);
           const before = s.replace(/—\s+https?:\/\/\S+/, "— ↗︎");
           if (!url) return escHtml(before);
-          return before.replace("↗︎", `<a href="${url}">↗︎</a>`);
+          return before.replace("↗︎", `<a href="${url}" rel="noopener noreferrer">↗︎</a>`);
         });
         lines.push(...items);
       }
@@ -318,7 +316,7 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
           if (url) mapLinks.push(url);
           const before = escHtml(s.replace(/—\s+https?:\/\/\S+/, "— ↗︎"));
           if (!url) return before;
-          return before.replace("↗︎", `<a href="${url}">↗︎</a>`);
+          return before.replace("↗︎", `<a href="${url}" rel="noopener noreferrer">↗︎</a>`);
         })];
         return { text: lines.join("\n"), isHtml: true, meta: { containsText: false, ocrText: "", landmarks: [], mapLinks } };
       }
