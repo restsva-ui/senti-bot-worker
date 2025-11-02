@@ -42,11 +42,12 @@ DIAG_TAGS = "on"
 # ────────────────────────────────────────────────────────────────────────────
 #                ПОРЯДКИ МОДЕЛЕЙ (TEXT / CODE / VISION / STT / TTS)
 # ────────────────────────────────────────────────────────────────────────────
-# TEXT: першим йде Gemini (якщо є ключ), далі CF безкоштовні, потім free-фолбек
-MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
+# TEXT: спочатку Gemini (якщо є ключ), далі CF (реально наявна у тебе),
+# потім безкоштовний OpenRouter-фолбек
+MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-1b-instruct, free:meta-llama/llama-4-scout:free"
 
-# CODE: спільний з TEXT або окремий; залишаємо як зараз
-MODEL_ORDER_CODE = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
+# CODE: використовуємо ту ж CF текстову модель як перший крок
+MODEL_ORDER_CODE = "cf:@cf/meta/llama-3.2-1b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
 
 # VISION — лише провайдери з підтримкою зображень
 MODEL_ORDER_VISION = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct"
@@ -56,11 +57,11 @@ MODEL_ORDER_VISION = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-
 # MODEL_ORDER_TTS = "cf:@cf/openai/tts-1"
 
 # RUNTIME дефолт: якщо код не підміняє порядок — беремо текстовий
-MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
+MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-1b-instruct, free:meta-llama/llama-4-scout:free"
 
 # --- Дефолтні моделі (для читабельності) ---
 GEMINI_MODEL    = "gemini-2.5-flash"
-CF_MODEL        = "@cf/qwen/qwen2.5-7b-instruct"
+CF_MODEL        = "@cf/meta/llama-3.2-1b-instruct"
 # Vision-модель CF (виправлений slug)
 CF_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
 
@@ -74,7 +75,7 @@ FREE_API_PATH     = "/v1/chat/completions"
 # Узгоджено з кодом modelRouter.js (використовує FREE_LLM_*)
 FREE_LLM_BASE_URL = "https://openrouter.ai/api"
 FREE_LLM_MODEL    = "meta-llama/llama-4-scout:free"
-# Залишаємо для сумісності зі старим кодом
+# Залишено для сумісності зі старим кодом
 FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
 
 # (необов'язково) Ідентифікатори застосунку для OpenRouter заголовків
