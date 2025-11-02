@@ -4,7 +4,7 @@
 //  • Якщо на фото НЕМає тексту — не згадуємо про це.
 //  • Якщо розпізнано визначні місця — даємо точні лінки на Google Maps.
 //  • Якщо ландмарків немає — звичайний короткий опис без лінків.
-//  • Працюємо через JSON-режим + надійний фолбек у текстовий режим.
+//  • JSON-режим з авто-ретраями по MIME (png → jpeg → webp) + надійний текстовий фолбек.
 //
 // Використання:
 //   const { text } = await describeImage(env, { chatId, tgLang, imageBase64, question, modelOrder });
@@ -12,7 +12,7 @@
 import { askVision, askText } from "../lib/modelRouter.js";
 import { buildVisionHintByLang, makeVisionUserPrompt, postprocessVisionText } from "./visionPolicy.js";
 import { getUserLang, setUserLang } from "../lib/langPref.js";
-import { detectLandmarks, formatLandmarkLines } from "../lib/landmarkDetect.js"; // ← NEW
+import { detectLandmarks, formatLandmarkLines } from "../lib/landmarkDetect.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Локальні утиліти
@@ -24,6 +24,10 @@ function stripProviderSignature(s = "") {
 }
 function normalizeText(s = "") {
   return stripProviderSignature(String(s || "").replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim());
+}
+function sanitizeBase64(b64 = "") {
+  // Прибираємо префікс data:...;base64, пробіли/переноси.
+  return String(b64).replace(/^data:[^;]+;base64,/i, "").replace(/\s+/g, "");
 }
 function mapsLink({ name, lat, lon, city, country }) {
   if (typeof lat === "number" && typeof lon === "number") {
@@ -44,8 +48,17 @@ function shouldTextFallback(err) {
     m.includes("no route for that uri") ||
     m.includes("only text mode supported") ||
     m.includes("unsupported mode") ||
-    m.includes("vision") && m.includes("unsupported") ||
-    m.includes("image") && m.includes("not") && m.includes("supported")
+    (m.includes("vision") && m.includes("unsupported")) ||
+    (m.includes("image") && m.includes("not") && m.includes("supported"))
+  );
+}
+
+// Виявити "водяні знаки" зі стоків — їх текст не цитуємо
+function isStockWatermark(s = "") {
+  const x = s.toLowerCase();
+  return (
+    /dreamstime|shutterstock|adobe\s*stock|istock|depositphotos|getty\s*images/.test(x) ||
+    /watermark/.test(x)
   );
 }
 
@@ -79,7 +92,7 @@ function buildJsonSystemHint(lang) {
 }
 
 // Створюємо промпт користувача для віжн-моделі у JSON-режимі
-function buildJsonUserPrompt(basePrompt, _lang) {
+function buildJsonUserPrompt(basePrompt) {
   return (
 `${basePrompt}
 
@@ -87,12 +100,67 @@ function buildJsonUserPrompt(basePrompt, _lang) {
   );
 }
 
-// Текстовий системний хінт для аварійного фолбеку (коли зображення опрацювати неможливо)
+// Текстовий системний хінт для аварійного фолбеку
 function buildTextFallbackHint(lang) {
   if (lang.startsWith("en")) {
     return `You cannot access the image right now. Reply briefly (1–2 sentences) in ${lang} with a neutral note like "Image analysis is temporarily unavailable" and suggest to resend the photo. Do not include technical details.`;
   }
   return `Наразі доступ до зображення недоступний. Відповідай стисло (1–2 речення) мовою користувача (${lang}) з нейтральним повідомленням, що аналіз фото тимчасово недоступний, і запропонуй надіслати знімок ще раз. Без технічних подробиць.`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Внутрішні ретраї
+
+async function tryVisionJSON(env, modelOrder, jsonUserPrompt, jsonSystemHint, imageBase64) {
+  const base64 = sanitizeBase64(imageBase64);
+  const mimes = ["image/png", "image/jpeg", "image/webp"];
+  let lastErr = null;
+
+  for (const mime of mimes) {
+    try {
+      const raw = await askVision(env, modelOrder, jsonUserPrompt, {
+        systemHint: jsonSystemHint,
+        imageBase64: base64,
+        imageMime: mime,
+        temperature: 0.1,
+        max_tokens: 700,
+        json: true,
+      });
+      return { raw: String(raw || ""), forceTextFallback: false };
+    } catch (e) {
+      lastErr = e;
+      if (shouldTextFallback(e)) {
+        return { raw: null, forceTextFallback: true, error: e };
+      }
+      // інакше — просто пробуємо наступний MIME
+    }
+  }
+  return { raw: null, forceTextFallback: false, error: lastErr };
+}
+
+async function tryVisionPlain(env, modelOrder, userPromptBase, systemHintBase, imageBase64) {
+  const base64 = sanitizeBase64(imageBase64);
+  const mimes = ["image/png", "image/jpeg", "image/webp"];
+  let lastErr = null;
+
+  for (const mime of mimes) {
+    try {
+      const out = await askVision(env, modelOrder, userPromptBase, {
+        systemHint: systemHintBase,
+        imageBase64: base64,
+        imageMime: mime,
+        temperature: 0.2,
+        max_tokens: 500,
+      });
+      return { text: String(out || ""), forceTextFallback: false };
+    } catch (e) {
+      lastErr = e;
+      if (shouldTextFallback(e)) {
+        return { text: null, forceTextFallback: true, error: e };
+      }
+    }
+  }
+  return { text: null, forceTextFallback: false, error: lastErr };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -105,7 +173,7 @@ function buildTextFallbackHint(lang) {
  * @param {string} [p.tgLang]
  * @param {string} p.imageBase64
  * @param {string} [p.question]
- * @param {string} [p.modelOrder]
+ * @param {string} [p.modelOrder]  // напр., env.MODEL_ORDER_VISION
  * @returns {Promise<{ text: string }>}
  */
 export async function describeImage(env, { chatId, tgLang, imageBase64, question, modelOrder }) {
@@ -120,39 +188,34 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
   const systemHintBase = buildVisionHintByLang(lang);
   const userPromptBase = makeVisionUserPrompt(question, lang);
 
-  // 3) Спроба №1: JSON-режим (структурована відповідь)
+  // 3) Спроба №1: JSON-режим з авто-ретраями по MIME
   const jsonSystemHint = buildJsonSystemHint(lang);
   const jsonUserPrompt = buildJsonUserPrompt(userPromptBase, lang);
 
   let parsed = null;
   let forceTextFallback = false;
-  try {
-    const raw = await askVision(env, modelOrder, jsonUserPrompt, {
-      systemHint: jsonSystemHint,
-      imageBase64,
-      imageMime: "image/png",
-      temperature: 0.1,
-      max_tokens: 700,
-      json: true,
-    });
-    parsed = tryParseJsonLoose(String(raw || ""));
-  } catch (e) {
-    forceTextFallback = shouldTextFallback(e);
-    parsed = null;
+
+  const j = await tryVisionJSON(env, modelOrder, jsonUserPrompt, jsonSystemHint, imageBase64);
+  if (j.raw) {
+    parsed = tryParseJsonLoose(String(j.raw || ""));
+  } else {
+    forceTextFallback = !!j.forceTextFallback;
   }
 
   // 4) Якщо JSON коректний — форматування відповіді за правилами
   if (parsed && typeof parsed === "object") {
     const containsText = !!parsed.contains_text;
-    const ocrText = containsText ? String(parsed.ocr_text || "").trim() : "";
+    const ocrTextRaw = containsText ? String(parsed.ocr_text || "").trim() : "";
     const landmarks = Array.isArray(parsed.landmarks) ? parsed.landmarks : [];
     const desc = normalizeText(String(parsed.description || "").trim());
 
     const lines = [];
     if (desc) lines.push(desc);
 
-    if (containsText && ocrText) {
-      lines.push(`Текст на фото: "${ocrText.replace(/\s+/g, " ").slice(0, 300)}"`);
+    // Додаємо OCR тільки якщо це не водяний знак/стокова плашка
+    if (containsText && ocrTextRaw && !isStockWatermark(ocrTextRaw)) {
+      const ocr = ocrTextRaw.replace(/\s+/g, " ").slice(0, 300);
+      if (ocr) lines.push(`Текст на фото: "${ocr}"`);
     }
 
     let totalAdded = 0;
@@ -171,10 +234,8 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
     }
 
     if (totalAdded === 0) {
-      const backup = await detectLandmarks(env, { description: desc, ocrText, lang });
-      if (backup.length) {
-        lines.push(...formatLandmarkLines(backup, lang));
-      }
+      const backup = await detectLandmarks(env, { description: desc, ocrText: ocrTextRaw, lang });
+      if (backup.length) lines.push(...formatLandmarkLines(backup, lang));
     }
 
     return { text: lines.join("\n") };
@@ -182,25 +243,17 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
 
   // 5) Фолбек: звичайний текстовий опис (без JSON), якщо vision працює
   if (!forceTextFallback) {
-    try {
-      const fallbackOut = await askVision(env, modelOrder, userPromptBase, {
-        systemHint: systemHintBase,
-        imageBase64,
-        imageMime: "image/png",
-        temperature: 0.2,
-        max_tokens: 500,
-      });
-
-      const cleaned = postprocessVisionText(fallbackOut);
+    const f = await tryVisionPlain(env, modelOrder, userPromptBase, systemHintBase, imageBase64);
+    if (f.text) {
+      const cleaned = postprocessVisionText(f.text);
       const backup = await detectLandmarks(env, { description: cleaned, ocrText: "", lang });
       if (backup.length) {
         const lines = [cleaned, ...formatLandmarkLines(backup, lang)];
         return { text: lines.join("\n") };
       }
       return { text: cleaned };
-    } catch (e2) {
-      forceTextFallback = shouldTextFallback(e2);
     }
+    forceTextFallback = !!f.forceTextFallback;
   }
 
   // 6) Аварійний текстовий фолбек (коли vision недоступний зовсім)
@@ -208,7 +261,7 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
   const textMsg = lang.startsWith("en")
     ? "Please provide a short, polite notice."
     : "Дай коротке ввічливе повідомлення.";
-  const safeText = await askText(env, env.MODEL_ORDER_TEXT || modelOrder, textMsg, {
+  const safeText = await askText(env, env.MODEL_ORDER_TEXT || env.MODEL_ORDER || "gemini:gemini-2.5-flash", textMsg, {
     systemHint: textHint,
     temperature: 0.1,
     max_tokens: 80,
@@ -234,9 +287,9 @@ function dedupLandmarks(list) {
   const out = [];
   for (const lm of list) {
     const key = [
-      String(lm.name || "").toLowerCase(),
-      String(lm.city || "").toLowerCase(),
-      String(lm.country || "").toLowerCase()
+      String(lm?.name || "").toLowerCase(),
+      String(lm?.city || "").toLowerCase(),
+      String(lm?.country || "").toLowerCase()
     ].join("|");
     if (seen.has(key)) continue;
     seen.add(key);
