@@ -3,6 +3,10 @@
 // • Якщо на фото НЕМає тексту — не згадуємо про це.
 // • Якщо розпізнано визначні місця — даємо компактні лінки (↗︎ maps.app.goo.gl).
 // • JSON-режим з авто-ретраями по MIME (png → jpeg → webp) + надійний текстовий фолбек.
+// • Керування виглядом лінків через env.MAP_LINK_STYLE:
+//     - "arrow"  (дефолт) → "↗︎ https://maps.app.goo.gl/?q=..."
+//     - "md-icon"          → "[↗︎](url)"  (вмикай parse_mode Markdown/HTML у відправці повідомлень)
+//     - "md-pin"           → "[📍](url)"
 
 import { askVision, askText } from "../lib/modelRouter.js";
 import { buildVisionHintByLang, makeVisionUserPrompt, postprocessVisionText } from "./visionPolicy.js";
@@ -35,6 +39,14 @@ function mapsShortLink({ name, lat, lon, city, country }) {
   return `https://maps.app.goo.gl/?q=${encodeURIComponent(q)}`;
 }
 
+// як відображати лінк у повідомленні (враховує parse_mode, якщо ти його вмикаєш)
+function mapLinkDisplay(url, env, mode = "arrow") {
+  const style = String(env?.MAP_LINK_STYLE || mode || "arrow").toLowerCase();
+  if (style === "md-icon") return `[↗︎](${url})`;
+  if (style === "md-pin")  return `[📍](${url})`;
+  return `↗︎ ${url}`; // дефолт — без Markdown
+}
+
 // коли точно треба йти у текстовий фолбек (режим vision недоступний технічно)
 function shouldTextFallback(err) {
   const m = String(err && (err.message || err)).toLowerCase();
@@ -45,7 +57,7 @@ function shouldTextFallback(err) {
     m.includes("unsupported mode") ||
     (m.includes("vision") && m.includes("unsupported")) ||
     (m.includes("image") && m.includes("not") && m.includes("supported"))
-    // УВАГА: safety / blocked НЕ переводять у текст — дамо шанс іншим провайдерам
+    // УВАГА: safety/blocked НЕ переводять у текст — дамо шанс іншим провайдерам
   );
 }
 
@@ -198,7 +210,8 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
       const links = unique.slice(0, 4).map((lm) => {
         const url  = mapsShortLink(lm);
         const name = [lm.name, lm.city, lm.country].filter(Boolean).join(", ");
-        return `• ${name} — ↗︎ ${url}`;
+        const shown = mapLinkDisplay(url, env);
+        return `• ${name} — ${shown}`;
       });
       if (links.length) {
         lines.push(lang.startsWith("uk") ? "Посилання на мапу:" : "Map links:");
@@ -211,11 +224,17 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
     if (added === 0) {
       const backup = await detectLandmarks(env, { description: desc, ocrText: ocrTextRaw, lang });
       if (backup.length) {
-        lines.push(...formatLandmarkLines(backup, lang).map(s => s.replace(/—\s+https:\/\/[^\s]+/, (m) => {
-          // якщо форматер поверне довге посилання — вкоротимо
-          const url = m.split("—")[1].trim();
-          return `— ↗︎ ${url.replace("https://www.google.com/maps/search/?api=1&query=", "https://maps.app.goo.gl/?q=")}`;
-        })));
+        // переформатуємо стандартні рядки форматтера у компактне відображення
+        const compact = backup.slice(0, 4).map((lm) => {
+          const url = mapsShortLink(lm);
+          const name = [lm.name, lm.city, lm.country].filter(Boolean).join(", ");
+          const shown = mapLinkDisplay(url, env);
+          return `• ${name} — ${shown}`;
+        });
+        if (compact.length) {
+          lines.push(lang.startsWith("uk") ? "Посилання на мапу:" : "Map links:");
+          lines.push(...compact);
+        }
       }
     }
 
@@ -227,13 +246,17 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
     const f = await tryVisionPlain(env, visionOrder, userPromptBase, systemHintBase, imageBase64);
     if (f.text) {
       const cleaned = postprocessVisionText(f.text);
+
+      // спробуємо знайти ландмарки і відразу подати їх у компактному вигляді
       const backup = await detectLandmarks(env, { description: cleaned, ocrText: "", lang });
       if (backup.length) {
-        const lines = [cleaned, ...formatLandmarkLines(backup, lang).map(s => s.replace(/—\s+https:\/\/[^\s]+/, (m) => {
-          const url = m.split("—")[1].trim();
-          return `— ↗︎ ${url.replace("https://www.google.com/maps/search/?api=1&query=", "https://maps.app.goo.gl/?q=")}`;
-        }))];
-        return { text: lines.join("\n") };
+        const links = backup.slice(0, 4).map((lm) => {
+          const url = mapsShortLink(lm);
+          const name = [lm.name, lm.city, lm.country].filter(Boolean).join(", ");
+          const shown = mapLinkDisplay(url, env);
+          return `• ${name} — ${shown}`;
+        });
+        return { text: [cleaned, (lang.startsWith("uk") ? "Посилання на мапу:" : "Map links:"), ...links].join("\n") };
       }
       return { text: cleaned };
     }
