@@ -3,6 +3,7 @@
 // • Якщо на фото НЕМає тексту — не згадуємо про це.
 // • Визначні місця: компактна іконка-лінк (↗︎) через HTML (<a href>), без довгих URL.
 // • JSON-режим з авто-ретраями по MIME (png → jpeg → webp) + надійний текстовий фолбек.
+// • Повертаємо метадані (meta) для автопам’яті фото: mapLinks, ocrText, landmarks.
 
 import { askVision, askText } from "../lib/modelRouter.js";
 import { buildVisionHintByLang, makeVisionUserPrompt, postprocessVisionText } from "./visionPolicy.js";
@@ -33,6 +34,14 @@ function escHtml(s="") {
     .replace(/"/g,"&quot;");
 }
 
+// Нормалізація до maps.app.goo.gl (goo.gl/app/maps не використовуємо)
+function toMapsShort(u="") {
+  return String(u).replace(
+    "https://www.google.com/maps/search/?api=1&query=",
+    "https://maps.app.goo.gl/?q="
+  );
+}
+
 // компактне посилання на мапу (координати → ще коротше), повертає вже HTML-іконку
 function mapsIconLink({ name, lat, lon, city, country }) {
   let href;
@@ -42,7 +51,6 @@ function mapsIconLink({ name, lat, lon, city, country }) {
     const q = [name, city, country].filter(Boolean).join(", ");
     href = `https://maps.app.goo.gl/?q=${encodeURIComponent(q)}`;
   }
-  // маленька іконка без опису посилання
   return `<a href="${href}">↗︎</a>`;
 }
 
@@ -56,6 +64,7 @@ function shouldTextFallback(err) {
     m.includes("unsupported mode") ||
     (m.includes("vision") && m.includes("unsupported")) ||
     (m.includes("image") && m.includes("not") && m.includes("supported"))
+    // safety/blocked не форсує текст — дамо шанс іншому провайдеру/MIME
   );
 }
 
@@ -88,7 +97,6 @@ function buildJsonSystemHint(lang) {
 - Не вигадуй.`
   );
 }
-
 function buildJsonUserPrompt(basePrompt) {
   return `${basePrompt}\n\nПоверни СТРОГО JSON як вище. Без \`\`\`json\`\`\`, без коментарів.`;
 }
@@ -101,13 +109,14 @@ function buildTextFallbackHint(lang) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Внутрішні ретраї по MIME
+// Внутрішні ретраї по MIME + альтернативний порядок моделей
 
 async function tryVisionJSON(env, modelOrder, jsonUserPrompt, jsonSystemHint, imageBase64) {
   const base64 = sanitizeBase64(imageBase64);
   const mimes = ["image/png", "image/jpeg", "image/webp"];
   let lastErr = null;
 
+  // 1) основний порядок моделей
   for (const mime of mimes) {
     try {
       const raw = await askVision(env, modelOrder, jsonUserPrompt, {
@@ -122,9 +131,29 @@ async function tryVisionJSON(env, modelOrder, jsonUserPrompt, jsonSystemHint, im
     } catch (e) {
       lastErr = e;
       if (shouldTextFallback(e)) return { raw: null, forceTextFallback: true, error: e };
-      // safety/blocked — не змушуємо текстовий фолбек; нехай спробує інший провайдер/MIME
     }
   }
+
+  // 2) альтернативний порядок: пробуємо поставити CF-vision першим
+  const cfFirst =
+    "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.5-flash";
+  for (const mime of mimes) {
+    try {
+      const raw = await askVision(env, cfFirst, jsonUserPrompt, {
+        systemHint: jsonSystemHint,
+        imageBase64: base64,
+        imageMime: mime,
+        temperature: 0.1,
+        max_tokens: 700,
+        json: true,
+      });
+      return { raw: String(raw || ""), forceTextFallback: false };
+    } catch (e) {
+      lastErr = e;
+      if (shouldTextFallback(e)) return { raw: null, forceTextFallback: true, error: e };
+    }
+  }
+
   return { raw: null, forceTextFallback: false, error: lastErr };
 }
 
@@ -133,6 +162,7 @@ async function tryVisionPlain(env, modelOrder, userPromptBase, systemHintBase, i
   const mimes = ["image/png", "image/jpeg", "image/webp"];
   let lastErr = null;
 
+  // 1) основний порядок
   for (const mime of mimes) {
     try {
       const out = await askVision(env, modelOrder, userPromptBase, {
@@ -148,6 +178,26 @@ async function tryVisionPlain(env, modelOrder, userPromptBase, systemHintBase, i
       if (shouldTextFallback(e)) return { text: null, forceTextFallback: true, error: e };
     }
   }
+
+  // 2) CF-vision першим
+  const cfFirst =
+    "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.5-flash";
+  for (const mime of mimes) {
+    try {
+      const out = await askVision(env, cfFirst, userPromptBase, {
+        systemHint: systemHintBase,
+        imageBase64: base64,
+        imageMime: mime,
+        temperature: 0.2,
+        max_tokens: 500,
+      });
+      return { text: String(out || ""), forceTextFallback: false };
+    } catch (e) {
+      lastErr = e;
+      if (shouldTextFallback(e)) return { text: null, forceTextFallback: true, error: e };
+    }
+  }
+
   return { text: null, forceTextFallback: false, error: lastErr };
 }
 
@@ -162,6 +212,7 @@ async function tryVisionPlain(env, modelOrder, userPromptBase, systemHintBase, i
  * @param {string} p.imageBase64
  * @param {string} [p.question]
  * @param {string} [p.modelOrder]  // якщо не передано — беремо env.MODEL_ORDER_VISION
+ * @returns {{ text: string, isHtml: boolean, meta?: { containsText: boolean, ocrText: string, landmarks: any[], mapLinks: string[] } }}
  */
 export async function describeImage(env, { chatId, tgLang, imageBase64, question, modelOrder }) {
   // 1) мова
@@ -196,18 +247,29 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
     if (desc) lines.push(escHtml(desc));
 
     // OCR — без водяних знаків
+    let ocrClean = "";
     if (containsText && ocrTextRaw && !isStockWatermark(ocrTextRaw)) {
-      const ocr = ocrTextRaw.replace(/\s+/g, " ").slice(0, 300);
-      if (ocr) lines.push(`Текст на фото: "${escHtml(ocr)}"`);
+      ocrClean = ocrTextRaw.replace(/\s+/g, " ").slice(0, 300);
+      if (ocrClean) lines.push(`Текст на фото: "${escHtml(ocrClean)}"`);
     }
 
     // компактні іконки-лінки
     let added = 0;
+    let mapLinks = [];
     if (landmarks.length) {
       const unique = dedupLandmarks(landmarks);
       const links = unique.slice(0, 4).map((lm) => {
         const icon = mapsIconLink(lm);
         const name = [lm.name, lm.city, lm.country].filter(Boolean).join(", ");
+        // для метаданих збираємо й самі URL
+        let href;
+        if (typeof lm.lat === "number" && typeof lm.lon === "number") {
+          href = `https://maps.app.goo.gl/?q=${encodeURIComponent(`${lm.lat},${lm.lon}`)}`;
+        } else {
+          const q = [lm.name, lm.city, lm.country].filter(Boolean).join(", ");
+          href = `https://maps.app.goo.gl/?q=${encodeURIComponent(q)}`;
+        }
+        mapLinks.push(href);
         return `• ${escHtml(name)} — ${icon}`;
       });
       if (links.length) {
@@ -224,17 +286,22 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
         const items = formatLandmarkLines(backup, lang).map(s => {
           // замінимо довгу URL на іконку
           const m = s.match(/—\s+(https?:\/\/\S+)/);
-          const url = m ? m[1] : null;
+          const url = m ? toMapsShort(m[1]) : null;
+          if (url) mapLinks.push(url);
           const before = s.replace(/—\s+https?:\/\/\S+/, "— ↗︎");
           if (!url) return escHtml(before);
-          return before.replace("↗︎", `<a href="${url.replace("https://www.google.com/maps/search/?api=1&query=", "https://maps.app.goo.gl/?q=")}">↗︎</a>`);
+          return before.replace("↗︎", `<a href="${url}">↗︎</a>`);
         });
         lines.push(...items);
       }
     }
 
-    // Звертаємо увагу: повертаємо HTML-текст
-    return { text: lines.join("\n"), isHtml: true };
+    // HTML-відповідь + мета для автопам’яті
+    return {
+      text: lines.join("\n"),
+      isHtml: true,
+      meta: { containsText, ocrText: ocrClean || "", landmarks, mapLinks }
+    };
   }
 
   // 6) фолбек у plain-vision
@@ -243,17 +310,19 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
     if (f.text) {
       const cleaned = escHtml(postprocessVisionText(f.text));
       const backup = await detectLandmarks(env, { description: cleaned, ocrText: "", lang });
+      let mapLinks = [];
       if (backup.length) {
         const lines = [cleaned, ...formatLandmarkLines(backup, lang).map(s => {
           const m = s.match(/—\s+(https?:\/\/\S+)/);
-          const url = m ? m[1] : null;
+          const url = m ? toMapsShort(m[1]) : null;
+          if (url) mapLinks.push(url);
           const before = escHtml(s.replace(/—\s+https?:\/\/\S+/, "— ↗︎"));
           if (!url) return before;
-          return before.replace("↗︎", `<a href="${url.replace("https://www.google.com/maps/search/?api=1&query=", "https://maps.app.goo.gl/?q=")}">↗︎</a>`);
+          return before.replace("↗︎", `<a href="${url}">↗︎</a>`);
         })];
-        return { text: lines.join("\n"), isHtml: true };
+        return { text: lines.join("\n"), isHtml: true, meta: { containsText: false, ocrText: "", landmarks: [], mapLinks } };
       }
-      return { text: cleaned, isHtml: true };
+      return { text: cleaned, isHtml: true, meta: { containsText: false, ocrText: "", landmarks: [], mapLinks: [] } };
     }
     forceTextFallback = !!f.forceTextFallback;
   }
@@ -264,7 +333,7 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
   const safeText = await askText(env, env.MODEL_ORDER_TEXT || env.MODEL_ORDER || "gemini:gemini-2.5-flash", textMsg, {
     systemHint: textHint, temperature: 0.1, max_tokens: 80,
   });
-  return { text: normalizeText(safeText), isHtml: false };
+  return { text: normalizeText(safeText), isHtml: false, meta: { containsText: false, ocrText: "", landmarks: [], mapLinks: [] } };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
