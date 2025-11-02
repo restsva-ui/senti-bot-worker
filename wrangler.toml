@@ -39,6 +39,15 @@ TIMEZONE = "Europe/Kyiv"
 # ДІАГНОСТИЧНІ ТЕГИ: "on" — показує [via ...], "off" — ховає
 DIAG_TAGS = "on"
 
+# ── НОВЕ: стиль коротких мап-лінків у відповіді vision
+#   "arrow"  (дефолт, без Markdown) → "↗︎ https://maps.app.goo.gl/?q=..."
+#   "md-icon"                         → "[↗︎](url)"  (використовуй parse_mode=Markdown/HTML)
+#   "md-pin"                          → "[📍](url)"
+MAP_LINK_STYLE = "arrow"
+
+# (опц.) Якщо в боті підтримується parse_mode — можна увімкнути Markdown глобально.
+# TELEGRAM_PARSE_MODE = "Markdown"
+
 # ────────────────────────────────────────────────────────────────────────────
 #                ПОРЯДКИ МОДЕЛЕЙ (TEXT / CODE / VISION / STT / TTS)
 # ────────────────────────────────────────────────────────────────────────────
