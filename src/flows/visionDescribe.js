@@ -9,7 +9,7 @@
 // Використання:
 //   const { text } = await describeImage(env, { chatId, tgLang, imageBase64, question, modelOrder });
 
-import { askVision } from "../lib/modelRouter.js";
+import { askVision, askText } from "../lib/modelRouter.js";
 import { buildVisionHintByLang, makeVisionUserPrompt, postprocessVisionText } from "./visionPolicy.js";
 import { getUserLang, setUserLang } from "../lib/langPref.js";
 import { detectLandmarks, formatLandmarkLines } from "../lib/landmarkDetect.js"; // ← NEW
@@ -26,7 +26,6 @@ function normalizeText(s = "") {
   return stripProviderSignature(String(s || "").replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim());
 }
 function mapsLink({ name, lat, lon, city, country }) {
-  // Пріоритет: координати → інакше пошук за назвою + місто/країна.
   if (typeof lat === "number" && typeof lon === "number") {
     return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${lat},${lon}`)}`;
   }
@@ -36,6 +35,18 @@ function mapsLink({ name, lat, lon, city, country }) {
 function langSafe(l) {
   const t = String(l || "").toLowerCase();
   return ["uk","ru","en","de","fr","pl","es","it"].includes(t) ? t : "uk";
+}
+
+// Ознаки, коли треба одразу падати у текстовий фолбек
+function shouldTextFallback(err) {
+  const m = String(err && (err.message || err)).toLowerCase();
+  return (
+    m.includes("no route for that uri") ||
+    m.includes("only text mode supported") ||
+    m.includes("unsupported mode") ||
+    m.includes("vision") && m.includes("unsupported") ||
+    m.includes("image") && m.includes("not") && m.includes("supported")
+  );
 }
 
 // Формуємо інструкцію для JSON-відповіді (строгий формат)
@@ -68,25 +79,34 @@ function buildJsonSystemHint(lang) {
 }
 
 // Створюємо промпт користувача для віжн-моделі у JSON-режимі
-function buildJsonUserPrompt(basePrompt, lang) {
+function buildJsonUserPrompt(basePrompt, _lang) {
   return (
 `${basePrompt}
 
 Поверни СТРОГО JSON як вище. Без \`\`\`json\`\`\`, без коментарів.`
   );
 }
+
+// Текстовий системний хінт для аварійного фолбеку (коли зображення опрацювати неможливо)
+function buildTextFallbackHint(lang) {
+  if (lang.startsWith("en")) {
+    return `You cannot access the image right now. Reply briefly (1–2 sentences) in ${lang} with a neutral note like "Image analysis is temporarily unavailable" and suggest to resend the photo. Do not include technical details.`;
+  }
+  return `Наразі доступ до зображення недоступний. Відповідай стисло (1–2 речення) мовою користувача (${lang}) з нейтральним повідомленням, що аналіз фото тимчасово недоступний, і запропонуй надіслати знімок ще раз. Без технічних подробиць.`;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Основна функція
 
 /**
  * @param {object} env - середовище Cloudflare Worker (з KV, токенами тощо)
  * @param {object} p
- * @param {string|number} p.chatId          - id чату (для KV-переваг)
- * @param {string} [p.tgLang]               - msg.from.language_code з Telegram
- * @param {string} p.imageBase64            - зображення у base64 (без префікса data:)
- * @param {string} [p.question]             - питання користувача (caption або текст)
- * @param {string} [p.modelOrder]           - ланцюжок моделей для vision (напр., "gemini:gemini-2.5-flash,@cf/meta/llama-3.2-11b-vision-instruct")
- * @returns {Promise<{ text: string }>}     - нормалізований текст відповіді
+ * @param {string|number} p.chatId
+ * @param {string} [p.tgLang]
+ * @param {string} p.imageBase64
+ * @param {string} [p.question]
+ * @param {string} [p.modelOrder]
+ * @returns {Promise<{ text: string }>}
  */
 export async function describeImage(env, { chatId, tgLang, imageBase64, question, modelOrder }) {
   // 1) Мова користувача (оновлення за даними Телеграм)
@@ -105,6 +125,7 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
   const jsonUserPrompt = buildJsonUserPrompt(userPromptBase, lang);
 
   let parsed = null;
+  let forceTextFallback = false;
   try {
     const raw = await askVision(env, modelOrder, jsonUserPrompt, {
       systemHint: jsonSystemHint,
@@ -112,12 +133,11 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
       imageMime: "image/png",
       temperature: 0.1,
       max_tokens: 700,
-      json: true,                 // ← просимо JSON; зайві поля ігноруються провайдером
+      json: true,
     });
-
-    // Модель може повернути текстовий JSON — спробуємо пропарсити.
     parsed = tryParseJsonLoose(String(raw || ""));
-  } catch {
+  } catch (e) {
+    forceTextFallback = shouldTextFallback(e);
     parsed = null;
   }
 
@@ -131,12 +151,10 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
     const lines = [];
     if (desc) lines.push(desc);
 
-    // Якщо є текст — додамо його акуратно (без згадки "на фото немає тексту")
     if (containsText && ocrText) {
       lines.push(`Текст на фото: "${ocrText.replace(/\s+/g, " ").slice(0, 300)}"`);
     }
 
-    // Ландмарки з моделі → лінки
     let totalAdded = 0;
     if (landmarks.length) {
       const unique = dedupLandmarks(landmarks);
@@ -152,7 +170,6 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
       }
     }
 
-    // 🔁 Бекап-детектор: якщо модель не дала ландмарків — спробуємо самі
     if (totalAdded === 0) {
       const backup = await detectLandmarks(env, { description: desc, ocrText, lang });
       if (backup.length) {
@@ -163,37 +180,51 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
     return { text: lines.join("\n") };
   }
 
-  // 5) Фолбек: звичайний текстовий опис (без JSON), з твоїм постпроцесором
-  const fallbackOut = await askVision(env, modelOrder, userPromptBase, {
-    systemHint: systemHintBase,
-    imageBase64,
-    imageMime: "image/png",
-    temperature: 0.2,
-    max_tokens: 500,
-  });
+  // 5) Фолбек: звичайний текстовий опис (без JSON), якщо vision працює
+  if (!forceTextFallback) {
+    try {
+      const fallbackOut = await askVision(env, modelOrder, userPromptBase, {
+        systemHint: systemHintBase,
+        imageBase64,
+        imageMime: "image/png",
+        temperature: 0.2,
+        max_tokens: 500,
+      });
 
-  // Спроба бекап-детектора і для фолбек-тексту
-  const cleaned = postprocessVisionText(fallbackOut);
-  const backup = await detectLandmarks(env, { description: cleaned, ocrText: "", lang });
-  if (backup.length) {
-    const lines = [cleaned, ...formatLandmarkLines(backup, lang)];
-    return { text: lines.join("\n") };
+      const cleaned = postprocessVisionText(fallbackOut);
+      const backup = await detectLandmarks(env, { description: cleaned, ocrText: "", lang });
+      if (backup.length) {
+        const lines = [cleaned, ...formatLandmarkLines(backup, lang)];
+        return { text: lines.join("\n") };
+      }
+      return { text: cleaned };
+    } catch (e2) {
+      forceTextFallback = shouldTextFallback(e2);
+    }
   }
 
-  return { text: cleaned };
+  // 6) Аварійний текстовий фолбек (коли vision недоступний зовсім)
+  const textHint = buildTextFallbackHint(lang);
+  const textMsg = lang.startsWith("en")
+    ? "Please provide a short, polite notice."
+    : "Дай коротке ввічливе повідомлення.";
+  const safeText = await askText(env, env.MODEL_ORDER_TEXT || modelOrder, textMsg, {
+    systemHint: textHint,
+    temperature: 0.1,
+    max_tokens: 80,
+  });
+
+  return { text: normalizeText(safeText) };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Допоміжні парсери/дедуп
 
 function tryParseJsonLoose(s) {
-  // Прибираємо ```json ... ```
   let x = String(s || "").trim().replace(/```json/gi, "").replace(/```/g, "").trim();
-  // Вирізаємо до першої { і останньої }
   const a = x.indexOf("{");
   const b = x.lastIndexOf("}");
   if (a !== -1 && b !== -1 && b > a) x = x.slice(a, b + 1);
-  // Мінімізуємо типові помилки: коми перед ] або }
   x = x.replace(/,\s*([}\]])/g, "$1");
   try { return JSON.parse(x); } catch { return null; }
 }
