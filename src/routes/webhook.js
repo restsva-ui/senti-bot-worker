@@ -230,7 +230,6 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   }
   return true;
 }
-
 // ── SystemHint ───────────────────────────────────────────────────────────────
 async function buildSystemHint(env, chatId, userId, preferredLang) {
   const statut = String((await readStatut(env)) || "").trim();
@@ -327,6 +326,32 @@ function looksLikeModelDump(s = "") {
   return /here(?:'|)s a breakdown|model (aliases|mappings|configurations)/i.test(x) || /gemini-?2\.5|openrouter|deepseek|llama/i.test(x);
 }
 
+/** ── Безпечний виклик моделі з фолбеком ─────────────────────────────────── */
+async function safeAsk(env, modelOrder, prompt, { systemHint } = {}) {
+  if (modelOrder) {
+    try {
+      const out = await askAnyModel(env, modelOrder, prompt, { systemHint });
+      return out;
+    } catch (err) {
+      console.error("Помилка askAnyModel:", err);
+      try {
+        const out = await think(env, prompt, { systemHint });
+        return out;
+      } catch (err2) {
+        console.error("Помилка fallback think після askAnyModel:", err2);
+        return null;
+      }
+    }
+  }
+  try {
+    const out = await think(env, prompt, { systemHint });
+    return out;
+  } catch (err) {
+    console.error("Помилка think (без modelOrder):", err);
+    return null;
+  }
+}
+
 async function callSmartLLM(env, userText, { lang, name, systemHint, expand, adminDiag = false }) {
   const modelOrder = String(env.MODEL_ORDER || "").trim();
 
@@ -338,48 +363,55 @@ async function callSmartLLM(env, userText, { lang, name, systemHint, expand, adm
 User (${name}) says: ${userText}
 ${control}`;
 
-  let out;
-  try {
-    out = modelOrder
-      ? await askAnyModel(env, modelOrder, prompt, { systemHint })
-      : await think(env, prompt, { systemHint });
-  } catch (e) {
-    if (adminDiag) throw e;
-    throw new Error("LLM call failed");
+  // 1) перша відповідь — безпечно
+  let out = await safeAsk(env, modelOrder, prompt, { systemHint });
+  if (!out) {
+    const msg = "Виникла помилка при зверненні до AI. Спробуйте пізніше.";
+    return { short: msg, full: msg };
   }
-
   out = stripProviderSignature((out || "").trim());
 
+  // 2) технічний дамп → повтор безпечно
   if (looksLikeModelDump(out)) {
-    out = stripProviderSignature((await think(env, prompt, { systemHint }))?.trim() || out);
+    const retry = await safeAsk(env, modelOrder, prompt, { systemHint });
+    if (retry) {
+      out = stripProviderSignature((retry || out || "").trim());
+    }
   }
+
+  // 3) анти-розкриття «я AI»
   if (revealsAiSelf(out)) {
     const fix = `Rewrite the previous answer as Senti. Do NOT mention being an AI/model or any company. Keep it in ${lang}, concise and natural.`;
-    let cleaned = modelOrder
-      ? await askAnyModel(env, modelOrder, fix, { systemHint })
-      : await think(env, fix, { systemHint });
-    cleaned = stripProviderSignature((cleaned || "").trim());
-    if (cleaned) out = cleaned;
+    const cleaned = await safeAsk(env, modelOrder, fix, { systemHint });
+    if (!cleaned) {
+      const msg = "Виникла помилка при зверненні до AI. Спробуйте пізніше.";
+      return { short: msg, full: msg };
+    }
+    out = stripProviderSignature((cleaned || out || "").trim());
   }
+
+  // 4) емодзі на початку
   if (!looksLikeEmojiStart(out)) {
     const em = guessEmoji(userText);
     out = `${em} ${out}`;
   }
 
+  // 5) контроль мови
   const detected = detectFromText(out);
   if (detected && lang && detected !== lang) {
     const hardPrompt = `STRICT LANGUAGE MODE: Respond ONLY in ${lang}. If the previous answer used another language, rewrite it now in ${lang}. Keep it concise.`;
-    let fixed = modelOrder
-      ? await askAnyModel(env, modelOrder, hardPrompt, { systemHint })
-      : await think(env, hardPrompt, { systemHint });
-    fixed = stripProviderSignature((fixed || "").trim());
-    if (fixed) out = looksLikeEmojiStart(fixed) ? fixed : `${guessEmoji(userText)} ${fixed}`;
+    const fixed = await safeAsk(env, modelOrder, hardPrompt, { systemHint });
+    if (!fixed) {
+      const msg = "Виникла помилка при зверненні до AI. Спробуйте пізніше.";
+      return { short: msg, full: msg };
+    }
+    const clean = stripProviderSignature((fixed || "").trim());
+    out = looksLikeEmojiStart(clean) ? clean : `${guessEmoji(userText)} ${clean}`;
   }
 
   const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
 }
-
 // ── маленькі адмін-хелпери для Learn ────────────────────────────────────────
 async function runLearnNow(env) {
   const secret = env.WEBHOOK_SECRET || env.TG_WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || "";
