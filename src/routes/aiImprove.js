@@ -1,9 +1,11 @@
+// src/routes/aiImprove.js
 // Нічний агент: читає коротку пам'ять LIKES_KV, робить стислий аналіз,
 // зберігає інсайти у STATE_KV і пише нотатки у CHECKLIST_KV.
 // Додано debug-ендпойнти для перевірки KV/часу + seed та аналіз одного ключа
 // + bindings/checklist/insight debug.
 
 import { askAnyModel } from "../lib/modelRouter.js";
+import { think as coreThink } from "../lib/brain.js";
 import { appendChecklist as appendToChecklist } from "../lib/kvChecklist.js";
 
 const INSIGHT_TTL = 60 * 60 * 24 * 14; // 14 днів
@@ -57,7 +59,6 @@ function previewFromInsight(insight) {
     : "";
   return [sum, rules].filter(Boolean).join(" | ");
 }
-
 // ---------- JSON стабілізатор для аналізу ----------
 function stripCodeFences(s = "") {
   return String(s)
@@ -82,7 +83,7 @@ function cutBalancedJson(s = "") {
     const ch = text[i];
     if (inStr) {
       if (ch === "\\" && i + 1 < text.length) { i += 2; continue; }
-      if (ch === "\n") { /* дозволяємо, але якщо неекранований — виправимо нижче */ }
+      if (ch === "\n") { /* дозволяємо */ }
       if (ch === strCh) inStr = false;
     } else {
       if (ch === '"' || ch === "'") { inStr = true; strCh = ch; }
@@ -107,8 +108,7 @@ function escapeNewlinesInsideStrings(s = "") {
     const ch = s[i];
     if (inStr) {
       if (ch === "\\" && i + 1 < s.length) { out += ch + s[i + 1]; i++; continue; }
-      if (ch === "\n") { out += "\\n"; continue; }
-      if (ch === "\r") { out += "\\n"; continue; }
+      if (ch === "\n" || ch === "\r") { out += "\\n"; continue; }
       if (ch === strCh) inStr = false;
       out += ch;
     } else {
@@ -140,6 +140,30 @@ function tryParseJSONPossiblyBroken(outText) {
   return { ok: false, error: "json-parse-failed", _clean: jsonChunk, _raw: outText };
 }
 
+// ---------- LLM-safe ----------
+async function safeAsk(env, prompt, { systemHint, temperature = 0.2, max_tokens = 600 } = {}) {
+  const order = String(env.MODEL_ORDER || "").trim();
+  if (order) {
+    try {
+      return await askAnyModel(env, order, prompt, { systemHint, temperature, max_tokens });
+    } catch (e) {
+      console.error("[aiImprove] askAnyModel error:", e?.message || e);
+      try {
+        return await coreThink(env, prompt, systemHint);
+      } catch (e2) {
+        console.error("[aiImprove] fallback coreThink error:", e2?.message || e2);
+        return null;
+      }
+    }
+  }
+  try {
+    return await coreThink(env, prompt, systemHint);
+  } catch (e) {
+    console.error("[aiImprove] coreThink error (no modelOrder):", e?.message || e);
+    return null;
+  }
+}
+
 // ---------- core ----------
 async function analyzeOneUser(env, chatId, state) {
   const messages = (state?.messages || []).slice(-20);
@@ -154,10 +178,13 @@ async function analyzeOneUser(env, chatId, state) {
 
   let analysis;
   try {
-    const out = await askAnyModel(env, `${buildSystemHint()}\n\n${prompt}`, {
+    const out = await safeAsk(env, prompt, {
+      systemHint: buildSystemHint(),
       temperature: 0.2,
       max_tokens: 600,
     });
+
+    if (!out) throw new Error("llm-unavailable");
 
     const parsed = tryParseJSONPossiblyBroken(String(out));
     if (!parsed.ok) throw new Error(parsed.error || "bad-json");
@@ -176,7 +203,6 @@ async function analyzeOneUser(env, chatId, state) {
 
   return { chatId, date: todayUTC(), analysis };
 }
-
 async function listUserKeys(likesKV, cursor = undefined) {
   return await likesKV.list({ prefix: MEM_PREFIX, cursor }); // {keys, cursor, list_complete}
 }
