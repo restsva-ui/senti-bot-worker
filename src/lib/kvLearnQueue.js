@@ -42,7 +42,6 @@ function bytesFmt(n) {
   const mb = kb / 1024; if (mb < 1024) return `${mb.toFixed(1)} MB`;
   const gb = mb / 1024; return `${gb.toFixed(2)} GB`;
 }
-
 export async function enqueueLearn(env, userId, payload) {
   if (!enabled(env)) return { ok: false, reason: "learn_disabled" };
   const item = {
@@ -118,7 +117,6 @@ export async function getLearnUsage(env) {
   }
   return { learnedCount, r2Bytes, r2Pretty: bytesFmt(r2Bytes) };
 }
-
 export async function runLearnOnce(env, { maxItems = 10 } = {}) {
   if (!enabled(env)) return { ok: false, reason: "learn_disabled" };
 
@@ -137,6 +135,7 @@ export async function runLearnOnce(env, { maxItems = 10 } = {}) {
       const res = await learnItem(env, item);
       results.push({ id: item.id, ok: true, ...res });
     } catch (e) {
+      console.error("[kvLearnQueue] learnItem error:", e?.message || e);
       results.push({ id: item.id, ok: false, error: String(e?.message || e) });
     } finally {
       await del(env, key);
@@ -233,7 +232,6 @@ async function learnItem(env, item) {
 
   return { kind, src, learned: true, insight, r2Key, r2Size };
 }
-
 // ── helpers ────────────────────────────────────────────────────────────────
 
 function safeUrl(u) { try { return new URL(u); } catch { return null; } }
@@ -355,6 +353,30 @@ function mineHtmlSummary(text, fallbackTitle = "") {
   return { title: fallbackTitle, preview };
 }
 
+/** ── Безпечний виклик LLM з фолбеком ────────────────────────────────────── */
+async function safeAsk(env, prompt, { systemHint, temperature = 0.2, max_tokens = 700 } = {}) {
+  const modelOrder = String(env.MODEL_ORDER || "").trim();
+  if (modelOrder) {
+    try {
+      return await askAnyModel(env, modelOrder, prompt, { systemHint, temperature, max_tokens });
+    } catch (e) {
+      console.error("[kvLearnQueue] askAnyModel error:", e?.message || e);
+      try {
+        return await coreThink(env, prompt, systemHint);
+      } catch (e2) {
+        console.error("[kvLearnQueue] fallback coreThink error:", e2?.message || e2);
+        return null;
+      }
+    }
+  }
+  try {
+    return await coreThink(env, prompt, systemHint);
+  } catch (e) {
+    console.error("[kvLearnQueue] coreThink error (no modelOrder):", e?.message || e);
+    return null;
+  }
+}
+
 async function makeInsight(env, { title, meta, textPreview }) {
   const typeUa = humanTypeUa(meta.type);
   const base = `Вивчено: ${title}${typeUa ? ` (${typeUa})` : ""}`;
@@ -366,25 +388,22 @@ async function makeInsight(env, { title, meta, textPreview }) {
 `Зроби коротку (2–3 пункти) вичавку ключових тез із матеріалу нижче українською. Без "вступу" й "висновків".
 Матеріал: """${sample.slice(0, 3500)}"""`;
 
-  try {
-    const modelOrder = String(env.MODEL_ORDER || "").trim();
-    let out = "";
-    if (modelOrder) {
-      out = await askAnyModel(env, modelOrder, prompt, {
-        systemHint: "Ти помічник, який створює стислий конспект фактів."
-      });
-    } else {
-      out = await coreThink(env, prompt, "Ти помічник, який створює стислий конспект фактів.");
-    }
-    out = (out || "")
-      .replace(/^[\s\-•]+/g, "• ")
-      .replace(/\n{3,}/g, "\n\n")
-      .replace(/^[ \t]*—?\s*via[^\n]*\n?/gim, "") // прибрати підпис провайдера
-      .trim()
-      .slice(0, 500);
-    if (!out) return base;
-    return `${base}\n${out}`;
-  } catch { return base; }
+  const out = await safeAsk(env, prompt, {
+    systemHint: "Ти помічник, який створює стислий конспект фактів.",
+    temperature: 0.1,
+    max_tokens: 400
+  });
+
+  if (!out) return base;
+
+  const cleaned = String(out || "")
+    .replace(/^[\s\-•]+/g, "• ")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/^[ \t]*—?\s*via[^\n]*\n?/gim, "")
+    .trim()
+    .slice(0, 500);
+
+  return cleaned ? `${base}\n${cleaned}` : base;
 }
 
 function makeSummary(results) {
