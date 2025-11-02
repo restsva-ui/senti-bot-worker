@@ -119,3 +119,73 @@ async function loadExtraFromKV(env) {
     return (_cachedExtra = []);
   }
 }
+// Підібрати матч по alias/місту/назві
+function matches(textN, lm) {
+  const fields = [
+    lm.name, lm.city, lm.country,
+    ...(Array.isArray(lm.aliases) ? lm.aliases : [])
+  ].filter(Boolean);
+
+  for (const f of fields) {
+    const token = normalize(String(f));
+    if (!token) continue;
+    // гнучке співпадіння по словах
+    const re = new RegExp(`\\b${escapeRegex(token)}\\b`, "i");
+    if (re.test(textN)) return true;
+  }
+  return false;
+}
+function escapeRegex(s = "") { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+// Основна функція детекції
+export async function detectLandmarks(env, { description, ocrText, lang } = {}) {
+  const text = [description, ocrText].filter(Boolean).join(" \n ");
+  const textN = normalize(text);
+  if (!textN) return [];
+
+  const extra = await loadExtraFromKV(env);
+  const pool = [...BASE_LANDMARKS, ...extra];
+
+  const found = [];
+  for (const lm of pool) {
+    if (matches(textN, lm)) {
+      found.push({
+        name: lm.name,
+        city: lm.city || "",
+        country: lm.country || "",
+        lat: typeof lm.lat === "number" ? lm.lat : null,
+        lon: typeof lm.lon === "number" ? lm.lon : null,
+        link: mapsLink(lm),
+      });
+      if (found.length >= 5) break;
+    }
+  }
+  return dedup(found);
+}
+
+function dedup(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const x of arr) {
+    const key = [x.name, x.city, x.country].map((s)=>String(s||"").toLowerCase()).join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(x);
+  }
+  return out;
+}
+
+// Зручний форматер для додавання рядків у відповідь
+export function formatLandmarkLines(landmarks, lang = "uk") {
+  if (!Array.isArray(landmarks) || !landmarks.length) return [];
+  const head = lang.startsWith("uk") ? "Посилання на мапу:" :
+               lang.startsWith("ru") ? "Ссылки на карту:" :
+               lang.startsWith("de") ? "Karten-Links:" :
+               lang.startsWith("en") ? "Map links:" : "Map links:";
+  const lines = [head];
+  for (const lm of landmarks.slice(0, 4)) {
+    const name = [lm.name, lm.city, lm.country].filter(Boolean).join(", ");
+    lines.push(`• ${name} — ${lm.link}`);
+  }
+  return lines;
+}
