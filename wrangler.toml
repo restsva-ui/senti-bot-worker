@@ -48,11 +48,10 @@ MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf
 # CODE: спільний з TEXT або окремий; залишаємо як зараз
 MODEL_ORDER_CODE = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
 
-# NEW: VISION — **лише провайдери з підтримкою зображень** (без “free” текстових)
-# першим ставимо Gemini Vision, далі CF Llama-3.2-11B-Vision
+# VISION — лише провайдери з підтримкою зображень
 MODEL_ORDER_VISION = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct"
 
-# (необов'язково) окремі порядки для STT/TTS — залишив шаблонні варіанти
+# (необов'язково) окремі порядки для STT/TTS — шаблони
 # MODEL_ORDER_STT = "cf:@cf/openai/whisper"
 # MODEL_ORDER_TTS = "cf:@cf/openai/tts-1"
 
@@ -62,20 +61,20 @@ MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/
 # --- Дефолтні моделі (для читабельності) ---
 GEMINI_MODEL    = "gemini-2.5-flash"
 CF_MODEL        = "@cf/qwen/qwen2.5-7b-instruct"
-# Vision-модель CF (виправлено префікс на @cf/meta/…)
+# Vision-модель CF (виправлений slug)
 CF_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
 
 # ────────────────────────────────────────────────────────────────────────────
 #          OpenAI-сумісний fallback (через OpenRouter як "free")
 # ────────────────────────────────────────────────────────────────────────────
-# ВАЖЛИВО: ключ додати окремо як секрет:
-#   wrangler secret put OPENROUTER_API_KEY
+# Додай секрет окремо:  wrangler secret put OPENROUTER_API_KEY
 FREE_API_BASE_URL = "https://openrouter.ai/api"
 FREE_API_PATH     = "/v1/chat/completions"
 
-# Імʼя моделі: код очікує FREE_LLM_MODEL; лишимо також ваш FREE_API_MODEL для сумісності
-FREE_LLM_BASE_URL = "https://openrouter.ai/api"            # для сумісності з кодом
+# Узгоджено з кодом modelRouter.js (використовує FREE_LLM_*)
+FREE_LLM_BASE_URL = "https://openrouter.ai/api"
 FREE_LLM_MODEL    = "meta-llama/llama-4-scout:free"
+# Залишаємо для сумісності зі старим кодом
 FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
 
 # (необов'язково) Ідентифікатори застосунку для OpenRouter заголовків
