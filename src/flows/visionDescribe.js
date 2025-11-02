@@ -1,15 +1,13 @@
 // src/flows/visionDescribe.js
 // Єдина точка для опису зображення з мультимовністю.
 // • Якщо на фото НЕМає тексту — не згадуємо про це.
-// • Якщо розпізнано визначні місця — даємо компактні іконки-лінки (↗︎) без описів.
+// • Визначні місця: компактна іконка-лінк (↗︎) через HTML (<a href>), без довгих URL.
 // • JSON-режим з авто-ретраями по MIME (png → jpeg → webp) + надійний текстовий фолбек.
-// • Пам’ять фото: останній опис/ландмарки кешуються в KV для контексту діалогу.
 
 import { askVision, askText } from "../lib/modelRouter.js";
 import { buildVisionHintByLang, makeVisionUserPrompt, postprocessVisionText } from "./visionPolicy.js";
 import { getUserLang, setUserLang } from "../lib/langPref.js";
 import { detectLandmarks, formatLandmarkLines } from "../lib/landmarkDetect.js";
-import { savePhotoMemory } from "../lib/photoMemory.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Локальні утиліти
@@ -27,15 +25,25 @@ function langSafe(l) {
   const t = String(l || "").toLowerCase();
   return ["uk","ru","en","de","fr","pl","es","it"].includes(t) ? t : "uk";
 }
+function escHtml(s="") {
+  return String(s)
+    .replace(/&/g,"&amp;")
+    .replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;");
+}
 
-// компактна HTML-іконка на мапу (Telegram: parse_mode=HTML)
-function mapIcon({ name, lat, lon, city, country }) {
-  const q = (typeof lat === "number" && typeof lon === "number")
-    ? `${lat},${lon}`
-    : [name, city, country].filter(Boolean).join(", ");
-  const url = `https://maps.google.com/?q=${encodeURIComponent(q)}`;
-  // Повертаємо лише іконку ↗︎ як посилання (без розкриття URL)
-  return `<a href="${url}">↗︎</a>`;
+// компактне посилання на мапу (координати → ще коротше), повертає вже HTML-іконку
+function mapsIconLink({ name, lat, lon, city, country }) {
+  let href;
+  if (typeof lat === "number" && typeof lon === "number") {
+    href = `https://maps.app.goo.gl/?q=${encodeURIComponent(`${lat},${lon}`)}`;
+  } else {
+    const q = [name, city, country].filter(Boolean).join(", ");
+    href = `https://maps.app.goo.gl/?q=${encodeURIComponent(q)}`;
+  }
+  // маленька іконка без опису посилання
+  return `<a href="${href}">↗︎</a>`;
 }
 
 // коли точно треба йти у текстовий фолбек (режим vision недоступний технічно)
@@ -48,11 +56,10 @@ function shouldTextFallback(err) {
     m.includes("unsupported mode") ||
     (m.includes("vision") && m.includes("unsupported")) ||
     (m.includes("image") && m.includes("not") && m.includes("supported"))
-    // safety/blocked НЕ переводить у текст — нехай спробують інші провайдери/MIME
   );
 }
 
-// «водяні знаки» зі стоків — не цитуємо в OCR
+// “водяні знаки” зі стоків — не цитуємо в OCR
 function isStockWatermark(s = "") {
   const x = s.toLowerCase();
   return /dreamstime|shutterstock|adobe\s*stock|istock|depositphotos|getty\s*images|watermark/.test(x);
@@ -81,9 +88,11 @@ function buildJsonSystemHint(lang) {
 - Не вигадуй.`
   );
 }
+
 function buildJsonUserPrompt(basePrompt) {
   return `${basePrompt}\n\nПоверни СТРОГО JSON як вище. Без \`\`\`json\`\`\`, без коментарів.`;
 }
+
 function buildTextFallbackHint(lang) {
   if (lang.startsWith("en")) {
     return `You cannot access the image right now. Reply briefly (1–2 sentences) in ${lang} with a neutral note like "Image analysis is temporarily unavailable" and suggest to resend the photo. No technical details.`;
@@ -113,7 +122,7 @@ async function tryVisionJSON(env, modelOrder, jsonUserPrompt, jsonSystemHint, im
     } catch (e) {
       lastErr = e;
       if (shouldTextFallback(e)) return { raw: null, forceTextFallback: true, error: e };
-      // safety/blocked — нехай спробує інший провайдер/MIME
+      // safety/blocked — не змушуємо текстовий фолбек; нехай спробує інший провайдер/MIME
     }
   }
   return { raw: null, forceTextFallback: false, error: lastErr };
@@ -164,7 +173,7 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
   const systemHintBase = buildVisionHintByLang(lang);
   const userPromptBase = makeVisionUserPrompt(question, lang);
 
-  // 3) порядок моделей: vision за замовчуванням
+  // 3) вибір порядку моделей: vision за замовчуванням
   const visionOrder = String(modelOrder || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "");
 
   // 4) JSON-спроба
@@ -184,67 +193,67 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
     const desc         = normalizeText(String(parsed.description || "").trim());
 
     const lines = [];
-    if (desc) lines.push(desc);
+    if (desc) lines.push(escHtml(desc));
 
-    // OCR — без «водяних знаків»
+    // OCR — без водяних знаків
     if (containsText && ocrTextRaw && !isStockWatermark(ocrTextRaw)) {
       const ocr = ocrTextRaw.replace(/\s+/g, " ").slice(0, 300);
-      if (ocr) lines.push(`Текст на фото: "${ocr}"`);
+      if (ocr) lines.push(`Текст на фото: "${escHtml(ocr)}"`);
     }
 
-    // іконки-лінки ↗︎ (без опису посилання)
-    const icons = [];
+    // компактні іконки-лінки
+    let added = 0;
     if (landmarks.length) {
-      const unique = dedupLandmarks(landmarks).slice(0, 4);
-      for (const lm of unique) icons.push(mapIcon(lm));
-      if (icons.length) lines.push((lang.startsWith("uk") ? "Посилання на мапу: " : "Map: ") + icons.join("  "));
-    }
-
-    // бекап-детектор
-    if (!icons.length) {
-      const backup = await detectLandmarks(env, { description: desc, ocrText: ocrTextRaw, lang });
-      if (backup.length) {
-        const compact = backup.slice(0, 4).map(lm => mapIcon(lm)).join("  ");
-        if (compact) lines.push((lang.startsWith("uk") ? "Посилання на мапу: " : "Map: ") + compact);
+      const unique = dedupLandmarks(landmarks);
+      const links = unique.slice(0, 4).map((lm) => {
+        const icon = mapsIconLink(lm);
+        const name = [lm.name, lm.city, lm.country].filter(Boolean).join(", ");
+        return `• ${escHtml(name)} — ${icon}`;
+      });
+      if (links.length) {
+        lines.push(lang.startsWith("uk") ? "Посилання на мапу:" : "Map links:");
+        lines.push(...links);
+        added += links.length;
       }
     }
 
-    const text = lines.join("\n");
+    // бекап-детектор
+    if (added === 0) {
+      const backup = await detectLandmarks(env, { description: desc, ocrText: ocrTextRaw, lang });
+      if (backup.length) {
+        const items = formatLandmarkLines(backup, lang).map(s => {
+          // замінимо довгу URL на іконку
+          const m = s.match(/—\s+(https?:\/\/\S+)/);
+          const url = m ? m[1] : null;
+          const before = s.replace(/—\s+https?:\/\/\S+/, "— ↗︎");
+          if (!url) return escHtml(before);
+          return before.replace("↗︎", `<a href="${url.replace("https://www.google.com/maps/search/?api=1&query=", "https://maps.app.goo.gl/?q=")}">↗︎</a>`);
+        });
+        lines.push(...items);
+      }
+    }
 
-    // 🧠 Пам’ять фото
-    await savePhotoMemory(env, chatId, {
-      description: desc,
-      ocrText: containsText && !isStockWatermark(ocrTextRaw) ? ocrTextRaw : "",
-      landmarks: Array.isArray(landmarks) ? landmarks : [],
-      ts: Date.now(),
-    });
-
-    return { text, parse_mode: "HTML" };
+    // Звертаємо увагу: повертаємо HTML-текст
+    return { text: lines.join("\n"), isHtml: true };
   }
 
   // 6) фолбек у plain-vision
   if (!forceTextFallback) {
     const f = await tryVisionPlain(env, visionOrder, userPromptBase, systemHintBase, imageBase64);
     if (f.text) {
-      const cleaned = postprocessVisionText(f.text);
+      const cleaned = escHtml(postprocessVisionText(f.text));
       const backup = await detectLandmarks(env, { description: cleaned, ocrText: "", lang });
-
-      const lines = [cleaned];
       if (backup.length) {
-        const compact = backup.slice(0, 4).map(lm => mapIcon(lm)).join("  ");
-        if (compact) lines.push((lang.startsWith("uk") ? "Посилання на мапу: " : "Map: ") + compact);
+        const lines = [cleaned, ...formatLandmarkLines(backup, lang).map(s => {
+          const m = s.match(/—\s+(https?:\/\/\S+)/);
+          const url = m ? m[1] : null;
+          const before = escHtml(s.replace(/—\s+https?:\/\/\S+/, "— ↗︎"));
+          if (!url) return before;
+          return before.replace("↗︎", `<a href="${url.replace("https://www.google.com/maps/search/?api=1&query=", "https://maps.app.goo.gl/?q=")}">↗︎</a>`);
+        })];
+        return { text: lines.join("\n"), isHtml: true };
       }
-
-      const text = lines.join("\n");
-
-      await savePhotoMemory(env, chatId, {
-        description: cleaned,
-        ocrText: "",
-        landmarks: backup,
-        ts: Date.now(),
-      });
-
-      return { text, parse_mode: "HTML" };
+      return { text: cleaned, isHtml: true };
     }
     forceTextFallback = !!f.forceTextFallback;
   }
@@ -255,11 +264,7 @@ export async function describeImage(env, { chatId, tgLang, imageBase64, question
   const safeText = await askText(env, env.MODEL_ORDER_TEXT || env.MODEL_ORDER || "gemini:gemini-2.5-flash", textMsg, {
     systemHint: textHint, temperature: 0.1, max_tokens: 80,
   });
-
-  // теж кладемо у «пам’ять» маркер недоступності
-  await savePhotoMemory(env, chatId, { description: normalizeText(safeText), ocrText: "", landmarks: [], ts: Date.now(), degraded: true });
-
-  return { text: normalizeText(safeText), parse_mode: "HTML" };
+  return { text: normalizeText(safeText), isHtml: false };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
