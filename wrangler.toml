@@ -40,23 +40,30 @@ TIMEZONE = "Europe/Kyiv"
 DIAG_TAGS = "on"
 
 # ────────────────────────────────────────────────────────────────────────────
-#                ПОРЯДКИ МОДЕЛЕЙ (TEXT / CODE) + RUNTIME DEFAULT
+#                ПОРЯДКИ МОДЕЛЕЙ (TEXT / CODE / VISION / STT / TTS)
 # ────────────────────────────────────────────────────────────────────────────
 # TEXT: першим йде Gemini (якщо є ключ), далі CF безкоштовні, потім free-фолбек
 MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 
-# CODE: першим спеціалізований безкоштовний Qwen3 Coder через OpenRouter,
-# далі CF як безкоштовний фолбек, потім загальний free-фолбек
+# CODE: спільний з TEXT або окремий; залишаємо як зараз
 MODEL_ORDER_CODE = "cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
 
-# RUNTIME дефолт: якщо код у webhook не підміняє порядок — беремо текстовий
+# NEW: VISION — **лише провайдери з підтримкою зображень** (без “free” текстових)
+# першим ставимо Gemini Vision, далі CF Llama-3.2-11B-Vision
+MODEL_ORDER_VISION = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct"
+
+# (необов'язково) окремі порядки для STT/TTS — залишив шаблонні варіанти
+# MODEL_ORDER_STT = "cf:@cf/openai/whisper"
+# MODEL_ORDER_TTS = "cf:@cf/openai/tts-1"
+
+# RUNTIME дефолт: якщо код не підміняє порядок — беремо текстовий
 MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen2.5-7b-instruct, cf:@cf/meta/llama-3.1-8b-instruct, free:meta-llama/llama-4-scout:free"
 
-# --- Дефолтні моделі (необов'язково, але зручно для читабельності) ---
+# --- Дефолтні моделі (для читабельності) ---
 GEMINI_MODEL    = "gemini-2.5-flash"
 CF_MODEL        = "@cf/qwen/qwen2.5-7b-instruct"
-# Vision-модель CF (безкоштовний опис зображень)
-CF_VISION_MODEL = "@cf/llama-3.2-11b-vision-instruct"
+# Vision-модель CF (виправлено префікс на @cf/meta/…)
+CF_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
 
 # ────────────────────────────────────────────────────────────────────────────
 #          OpenAI-сумісний fallback (через OpenRouter як "free")
@@ -64,11 +71,14 @@ CF_VISION_MODEL = "@cf/llama-3.2-11b-vision-instruct"
 # ВАЖЛИВО: ключ додати окремо як секрет:
 #   wrangler secret put OPENROUTER_API_KEY
 FREE_API_BASE_URL = "https://openrouter.ai/api"
-FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
 FREE_API_PATH     = "/v1/chat/completions"
 
+# Імʼя моделі: код очікує FREE_LLM_MODEL; лишимо також ваш FREE_API_MODEL для сумісності
+FREE_LLM_BASE_URL = "https://openrouter.ai/api"            # для сумісності з кодом
+FREE_LLM_MODEL    = "meta-llama/llama-4-scout:free"
+FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
+
 # (необов'язково) Ідентифікатори застосунку для OpenRouter заголовків
-# використовуються у modelRouter.js, якщо задані
 OPENROUTER_SITE_URL = "https://senti.restsva.app"
 OPENROUTER_APP_NAME = "Senti Bot Worker"
 
