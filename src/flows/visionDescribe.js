@@ -108,128 +108,79 @@ function buildTextFallbackHint(lang) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Внутрішні ретраї по MIME + альтернативний порядок моделей
+// Внутрішні ретраї по MIME + альтернативний порядок моделей (із Gemini 1.5)
+
+function isTempError(e) {
+  const s = String(e && (e.message || e)).toLowerCase();
+  return /429|rate|timeout|fetch|network|5\d\d/.test(s);
+}
 
 async function tryVisionJSON(env, modelOrder, jsonUserPrompt, jsonSystemHint, imageBase64) {
   const base64 = sanitizeBase64(imageBase64);
-  const mimes = ["image/png", "image/jpeg", "image/webp"];
+  const mimes  = ["image/png", "image/jpeg", "image/webp"];
+  const orders = [
+    String(modelOrder || ""),
+    "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.5-flash",
+    "gemini:gemini-1.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct"
+  ].filter(Boolean);
+
   let lastErr = null;
 
-  // 1) основний порядок моделей
-  for (const mime of mimes) {
-    try {
-      const raw = await askVision(env, modelOrder, jsonUserPrompt, {
-        systemHint: jsonSystemHint,
-        imageBase64: base64,
-        imageMime: mime,
-        temperature: 0.1,
-        max_tokens: 700,
-        json: true,
-      });
-      return { raw: String(raw || ""), forceTextFallback: false };
-    } catch (e) {
-      lastErr = e;
-      if (shouldTextFallback(e)) return { raw: null, forceTextFallback: true, error: e };
+  for (const order of orders) {
+    for (const mime of mimes) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const raw = await askVision(env, order, jsonUserPrompt, {
+            systemHint: jsonSystemHint,
+            imageBase64: base64,
+            imageMime: mime,
+            temperature: attempt === 0 ? 0.1 : 0.0,
+            max_tokens: attempt === 0 ? 700 : 360,
+            json: true,
+          });
+          return { raw: String(raw || ""), forceTextFallback: false };
+        } catch (e) {
+          lastErr = e;
+          if (shouldTextFallback(e)) return { raw: null, forceTextFallback: true, error: e };
+          if (!isTempError(e)) break; // не тимчасова — переходимо далі
+        }
+      }
     }
   }
-
-  // 2) альтернативний порядок: CF-vision першим
-  const cfFirst = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.5-flash";
-  for (const mime of mimes) {
-    try {
-      const raw = await askVision(env, cfFirst, jsonUserPrompt, {
-        systemHint: jsonSystemHint,
-        imageBase64: base64,
-        imageMime: mime,
-        temperature: 0.1,
-        max_tokens: 700,
-        json: true,
-      });
-      return { raw: String(raw || ""), forceTextFallback: false };
-    } catch (e) {
-      lastErr = e;
-      if (shouldTextFallback(e)) return { raw: null, forceTextFallback: true, error: e };
-    }
-  }
-
-  // 3) м’який повтор (понижені ліміти) — зменшує частоту фолбеків
-  for (const mime of mimes) {
-    try {
-      const raw = await askVision(env, modelOrder, jsonUserPrompt, {
-        systemHint: jsonSystemHint,
-        imageBase64: base64,
-        imageMime: mime,
-        temperature: 0.0,
-        max_tokens: 350,
-        json: true,
-      });
-      return { raw: String(raw || ""), forceTextFallback: false };
-    } catch (e) {
-      lastErr = e;
-      if (shouldTextFallback(e)) return { raw: null, forceTextFallback: true, error: e };
-    }
-  }
-
   return { raw: null, forceTextFallback: false, error: lastErr };
 }
 
 async function tryVisionPlain(env, modelOrder, userPromptBase, systemHintBase, imageBase64) {
   const base64 = sanitizeBase64(imageBase64);
-  const mimes = ["image/png", "image/jpeg", "image/webp"];
+  const mimes  = ["image/png", "image/jpeg", "image/webp"];
+  const orders = [
+    String(modelOrder || ""),
+    "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.5-flash",
+    "gemini:gemini-1.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct"
+  ].filter(Boolean);
+
   let lastErr = null;
 
-  // 1) основний порядок
-  for (const mime of mimes) {
-    try {
-      const out = await askVision(env, modelOrder, userPromptBase, {
-        systemHint: systemHintBase,
-        imageBase64: base64,
-        imageMime: mime,
-        temperature: 0.2,
-        max_tokens: 500,
-      });
-      return { text: String(out || ""), forceTextFallback: false };
-    } catch (e) {
-      lastErr = e;
-      if (shouldTextFallback(e)) return { text: null, forceTextFallback: true, error: e };
+  for (const order of orders) {
+    for (const mime of mimes) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const out = await askVision(env, order, userPromptBase, {
+            systemHint: systemHintBase,
+            imageBase64: base64,
+            imageMime: mime,
+            temperature: attempt === 0 ? 0.2 : 0.0,
+            max_tokens: attempt === 0 ? 500 : 320,
+          });
+          return { text: String(out || ""), forceTextFallback: false };
+        } catch (e) {
+          lastErr = e;
+          if (shouldTextFallback(e)) return { text: null, forceTextFallback: true, error: e };
+          if (!isTempError(e)) break;
+        }
+      }
     }
   }
-
-  // 2) CF-vision першим
-  const cfFirst = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.5-flash";
-  for (const mime of mimes) {
-    try {
-      const out = await askVision(env, cfFirst, userPromptBase, {
-        systemHint: systemHintBase,
-        imageBase64: base64,
-        imageMime: mime,
-        temperature: 0.2,
-        max_tokens: 500,
-      });
-      return { text: String(out || ""), forceTextFallback: false };
-    } catch (e) {
-      lastErr = e;
-      if (shouldTextFallback(e)) return { text: null, forceTextFallback: true, error: e };
-    }
-  }
-
-  // 3) м’який повтор із пониженими лімітами
-  for (const mime of mimes) {
-    try {
-      const out = await askVision(env, modelOrder, userPromptBase, {
-        systemHint: systemHintBase,
-        imageBase64: base64,
-        imageMime: mime,
-        temperature: 0.0,
-        max_tokens: 320,
-      });
-      return { text: String(out || ""), forceTextFallback: false };
-    } catch (e) {
-      lastErr = e;
-      if (shouldTextFallback(e)) return { text: null, forceTextFallback: true, error: e };
-    }
-  }
-
   return { text: null, forceTextFallback: false, error: lastErr };
 }
 // ─────────────────────────────────────────────────────────────────────────────
