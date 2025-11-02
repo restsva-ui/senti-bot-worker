@@ -1,125 +1,84 @@
 // src/lib/providers/workersAi.js
-// Обгортки для Cloudflare Workers AI (чат/візн/ASR/TTS).
-// Не прив'язаний до глобальних ENV — ключі/айді приходять параметрами.
+// Cloudflare Workers AI provider (text & vision)
 
-const CF_BASE = (accountId) => `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/`;
+function sanitizeBase64(b64 = "") {
+  return String(b64).replace(/^data:[^;]+;base64,/i, "").replace(/\s+/g, "");
+}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// НИЗЬКОРІВНЕВИЙ ВИКЛИК
+export async function call_cfText(env, model, userPrompt, { systemHint, temperature = 0.2, max_tokens = 512 }) {
+  const accountId = env.CF_ACCOUNT_ID;
+  const token = env.CF_AI_TOKEN || env.CLOUDFLARE_API_TOKEN || env.CF_AUTH_TOKEN;
+  if (!accountId || !token) throw new Error("CF credentials missing");
 
-export async function callWorkersAI({ accountId, apiToken, model, inputs }) {
-  if (!accountId) throw new Error("WorkersAI: missing accountId");
-  if (!apiToken) throw new Error("WorkersAI: missing apiToken");
-  if (!model) throw new Error("WorkersAI: missing model");
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${encodeURIComponent(model)}`;
 
-  const url = CF_BASE(accountId) + encodeURIComponent(model);
+  const messages = [];
+  if (systemHint) messages.push({ role: "system", content: systemHint });
+  messages.push({ role: "user", content: userPrompt });
+
   const r = await fetch(url, {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiToken}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(inputs ?? {})
+    headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages,
+      temperature,
+      max_tokens,
+    })
   });
 
-  const j = await r.json().catch(() => null);
-  if (!r.ok || !j?.success) {
-    const errs = (j && j.errors) ? JSON.stringify(j.errors) : await r.text().catch(() => "");
-    throw new Error(`WorkersAI ${r.status}: ${errs}`);
+  if (!r.ok) {
+    const t = await safeErr(r);
+    throw new Error(`cf:text ${r.status} ${t}`);
   }
-  return j.result;
+  const j = await r.json();
+  const text = j?.result?.response || j?.result?.output_text || "";
+  return String(text || "").trim();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ВЕРХНІ РІВНІ — СПЕЦІАЛІЗОВАНІ ВИКЛИКИ
+export async function call_cfVision(env, model, userPrompt, {
+  systemHint,
+  imageBase64,
+  imageMime = "image/jpeg",
+  temperature = 0.2,
+  max_tokens = 700,
+  json = false,
+}) {
+  const accountId = env.CF_ACCOUNT_ID;
+  const token = env.CF_AI_TOKEN || env.CLOUDFLARE_API_TOKEN || env.CF_AUTH_TOKEN;
+  if (!accountId || !token) throw new Error("CF credentials missing");
 
-// 1) ЧАТ/ТЕКСТ (LLM інструктаж, код, reasoning)
-export async function cfChat({ accountId, apiToken, model, messages, temperature = 0.2 }) {
-  const res = await callWorkersAI({
-    accountId, apiToken, model,
-    inputs: { messages, temperature }
-  });
-
-  // CF моделі повертають різні поля залежно від провайдера.
-  // Спробуємо витягнути текст максимально універсально.
-  const text =
-    res?.response ??
-    res?.output_text ??
-    res?.output?.text ??
-    res?.result ??
-    (Array.isArray(res?.choices) ? res.choices[0]?.message?.content : null) ??
-    "";
-
-  return { text, raw: res };
-}
-
-// 2) ВІЖН (image + текстовий промпт)
-export async function cfVision({ accountId, apiToken, model, prompt, imageBase64 }) {
-  // Формат вмісту узгоджений із CF прикладами: content = [{type:"input_text"}, {type:"input_image", image: base64}]
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${encodeURIComponent(model)}`;
+  const base64 = sanitizeBase64(imageBase64);
   const messages = [{
     role: "user",
     content: [
-      { type: "input_text", text: prompt || "" },
-      ...(imageBase64 ? [{ type: "input_image", image: imageBase64 }] : [])
+      { type: "input_text", text: String(userPrompt || "") },
+      // нові ревізії приймають image object з mime_type; старим не заважає
+      { type: "input_image", image: { data: base64, mime_type: imageMime } },
     ]
   }];
+  if (systemHint) messages.unshift({ role: "system", content: String(systemHint) });
 
-  const res = await callWorkersAI({
-    accountId, apiToken, model,
-    inputs: { messages, temperature: 0.2 }
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages,
+      temperature,
+      max_tokens,
+      ...(json ? { response_format: { type: "json_object" } } : {})
+    })
   });
 
-  const text =
-    res?.response ??
-    res?.output_text ??
-    res?.output?.text ??
-    res?.result ??
-    "";
-
-  return { text, raw: res };
-}
-
-// 3) ASR (Whisper) — audio(base64) → transcript
-export async function cfWhisper({ accountId, apiToken, model, audioBase64, format = "mp3" }) {
-  const res = await callWorkersAI({
-    accountId, apiToken, model,
-    inputs: { audio: { buffer: audioBase64, format } }
-  });
-
-  // Зазвичай повертає { text: "..." } або подібне
-  const text =
-    res?.text ??
-    res?.transcript ??
-    res?.result ??
-    res?.response ??
-    "";
-
-  return { text, raw: res };
-}
-
-// 4) TTS — text → audio (base64)
-// Назва TTS-моделі залежить від каталогу Workers AI (перевір у changelog/каталозі).
-export async function cfTTS({ accountId, apiToken, model, text, voice = "male" }) {
-  const res = await callWorkersAI({
-    accountId, apiToken, model,
-    inputs: { text, voice }
-  });
-
-  // Прагнемо повернути base64 аудіо (CF часто повертає { audio: base64, format })
-  const audioBase64 =
-    res?.audio ??
-    res?.output?.audio ??
-    res?.result ??
-    null;
-
-  const format =
-    res?.format ??
-    res?.output?.format ??
-    "mp3";
-
-  if (!audioBase64) {
-    throw new Error("WorkersAI TTS: no audio in result");
+  if (!r.ok) {
+    const t = await safeErr(r);
+    throw new Error(`cf:vision ${r.status} ${t}`);
   }
+  const j = await r.json();
+  const text = j?.result?.response || j?.result?.output_text || "";
+  return String(text || "").trim();
+}
 
-  return { audioBase64, format, raw: res };
+async function safeErr(r) {
+  try { return await r.text(); } catch { return ""; }
 }
