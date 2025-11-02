@@ -4,16 +4,16 @@
 // підмішуємо як префікс до user-повідомлення.
 
 const HEALTH_NS = "ai:health";
-const ALPHA = 0.3; // EWMA коеф.
-const SLOW_MS = 4500; // поріг "повільно"
+const ALPHA = 0.3;     // EWMA коеф.
+const SLOW_MS = 4500;  // поріг "повільно"
+const RETRIES = 2;     // кількість повторів на провайдера
+const TIMEOUT_MS = 22000; // таймаут одного виклику
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 
 function nowMs() { return Date.now(); }
-async function jsonSafe(r) {
-  try { return await r.json(); } catch { return null; }
-}
+async function jsonSafe(r) { try { return await r.json(); } catch { return null; } }
 function withSystemPrefix(systemHint, userPrompt) {
   const s = (systemHint || "").trim();
   if (!s) return String(userPrompt || "");
@@ -22,9 +22,8 @@ function withSystemPrefix(systemHint, userPrompt) {
 function pickKV(env) {
   return env.STATE_KV || env.CHECKLIST_KV || env.ENERGY_LOG_KV || env.LEARN_QUEUE_KV;
 }
-function hkey(provider, model) {
-  return `${HEALTH_NS}:${provider}:${model}`;
-}
+function hkey(provider, model) { return `${HEALTH_NS}:${provider}:${model}`; }
+
 async function updateHealth(env, { provider, model, ms, ok }) {
   const kv = pickKV(env);
   if (!kv) return;
@@ -36,6 +35,7 @@ async function updateHealth(env, { provider, model, ms, ok }) {
   const data = { ewmaMs, failStreak, lastTs: new Date().toISOString() };
   try { await kv.put(key, JSON.stringify(data)); } catch {}
 }
+
 function parseEntry(raw) {
   // Підтримувані форми:
   // - "gemini:gemini-2.5-flash"
@@ -44,15 +44,9 @@ function parseEntry(raw) {
   // - "free:meta-llama/llama-4-scout:free" або просто "free"
   const s = String(raw || "").trim();
   if (!s) return null;
-
   if (s.startsWith("@cf/")) return { provider: "cf", model: s };
   const m = s.split(":");
-  if (m.length >= 2) {
-    const provider = m[0].trim();
-    const model = m.slice(1).join(":").trim();
-    return { provider, model };
-  }
-  // якщо явно не вказано — вважаємо, що це openrouter-модель (вигляд a/b)
+  if (m.length >= 2) return { provider: m[0].trim(), model: m.slice(1).join(":").trim() };
   if (s.includes("/")) return { provider: "openrouter", model: s };
   return { provider: "free", model: s };
 }
@@ -65,8 +59,43 @@ function detectMode(opts = {}) {
   return "text";                                 // text -> text (у т.ч. код)
 }
 
+// Санітизація відповіді провайдерів (зрізати "via ...", зайві пробіли)
+function stripProviderSignature(s = "") {
+  return String(s)
+    .replace(/^[ \t]*(?:—|--)?\s*via\s+[^\n]*\n?/gim, "")
+    .trim();
+}
+function normalizeText(s = "") {
+  return stripProviderSignature(String(s || "").replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim());
+}
+
+// Обгортка з таймаутом
+async function withTimeout(promise, ms = TIMEOUT_MS, label = "request") {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(`${label}:timeout`), ms);
+  try {
+    const res = await promise(ctrl.signal);
+    return res;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// Повтор з ретраями
+async function callWithRetry(fn, tries = RETRIES) {
+  let lastErr;
+  for (let i = 0; i < Math.max(1, tries); i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (i < tries) continue;
+    }
+  }
+  throw lastErr || new Error("call failed");
+}
 // ─────────────────────────────────────────────────────────────────────────────
-// Провайдери — текст/vision/stt/tts
+// Провайдери — text/vision/stt/tts + JSON-режим (де можливо)
 
 // GEMINI (text + vision)
 async function callGemini(env, model, prompt, systemHint, opts = {}) {
@@ -77,36 +106,40 @@ async function callGemini(env, model, prompt, systemHint, opts = {}) {
   const user = withSystemPrefix(systemHint, prompt);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
 
-  // parts: text + (опціонально) inline image
   const parts = [{ text: user }];
   if (mode === "vision" && opts.imageBase64) {
-    // За замовчуванням припускаємо PNG; змінюй mime_type за потреби.
-    parts.push({
-      inline_data: { mime_type: opts.imageMime || "image/png", data: opts.imageBase64 }
-    });
+    parts.push({ inline_data: { mime_type: opts.imageMime || "image/png", data: opts.imageBase64 } });
   }
+
+  const generationConfig = {
+    temperature: opts.temperature ?? 0.2,
+    ...(opts.max_tokens ? { maxOutputTokens: opts.max_tokens } : {}),
+    ...(opts.json ? { responseMimeType: "application/json" } : {}),
+  };
 
   const body = {
     contents: [{ role: "user", parts }],
-    generationConfig: { temperature: opts.temperature ?? 0.2 },
+    generationConfig,
     safetySettings: [{ category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }],
   };
 
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await jsonSafe(r);
-  if (!r.ok) throw new Error(`gemini ${r.status} ${data?.error?.message || ""}`);
+  const run = async (signal) => {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    const data = await jsonSafe(r);
+    if (!r.ok) throw new Error(`gemini ${r.status} ${data?.error?.message || ""}`);
+    const text =
+      data?.candidates?.[0]?.content?.parts?.map(p => p?.text).filter(Boolean).join("\n").trim() ||
+      data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    if (!text) throw new Error("gemini: empty response");
+    return normalizeText(text);
+  };
 
-  const text =
-    data?.candidates?.[0]?.content?.parts?.map(p => p?.text).filter(Boolean).join("\n").trim() ||
-    data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-    "";
-
-  if (!text) throw new Error("gemini: empty response");
-  return text.trim();
+  return await withTimeout(run, opts.timeoutMs || TIMEOUT_MS, "gemini");
 }
 
 // CLOUDFLARE WORKERS AI (chat/vision/stt/tts)
@@ -120,76 +153,78 @@ async function callCF(env, model, prompt, systemHint, opts = {}) {
 
   let inputs;
   if (mode === "vision") {
-    // CF vision формат: content = [{type:"input_text"},{type:"input_image", image: BASE64}]
     inputs = {
       messages: [{
         role: "user",
         content: [
-          { type: "input_text", text: String(prompt || "") },
+          { type: "input_text", text: withSystemPrefix(systemHint, prompt) },
           ...(opts.imageBase64 ? [{ type: "input_image", image: opts.imageBase64 }] : [])
         ]
       }],
       temperature: opts.temperature ?? 0.2
     };
   } else if (mode === "stt") {
-    inputs = {
-      audio: { buffer: opts.audioBase64, format: opts.audioFormat || "mp3" }
-    };
+    inputs = { audio: { buffer: opts.audioBase64, format: opts.audioFormat || "mp3" } };
   } else if (mode === "tts") {
     inputs = { text: opts.ttsText, voice: opts.voice || "male" };
   } else {
-    // text/chat
     const messages = [];
     if (systemHint?.trim()) messages.push({ role: "system", content: systemHint.trim() });
     messages.push({ role: "user", content: String(prompt || "") });
-    inputs = { messages, temperature: opts.temperature ?? 0.2 };
+    inputs = {
+      messages,
+      temperature: opts.temperature ?? 0.2,
+      ...(opts.json ? { response_format: { type: "json_object" } } : {})
+    };
   }
 
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(inputs),
-  });
+  const run = async (signal) => {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(inputs),
+      signal,
+    });
 
-  const data = await jsonSafe(r);
-  if (!data?.success) {
-    const msg = data?.errors?.[0]?.message || `cf http ${r.status}`;
-    throw new Error(msg);
-  }
+    const data = await jsonSafe(r);
+    if (!data?.success) {
+      const msg = data?.errors?.[0]?.message || `cf http ${r.status}`;
+      throw new Error(msg);
+    }
 
-  // Нормалізуємо вихід
-  if (mode === "tts") {
-    const res = data?.result || {};
-    const audioBase64 = res?.audio ?? res?.output?.audio ?? res?.result ?? null;
-    const format = res?.format ?? res?.output?.format ?? "mp3";
-    if (!audioBase64) throw new Error("cf tts: no audio");
-    return { audioBase64, format };
-  }
+    if (mode === "tts") {
+      const res = data?.result || {};
+      const audioBase64 = res?.audio ?? res?.output?.audio ?? res?.result ?? null;
+      const format = res?.format ?? res?.output?.format ?? "mp3";
+      if (!audioBase64) throw new Error("cf tts: no audio");
+      return { audioBase64, format };
+    }
 
-  if (mode === "stt") {
-    const res = data?.result || {};
-    const text = res?.text ?? res?.transcript ?? res?.response ?? res?.result ?? "";
-    if (!text) throw new Error("cf stt: empty transcript");
-    return String(text).trim();
-  }
+    if (mode === "stt") {
+      const res = data?.result || {};
+      const text = res?.text ?? res?.transcript ?? res?.response ?? res?.result ?? "";
+      if (!text) throw new Error("cf stt: empty transcript");
+      return normalizeText(text);
+    }
 
-  // text / vision → текст
-  const out =
-    data?.result?.response?.trim?.() ||
-    data?.result?.text?.trim?.() ||
-    data?.result?.output_text?.trim?.() ||
-    data?.result?.output?.text?.trim?.() ||
-    data?.result?.result?.trim?.() ||
-    "";
+    const out =
+      data?.result?.response?.trim?.() ||
+      data?.result?.text?.trim?.() ||
+      data?.result?.output_text?.trim?.() ||
+      data?.result?.output?.text?.trim?.() ||
+      data?.result?.result?.trim?.() ||
+      "";
+    if (!out) throw new Error("cf: empty response");
+    return normalizeText(out);
+  };
 
-  if (!out) throw new Error("cf: empty response");
-  return out.trim();
+  return await withTimeout(run, opts.timeoutMs || TIMEOUT_MS, "cf");
 }
 
-// OPENROUTER (text тільки; якщо vision/stt/tts — пропускаємо)
+// OPENROUTER (text; JSON-режим підтримується через response_format)
 async function callOpenRouter(env, model, prompt, systemHint, opts = {}) {
   const mode = detectMode(opts);
   if (mode !== "text") throw new Error("openrouter: unsupported mode for this call");
@@ -202,28 +237,34 @@ async function callOpenRouter(env, model, prompt, systemHint, opts = {}) {
   if (systemHint?.trim()) messages.push({ role: "system", content: systemHint.trim() });
   messages.push({ role: "user", content: String(prompt || "") });
 
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature: opts.temperature ?? 0.6,
-    }),
-  });
-  const data = await jsonSafe(r);
-  const txt = data?.choices?.[0]?.message?.content || "";
-  if (!r.ok || !txt) {
-    const err = data?.error?.message || data?.message || `http ${r.status}`;
-    throw new Error(`openrouter: ${err}`);
-  }
-  return txt.trim();
+  const body = {
+    model,
+    messages,
+    temperature: opts.temperature ?? 0.6,
+    ...(opts.max_tokens ? { max_tokens: opts.max_tokens } : {}),
+    ...(opts.json ? { response_format: { type: "json_object" } } : {}),
+  };
+
+  const run = async (signal) => {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    const data = await jsonSafe(r);
+    const txt = data?.choices?.[0]?.message?.content || "";
+    if (!r.ok || !txt) {
+      const err = data?.error?.message || data?.message || `http ${r.status}`;
+      throw new Error(`openrouter: ${err}`);
+    }
+    return normalizeText(txt);
+  };
+
+  return await withTimeout(run, opts.timeoutMs || TIMEOUT_MS, "openrouter");
 }
 
-// FREE (OpenAI-сумісний endpoint; тільки text)
+// FREE (OpenAI-сумісний endpoint; text; JSON-режим через response_format)
 async function callFree(env, model, prompt, systemHint, opts = {}) {
   const mode = detectMode(opts);
   if (mode !== "text") throw new Error("free: unsupported mode for this call");
@@ -237,32 +278,42 @@ async function callFree(env, model, prompt, systemHint, opts = {}) {
   if (systemHint?.trim()) messages.push({ role: "system", content: systemHint.trim() });
   messages.push({ role: "user", content: String(prompt || "") });
 
-  const r = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(key ? { Authorization: `Bearer ${key}` } : {}),
-    },
-    body: JSON.stringify({
-      model: model || env.FREE_LLM_MODEL || "gpt-3.5-turbo",
-      messages,
-      temperature: opts.temperature ?? 0.6,
-    }),
-  });
-  const data = await jsonSafe(r);
-  const txt = data?.choices?.[0]?.message?.content || "";
-  if (!r.ok || !txt) {
-    const err = data?.error?.message || data?.message || `http ${r.status}`;
-    throw new Error(`free: ${err}`);
-  }
-  return txt.trim();
-}
+  const body = {
+    model: model || env.FREE_LLM_MODEL || "gpt-3.5-turbo",
+    messages,
+    temperature: opts.temperature ?? 0.6,
+    ...(opts.max_tokens ? { max_tokens: opts.max_tokens } : {}),
+    ...(opts.json ? { response_format: { type: "json_object" } } : {}),
+  };
 
+  const run = async (signal) => {
+    const r = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) },
+      body: JSON.stringify(body),
+      signal,
+    });
+    const data = await jsonSafe(r);
+    const txt = data?.choices?.[0]?.message?.content || "";
+    if (!r.ok || !txt) {
+      const err = data?.error?.message || data?.message || `http ${r.status}`;
+      throw new Error(`free: ${err}`);
+    }
+    return normalizeText(txt);
+  };
+
+  return await withTimeout(run, opts.timeoutMs || TIMEOUT_MS, "free");
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // Головна точка: послідовний перебір за modelOrder.
-// Розширено: тепер приймає опції режимів (imageBase64 / audioBase64 / ttsText / voice / temperature).
+// Параметри: { systemHint, imageBase64, imageMime, audioBase64, audioFormat, ttsText, voice, temperature, max_tokens, json }
 
-export async function askAnyModel(env, modelOrder, prompt, { systemHint, imageBase64, imageMime, audioBase64, audioFormat, ttsText, voice, temperature } = {}) {
+export async function askAnyModel(
+  env,
+  modelOrder,
+  prompt,
+  { systemHint, imageBase64, imageMime, audioBase64, audioFormat, ttsText, voice, temperature, max_tokens, json } = {}
+) {
   const entries = String(modelOrder || "")
     .split(",")
     .map(s => s.trim())
@@ -271,12 +322,12 @@ export async function askAnyModel(env, modelOrder, prompt, { systemHint, imageBa
   // Якщо порядок не задано — спробуємо мінімальний FREE як запасний варіант (text only)
   if (!entries.length) {
     const p = withSystemPrefix(systemHint, prompt);
-    return await callFree(env, env.FREE_LLM_MODEL || "gpt-3.5-turbo", p, "", { temperature });
+    return await callFree(env, env.FREE_LLM_MODEL || "gpt-3.5-turbo", p, "", { temperature, max_tokens, json });
   }
 
   const mode = detectMode({ imageBase64, audioBase64, ttsText });
-
   let lastErr = null;
+
   for (const raw of entries) {
     const ent = parseEntry(raw);
     if (!ent) continue;
@@ -284,25 +335,27 @@ export async function askAnyModel(env, modelOrder, prompt, { systemHint, imageBa
 
     const t0 = nowMs();
     try {
-      let out;
-      if (provider === "gemini") {
-        // Gemini підтримує text і vision (inline_data)
-        out = await callGemini(env, model, prompt, systemHint, { imageBase64, imageMime, temperature });
-      } else if (provider === "cf") {
-        // CF підтримує text/vision/stt/tts
-        out = await callCF(env, model, prompt, systemHint, { imageBase64, imageMime, audioBase64, audioFormat, ttsText, voice, temperature });
-      } else if (provider === "openrouter") {
-        if (mode !== "text") throw new Error("openrouter: only text mode supported here");
-        out = await callOpenRouter(env, model, prompt, systemHint, { temperature });
-      } else if (provider === "free") {
-        if (mode !== "text") throw new Error("free: only text mode supported here");
-        out = await callFree(env, model, prompt, systemHint, { temperature });
-      } else {
-        // невідомий провайдер — пробуємо як Free (text only)
-        if (mode !== "text") throw new Error("unknown provider: only text mode fallback available");
-        out = await callFree(env, model, prompt, systemHint, { temperature });
-      }
+      const doCall = async () => {
+        if (provider === "gemini") {
+          // Gemini: text/vision
+          return await callGemini(env, model, prompt, systemHint, { imageBase64, imageMime, temperature, max_tokens, json });
+        } else if (provider === "cf") {
+          // Cloudflare: text/vision/stt/tts
+          return await callCF(env, model, prompt, systemHint, { imageBase64, imageMime, audioBase64, audioFormat, ttsText, voice, temperature, max_tokens, json });
+        } else if (provider === "openrouter") {
+          if (mode !== "text") throw new Error("openrouter: only text mode supported here");
+          return await callOpenRouter(env, model, prompt, systemHint, { temperature, max_tokens, json });
+        } else if (provider === "free") {
+          if (mode !== "text") throw new Error("free: only text mode supported here");
+          return await callFree(env, model, prompt, systemHint, { temperature, max_tokens, json });
+        } else {
+          // невідомий провайдер — пробуємо як Free (text only)
+          if (mode !== "text") throw new Error("unknown provider: only text mode fallback available");
+          return await callFree(env, model, prompt, systemHint, { temperature, max_tokens, json });
+        }
+      };
 
+      const out = await callWithRetry(doCall, RETRIES);
       const ms = nowMs() - t0;
       updateHealth(env, { provider, model, ms, ok: true }).catch(() => {});
       return out;
@@ -310,7 +363,7 @@ export async function askAnyModel(env, modelOrder, prompt, { systemHint, imageBa
       const ms = nowMs() - t0;
       updateHealth(env, { provider, model, ms, ok: false }).catch(() => {});
       lastErr = e;
-      continue; // пробуємо наступний у ланцюжку
+      continue; // пробуємо наступного у ланцюжку
     }
   }
 
@@ -322,13 +375,13 @@ export async function askAnyModel(env, modelOrder, prompt, { systemHint, imageBa
 // Спеціалізовані “цукрові” функції для зручності інтеграції
 
 // text/code
-export async function askText(env, modelOrder, prompt, { systemHint, temperature } = {}) {
-  return await askAnyModel(env, modelOrder, prompt, { systemHint, temperature });
+export async function askText(env, modelOrder, prompt, { systemHint, temperature, max_tokens, json } = {}) {
+  return await askAnyModel(env, modelOrder, prompt, { systemHint, temperature, max_tokens, json });
 }
 
 // vision: image(base64) + prompt → text
-export async function askVision(env, modelOrder, prompt, { systemHint, imageBase64, imageMime = "image/png", temperature } = {}) {
-  return await askAnyModel(env, modelOrder, prompt, { systemHint, imageBase64, imageMime, temperature });
+export async function askVision(env, modelOrder, prompt, { systemHint, imageBase64, imageMime = "image/png", temperature, max_tokens, json } = {}) {
+  return await askAnyModel(env, modelOrder, prompt, { systemHint, imageBase64, imageMime, temperature, max_tokens, json });
 }
 
 // stt: audio(base64) → transcript
@@ -339,10 +392,8 @@ export async function transcribe(env, modelOrder, { audioBase64, audioFormat = "
 // tts: text → { audioBase64, format }
 export async function speak(env, modelOrder, text, { voice = "male", systemHint } = {}) {
   const out = await askAnyModel(env, modelOrder, "(tts)", { systemHint, ttsText: text, voice });
-  // для TTS ми повертаємо об'єкт {audioBase64, format} з callCF
-  return out;
+  return out; // { audioBase64, format }
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Health summary для /admin
 
