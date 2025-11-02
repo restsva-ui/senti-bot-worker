@@ -44,6 +44,34 @@ function limitMsg(s, max = 220) {
   return s.length <= max ? s : s.slice(0, max - 1);
 }
 
+/** ── Безпечний виклик моделі з фолбеком ─────────────────────────────────── */
+async function safeAsk(env, modelOrder, prompt, { systemHint } = {}) {
+  // 1) пробуємо основний ланцюжок моделей
+  if (modelOrder) {
+    try {
+      const out = await askAnyModel(env, modelOrder, prompt, { systemHint });
+      return out;
+    } catch (err) {
+      console.error("Помилка askAnyModel:", err);
+      // 2) фолбек на локальний think
+      try {
+        const out = await think(env, prompt, { systemHint });
+        return out;
+      } catch (err2) {
+        console.error("Помилка fallback think після askAnyModel:", err2);
+        return null;
+      }
+    }
+  }
+  // якщо modelOrder не заданий — одразу think
+  try {
+    const out = await think(env, prompt, { systemHint });
+    return out;
+  } catch (err) {
+    console.error("Помилка think (без modelOrder):", err);
+    return null;
+  }
+}
 /** ── Основна функція відповіді ───────────────────────────────────────────── */
 export async function aiRespond(env, { text, lang, name, systemHint, expand }) {
   const modelOrder = String(env.MODEL_ORDER || "").trim();
@@ -56,27 +84,30 @@ export async function aiRespond(env, { text, lang, name, systemHint, expand }) {
 User (${name}) says: ${text}
 ${control}`;
 
-  // 1) перша спроба (model router або think)
-  let out = modelOrder
-    ? await askAnyModel(env, modelOrder, prompt, { systemHint })
-    : await think(env, prompt, { systemHint });
-
+  // 1) перша спроба (безпечно)
+  let out = await safeAsk(env, modelOrder, prompt, { systemHint });
+  if (!out) {
+    const msg = "Виникла помилка при зверненні до AI. Спробуйте пізніше.";
+    return { short: msg, full: msg };
+  }
   out = stripProviderSignature((out || "").trim());
 
-  // 2) якщо почав лити технічний дамп про моделі — страхуємося
+  // 2) якщо технічний дамп — ще одна безпечна спроба
   if (looksLikeModelDump(out)) {
-    const retry = modelOrder
-      ? await askAnyModel(env, modelOrder, prompt, { systemHint })
-      : await think(env, prompt, { systemHint });
-    out = stripProviderSignature((retry || out || "").trim());
+    const retry = await safeAsk(env, modelOrder, prompt, { systemHint });
+    if (retry) {
+      out = stripProviderSignature((retry || out || "").trim());
+    }
   }
 
   // 3) анти-розкриття «я AI»
   if (revealsAiSelf(out)) {
     const fix = `Rewrite the previous answer as Senti. Do NOT mention being an AI/model or any company. Keep it in ${lang}, concise and natural.`;
-    const cleaned = modelOrder
-      ? await askAnyModel(env, modelOrder, fix, { systemHint })
-      : await think(env, fix, { systemHint });
+    const cleaned = await safeAsk(env, modelOrder, fix, { systemHint });
+    if (!cleaned) {
+      const msg = "Виникла помилка при зверненні до AI. Спробуйте пізніше.";
+      return { short: msg, full: msg };
+    }
     out = stripProviderSignature((cleaned || out || "").trim());
   }
 
@@ -89,9 +120,11 @@ ${control}`;
   const detected = detectFromText(out);
   if (detected && lang && detected !== lang) {
     const hardPrompt = `STRICT LANGUAGE MODE: Respond ONLY in ${lang}. If the previous answer used another language, rewrite it now in ${lang}. Keep it concise.`;
-    const fixed = modelOrder
-      ? await askAnyModel(env, modelOrder, hardPrompt, { systemHint })
-      : await think(env, hardPrompt, { systemHint });
+    const fixed = await safeAsk(env, modelOrder, hardPrompt, { systemHint });
+    if (!fixed) {
+      const msg = "Виникла помилка при зверненні до AI. Спробуйте пізніше.";
+      return { short: msg, full: msg };
+    }
     const clean = stripProviderSignature((fixed || "").trim());
     out = looksLikeEmojiStart(clean) ? clean : `${guessEmoji(text)} ${clean}`;
   }
