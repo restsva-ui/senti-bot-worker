@@ -24,6 +24,11 @@ function pickKV(env) {
 }
 function hkey(provider, model) { return `${HEALTH_NS}:${provider}:${model}`; }
 
+// ✳️ НОВЕ: санітизація base64 (прибирає префікс data:...;base64,)
+function sanitizeBase64(b64 = "") {
+  return String(b64).replace(/^data:[^;]+;base64,/i, "").replace(/\s+/g, "");
+}
+
 async function updateHealth(env, { provider, model, ms, ok }) {
   const kv = pickKV(env);
   if (!kv) return;
@@ -53,10 +58,10 @@ function parseEntry(raw) {
 
 // Розпізнавання режиму за опціями
 function detectMode(opts = {}) {
-  if (opts?.ttsText)   return "tts";     // text -> audio
-  if (opts?.audioBase64) return "stt";   // audio -> text
-  if (opts?.imageBase64) return "vision";// image -> text
-  return "text";                          // text -> text (у т.ч. код)
+  if (opts?.ttsText)     return "tts";     // text -> audio
+  if (opts?.audioBase64) return "stt";     // audio -> text
+  if (opts?.imageBase64) return "vision";  // image -> text
+  return "text";                            // text -> text (у т.ч. код)
 }
 
 // Підтримка режимів провайдерами
@@ -113,7 +118,7 @@ async function callGemini(env, model, prompt, systemHint, opts = {}) {
 
   const parts = [{ text: user }];
   if (mode === "vision" && opts.imageBase64) {
-    parts.push({ inline_data: { mime_type: opts.imageMime || "image/png", data: opts.imageBase64 } });
+    parts.push({ inline_data: { mime_type: opts.imageMime || "image/jpeg", data: sanitizeBase64(opts.imageBase64) } });
   }
 
   const generationConfig = {
@@ -122,8 +127,11 @@ async function callGemini(env, model, prompt, systemHint, opts = {}) {
     ...(opts.json ? { responseMimeType: "application/json" } : {}),
   };
 
-  const body = { contents: [{ role: "user", parts }], generationConfig,
-                 safetySettings: [{ category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }] };
+  const body = {
+    contents: [{ role: "user", parts }],
+    generationConfig,
+    safetySettings: [{ category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }]
+  };
 
   const run = async (signal) => {
     const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal });
@@ -141,7 +149,7 @@ async function callGemini(env, model, prompt, systemHint, opts = {}) {
 
 // CLOUDFLARE WORKERS AI (chat/vision/stt/tts)
 async function callCF(env, model, prompt, systemHint, opts = {}) {
-  const token = env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN;
+  const token = env.CLOUDFLARE_API_TOKEN || env.CF_AI_TOKEN || env.CF_API_TOKEN;
   const acc   = env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID;
   if (!token || !acc) throw new Error("Cloudflare credentials missing");
 
@@ -149,24 +157,35 @@ async function callCF(env, model, prompt, systemHint, opts = {}) {
   const mode = detectMode(opts);
 
   let inputs;
+
   if (mode === "vision") {
+    // ✳️ НОВЕ: чистимо base64 та явно передаємо mime_type у форматі CF
+    const base64 = sanitizeBase64(opts.imageBase64 || "");
+    const mime   = opts.imageMime || "image/jpeg";
     inputs = {
-      messages: [{ role: "user", content: [
-        { type: "input_text", text: withSystemPrefix(systemHint, prompt) },
-        ...(opts.imageBase64 ? [{ type: "input_image", image: opts.imageBase64 }] : [])
-      ]}],
-      temperature: opts.temperature ?? 0.2
+      messages: [{
+        role: "user",
+        content: [
+          { type: "input_text",  text: withSystemPrefix(systemHint, prompt) },
+          { type: "input_image", image: { data: base64, mime_type: mime } }
+        ]
+      }],
+      temperature: opts.temperature ?? 0.2,
+      ...(opts.json ? { response_format: { type: "json_object" } } : {})
     };
   } else if (mode === "stt") {
-    inputs = { audio: { buffer: opts.audioBase64, format: opts.audioFormat || "mp3" } };
+    inputs = { audio: { buffer: sanitizeBase64(opts.audioBase64 || ""), format: opts.audioFormat || "mp3" } };
   } else if (mode === "tts") {
-    inputs = { text: opts.ttsText, voice: opts.voice || "male" };
+    inputs = { text: String(opts.ttsText || ""), voice: opts.voice || "male" };
   } else {
     const messages = [];
     if (systemHint?.trim()) messages.push({ role: "system", content: systemHint.trim() });
     messages.push({ role: "user", content: String(prompt || "") });
-    inputs = { messages, temperature: opts.temperature ?? 0.2,
-               ...(opts.json ? { response_format: { type: "json_object" } } : {}) };
+    inputs = {
+      messages,
+      temperature: opts.temperature ?? 0.2,
+      ...(opts.json ? { response_format: { type: "json_object" } } : {})
+    };
   }
 
   const run = async (signal) => {
@@ -176,10 +195,11 @@ async function callCF(env, model, prompt, systemHint, opts = {}) {
       body: JSON.stringify(inputs),
       signal
     });
+
     const data = await jsonSafe(r);
-    if (!data?.success) {
-      const msg = data?.errors?.[0]?.message || `cf http ${r.status}`;
-      throw new Error(msg);
+    if (!r.ok || data?.success === false) {
+      const msg = data?.errors?.[0]?.message || data?.messages?.[0] || `cf http ${r.status}`;
+      throw new Error(`cf: ${msg}`);
     }
 
     if (mode === "tts") {
@@ -232,7 +252,17 @@ async function callOpenRouter(env, model, prompt, systemHint, opts = {}) {
   };
 
   const run = async (signal) => {
-    const r = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify(body), signal });
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "content-type": "application/json",
+        ...(env.OPENROUTER_SITE_URL ? { "HTTP-Referer": env.OPENROUTER_SITE_URL } : {}),
+        ...(env.OPENROUTER_APP_NAME ? { "X-Title": env.OPENROUTER_APP_NAME } : {})
+      },
+      body: JSON.stringify(body),
+      signal
+    });
     const data = await jsonSafe(r);
     const txt  = data?.choices?.[0]?.message?.content || "";
     if (!r.ok || !txt) {
@@ -325,7 +355,6 @@ export async function askAnyModel(
   // 2) Якщо нічого сумісного — спеціальне повідомлення
   if (!entries.length) {
     if (mode === "text") {
-      // як резерв — спробуємо FREE, якщо налаштований
       const p = withSystemPrefix(systemHint, prompt);
       return await callFree(env, env.FREE_LLM_MODEL || "gpt-3.5-turbo", p, "", { temperature, max_tokens, json });
     }
@@ -347,7 +376,6 @@ export async function askAnyModel(
         } else if (provider === "free") {
           return await callFree(env, model, prompt, systemHint, { temperature, max_tokens, json });
         } else {
-          // unknown → як Free (тільки text)
           if (mode !== "text") throw new Error("unknown provider: only text mode fallback available");
           return await callFree(env, model, prompt, systemHint, { temperature, max_tokens, json });
         }
@@ -377,7 +405,7 @@ export async function askText(env, modelOrder, prompt, { systemHint, temperature
 }
 
 // vision: image(base64) + prompt → text
-export async function askVision(env, modelOrder, prompt, { systemHint, imageBase64, imageMime = "image/png", temperature, max_tokens, json } = {}) {
+export async function askVision(env, modelOrder, prompt, { systemHint, imageBase64, imageMime = "image/jpeg", temperature, max_tokens, json } = {}) {
   return await askAnyModel(env, modelOrder, prompt, { systemHint, imageBase64, imageMime, temperature, max_tokens, json });
 }
 
