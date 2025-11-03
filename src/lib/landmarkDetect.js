@@ -1,5 +1,5 @@
 // src/lib/landmarkDetect.js
-// Простий детектор визначних місць за текстом (опис + OCR).
+// Простий детектор визначних місць за текстом (опис + OCR) + image-based через vision.
 // Повертає структурований список та готові Google Maps лінки.
 // Може доповнюватися через KV: LANDMARKS_KV -> key "list" (JSON масив у форматі як нижче).
 
@@ -65,7 +65,7 @@ const BASE_LANDMARKS = [
   { name: "Charles Bridge", city: "Prague", country: "Czechia", lat: 50.0865, lon: 14.4114,
     aliases: ["charles bridge","карлів міст","карлов мост"] },
   { name: "Wawel Royal Castle", city: "Kraków", country: "Poland", lat: 50.0541, lon: 19.9366,
-    aliases: ["wawel castle","вாவель","вабель","вaвель"] },
+    aliases: ["wawel castle","вавель","вабель","вaвель"] }, // виправлено кириличний alias
   { name: "Schönbrunn Palace", city: "Vienna", country: "Austria", lat: 48.1845, lon: 16.3122,
     aliases: ["schonbrunn","schönbrunn palace","шенбрунн","шенбрун"] },
 ];
@@ -79,9 +79,11 @@ function normalize(s = "") {
     .replace(DIACRITICS, "")
     .replace(/[“”«»„’']/g, "'")
     .replace(/[^a-zа-яёїієґ0-9' \-]/gi, " ")
+    .replace(/\b(looks like|схоже на|виглядає як|похоже на)\b/gi, " ") // прибираємо невпевненість
     .replace(/\s+/g, " ")
     .trim();
 }
+function escapeRegex(s = "") { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
 // Побудувати лінк Google Maps
 export function mapsLink(obj) {
@@ -90,7 +92,7 @@ export function mapsLink(obj) {
     return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${lat},${lon}`)}`;
   }
   const q = [name, city, country].filter(Boolean).join(", ");
-  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`; // виправлено: без переносу після return
 }
 
 // Завантажити додаткові лендмарки з KV (необов'язково)
@@ -111,7 +113,7 @@ async function loadExtraFromKV(env) {
         country: String(x?.country || "").trim(),
         lat: typeof x?.lat === "number" ? x.lat : null,
         lon: typeof x?.lon === "number" ? x.lon : null,
-        aliases: Array.isArray(x?.aliases) ? x.aliases.map((a) => String(a || "").toLowerCase()) : []
+        aliases: Array.isArray(x?.aliases) ? x.aliases.map((a) => normalize(a)) : []
       }))
       .filter((x) => x.name && (x.aliases?.length || x.lat != null));
     return _cachedExtra;
@@ -119,6 +121,7 @@ async function loadExtraFromKV(env) {
     return (_cachedExtra = []);
   }
 }
+
 // Підібрати матч по alias/місту/назві
 function matches(textN, lm) {
   const fields = [
@@ -129,15 +132,25 @@ function matches(textN, lm) {
   for (const f of fields) {
     const token = normalize(String(f));
     if (!token) continue;
-    // гнучке співпадіння по словах
     const re = new RegExp(`\\b${escapeRegex(token)}\\b`, "i");
     if (re.test(textN)) return true;
   }
   return false;
 }
-function escapeRegex(s = "") { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
-// Основна функція детекції
+function dedup(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const x of arr) {
+    const key = [x.name, x.city, x.country].map((s)=>String(s||"").toLowerCase()).join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(x);
+  }
+  return out;
+}
+
+// ── Текстова детекція (опис + OCR) ──────────────────────────────────────────
 export async function detectLandmarks(env, { description, ocrText, lang } = {}) {
   const text = [description, ocrText].filter(Boolean).join(" \n ");
   const textN = normalize(text);
@@ -163,19 +176,44 @@ export async function detectLandmarks(env, { description, ocrText, lang } = {}) 
   return dedup(found);
 }
 
-function dedup(arr) {
-  const seen = new Set();
-  const out = [];
-  for (const x of arr) {
-    const key = [x.name, x.city, x.country].map((s)=>String(s||"").toLowerCase()).join("|");
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(x);
+// ── Image-based детекція через visionDescribe (lazy-import) ──────────────────
+// Виклик: передай imageBase64; модуль сам зробить короткий опис і прокладе через detectLandmarks().
+export async function detectLandmarksFromImage(env, { imageBase64, question, lang = "uk", modelOrder } = {}) {
+  if (!imageBase64) return [];
+
+  // lazy import, щоб уникнути можливих циклів імпортів
+  let describeImage;
+  try {
+    ({ describeImage } = await import("../flows/visionDescribe.js"));
+  } catch {
+    return []; // якщо нема vision-пайплайна — тихо відходимо без помилки
   }
-  return out;
+
+  try {
+    const q = question || (lang.startsWith("uk") ? "Коротко назви впізнавані місця/об'єкти." : "Briefly name recognizable landmarks/objects.");
+    const res = await describeImage(env, {
+      chatId: null,
+      tgLang: lang,
+      imageBase64,
+      question: q,
+      modelOrder: modelOrder || (env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER)
+    });
+    const description = String(res?.text || "");
+    const ocrText = String(res?.meta?.ocrText || "");
+    return await detectLandmarks(env, { description, ocrText, lang });
+  } catch {
+    return [];
+  }
 }
 
-// Зручний форматер для додавання рядків у відповідь
+// ── Уніфікована детекція: текст + (опційно) зображення ──────────────────────
+export async function detectLandmarksUnified(env, { description, ocrText, imageBase64, lang = "uk", modelOrder } = {}) {
+  const byText = await detectLandmarks(env, { description, ocrText, lang });
+  const byImage = imageBase64 ? await detectLandmarksFromImage(env, { imageBase64, lang, modelOrder }) : [];
+  return dedup([...byText, ...byImage]);
+}
+
+// ── Зручний форматер для додавання рядків у відповідь ───────────────────────
 export function formatLandmarkLines(landmarks, lang = "uk") {
   if (!Array.isArray(landmarks) || !landmarks.length) return [];
   const head = lang.startsWith("uk") ? "Посилання на мапу:" :
