@@ -1,5 +1,9 @@
 // src/flows/visionDescribe.js
 // Єдина точка для опису зображення з мультимовністю.
+// • Якщо на фото НЕМає тексту — не згадуємо про це.
+// • Визначні місця: компактна іконка-лінк (↗︎) через HTML (<a href>), без довгих URL.
+// • JSON-режим з авто-ретраями по MIME (png → jpeg → webp) + надійний текстовий фолбек.
+// • Повертаємо метадані (meta) для автопам’яті фото: mapLinks, ocrText, landmarks.
 
 import { askVision, askText } from "../lib/modelRouter.js";
 import { buildVisionHintByLang, makeVisionUserPrompt, postprocessVisionText } from "./visionPolicy.js";
@@ -50,22 +54,17 @@ function mapsIconLink({ name, lat, lon, city, country }) {
   return `<a href="${href}" rel="noopener noreferrer">↗︎</a>`;
 }
 
-// коли точно треба йти у текстовий фолбек (режим vision недоступний технічно)
+// коли точно треба йти у текстовий фолбек (лише ТЕХНІЧНА непідтримка режиму)
 function shouldTextFallback(err) {
   const m = String(err && (err.message || err)).toLowerCase();
   if (!m) return false;
+  // Тільки «режим не підтримується» або «image не підтримується» — справді безсенсовно ретраїти
   return (
     m.includes("no route for that uri") ||
     m.includes("only text mode supported") ||
     m.includes("unsupported mode") ||
     (m.includes("vision") && m.includes("unsupported")) ||
-    (m.includes("image") && m.includes("not") && m.includes("supported")) ||
-    // розширення: перевантаження/квота/сейфті/мережа/429/5xx
-    m.includes("rate limit") || m.includes("quota") || m.includes("exceeded") ||
-    m.includes("safety") || m.includes("blocked") ||
-    m.includes("temporarily unavailable") || m.includes("overloaded") ||
-    m.includes("fetch failed") || m.includes("timeout") ||
-    /\b(429|502|503|504)\b/.test(m)
+    (m.includes("image") && m.includes("not") && m.includes("supported"))
   );
 }
 
@@ -74,6 +73,7 @@ function isStockWatermark(s = "") {
   const x = s.toLowerCase();
   return /dreamstime|shutterstock|adobe\s*stock|istock|depositphotos|getty\s*images|watermark/.test(x);
 }
+
 // строгий JSON-хінт
 function buildJsonSystemHint(lang) {
   return (
@@ -131,10 +131,12 @@ async function tryVisionJSON(env, modelOrder, jsonUserPrompt, jsonSystemHint, im
     } catch (e) {
       lastErr = e;
       if (shouldTextFallback(e)) return { raw: null, forceTextFallback: true, error: e };
+      // safety/429/5xx/timeout — НЕ форсимо текст; даємо шанс іншим MIME/провайдерам
+      continue;
     }
   }
 
-  // 2) альтернативний порядок: CF першим
+  // 2) альтернативний порядок: CF-vision першим
   const cfFirst = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.5-flash";
   for (const mime of mimes) {
     try {
@@ -150,10 +152,11 @@ async function tryVisionJSON(env, modelOrder, jsonUserPrompt, jsonSystemHint, im
     } catch (e) {
       lastErr = e;
       if (shouldTextFallback(e)) return { raw: null, forceTextFallback: true, error: e };
+      continue;
     }
   }
 
-  // 3) м’який повтор (понижені ліміти)
+  // 3) м’який повтор (понижені ліміти) — зменшує частоту блоків
   for (const mime of mimes) {
     try {
       const raw = await askVision(env, modelOrder, jsonUserPrompt, {
@@ -193,10 +196,11 @@ async function tryVisionPlain(env, modelOrder, userPromptBase, systemHintBase, i
     } catch (e) {
       lastErr = e;
       if (shouldTextFallback(e)) return { text: null, forceTextFallback: true, error: e };
+      continue;
     }
   }
 
-  // 2) CF першим
+  // 2) CF-vision першим
   const cfFirst = "cf:@cf/meta/llama-3.2-11b-vision-instruct, gemini:gemini-2.5-flash";
   for (const mime of mimes) {
     try {
@@ -211,6 +215,7 @@ async function tryVisionPlain(env, modelOrder, userPromptBase, systemHintBase, i
     } catch (e) {
       lastErr = e;
       if (shouldTextFallback(e)) return { text: null, forceTextFallback: true, error: e };
+      continue;
     }
   }
 
@@ -236,6 +241,16 @@ async function tryVisionPlain(env, modelOrder, userPromptBase, systemHintBase, i
 // ─────────────────────────────────────────────────────────────────────────────
 // Основна
 
+/**
+ * @param {object} env
+ * @param {object} p
+ * @param {string|number} p.chatId
+ * @param {string} [p.tgLang]
+ * @param {string} p.imageBase64
+ * @param {string} [p.question]
+ * @param {string} [p.modelOrder]  // якщо не передано — беремо env.MODEL_ORDER_VISION
+ * @returns {{ text: string, isHtml: boolean, meta?: { containsText: boolean, ocrText: string, landmarks: any[], mapLinks: string[] } }}
+ */
 export async function describeImage(env, { chatId, tgLang, imageBase64, question, modelOrder }) {
   // 1) мова
   const lang0 = await getUserLang(env, chatId, tgLang);
