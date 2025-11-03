@@ -1,98 +1,64 @@
 // src/lib/providers/gemini.js
-// Google Gemini provider: text & vision
+// Чистий провайдер для Google Generative Language (Gemini).
+// Підтримує текст і зображення (vision), systemHint, JSON-режим.
 
-function sanitizeBase64(b64 = "") {
-  return String(b64).replace(/^data:[^;]+;base64,/i, "").replace(/\s+/g, "");
+const BASE = "https://generativelanguage.googleapis.com/v1beta";
+
+function getGeminiKey(env) {
+  return (
+    env.GEMINI_API_KEY ||
+    env.GOOGLE_API_KEY ||
+    env.GEMINI_KEY ||
+    env.GOOGLE_API_KEY_GEMINI || null
+  );
 }
 
-export async function call_geminiText(env, model, userPrompt, { systemHint, temperature = 0.2, max_tokens = 512 }) {
-  const apiKey = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
-  if (!apiKey) throw new Error("Gemini API key missing");
-
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
-
-  const contents = [];
-  if (systemHint) contents.push({ role: "system", parts: [{ text: String(systemHint) }] });
-  contents.push({ role: "user", parts: [{ text: String(userPrompt || "") }] });
-
-  const body = {
-    contents,
-    generationConfig: {
-      temperature,
-      maxOutputTokens: max_tokens,
-    },
-  };
-
-  const r = await fetch(endpoint, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  if (!r.ok) {
-    const msg = await safeErr(r);
-    throw new Error(`gemini:text ${r.status} ${msg}`);
-  }
-  const j = await r.json();
-  const text = j?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
-  return text.trim();
+function buildUrl(model, method, apiKey) {
+  const m = encodeURIComponent(model);
+  return `${BASE}/models/${m}:${method}?key=${encodeURIComponent(apiKey)}`;
 }
 
-export async function call_geminiVision(env, model, userPrompt, {
-  systemHint,
-  imageBase64,
-  imageMime = "image/jpeg",
-  temperature = 0.2,
-  max_tokens = 700,
-  json = false,
-}) {
-  const apiKey = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
-  if (!apiKey) throw new Error("Gemini API key missing");
+function partsFromText(text) {
+  return [{ text: String(text ?? "") }];
+}
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
-
-  const imgMime = (String(imageMime || "").toLowerCase().startsWith("image/") ? imageMime : "image/jpeg");
-  const base64 = sanitizeBase64(imageBase64);
-
-  const userParts = [{ text: String(userPrompt || "") }];
-  if (base64) {
-    userParts.push({
-      inlineData: {
-        mimeType: imgMime,            // <- ВАЖЛИВО: реальний MIME
-        data: base64,
-      }
+function partsFromImage({ imageBase64, imageMime, prompt }) {
+  const parts = [];
+  if (imageBase64) {
+    parts.push({
+      inline_data: {
+        mime_type: imageMime || "image/jpeg",
+        data: imageBase64.replace(/^data:[^;]+;base64,/i, "").replace(/\s+/g, ""),
+      },
     });
   }
+  if (prompt) parts.push({ text: String(prompt) });
+  return parts;
+}
 
-  const contents = [];
-  if (systemHint) contents.push({ role: "system", parts: [{ text: String(systemHint) }] });
-  contents.push({ role: "user", parts: userParts });
+function makeBody({ systemHint, contents, temperature, max_tokens, json }) {
+  const generationConfig = {};
+  if (typeof temperature === "number") generationConfig.temperature = temperature;
+  if (typeof max_tokens === "number") generationConfig.maxOutputTokens = max_tokens;
+  if (json) generationConfig.responseMimeType = "application/json";
 
   const body = {
     contents,
-    generationConfig: {
-      temperature,
-      maxOutputTokens: max_tokens,
-      ...(json ? { responseMimeType: "application/json" } : {})
-    },
+    generationConfig,
   };
 
-  const r = await fetch(endpoint, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  if (!r.ok) {
-    const msg = await safeErr(r);
-    throw new Error(`gemini:vision ${r.status} ${msg}`);
+  if (systemHint && String(systemHint).trim()) {
+    body.systemInstruction = {
+      role: "system",
+      parts: [{ text: String(systemHint) }],
+    };
   }
-  const j = await r.json();
-  const parts = j?.candidates?.[0]?.content?.parts || [];
-  const text = parts.map(p => p.text || "").join("");
-  return text.trim();
+  return body;
 }
 
-async function safeErr(r) {
-  try { return await r.text(); } catch { return ""; }
+function extractText(respJson) {
+  // Беремо першу кандидатуру і склеюємо всі text-парти
+  const cand = respJson?.candidates?.[0];
+  const parts = cand?.content?.parts || [];
+  return parts.map(p => p?.text || "").join("").trim();
 }
