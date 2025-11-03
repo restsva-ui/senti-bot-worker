@@ -45,8 +45,8 @@ DIAG_TAGS = "on"
 #   "md-pin"                          → "[📍](url)"
 MAP_LINK_STYLE = "arrow"
 
-# (опц.) Якщо в боті підтримується parse_mode — можна увімкнути Markdown глобально.
-# TELEGRAM_PARSE_MODE = "Markdown"
+# Режим форматування повідомлень Telegram — потрібен для <a href>↗︎</a>
+TELEGRAM_PARSE_MODE = "HTML"
 
 # ────────────────────────────────────────────────────────────────────────────
 #                ПОРЯДКИ МОДЕЛЕЙ (TEXT / CODE / VISION / STT / TTS)
