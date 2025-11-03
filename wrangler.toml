@@ -59,7 +59,8 @@ MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-1b-instruct, 
 MODEL_ORDER_CODE = "cf:@cf/meta/llama-3.2-1b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
 
 # VISION — лише провайдери з підтримкою зображень
-MODEL_ORDER_VISION = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct"
+# ❗ Правка: використовуємо gemini-1.5-flash (має vision), далі CF-vision
+MODEL_ORDER_VISION = "gemini:gemini-1.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct"
 
 # (необов'язково) окремі порядки для STT/TTS — шаблони
 # MODEL_ORDER_STT = "cf:@cf/openai/whisper"
