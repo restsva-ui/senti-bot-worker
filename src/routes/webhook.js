@@ -18,7 +18,7 @@ import { getEnergy, spendEnergy } from "../lib/energy.js";
 import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
 import { loadSelfTune, autoUpdateSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
-import { t, pickLang } from "../lib/i18n.js"; // ← лишаємо те, що точно є в архіві
+import { pickReplyLanguage as pickLang, t } from "../lib/i18n.js"; // ← лишаємо те, що точно є в архіві
 import { TG } from "../lib/tg.js";
 import { enqueueLearn, listQueued, getRecentInsights } from "../lib/kvLearnQueue.js";
 import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from "../apis/time.js";
