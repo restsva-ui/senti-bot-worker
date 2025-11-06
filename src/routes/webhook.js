@@ -2,7 +2,7 @@
 // (rev) Без вітального відео; тихе перемикання режимів; фікс мови на /start;
 // перевірка підключення Google Drive; дружній фолбек для медіа в Senti;
 // авто-самотюнінг стилю (мовні профілі) через selfTune.
-// (upd) Vision через каскад моделей (мультимовний) + base64 із Telegram файлів.
+// (upd) Vision через каскад моделей (Gemini → CF → OpenRouter) + base64 із Telegram файлів.
 // (new) Vision Memory у KV: зберігаємо останні 20 фото з описами.
 // (fix) Погода через open-meteo: "погода київ" / "weather london".
 // (fix) Фото без підпису → зберегти і спитати, що робити.
@@ -22,7 +22,6 @@ import { t, pickReplyLanguage } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
 import { enqueueLearn, listQueued, getRecentInsights } from "../lib/kvLearnQueue.js";
 import { setUserLocation } from "../lib/geo.js";
-import { describeImage } from "../flows/visionDescribe.js";
 import { detectLandmarksFromText, formatLandmarkLines } from "../lib/landmarkDetect.js";
 // погода — безкоштовна, ключ не потрібен
 import * as weatherApi from "../apis/weather.js";
@@ -64,7 +63,7 @@ async function saveVisionMem(env, userId, entry) {
   } catch {}
 }
 
-// ===== vision text cleaner (прибрати "великі вуха, великі вуха...") =====
+// ===== vision text cleaner =====
 function cleanVisionText(text = "", lang = "uk") {
   let s = String(text || "").trim();
   s = s.replace(/\b(\S+)(\s+\1){3,}\b/gi, "$1 $1 $1");
@@ -74,10 +73,134 @@ function cleanVisionText(text = "", lang = "uk") {
   if (s.length > MAX_LEN) s = s.slice(0, MAX_LEN) + "…";
   if (!s) {
     s = lang.startsWith("uk")
-      ? "На зображенні об’єкт, але модель не змогла описати деталі."
+      ? "На зображенні є об’єкт, але модель не змогла описати деталі."
       : "There is an object in the image, but the model could not describe details.";
   }
   return s;
+}
+
+// ====== VISION CASCADE (Gemini → Cloudflare → OpenRouter) ======
+async function visionWithGemini(env, { imageBase64, prompt }) {
+  const key = env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY;
+  if (!key) return null;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`;
+  const body = {
+    contents: [
+      {
+        parts: [
+          { text: prompt },
+          {
+            inline_data: {
+              mime_type: "image/jpeg",
+              data: imageBase64
+            }
+          }
+        ]
+      }
+    ]
+  };
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) return null;
+  const data = await r.json();
+  const txt = data?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join(" ").trim();
+  return txt || null;
+}
+
+async function visionWithCloudflare(env, { imageBase64, prompt }) {
+  const accountId = env.CF_ACCOUNT_ID || env.CLOUDFlARE_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID;
+  const token = env.CLOUDFLARE_API_TOKEN;
+  const model =
+    env.CF_VISION_MODEL ||
+    "@cf/meta/llama-3.2-11b-vision-instruct";
+  if (!accountId || !token || !model) return null;
+
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`;
+  const body = {
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: prompt },
+          { type: "input_image", image: imageBase64 }
+        ]
+      }
+    ]
+  };
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) return null;
+  const data = await r.json().catch(() => null);
+  const txt =
+    data?.result?.response ||
+    data?.result?.output ||
+    data?.result?.text ||
+    null;
+  return txt;
+}
+
+async function visionWithOpenRouter(env, { imageBase64, prompt }) {
+  const key = env.OPENROUTER_API_KEY;
+  if (!key) return null;
+
+  // безкоштовна в тебе була meta-llama/llama-4-scout:free, але вона не vision.
+  // тому беремо ту, що часто є у OpenRouter як vision і теж безплатна в публічних тарифах:
+  const model = "meta-llama/llama-3.2-11b-vision-instruct:free";
+
+  const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${key}`,
+      "HTTP-Referer": env.OPENROUTER_SITE_URL || "https://senti.restsva.app",
+      "X-Title": env.OPENROUTER_APP_NAME || "Senti Bot Worker",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: prompt },
+            {
+              type: "image_url",
+              image_url: { url: `data:image/jpeg;base64,${imageBase64}` }
+            }
+          ]
+        }
+      ]
+    })
+  });
+  if (!r.ok) return null;
+  const data = await r.json().catch(() => null);
+  const txt = data?.choices?.[0]?.message?.content || null;
+  return txt;
+}
+
+async function visionCascade(env, { imageBase64, prompt, lang }) {
+  // 1) Gemini
+  let out = await visionWithGemini(env, { imageBase64, prompt }).catch(() => null);
+  if (out) return { ok: true, text: cleanVisionText(out, lang) };
+
+  // 2) Cloudflare
+  out = await visionWithCloudflare(env, { imageBase64, prompt }).catch(() => null);
+  if (out) return { ok: true, text: cleanVisionText(out, lang) };
+
+  // 3) OpenRouter
+  out = await visionWithOpenRouter(env, { imageBase64, prompt }).catch(() => null);
+  if (out) return { ok: true, text: cleanVisionText(out, lang) };
+
+  return { ok: false, message: "all vision backends failed" };
 }
 
 // typing
@@ -106,6 +229,7 @@ async function urlToBase64(url) {
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
   return btoa(bin);
 }
+
 // media helpers
 function pickPhoto(msg) {
   const arr = Array.isArray(msg?.photo) ? msg.photo : null;
@@ -193,13 +317,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
     const head = await fetch(url, { method: "HEAD" });
     const size = Number(head.headers.get("content-length") || 0);
     if (size && size > 200 * 1024 * 1024) {
-      await sendPlain(
-        env,
-        chatId,
-        lang.startsWith("uk")
-          ? "⚠️ Файл більший за 200 МБ — не можу зберегти у Drive."
-          : "⚠️ File is bigger than 200 MB — can't save to Drive."
-      );
+      await sendPlain(env, chatId, "⚠️ Файл більший за 200 МБ — не можу зберегти у Drive.");
       return true;
     }
   } catch {}
@@ -261,18 +379,11 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
     ? "Опиши, що на зображенні, без повторів і без фантазій."
     : "Describe what is in the image, without repetitions and without fantasy.");
 
-  const visionOrder =
-    env.MODEL_ORDER_VISION ||
-    env.VISION_ORDER ||
-    "gemini:gemini-1.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct, cf:@cf/meta/llama-3.2-1b-vision-instruct";
-
   try {
-    const visionRes = await describeImage(env, {
+    const visionRes = await visionCascade(env, {
       imageBase64,
-      question: prompt,
+      prompt,
       lang,
-      userId: userId?.toString?.() || "anon",
-      modelOrder: visionOrder,
     });
 
     if (!visionRes?.ok) {
@@ -280,8 +391,6 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
     }
 
     let text = visionRes.text || "";
-    text = cleanVisionText(text, lang);
-
     const landmarks = detectLandmarksFromText(text, lang);
 
     await saveVisionMem(env, userId, { id: att.file_id, url, caption, desc: text });
@@ -306,15 +415,14 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
       await sendPlain(
         env,
         chatId,
-        lang.startsWith("uk")
-          ? "Поки що не можу проаналізувати фото. Можу зберегти його у Google Drive — натисни «Google Drive» або підключи Drive."
-          : "I can't analyze the photo right now. I can save it to Google Drive — tap «Google Drive» or connect Drive.",
+        "Поки що не можу проаналізувати фото. Можу зберегти його у Google Drive — натисни «Google Drive» або підключи Drive.",
         { reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn") || "Підключити Drive", url: connectUrl }]] } }
       );
     }
   }
   return true;
 }
+
 // SystemHint
 async function buildSystemHint(env, chatId, userId, preferredLang) {
   const statut = String((await readStatut(env)) || "").trim();
@@ -509,19 +617,16 @@ export async function handleTelegramWebhook(req, env) {
       return json({ ok: true });
     }
 
-    // 🔙 повернули кнопку чеклиста
-    if (data === "CHECKLIST") {
-      const statut = String((await readStatut(env)) || "").trim();
-      await sendPlain(
-        env,
-        chatId,
-        statut || (lang.startsWith("uk") ? "Чеклист поки що порожній." : "Checklist is empty.")
-      );
+    if (data === "ADMIN" || data === BTN_ADMIN) {
+      await sendPlain(env, chatId, t(lang, "admin_header") || "🛠 Адмін-панель поки що мінімальна.");
       return json({ ok: true });
     }
 
-    if (data === "ADMIN" || data === BTN_ADMIN) {
-      await sendPlain(env, chatId, t(lang, "admin_header") || "🛠 Адмін-панель поки що мінімальна.");
+    if (data === "CHECKLIST") {
+      const url = abs(env, "/checklist.html");
+      await sendPlain(env, chatId, "📋 Відкрити чеклист:", {
+        reply_markup: { inline_keyboard: [[{ text: "Відкрити чеклист ↗︎", url }]] }
+      });
       return json({ ok: true });
     }
 
@@ -583,7 +688,7 @@ export async function handleTelegramWebhook(req, env) {
     await safe(async () => {
       const mo = String(env.MODEL_ORDER || "").trim();
       const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_GEMINI_API_KEY || env.GEMINI_KEY);
-      const hasCF = !!(env.CLOUDFLARE_API_TOKEN && env.CF_ACCOUNT_ID);
+      const hasCF = !!(env.CLOUDFLARE_API_TOKEN && (env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID));
       const hasOR = !!(env.OPENROUTER_API_KEY);
       const hasFreeBase = !!(env.FREE_LLM_BASE_URL || env.FREE_API_BASE_URL);
       const hasFreeKey = !!(env.FREE_LLM_API_KEY || env.FREE_API_KEY);
@@ -639,7 +744,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // ⛅️ Погода по тексту (без ключа, як просив)
+  // ⛅️ Погода
   if (textRaw && (
     /^погода\b/i.test(textRaw) ||
     /^weather\b/i.test(textRaw) ||
@@ -651,15 +756,13 @@ export async function handleTelegramWebhook(req, env) {
       w = await weatherApi.weatherSummaryByPlace(env, place, lang).catch(() => null);
     }
     if (!w) {
-      await sendPlain(
-        env,
-        chatId,
+      await sendPlain(env, chatId,
         lang.startsWith("uk")
           ? "Скажи, для якого міста показати погоду 🌤"
           : "Tell me which city to show the weather for 🌤"
       );
     } else {
-      await sendPlain(env, chatId, w.text || (lang.startsWith("uk") ? "Не вдалося отримати погоду." : "Could not get weather."));
+      await sendPlain(env, chatId, w.text || "Не вдалося отримати погоду.");
     }
     return json({ ok: true });
   }
