@@ -56,7 +56,7 @@ TELEGRAM_PARSE_MODE = "HTML"
 MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-1b-instruct, free:meta-llama/llama-4-scout:free"
 
 # CODE: використовуємо ту ж CF текстову модель як перший крок
-MODEL_ORDER_CODE = "cf:@cf/meta/llama-3.2-1b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
+MODEL_ORDER_CODE = "cf:@cf/meta/llama-3.2-11b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
 
 # VISION — лише провайдери з підтримкою зображень
 # ❗ Правка: використовуємо gemini-1.5-flash (має vision), далі CF-vision
@@ -71,7 +71,7 @@ MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-1b-instruct, free:
 
 # --- Дефолтні моделі (для читабельності) ---
 GEMINI_MODEL    = "gemini-2.5-flash"
-CF_MODEL        = "@cf/meta/llama-3.2-1b-instruct"
+CF_MODEL        = "@cf/meta/llama-3.2-11b-instruct"
 # Vision-модель CF (виправлений slug)
 CF_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
 
