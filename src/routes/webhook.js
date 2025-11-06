@@ -261,7 +261,6 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
     ? "Опиши, що на зображенні, без повторів і без фантазій."
     : "Describe what is in the image, without repetitions and without fantasy.");
 
-  // 🔴 ГОЛОВНЕ ВИПРАВЛЕННЯ: нормальний каскад 3 моделей
   const visionOrder =
     env.MODEL_ORDER_VISION ||
     env.VISION_ORDER ||
@@ -510,6 +509,17 @@ export async function handleTelegramWebhook(req, env) {
       return json({ ok: true });
     }
 
+    // 🔙 повернули кнопку чеклиста
+    if (data === "CHECKLIST") {
+      const statut = String((await readStatut(env)) || "").trim();
+      await sendPlain(
+        env,
+        chatId,
+        statut || (lang.startsWith("uk") ? "Чеклист поки що порожній." : "Checklist is empty.")
+      );
+      return json({ ok: true });
+    }
+
     if (data === "ADMIN" || data === BTN_ADMIN) {
       await sendPlain(env, chatId, t(lang, "admin_header") || "🛠 Адмін-панель поки що мінімальна.");
       return json({ ok: true });
@@ -600,6 +610,7 @@ export async function handleTelegramWebhook(req, env) {
         reply_markup: {
           inline_keyboard: [
             [{ text: "🧠 Open Learn", url: links.learn }],
+            [{ text: "📋 Checklist", callback_data: "CHECKLIST" }]
           ]
         }
       });
