@@ -4,6 +4,7 @@
 // авто-самотюнінг стилю (мовні профілі) через selfTune.
 // (upd) Vision через каскад моделей (мультимовний) + base64 із Telegram файлів.
 // (new) Vision Memory у KV: зберігаємо останні 20 фото з описами.
+// (new) Landmark detect → клікабельне посилання на Google Maps.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -25,6 +26,9 @@ import { setUserLocation, getUserLocation } from "../lib/geo.js";
 
 // ⬇️ мультимовний vision-оркестратор
 import { describeImage } from "../flows/visionDescribe.js";
+
+// ⬇️ наш новий модуль для визначних місць
+import { detectLandmarksFromText, formatLandmarkLines } from "../lib/landmarkDetect.js";
 
 // ── Alias з tg.js ────────────────────────────────────────────────────────────
 const {
@@ -184,7 +188,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   return true;
 }
 
-// Vision-режим (мультимовний + пам'ять)
+// Vision-режим (мультимовний + пам'ять + лендмарки)
 async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const att = pickPhoto(msg);
   if (!att) return false;
@@ -207,14 +211,29 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   try {
     // SystemHint будується всередині describeImage() з урахуванням мови користувача.
     const { text } = await describeImage(env, {
-      chatId, tgLang: msg.from?.language_code, imageBase64, question: prompt,
+      chatId,
+      tgLang: msg.from?.language_code,
+      imageBase64,
+      question: prompt,
       modelOrder: (env.VISION_ORDER || env.MODEL_ORDER_VISION || env.MODEL_ORDER || "@cf/meta/llama-3.2-11b-vision-instruct")
     });
 
     // збережемо в пам'ять vision
     await saveVisionMem(env, userId, { id: att.file_id, url, caption, desc: text });
 
+    // 1) основна відповідь — як було
     await sendPlain(env, chatId, `🖼️ ${text}`);
+
+    // 2) НОВЕ: шукаємо визначні місця і шлемо окремим меседжем
+    const landmarks = detectLandmarksFromText(text, lang);
+    if (landmarks && landmarks.length) {
+      const lines = formatLandmarkLines(landmarks, lang);
+      await sendPlain(env, chatId, lines.join("\n"), {
+        parse_mode: "HTML",
+        disable_web_page_preview: true
+      });
+    }
+
   } catch (e) {
     if (ADMIN(env, userId)) {
       await sendPlain(env, chatId, `❌ Vision error: ${String(e.message || e).slice(0, 180)}`);
@@ -230,7 +249,6 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   }
   return true;
 }
-
 // ── SystemHint ───────────────────────────────────────────────────────────────
 async function buildSystemHint(env, chatId, userId, preferredLang) {
   const statut = String((await readStatut(env)) || "").trim();
