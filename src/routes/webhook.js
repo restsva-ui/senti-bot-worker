@@ -106,7 +106,6 @@ async function urlToBase64(url) {
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
   return btoa(bin);
 }
-
 // media helpers
 function pickPhoto(msg) {
   const arr = Array.isArray(msg?.photo) ? msg.photo : null;
@@ -194,7 +193,13 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
     const head = await fetch(url, { method: "HEAD" });
     const size = Number(head.headers.get("content-length") || 0);
     if (size && size > 200 * 1024 * 1024) {
-      await sendPlain(env, chatId, "⚠️ Файл більший за 200 МБ — не можу зберегти у Drive.");
+      await sendPlain(
+        env,
+        chatId,
+        lang.startsWith("uk")
+          ? "⚠️ Файл більший за 200 МБ — не можу зберегти у Drive."
+          : "⚠️ File is bigger than 200 MB — can't save to Drive."
+      );
       return true;
     }
   } catch {}
@@ -256,17 +261,19 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
     ? "Опиши, що на зображенні, без повторів і без фантазій."
     : "Describe what is in the image, without repetitions and without fantasy.");
 
+  // 🔴 ГОЛОВНЕ ВИПРАВЛЕННЯ: нормальний каскад 3 моделей
+  const visionOrder =
+    env.MODEL_ORDER_VISION ||
+    env.VISION_ORDER ||
+    "gemini:gemini-1.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct, cf:@cf/meta/llama-3.2-1b-vision-instruct";
+
   try {
     const visionRes = await describeImage(env, {
       imageBase64,
       question: prompt,
       lang,
       userId: userId?.toString?.() || "anon",
-      modelOrder: (
-        env.MODEL_ORDER_VISION ||
-        env.VISION_ORDER ||
-        "cf:@cf/meta/llama-3.2-11b-vision-instruct, cf:@cf/meta/llama-3.2-1b-vision-instruct"
-      ),
+      modelOrder: visionOrder,
     });
 
     if (!visionRes?.ok) {
@@ -300,7 +307,9 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
       await sendPlain(
         env,
         chatId,
-        "Поки що не можу проаналізувати фото. Можу зберегти його у Google Drive — натисни «Google Drive» або підключи Drive.",
+        lang.startsWith("uk")
+          ? "Поки що не можу проаналізувати фото. Можу зберегти його у Google Drive — натисни «Google Drive» або підключи Drive."
+          : "I can't analyze the photo right now. I can save it to Google Drive — tap «Google Drive» or connect Drive.",
         { reply_markup: { inline_keyboard: [[{ text: t(lang, "open_drive_btn") || "Підключити Drive", url: connectUrl }]] } }
       );
     }
@@ -458,6 +467,7 @@ async function callSmartLLM(env, userText, { lang, name, systemHint, expand, adm
   const short = expand ? out : limitMsg(out, 220);
   return { short, full: out };
 }
+
 // ====== webhook ======
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "POST") {
@@ -630,13 +640,15 @@ export async function handleTelegramWebhook(req, env) {
       w = await weatherApi.weatherSummaryByPlace(env, place, lang).catch(() => null);
     }
     if (!w) {
-      await sendPlain(env, chatId,
+      await sendPlain(
+        env,
+        chatId,
         lang.startsWith("uk")
           ? "Скажи, для якого міста показати погоду 🌤"
           : "Tell me which city to show the weather for 🌤"
       );
     } else {
-      await sendPlain(env, chatId, w.text || "Не вдалося отримати погоду.");
+      await sendPlain(env, chatId, w.text || (lang.startsWith("uk") ? "Не вдалося отримати погоду." : "Could not get weather."));
     }
     return json({ ok: true });
   }
