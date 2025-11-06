@@ -1,6 +1,5 @@
 // src/flows/visionPolicy.js
 // Політика для vision-відповідей Senti з підтримкою кількох мов.
-// Узгоджено з describeImage(): якщо тексту на фото немає — не згадуємо про це взагалі.
 
 const BASE_RULES = `
 Правила ВАЖЛИВО:
@@ -51,7 +50,16 @@ ${BASE_RULES}
 `.trim(),
 };
 
-// нормальне escape HTML, без синтаксичних помилок
+export function buildVisionHintByLang(langCode) {
+  const lc = String(langCode || "").toLowerCase();
+  if (lc.startsWith("uk") || lc === "ua") return HINTS.uk;
+  if (lc.startsWith("en")) return HINTS.en;
+  if (lc.startsWith("de")) return HINTS.de;
+  if (lc.startsWith("ru")) return HINTS.ru;
+  return HINTS.uk;
+}
+
+// нормальний escape
 function escHtml(s = "") {
   return String(s)
     .replace(/&/g, "&amp;")
@@ -59,22 +67,10 @@ function escHtml(s = "") {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
-
-export function buildVisionHintByLang(langCode) {
-  const lc = String(langCode || "").toLowerCase();
-  if (lc.startsWith("uk") || lc === "ua") return HINTS.uk;
-  if (lc.startsWith("en")) return HINTS.en;
-  if (lc.startsWith("de")) return HINTS.de;
-  if (lc.startsWith("ru")) return HINTS.ru;
-  // fallback — українська
-  return HINTS.uk;
-}
-
 export function makeVisionUserPrompt(question, lang = "uk") {
   const q = String(question || "").trim();
   const isEn = lang.startsWith("en");
 
-  // без конкретного питання — просто "опиши за правилами"
   if (!q) {
     return isEn
       ? [
@@ -89,7 +85,6 @@ export function makeVisionUserPrompt(question, lang = "uk") {
         ].join(" ");
   }
 
-  // з конкретним питанням
   return isEn
     ? [
         `User asks: "${q}"`,
@@ -108,23 +103,18 @@ export function makeVisionUserPrompt(question, lang = "uk") {
 export function postprocessVisionText(text) {
   let t = String(text || "").trim();
 
-  // прибираємо підпис провайдера
   t = t.replace(/^[ \t]*(?:—|--)?\s*via\s+[^\n]*\n?/gim, "");
-
-  // нормалізуємо переноси
   t = t
     .replace(/\r/g, "")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  // нормалізація лапок у “Текст на зображенні”
   t = t.replace(
     /(Текст на зображенні|Text on image):\s*["“](.+?)["”]/g,
     (_m, label, p1) => `${label}: "${p1}"`
   );
 
-  // якщо модель написала "немає/none/unclear" — прибираємо весь рядок
   t = t
     .replace(
       /^(?:\s*)?(Текст на зображенні|Text on image):\s*(“|")?(немає|нечитко|відсутній|none|no text|unclear|not readable|unreadable)(”|")?\.*\s*$/gim,
@@ -133,7 +123,6 @@ export function postprocessVisionText(text) {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  // ліміт у ~4 логічні рядки
   const lines = t.split(/\n+/).filter(Boolean);
   if (lines.length > 4) {
     t = lines.slice(0, 4).join("\n");
