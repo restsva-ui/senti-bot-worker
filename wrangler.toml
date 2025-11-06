@@ -3,113 +3,71 @@ main = "src/index.js"
 compatibility_date = "2024-09-25"
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
 
-# --- CRONs ---
-# 1) heartbeat кожні 15 хв (для логів/живості)
-# 2) evolve щогодини рівно о :00 (UTC)
-# 3) додатковий тригер нічного агента о 02:10 UTC (опційний)
+# якщо тобі треба nodejs-compat – розкоментуй
+# compatibility_flags = ["nodejs_compat"]
+
 [triggers]
 crons = ["*/15 * * * *", "0 * * * *", "10 2 * * *"]
 
-# --- Публічні змінні середовища (НЕ секрети) ---
 [vars]
 SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
 DRIVE_FOLDER_ID = "root"
 TELEGRAM_ADMIN_ID = "784869835"
 DEPLOY_ID = "local-dev"
 
-# Увімкнення/вимкнення Learn
 LEARN_ENABLED = "on"
 
-# Cloudflare Workers AI (безкоштовно)
 CF_ACCOUNT_ID = "2cf6e316af8623546c95c0354bc3aa00"
 
-# ── Публічні перегляди адмін-HTML (readonly)
 ALLOW_PUBLIC_REPO = "on"
 ALLOW_PUBLIC_STATUT = "on"
 ALLOW_PUBLIC_CHECKLIST = "on"
 
-# Секретні токени для ендпойнтів / вебхука TG (значення прикладні)
 WEBHOOK_SECRET = "senti1984"
 TG_WEBHOOK_SECRET = "senti1984"
 TELEGRAM_SECRET_TOKEN = "senti1984"
 
-# Локальна таймзона для UI/логів/дебагу часу
 TIMEZONE = "Europe/Kyiv"
 
-# ДІАГНОСТИЧНІ ТЕГИ: "on" — показує [via ...], "off" — ховає
 DIAG_TAGS = "on"
 
-# ── НОВЕ: стиль коротких мап-лінків у відповіді vision
-#   "arrow"  (дефолт, без Markdown) → "↗︎ https://maps.app.goo.gl/?q=..."
-#   "md-icon"                         → "[↗︎](url)"  (використовуй parse_mode=Markdown/HTML)
-#   "md-pin"                          → "[📍](url)"
 MAP_LINK_STYLE = "arrow"
-
-# Режим форматування повідомлень Telegram — потрібен для <a href>↗︎</a>
 TELEGRAM_PARSE_MODE = "HTML"
 
-# ────────────────────────────────────────────────────────────────────────────
-#                ПОРЯДКИ МОДЕЛЕЙ (TEXT / CODE / VISION / STT / TTS)
-# ────────────────────────────────────────────────────────────────────────────
-# TEXT: спочатку Gemini (якщо є ключ), далі CF (реально наявна у тебе),
-# потім безкоштовний OpenRouter-фолбек
+# ── Порядки моделей ──
 MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free"
-
-# CODE: використовуємо ту ж CF текстову модель як перший крок
 MODEL_ORDER_CODE = "cf:@cf/meta/llama-3.2-11b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
-
-# VISION — лише провайдери з підтримкою зображень
-# ❗ Правка: використовуємо gemini-1.5-flash (має vision), далі CF-vision
+# тут твоя головна правка: спершу Gemini, потім CF-vision
 MODEL_ORDER_VISION = "gemini:gemini-1.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct"
 
-# (необов'язково) окремі порядки для STT/TTS — шаблони
-# MODEL_ORDER_STT = "cf:@cf/openai/whisper"
-# MODEL_ORDER_TTS = "cf:@cf/openai/tts-1"
-
-# RUNTIME дефолт: якщо код не підміняє порядок — беремо текстовий
 MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free"
 
-# --- Дефолтні моделі (для читабельності) ---
-GEMINI_MODEL    = "gemini-2.5-flash"
-CF_MODEL        = "@cf/meta/llama-3.2-11b-instruct"
-# Vision-модель CF (виправлений slug)
+GEMINI_MODEL = "gemini-2.5-flash"
+CF_MODEL = "@cf/meta/llama-3.2-11b-instruct"
 CF_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
 
-# ────────────────────────────────────────────────────────────────────────────
-#          OpenAI-сумісний fallback (через OpenRouter як "free")
-# ────────────────────────────────────────────────────────────────────────────
-# Додай секрет окремо:  wrangler secret put OPENROUTER_API_KEY
 FREE_API_BASE_URL = "https://openrouter.ai/api"
 FREE_API_PATH     = "/v1/chat/completions"
 
-# Узгоджено з кодом modelRouter.js (використовує FREE_LLM_*)
 FREE_LLM_BASE_URL = "https://openrouter.ai/api"
 FREE_LLM_MODEL    = "meta-llama/llama-4-scout:free"
-# Залишено для сумісності зі старим кодом
 FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
 
-# (необов'язково) Ідентифікатори застосунку для OpenRouter заголовків
 OPENROUTER_SITE_URL = "https://senti.restsva.app"
 OPENROUTER_APP_NAME = "Senti Bot Worker"
 
-# --- Керування нічними авто-поліпшеннями ---
-AUTO_IMPROVE     = "on"   # "off" щоб вимкнути
-# Основний добовий запуск агента відбувається на годинному кроні ("0 * * * *"),
-# коли getUTCHours() === NIGHTLY_UTC_HOUR. 23 UTC ~= 02:00 за Києвом.
+AUTO_IMPROVE     = "on"
 NIGHTLY_UTC_HOUR = "23"
 
-# --- Self-Regulation (ввімк/вимк та сила тюнінгу) ---
 SELF_REGULATE      = "on"
 SELF_TUNING_FACTOR = "0.3"
 
-# --- ⚡ ЕНЕРГІЯ (щоб не зникали на деплої) ---
 ENERGY_MAX = "100"
 ENERGY_RECOVER_PER_MIN = "1"
 ENERGY_COST_TEXT = "1"
 ENERGY_COST_IMAGE = "5"
 ENERGY_LOW_THRESHOLD = "10"
 
-# --- KV bindings ---
 [[kv_namespaces]]
 binding = "DEDUP_KV"
 id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
@@ -134,27 +92,22 @@ id = "470d4f5c164a4a828c569eb9a52a5133"
 binding = "CHECKLIST_KV"
 id = "497eac980691495ea2a0bc8611892d65"
 
-# Пам'ять/лайки/нічні імпруви
 [[kv_namespaces]]
 binding = "LIKES_KV"
 id = "f7d480c281ad47d2bdf270fadf4de021"
 
-# ➕ Журнал енергії
 [[kv_namespaces]]
 binding = "ENERGY_LOG_KV"
 id = "9e6f0ed5bf2544a9a63d57455900a844"
 
-# ➕ Діалоги (коротка пам'ять між сесіями)
 [[kv_namespaces]]
 binding = "DIALOG_KV"
 id = "63c0d1e0962a419ca54082893410b28e"
 
-# ➕ Черга навчання (для Learn)
 [[kv_namespaces]]
 binding = "LEARN_QUEUE_KV"
 id = "86a54c59ce674a558780c58bf1a47dfd"
 
-# --- R2 buckets (для upload файлів у Learn) ---
 [[r2_buckets]]
-binding = "LEARN_BUCKET"           # використовуй у коді: env.LEARN_BUCKET
+binding = "LEARN_BUCKET"
 bucket_name = "senti-learn"
