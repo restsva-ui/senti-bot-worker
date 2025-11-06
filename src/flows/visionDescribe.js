@@ -1,41 +1,67 @@
 // src/flows/visionDescribe.js
-// Єдина точка для опису зображення з мультимовністю.
-// Використання: const { text } = await describeImage(env, { chatId, tgLang, imageBase64, question, modelOrder });
+// Єдина точка для опису зображення з мультимовною політикою.
 
 import { askVision } from "../lib/modelRouter.js";
 import { buildVisionHintByLang, makeVisionUserPrompt, postprocessVisionText } from "./visionPolicy.js";
 import { getUserLang, setUserLang } from "../lib/langPref.js";
 
 /**
- * @param {object} env - середовище Cloudflare Worker (з KV, токенами тощо)
+ * describeImage()
+ * @param {object} env
  * @param {object} p
- * @param {string|number} p.chatId          - id чату (для KV-переваг)
- * @param {string} [p.tgLang]               - msg.from.language_code з Telegram
- * @param {string} p.imageBase64            - зображення у base64 (без префікса data:)
- * @param {string} [p.question]             - питання користувача (caption або текст)
- * @param {string} [p.modelOrder]           - ланцюжок моделей для vision (наприклад, "gemini:gemini-2.5-flash,@cf/meta/llama-3.2-11b-vision-instruct")
- * @returns {Promise<{ text: string }>}     - нормалізований текст відповіді
+ * @param {string|number} p.chatId
+ * @param {string} [p.tgLang]
+ * @param {string} p.imageBase64
+ * @param {string} [p.question]
+ * @param {string} [p.modelOrder]
  */
-export async function describeImage(env, { chatId, tgLang, imageBase64, question, modelOrder }) {
-  // 1) Визначаємо/зберігаємо мову
-  const lang = await getUserLang(env, chatId, tgLang);
-  if (tgLang && tgLang.toLowerCase() !== lang) {
-    // оновимо, якщо Telegram дав нову/іншу
-    await setUserLang(env, chatId, tgLang);
+export async function describeImage(env, p = {}) {
+  const {
+    chatId,
+    tgLang,
+    imageBase64,
+    question = "",
+    modelOrder = ""
+  } = p;
+
+  if (!imageBase64) {
+    throw new Error("describeImage: imageBase64 is required");
   }
 
-  // 2) Готуємо system hint та user prompt
+  // 1) мова
+  let lang = tgLang;
+  if (!lang && chatId) {
+    try {
+      lang = await getUserLang(env, chatId);
+    } catch {
+      lang = null;
+    }
+  }
+  if (!lang) lang = "uk";
+
+  // 2) зберігаємо мовну перевагу
+  if (chatId && lang) {
+    try { await setUserLang(env, chatId, lang); } catch {}
+  }
+
+  // 3) системна підказка + юзерський промпт
   const systemHint = buildVisionHintByLang(lang);
   const userPrompt = makeVisionUserPrompt(question, lang);
 
-  // 3) Викликаємо маршрутизатор моделей (vision)
+  // 4) виклик каскаду vision-моделей
   const out = await askVision(
     env,
     modelOrder,
     userPrompt,
-    { systemHint, imageBase64, imageMime: "image/png", temperature: 0.2 }
+    {
+      systemHint,
+      imageBase64,
+      imageMime: "image/png",
+      temperature: 0.15
+    }
   );
 
-  // 4) Постпроцес і повернення
-  return { text: postprocessVisionText(out) };
+  // 5) постпроцес
+  const text = postprocessVisionText(out);
+  return { text, lang };
 }
