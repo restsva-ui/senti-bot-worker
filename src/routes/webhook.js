@@ -6,6 +6,8 @@
 // (new) Vision Memory у KV: зберігаємо останні 20 фото з описами.
 // (new) Landmark detect → клікабельне посилання на Google Maps.
 // (fix) Якщо CF-vision каже "No route for that URI" — робимо повторну спробу ЧИСТО через Gemini.
+// (fix2) Gemini vision: використовуємо актуальну назву моделі gemini-1.5-flash-latest,
+// щоб не ловити 404 на v1beta.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -13,12 +15,12 @@ import { abs } from "../utils/url.js";
 import { think } from "../lib/brain.js";
 import { readStatut } from "../lib/kvChecklist.js";
 import { askAnyModel, getAiHealthSummary } from "../lib/modelRouter.js";
-import { json } from "../utils/http.js"; // ← тут повернув, щоб не було "lib/utils.js"
+import { json } from "../utils/http.js";
 import { getEnergy, spendEnergy } from "../lib/energy.js";
 import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
 import { loadSelfTune, autoUpdateSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
-import { pickReplyLanguage as pickLang, t } from "../lib/i18n.js"; // ← лишаємо те, що точно є в архіві
+import { pickReplyLanguage as pickLang, t } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
 import { enqueueLearn, listQueued, getRecentInsights } from "../lib/kvLearnQueue.js";
 import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from "../apis/time.js";
@@ -45,6 +47,10 @@ const {
   askLocationKeyboard,
 } = TG;
 
+// актуальні назви моделей для віжна
+const GEMINI_VISION_MODEL = "gemini:gemini-1.5-flash-latest";
+const GEMINI_VISION_MODEL_RAW = "gemini:gemini-1.5-flash-latest";
+
 // ── Локальні helpers замість відсутніх експортів у i18n.js ───────────────────
 
 // підбираємо мову відповіді з апдейта або даємо en
@@ -52,7 +58,6 @@ function pickReplyLanguage(msg, textRaw) {
   return pickLang(
     msg?.from?.language_code ||
       msg?.chat?.language_code ||
-      // якщо немає — просто англійська
       "en"
   );
 }
@@ -316,11 +321,12 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
       ? "Опиши, що на зображенні, коротко і по суті."
       : "Describe the image briefly and to the point.");
 
+  // головний порядок: спочатку оновлений Gemini, далі CF
   const visionOrder =
     env.MODEL_ORDER_VISION ||
     env.VISION_ORDER ||
     env.MODEL_ORDER ||
-    "gemini:gemini-1.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct";
+    `${GEMINI_VISION_MODEL}, cf:@cf/meta/llama-3.2-11b-vision-instruct`;
 
   try {
     const { text } = await describeImage(env, {
@@ -350,10 +356,13 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   } catch (e) {
     const msgStr = String(e?.message || e || "").toLowerCase();
 
+    // спец-фікс під твою помилку: якщо CF каже "no route" або щось подібне —
+    // запускаємо ЧИСТИЙ новий Gemini
     if (
       msgStr.includes("no route for that uri") ||
       msgStr.includes("route not found") ||
-      msgStr.includes("7000")
+      msgStr.includes("7000") ||
+      msgStr.includes("not found for api version")
     ) {
       try {
         const { text } = await describeImage(env, {
@@ -361,7 +370,7 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
           tgLang: msg.from?.language_code,
           imageBase64,
           question: prompt,
-          modelOrder: "gemini:gemini-1.5-flash",
+          modelOrder: GEMINI_VISION_MODEL_RAW,
         });
 
         await saveVisionMem(env, userId, {
@@ -393,6 +402,7 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
       }
     }
 
+    // інші помилки
     if (ADMIN(env, userId)) {
       await sendPlain(
         env,
@@ -600,7 +610,6 @@ ${control}`;
     out = `${em} ${out}`;
   }
 
-  // локальний детектор мови
   const detected = detectFromTextLocal(out);
   if (detected && lang && detected !== lang) {
     const hardPrompt = `STRICT LANGUAGE MODE: Respond ONLY in ${lang}. If the previous answer used another language, rewrite it now in ${lang}. Keep it concise.`;
@@ -780,7 +789,6 @@ export async function handleTelegramWebhook(req, env) {
         const health = await getAiHealthSummary(env, entries);
         lines.push("\n— Health:");
         for (const h of health) {
-          // виправив порядок світлофорів
           const light = h.cool ? "🟩" : h.slow ? "🟨" : "🟥";
           const ms = h.ewmaMs ? `${Math.round(h.ewmaMs)}ms` : "n/a";
           lines.push(
