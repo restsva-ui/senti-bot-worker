@@ -53,7 +53,7 @@ TELEGRAM_PARSE_MODE = "HTML"
 # ────────────────────────────────────────────────────────────────────────────
 # TEXT: спочатку Gemini (якщо є ключ), далі CF (реально наявна у тебе),
 # потім безкоштовний OpenRouter-фолбек
-MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-1b-instruct, free:meta-llama/llama-4-scout:free"
+MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free"
 
 # CODE: використовуємо ту ж CF текстову модель як перший крок
 MODEL_ORDER_CODE = "cf:@cf/meta/llama-3.2-11b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
@@ -67,7 +67,7 @@ MODEL_ORDER_VISION = "gemini:gemini-1.5-flash, cf:@cf/meta/llama-3.2-11b-vision-
 # MODEL_ORDER_TTS = "cf:@cf/openai/tts-1"
 
 # RUNTIME дефолт: якщо код не підміняє порядок — беремо текстовий
-MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-1b-instruct, free:meta-llama/llama-4-scout:free"
+MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free"
 
 # --- Дефолтні моделі (для читабельності) ---
 GEMINI_MODEL    = "gemini-2.5-flash"
