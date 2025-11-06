@@ -156,4 +156,4 @@ id = "86a54c59ce674a558780c58bf1a47dfd"
 # ─────────────────────────────────────────
 [[r2_buckets]]
 binding = "LEARN_BUCKET"
-bucket_name = "senti-learn"
+bucket_name = "senti-learn" 
