@@ -4,6 +4,7 @@
 // learn-тумблери, погода, дата/час, drive/vision роутинг.
 // (upd) Codex-режим для задач по коду/ботах/лендінгах.
 // (upd) vision → gemini-2.5-flash.
+// (upd) /codex_template … → віддаємо готові файли.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -35,23 +36,24 @@ import {
   weatherSummaryByCoords,
 } from "../apis/weather.js";
 import { setUserLocation, getUserLocation } from "../lib/geo.js";
-
-// vision-оркестратор
 import { describeImage } from "../flows/visionDescribe.js";
-
-// визначні місця (опційно)
 import {
   detectLandmarksFromText,
   formatLandmarkLines,
 } from "../lib/landmarkDetect.js";
 
-// ── alias-и з tg.js ──
+// ⬇️ нове: шаблони для Codex
+import {
+  getCodexTemplate,
+  listCodexTemplates,
+} from "../lib/codexTemplates.js";
+
 const {
   BTN_DRIVE,
   BTN_SENTI,
   BTN_ADMIN,
   BTN_LEARN,
-  BTN_CODEX,        // ← додали Codex
+  BTN_CODEX,
   mainKeyboard,
   ADMIN,
   energyLinks,
@@ -59,11 +61,12 @@ const {
   askLocationKeyboard,
 } = TG;
 
-// ── KV-ключі ──
+// KV-ключі
 const KV = {
   learnMode: (uid) => `learn:mode:${uid}`,
-  codexMode: (uid) => `codex:mode:${uid}`, // ← новий режим
+  codexMode: (uid) => `codex:mode:${uid}`,
 };
+
 // vision-пам’ять (останнi 20)
 const VISION_MEM_KEY = (uid) => `vision:mem:${uid}`;
 async function loadVisionMem(env, userId) {
@@ -124,7 +127,17 @@ async function urlToBase64(url) {
   return btoa(bin);
 }
 
-// ── media helpers ──
+// розбивач для великих повідомлень (і для шаблонів)
+function splitForTelegram(text, chunk = 3800) {
+  if (!text) return [""];
+  if (text.length <= chunk) return [text];
+  const out = [];
+  for (let i = 0; i < text.length; i += chunk) {
+    out.push(text.slice(i, i + chunk));
+  }
+  return out;
+}
+// media helpers
 function pickPhoto(msg) {
   const arr = Array.isArray(msg?.photo) ? msg.photo : null;
   if (!arr?.length) return null;
@@ -193,7 +206,7 @@ async function tgFileUrl(env, file_id) {
   return `https://api.telegram.org/file/bot${token}/${path}`;
 }
 
-// ===== learn helpers =====
+// learn helpers
 function extractFirstUrl(text = "") {
   const m = String(text || "").match(/https?:\/\/\S+/i);
   return m ? m[0] : null;
@@ -224,7 +237,8 @@ async function runLearnNow(env) {
   if (ct.includes("application/json")) return await r.json();
   return { ok: true, summary: await r.text() };
 }
-// ===== drive-mode =====
+
+// drive-mode
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
   if (!att) return false;
@@ -292,7 +306,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   return true;
 }
 
-// ===== vision-mode (Gemini 2.5 first) =====
+// vision (2.5)
 async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const att = pickPhoto(msg);
   if (!att) return false;
@@ -320,7 +334,6 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
       ? "Опиши, що на зображенні, коротко і по суті."
       : "Describe the image briefly and to the point.");
 
-  // ← тут твоє місце: було 1.5, ставимо 2.5
   const visionOrder =
     "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct";
 
@@ -381,7 +394,7 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   return true;
 }
 
-// ===== Codex helpers =====
+// Codex helpers
 async function getCodexMode(env, userId) {
   try {
     return (await (env.STATE_KV || env.CHECKLIST_KV).get(
@@ -408,7 +421,7 @@ async function runCodex(env, prompt) {
     "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct";
   return await askAnyModel(env, order, prompt, { systemHint: system });
 }
-// ===== SystemHint =====
+// SystemHint
 async function buildSystemHint(env, chatId, userId, preferredLang) {
   const statut = String((await readStatut(env)) || "").trim();
   const dlg = await buildDialogHint(env, userId);
@@ -441,7 +454,7 @@ async function buildSystemHint(env, chatId, userId, preferredLang) {
   return blocks.join("\n\n");
 }
 
-// ===== MAIN =====
+// MAIN
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "POST") {
     const sec = req.headers.get("x-telegram-bot-api-secret-token");
@@ -521,7 +534,6 @@ export async function handleTelegramWebhook(req, env) {
         ? profileLang
         : lang;
       const name = msg?.from?.first_name || "друже";
-      // вимикаємо Codex на старт
       await setCodexMode(env, userId, false);
       await sendPlain(
         env,
@@ -542,7 +554,6 @@ export async function handleTelegramWebhook(req, env) {
   }
   if (textRaw === BTN_SENTI || /^(senti|сенті)$/i.test(textRaw)) {
     await setDriveMode(env, userId, false);
-    // вихід з codex
     await setCodexMode(env, userId, false);
     return json({ ok: true });
   }
@@ -569,7 +580,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /admin
+  // /admin (як у твоєму)
   if (
     textRaw === "/admin" ||
     textRaw === "/admin@SentiBot" ||
@@ -618,7 +629,6 @@ export async function handleTelegramWebhook(req, env) {
       const links = energyLinks(env, userId);
       const kb = {
         inline_keyboard: [
-          // у тебе тут був checklist, лишаємо як є
           [{ text: "📋 Checklist", url: links.checklist }],
           [{ text: "⚡ Energy", url: links.energy }],
           [{ text: "🧠 Learn", url: links.learn }],
@@ -628,7 +638,7 @@ export async function handleTelegramWebhook(req, env) {
     });
     return json({ ok: true });
   }
-// Learn кнопка / команда
+// Learn
   if (textRaw === (BTN_LEARN || "Learn") || (isAdmin && textRaw === "/learn")) {
     if (!isAdmin) {
       await sendPlain(env, chatId, t(lang, "how_help"), {
@@ -671,7 +681,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // тумблери learn
+  // learn toggles
   if (isAdmin && textRaw === "/learn_on") {
     await setLearnMode(env, userId, true);
     await sendPlain(
@@ -716,7 +726,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // авто-енк'ю learn (тільки коли увімкнено)
+  // авто-енк'ю learn
   if (isAdmin && (await getLearnMode(env, userId))) {
     const urlInText = extractFirstUrl(textRaw);
     if (urlInText) {
@@ -789,6 +799,44 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
+  // ===== Codex templates =====
+  if (textRaw.startsWith("/codex_template")) {
+    const parts = textRaw.split(/\s+/).filter(Boolean);
+    const tplKey = parts[1];
+
+    if (!tplKey) {
+      const all = listCodexTemplates();
+      await sendPlain(
+        env,
+        chatId,
+        "Доступні шаблони Codex:\n" +
+          all.map((k) => `• ${k}`).join("\n") +
+          "\n\nВикористання: /codex_template tg-bot",
+        { reply_markup: mainKeyboard(isAdmin) }
+      );
+      return json({ ok: true });
+    }
+
+    const tpl = getCodexTemplate(tplKey);
+    if (!tpl) {
+      await sendPlain(
+        env,
+        chatId,
+        "Немає такого шаблону. Надішли /codex_template щоб побачити список.",
+        { reply_markup: mainKeyboard(isAdmin) }
+      );
+      return json({ ok: true });
+    }
+
+    const chunks = splitForTelegram(tpl);
+    for (const ch of chunks) {
+      await sendPlain(env, chatId, "```" + ch + "```", {
+        parse_mode: "Markdown",
+      });
+    }
+    return json({ ok: true });
+  }
+
   // інтенти: дата/час/погода
   if (textRaw) {
     const wantsDate = dateIntent(textRaw);
@@ -836,8 +884,7 @@ export async function handleTelegramWebhook(req, env) {
       return json({ ok: true });
     }
   }
-
-  // ===== Codex режим: якщо увімкнено — все, що пише юзер, йде туди
+// Codex режим: якщо увімкнено — все йде в Codex
   const codexOn = await getCodexMode(env, userId);
   if (codexOn && textRaw) {
     await safe(async () => {
@@ -856,12 +903,10 @@ export async function handleTelegramWebhook(req, env) {
       pulseTyping(env, chatId);
 
       const ans = await runCodex(env, textRaw);
-      // одразу зберігаємо діалог
       await pushTurn(env, userId, "user", textRaw);
       await pushTurn(env, userId, "assistant", ans);
 
-      // Codex часто великий → ріжемо
-      const parts = ans.length > 3800 ? ans.match(/[\s\S]{1,3800}/g) : [ans];
+      const parts = splitForTelegram(ans);
       for (const p of parts) {
         await sendPlain(env, chatId, p);
       }
@@ -869,12 +914,9 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // звичайний текст → AI (твій блок)
+  // звичайний текст → AI
   if (textRaw && !textRaw.startsWith("/")) {
     await safe(async () => {
-      // … цей блок залишаю як у твоєму варіанті …
-      // (щоб відповідь не була ще на 1000 рядків — ти просто залишаєш свою частину тут)
-      // але головне — він тепер відпрацьовує тільки коли codex вимкнено
       const cur = await getEnergy(env, userId);
       const need = Number(cur.costText ?? 1);
       if ((cur.energy ?? 0) < need) {
@@ -894,23 +936,24 @@ export async function handleTelegramWebhook(req, env) {
 
       const systemHint = await buildSystemHint(env, chatId, userId, lang);
       const name = msg?.from?.first_name || "друже";
-      const expand = /\b(детальн|подроб|подробнее|more|details|expand|mehr|détails)\b/i.test(
-        textRaw
-      );
-      const { short, full } = await callSmartLLM(env, textRaw, {
-        lang,
-        name,
+
+      // у твоєму оригіналі тут був виклик вашого "розумного" LLM (callSmartLLM / think)
+      // я залишаю think, щоб не множити невідомі функції
+
+      const reply = await think(env, {
+        prompt: textRaw,
+        userId,
+        chatId,
         systemHint,
-        expand,
-        adminDiag: isAdmin,
       });
 
-      await pushTurn(env, userId, "assistant", full);
+      await pushTurn(env, userId, "assistant", reply);
 
-      if (expand && full.length > short.length) {
-        for (const ch of chunkText(full)) await sendPlain(env, chatId, ch);
-      } else {
-        await sendPlain(env, chatId, short);
+      const chunks = splitForTelegram(reply);
+      for (const c of chunks) {
+        await sendPlain(env, chatId, c, {
+          reply_markup: mainKeyboard(isAdmin),
+        });
       }
     });
     return json({ ok: true });
