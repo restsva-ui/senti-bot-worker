@@ -5,17 +5,25 @@ import { abs } from "../utils/url.js";
 export const BTN_DRIVE = "Google Drive";
 export const BTN_SENTI = "Senti";
 export const BTN_CODEX = "Codex";
-export const BTN_LEARN = "Learn";   // показуємо тільки адмінам / через команду
+export const BTN_LEARN = "Learn";
 export const BTN_ADMIN = "Admin";
 
 /* ───────────────── ГОЛОВНА КЛАВІАТУРА ───────────── */
+// тепер Codex є у всіх; Admin — тільки в адміна
 export const mainKeyboard = (isAdmin = false) => {
-  const row = [{ text: BTN_DRIVE }, { text: BTN_SENTI }];
-  // було: if (isAdmin) row.push({ text: BTN_LEARN });
-  if (isAdmin) row.push({ text: BTN_CODEX });
-  const rows = [row];
-  if (isAdmin) rows.push([{ text: BTN_ADMIN }]);
-  return { keyboard: rows, resize_keyboard: true };
+  const row1 = [
+    { text: BTN_DRIVE },
+    { text: BTN_SENTI },
+    { text: BTN_CODEX },
+  ];
+  const rows = [row1];
+  if (isAdmin) {
+    rows.push([{ text: BTN_ADMIN }]);
+  }
+  return {
+    keyboard: rows,
+    resize_keyboard: true,
+  };
 };
 
 /* ───────────────── АДМІН ─────────────── */
@@ -28,26 +36,42 @@ export const energyLinks = (env, userId) => {
   return {
     energy: `${base}?u=${encodeURIComponent(userId)}`,
     learn: abs(env, "/admin/learn"),
+    checklist: abs(env, "/admin/checklist"),
   };
 };
+
+/* ───────────────── РОЗБИВКА ПОВІДОМЛЕНЬ ─────────── */
+function splitForTelegram(text, chunk = 3900) {
+  if (!text) return [""];
+  if (text.length <= chunk) return [text];
+  const parts = [];
+  for (let i = 0; i < text.length; i += chunk) {
+    parts.push(text.slice(i, i + chunk));
+  }
+  return parts;
+}
 
 /* ───────────────── ВІДПРАВКА ТЕКСТУ ─────────────── */
 export async function sendPlain(env, chatId, text, extra = {}) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const body = {
-    chat_id: chatId,
-    text,
-    disable_web_page_preview: true,
-  };
-  if (extra.parse_mode) body.parse_mode = extra.parse_mode;
-  if (extra.reply_markup) body.reply_markup = extra.reply_markup;
 
-  await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const chunks = splitForTelegram(String(text || ""));
+  for (const part of chunks) {
+    const body = {
+      chat_id: chatId,
+      text: part,
+      disable_web_page_preview: true,
+    };
+    if (extra.parse_mode) body.parse_mode = extra.parse_mode;
+    if (extra.reply_markup) body.reply_markup = extra.reply_markup;
+
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
 }
 
 /* ───────────────── ЗАПИТ ЛОКАЦІЇ ─────────────── */
@@ -76,7 +100,7 @@ export async function withUploading(env, chatId, fn) {
   return await fn();
 }
 
-/* ───────────────── Спінер (залишаю як у тебе) ─────────────── */
+/* ───────────────── Спінер ─────────────── */
 export async function startSpinner(env, chatId, base = "Думаю над відповіддю") {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   let alive = true;
@@ -86,7 +110,9 @@ export async function startSpinner(env, chatId, base = "Думаю над від
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text: base }),
-  }).then(r => r.json()).catch(() => null);
+  })
+    .then((r) => r.json())
+    .catch(() => null);
 
   const timer = setInterval(async () => {
     if (!alive || !msg?.result?.message_id) return;
