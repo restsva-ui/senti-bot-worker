@@ -133,7 +133,6 @@ async function editMessageText(env, chatId, messageId, newText) {
     }),
   });
 }
-
 // base64 з TG (для vision)
 async function urlToBase64(url) {
   const r = await fetch(url);
@@ -312,7 +311,6 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   );
   return true;
 }
-
 // ===== vision-mode =====
 async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const att = pickPhoto(msg);
@@ -441,7 +439,7 @@ function extractCodeAndLang(text) {
     const code = m[2].trim();
     return { lang, code };
   }
-  // може бути просто html без ``` 
+  // може бути просто html без ```
   if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) {
     return { lang: "html", code: text.trim() };
   }
@@ -465,7 +463,6 @@ async function runCodex(env, prompt) {
   const res = await askAnyModel(env, order, prompt, { systemHint: system });
   return asText(res);
 }
-
 // ===== SystemHint =====
 async function buildSystemHint(env, chatId, userId, preferredLang) {
   const statut = String((await readStatut(env)) || "").trim();
@@ -515,13 +512,14 @@ async function callSmartLLM(env, userText, opts = {}) {
     opts.expand || full.length <= 900 ? full : full.slice(0, 900) + "…";
   return { full, short };
 }
+
 export async function handleTelegramWebhook(req, env) {
-  // ВАЖЛИВО: GET тепер завжди ок
+  // GET завжди ок
   if (req.method === "GET") {
     return json({ ok: true, worker: "senti", ts: Date.now() });
   }
 
-  // POST: можемо перевірити секрет, але м’яко
+  // POST: м’яка перевірка секрету
   if (req.method === "POST") {
     const expected =
       env.TG_WEBHOOK_SECRET ||
@@ -543,9 +541,8 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: false }, 400);
   }
 
-  // ми прибрали callback_query для admin-кнопок — усе віддамо одразу через URL
+  // callback_query — просто answer, бо все через URL
   if (update.callback_query) {
-    // залишимо тільки answerCallbackQuery, щоб не висіло
     const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
     if (token) {
       await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
@@ -563,7 +560,10 @@ export async function handleTelegramWebhook(req, env) {
   const userId = msg?.from?.id;
   const isAdmin = ADMIN(env, userId);
   const textRaw = String(msg?.text || msg?.caption || "").trim();
-  let lang = pickReplyLanguage(msg, textRaw);
+
+  // важливо: візьмемо мову з Telegram юзера, а вже потім — з повідомлення
+  const tgUserLang = msg?.from?.language_code;
+  let lang = tgUserLang ? tgUserLang : pickReplyLanguage(msg, textRaw);
 
   const safe = async (fn) => {
     try {
@@ -584,16 +584,13 @@ export async function handleTelegramWebhook(req, env) {
   // локація
   if (msg?.location && userId && chatId) {
     await setUserLocation(env, userId, msg.location);
-    await sendPlain(
-      env,
-      chatId,
-      "✅ Локацію збережено.",
-      { reply_markup: mainKeyboard(isAdmin) }
-    );
+    await sendPlain(env, chatId, "✅ Локацію збережено.", {
+      reply_markup: mainKeyboard(isAdmin),
+    });
     return json({ ok: true });
   }
 
-  // /start
+  // /start — тепер точно на мові Telegram
   if (textRaw === "/start") {
     await safe(async () => {
       await setCodexMode(env, userId, false);
@@ -619,7 +616,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /admin — одразу даємо URL-кнопки
+  // /admin — тільки потрібні кнопки
   if (textRaw === "/admin" || textRaw === BTN_ADMIN) {
     await safe(async () => {
       const mo = String(env.MODEL_ORDER || "").trim();
@@ -633,6 +630,19 @@ export async function handleTelegramWebhook(req, env) {
       const hasFreeKey = !!(env.FREE_LLM_API_KEY || env.FREE_API_KEY);
       const links = energyLinks(env, userId);
 
+      // зберемо learn-url, навіть якщо його немає в links
+      const secret =
+        env.WEBHOOK_SECRET ||
+        env.TG_WEBHOOK_SECRET ||
+        env.TELEGRAM_SECRET_TOKEN ||
+        "";
+      const fallbackLearn = secret
+        ? abs(
+            env,
+            `/admin/learn/html?s=${encodeURIComponent(secret)}&u=${userId}`
+          )
+        : null;
+
       const lines = [
         t(lang, "admin_header"),
         `MODEL_ORDER: ${mo || "(not set)"}`,
@@ -645,10 +655,10 @@ export async function handleTelegramWebhook(req, env) {
       const inline_keyboard = [];
       if (links.checklist)
         inline_keyboard.push([{ text: "📋 Checklist", url: links.checklist }]);
-      if (links.energy)
-        inline_keyboard.push([{ text: "⚡ Energy", url: links.energy }]);
-      if (links.learn)
-        inline_keyboard.push([{ text: "🧠 Learn", url: links.learn }]);
+      // ⚡ Energy прибрали — ти казав, що вона вже є на чеклісті
+      const learnUrl = links.learn || fallbackLearn;
+      if (learnUrl)
+        inline_keyboard.push([{ text: "🧠 Learn", url: learnUrl }]);
 
       await sendPlain(env, chatId, lines.join("\n"), {
         reply_markup: { inline_keyboard },
@@ -705,7 +715,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // інтенти (дата/час/погода)
+  // інтенти
   if (textRaw) {
     const wantsDate = dateIntent(textRaw);
     const wantsTime = timeIntent(textRaw);
@@ -796,15 +806,12 @@ export async function handleTelegramWebhook(req, env) {
       const fname = pickFilenameByLang(codeLang);
       await sendDocument(env, chatId, fname, code, "Ось готовий файл 👇");
 
-      // оновлюємо індикатор
       await editMessageText(env, chatId, indicatorId, "✅ Готово");
-
-      // все, без довгого коду в чат
     });
     return json({ ok: true });
   }
 
-  // звичайний текст — як і раніше
+  // звичайний текст
   if (textRaw && !textRaw.startsWith("/")) {
     await safe(async () => {
       const cur = await getEnergy(env, userId);
@@ -835,11 +842,8 @@ export async function handleTelegramWebhook(req, env) {
 
       await pushTurn(env, userId, "assistant", full);
       if (expand && full.length > short.length) {
-        // якщо просили детально — можна й шматками
-        const parts = [];
         for (let i = 0; i < full.length; i += 3800)
-          parts.push(full.slice(i, i + 3800));
-        for (const p of parts) await sendPlain(env, chatId, p);
+          await sendPlain(env, chatId, full.slice(i, i + 3800));
       } else {
         await sendPlain(env, chatId, short);
       }
