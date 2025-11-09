@@ -5,6 +5,7 @@
 // (upd) Codex-режим для задач по коду/ботах/лендінгах.
 // (upd) vision → gemini-2.5-flash.
 // (upd) /codex_template … → віддаємо готові файли.
+// (upd) vision follow-up по останньому фото + клавіатура + розбиття
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
@@ -41,8 +42,6 @@ import {
   detectLandmarksFromText,
   formatLandmarkLines,
 } from "../lib/landmarkDetect.js";
-
-// ⬇️ нове: шаблони для Codex
 import {
   getCodexTemplate,
   listCodexTemplates,
@@ -127,7 +126,7 @@ async function urlToBase64(url) {
   return btoa(bin);
 }
 
-// розбивач для великих повідомлень (і для шаблонів)
+// розбивач для великих повідомлень
 function splitForTelegram(text, chunk = 3800) {
   if (!text) return [""];
   if (text.length <= chunk) return [text];
@@ -206,7 +205,7 @@ async function tgFileUrl(env, file_id) {
   return `https://api.telegram.org/file/bot${token}/${path}`;
 }
 
-// learn helpers
+// learn helpers (як у тебе)
 function extractFirstUrl(text = "") {
   const m = String(text || "").match(/https?:\/\/\S+/i);
   return m ? m[0] : null;
@@ -223,19 +222,20 @@ async function setLearnMode(env, userId, on) {
     await env.STATE_KV.put(KV.learnMode(userId), on ? "on" : "off");
   } catch {}
 }
-async function runLearnNow(env) {
-  const secret =
-    env.WEBHOOK_SECRET ||
-    env.TG_WEBHOOK_SECRET ||
-    env.TELEGRAM_SECRET_TOKEN ||
-    "";
-  const u = new URL(abs(env, "/admin/learn/run"));
-  if (secret) u.searchParams.set("s", secret);
-  const r = await fetch(u.toString(), { method: "POST" });
-  const ct = r.headers.get("content-type") || "";
-  if (!r.ok) throw new Error(`learn_run http ${r.status}`);
-  if (ct.includes("application/json")) return await r.json();
-  return { ok: true, summary: await r.text() };
+
+// 🔎 визначаємо, чи це питання про попереднє фото
+function isVisionFollowup(text = "") {
+  const s = text.toLowerCase();
+  return (
+    s.includes("де це") ||
+    s.includes("що це") ||
+    s.includes("що на фото") ||
+    s.includes("це київ") ||
+    s.includes("where is this") ||
+    s.includes("what is on the photo") ||
+    s.includes("яке це місто") ||
+    s.includes("цей монумент")
+  );
 }
 
 // drive-mode
@@ -306,19 +306,21 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   return true;
 }
 
-// vision (2.5)
+// vision (2.5) — ДОДАНО клаву + розбиття
 async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const att = pickPhoto(msg);
   if (!att) return false;
 
   const cur = await getEnergy(env, userId);
   const need = Number(cur.costText ?? 1);
+  const isAdmin = ADMIN(env, userId);
   if ((cur.energy ?? 0) < need) {
     const links = energyLinks(env, userId);
     await sendPlain(
       env,
       chatId,
-      t(lang, "need_energy_text", need, links.energy)
+      t(lang, "need_energy_text", need, links.energy),
+      { reply_markup: mainKeyboard(isAdmin) }
     );
     return true;
   }
@@ -353,7 +355,12 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
       desc: text,
     });
 
-    await sendPlain(env, chatId, `🖼️ ${text}`);
+    const chunks = splitForTelegram(`🖼️ ${text}`);
+    for (const ch of chunks) {
+      await sendPlain(env, chatId, ch, {
+        reply_markup: mainKeyboard(isAdmin),
+      });
+    }
 
     const landmarks = detectLandmarksFromText(text, lang);
     if (landmarks && landmarks.length) {
@@ -364,11 +371,12 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
       });
     }
   } catch (e) {
-    if (ADMIN(env, userId)) {
+    if (isAdmin) {
       await sendPlain(
         env,
         chatId,
-        `❌ Vision error: ${String(e.message || e).slice(0, 180)}`
+        `❌ Vision error: ${String(e.message || e).slice(0, 180)}`,
+        { reply_markup: mainKeyboard(true) }
       );
     } else {
       const connectUrl = abs(env, "/auth/drive");
@@ -378,14 +386,8 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
         "Поки що не можу аналізувати фото. Можу зберегти його у Google Drive — натисни «Google Drive» або підключи Drive.",
         {
           reply_markup: {
-            inline_keyboard: [
-              [
-                {
-                  text: t(lang, "open_drive_btn") || "Підключити Drive",
-                  url: connectUrl,
-                },
-              ],
-            ],
+            keyboard: mainKeyboard(false).keyboard,
+            resize_keyboard: true,
           },
         }
       );
@@ -393,7 +395,6 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   }
   return true;
 }
-
 // Codex helpers
 async function getCodexMode(env, userId) {
   try {
@@ -421,6 +422,7 @@ async function runCodex(env, prompt) {
     "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct";
   return await askAnyModel(env, order, prompt, { systemHint: system });
 }
+
 // SystemHint
 async function buildSystemHint(env, chatId, userId, preferredLang) {
   const statut = String((await readStatut(env)) || "").trim();
@@ -557,8 +559,7 @@ export async function handleTelegramWebhook(req, env) {
     await setCodexMode(env, userId, false);
     return json({ ok: true });
   }
-
-  // Codex вкл
+// Codex вкл
   if (textRaw === BTN_CODEX || textRaw === "/codex") {
     await safe(async () => {
       await setCodexMode(env, userId, true);
@@ -580,7 +581,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /admin (як у твоєму)
+  // /admin
   if (
     textRaw === "/admin" ||
     textRaw === "/admin@SentiBot" ||
@@ -638,7 +639,8 @@ export async function handleTelegramWebhook(req, env) {
     });
     return json({ ok: true });
   }
-// Learn
+
+  // Learn
   if (textRaw === (BTN_LEARN || "Learn") || (isAdmin && textRaw === "/learn")) {
     if (!isAdmin) {
       await sendPlain(env, chatId, t(lang, "how_help"), {
@@ -698,31 +700,6 @@ export async function handleTelegramWebhook(req, env) {
       chatId,
       "🔴 Learn-режим вимкнено. Медіа знову працюють як раніше."
     );
-    return json({ ok: true });
-  }
-  if (isAdmin && textRaw.startsWith("/learn_add")) {
-    const u = extractFirstUrl(textRaw);
-    if (!u) {
-      await sendPlain(
-        env,
-        chatId,
-        "Дай посилання після команди, напр.: /learn_add https://..."
-      );
-      return json({ ok: true });
-    }
-    await enqueueLearn(env, String(userId), { url: u, name: u });
-    await sendPlain(env, chatId, "✅ Додано в чергу Learn.");
-    return json({ ok: true });
-  }
-  if (isAdmin && textRaw === "/learn_run") {
-    await safe(async () => {
-      const res = await runLearnNow(env);
-      const summary = String(res?.summary || "").trim();
-      const out = summary
-        ? `✅ Learn запущено.\n\n${summary.slice(0, 1500)}`
-        : "✅ Learn запущено.";
-      await sendPlain(env, chatId, out);
-    });
     return json({ ok: true });
   }
 
@@ -799,7 +776,30 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // ===== Codex templates =====
+  // 🟣 vision follow-up: якщо питали про попереднє фото
+  if (textRaw && isVisionFollowup(textRaw)) {
+    const mem = await loadVisionMem(env, userId);
+    const last = mem && mem.length ? mem[0] : null;
+    if (last?.url) {
+      const imgB64 = await urlToBase64(last.url);
+      const { text } = await describeImage(env, {
+        chatId,
+        tgLang: msg.from?.language_code,
+        imageBase64: imgB64,
+        question: textRaw,
+        modelOrder:
+          "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct",
+      });
+      const chunks = splitForTelegram(`🖼️ ${text}`);
+      for (const ch of chunks) {
+        await sendPlain(env, chatId, ch, {
+          reply_markup: mainKeyboard(isAdmin),
+        });
+      }
+      return json({ ok: true });
+    }
+  }
+// ===== Codex templates =====
   if (textRaw.startsWith("/codex_template")) {
     const parts = textRaw.split(/\s+/).filter(Boolean);
     const tplKey = parts[1];
@@ -884,7 +884,8 @@ export async function handleTelegramWebhook(req, env) {
       return json({ ok: true });
     }
   }
-// Codex режим: якщо увімкнено — все йде в Codex
+
+  // Codex режим: якщо увімкнено — все йде в Codex
   const codexOn = await getCodexMode(env, userId);
   if (codexOn && textRaw) {
     await safe(async () => {
@@ -935,10 +936,6 @@ export async function handleTelegramWebhook(req, env) {
       await autoUpdateSelfTune(env, userId, lang).catch(() => {});
 
       const systemHint = await buildSystemHint(env, chatId, userId, lang);
-      const name = msg?.from?.first_name || "друже";
-
-      // у твоєму оригіналі тут був виклик вашого "розумного" LLM (callSmartLLM / think)
-      // я залишаю think, щоб не множити невідомі функції
 
       const reply = await think(env, {
         prompt: textRaw,
