@@ -5,11 +5,10 @@ import { abs } from "../utils/url.js";
 export const BTN_DRIVE = "Google Drive";
 export const BTN_SENTI = "Senti";
 export const BTN_CODEX = "Codex";
-export const BTN_LEARN = "Learn";   // можна викликати командою
+export const BTN_LEARN = "Learn";
 export const BTN_ADMIN = "Admin";
 
 /* ───────────────── ГОЛОВНА КЛАВІАТУРА ───────────── */
-// 🔁 зміна: Codex показуємо всім, Admin — тільки адмінам
 export const mainKeyboard = (isAdmin = false) => {
   const row1 = [
     { text: BTN_DRIVE },
@@ -22,11 +21,49 @@ export const mainKeyboard = (isAdmin = false) => {
 };
 
 /* ───────────────── АДМІН ─────────────── */
-export const ADMIN = (env, userId) =>
-  String(userId || "") === String(env.ADMIN_USER_ID || env.ADMIN_ID || "");
+/**
+ * Визначаємо адміна:
+ * - по ID: ADMIN_USER_ID, ADMIN_ID, ADMINS="id1,id2"
+ * - по username: ADMIN_USERNAME, ADMIN_USERNAMES="@name1,@name2"
+ * webhook може викликати ADMIN(env, id, username)
+ */
+export const ADMIN = (env, userId, username) => {
+  const idStr = String(userId || "");
+
+  // IDs
+  const idCandidates = [
+    env.ADMIN_USER_ID,
+    env.ADMIN_ID,
+    env.ADMINS, // може бути "123,456"
+  ]
+    .filter(Boolean)
+    .join(",")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const idMatch = idCandidates.some((v) => v === idStr);
+
+  // usernames
+  const uname = String(username || "")
+    .replace("@", "")
+    .toLowerCase();
+  const unameCandidates = [
+    env.ADMIN_USERNAME,
+    env.ADMIN_USERNAMES,
+  ]
+    .filter(Boolean)
+    .join(",")
+    .split(",")
+    .map((s) => s.replace("@", "").trim().toLowerCase())
+    .filter(Boolean);
+
+  const unameMatch = uname && unameCandidates.includes(uname);
+
+  return idMatch || unameMatch;
+};
 
 /* ───────────────── ПОСИЛАННЯ ЛІНКІВ ─────────────── */
-// 🔁 зміна: додаємо checklist, бо webhook його просить
 export const energyLinks = (env, userId) => {
   const base = abs(env, "/admin/energy");
   return {
@@ -48,7 +85,6 @@ function splitForTelegram(text, chunk = 3900) {
 }
 
 /* ───────────────── ВІДПРАВКА ТЕКСТУ ─────────────── */
-// 🔁 зміна: відправляємо кілька шматків, якщо довго
 export async function sendPlain(env, chatId, text, extra = {}) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
@@ -97,7 +133,7 @@ export async function withUploading(env, chatId, fn) {
   return await fn();
 }
 
-/* ───────────────── Спінер (залишаю як у тебе) ─────────────── */
+/* ───────────────── Спінер ─────────────── */
 export async function startSpinner(env, chatId, base = "Думаю над відповіддю") {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   let alive = true;
