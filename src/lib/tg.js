@@ -9,29 +9,43 @@ export const BTN_LEARN = "Learn";
 export const BTN_ADMIN = "Admin";
 
 /* ───────────────── ГОЛОВНА КЛАВІАТУРА ───────────── */
+/**
+ * isAdmin=true → показуємо Codex + Admin
+ * isAdmin=false → тільки публічні кнопки
+ */
 export const mainKeyboard = (isAdmin = false) => {
-  const row1 = [
+  const rows = [];
+
+  // базовий рядок для всіх
+  const baseRow = [
     { text: BTN_DRIVE },
     { text: BTN_SENTI },
-    { text: BTN_CODEX },
   ];
-  const rows = [row1];
-  if (isAdmin) rows.push([{ text: BTN_ADMIN }]);
+  rows.push(baseRow);
+
+  // Codex тільки адмінам
+  if (isAdmin) {
+    rows[0].push({ text: BTN_CODEX });
+    rows.push([{ text: BTN_ADMIN }]);
+  }
+
   return { keyboard: rows, resize_keyboard: true };
 };
 
 /* ───────────────── АДМІН ─────────────── */
 /**
  * Визначаємо адміна:
- * - по ID: ADMIN_USER_ID, ADMIN_ID, ADMINS="id1,id2"
+ * - по ID: TELEGRAM_ADMIN_ID, TELEGRAM_OWNER_ID, ADMIN_USER_ID, ADMIN_ID, ADMINS="id1,id2"
  * - по username: ADMIN_USERNAME, ADMIN_USERNAMES="@name1,@name2"
- * webhook може викликати ADMIN(env, id, username)
+ * webhook має викликати ADMIN(env, id, username)
  */
 export const ADMIN = (env, userId, username) => {
   const idStr = String(userId || "");
 
-  // IDs
+  // IDs з багатьох полів, включно з тим, що у тебе реально стоїть у воркері
   const idCandidates = [
+    env.TELEGRAM_ADMIN_ID,
+    env.TELEGRAM_OWNER_ID,
     env.ADMIN_USER_ID,
     env.ADMIN_ID,
     env.ADMINS, // може бути "123,456"
@@ -48,6 +62,7 @@ export const ADMIN = (env, userId, username) => {
   const uname = String(username || "")
     .replace("@", "")
     .toLowerCase();
+
   const unameCandidates = [
     env.ADMIN_USERNAME,
     env.ADMIN_USERNAMES,
