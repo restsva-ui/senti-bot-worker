@@ -1,10 +1,10 @@
 // src/lib/codexTemplates.js
-// Готові шаблони для Senti Codex, щоб одразу віддавати ПОВНІ файли.
+// Готові шаблони для /codex_template
 
 export const CODEX_TEMPLATES = {
   "tg-bot": `// index.js
-// Простий Telegram-бот на Node.js (fetch), без фреймворків.
-// Заміни <BOT_TOKEN> на свій токен.
+// Простий Telegram-бот на Node.js (fetch)
+// Заміни <BOT_TOKEN> на свій токен
 
 const TOKEN = process.env.BOT_TOKEN || "<BOT_TOKEN>";
 const TG_API = "https://api.telegram.org";
@@ -35,7 +35,7 @@ export default {
 `,
 
   "cf-worker": `// worker.js
-// Базовий Cloudflare Worker з одним роутом /webhook для Telegram.
+// Базовий Cloudflare Worker
 
 export default {
   async fetch(req, env, ctx) {
@@ -47,7 +47,7 @@ export default {
 
     if (url.pathname === "/webhook" && req.method === "POST") {
       const upd = await req.json();
-      // тут далі логіка розбору апдейта...
+      // TODO: розбір Telegram
       return new Response("OK");
     }
 
@@ -76,7 +76,7 @@ export default {
     <div class="wrap">
       <div class="card">
         <h1>Senti — твій AI-помічник</h1>
-        <p>Розуміє фото, текст, локацію. Працює у Telegram. Може розвиватися разом з тобою.</p>
+        <p>Розуміє фото, текст, локацію. Працює у Telegram.</p>
         <a class="btn" href="https://t.me/your_senti_bot">Запустити в Telegram</a>
       </div>
       <p class="footer">© Senti. Згенеровано Codex.</p>
@@ -90,10 +90,9 @@ export function getCodexTemplate(key) {
   const k = String(key || "").trim().toLowerCase();
   if (!k) return null;
   if (CODEX_TEMPLATES[k]) return CODEX_TEMPLATES[k];
-  // невеличкі синоніми
   if (k === "tg" || k === "telegram") return CODEX_TEMPLATES["tg-bot"];
   if (k === "worker" || k === "cf") return CODEX_TEMPLATES["cf-worker"];
-  if (k === "landing-page" || k === "page") return CODEX_TEMPLATES["landing"];
+  if (k === "page" || k === "landing-page") return CODEX_TEMPLATES["landing"];
   return null;
 }
 
