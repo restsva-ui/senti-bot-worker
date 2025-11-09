@@ -50,13 +50,16 @@ const {
   askLocationKeyboard,
 } = TG;
 
+// ключі в KV
 const KV = {
   learnMode: (uid) => `learn:mode:${uid}`,
   codexMode: (uid) => `codex:mode:${uid}`,
 };
 
 const VISION_MEM_KEY = (uid) => `vision:mem:${uid}`;
+const CODEX_MEM_KEY = (uid) => `codex:mem:${uid}`;
 
+// ===== Vision short-memory (20 фоток на 180 днів) =====
 async function loadVisionMem(env, userId) {
   try {
     const raw = await (env.STATE_KV || env.CHECKLIST_KV)?.get(
@@ -86,8 +89,7 @@ async function saveVisionMem(env, userId, entry) {
   } catch {}
 }
 
-// CODEx memory (проектні файли)
-const CODEX_MEM_KEY = (uid) => `codex:mem:${uid}`;
+// ===== Codex project memory (до 50 файлів, 180 днів) =====
 async function loadCodexMem(env, userId) {
   try {
     const raw = await (env.STATE_KV || env.CHECKLIST_KV)?.get(
@@ -121,7 +123,7 @@ async function clearCodexMem(env, userId) {
   } catch {}
 }
 
-// typing
+// ===== typing / індикатор =====
 async function sendTyping(env, chatId) {
   try {
     const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
@@ -135,11 +137,12 @@ async function sendTyping(env, chatId) {
 }
 function pulseTyping(env, chatId, times = 4, intervalMs = 4000) {
   sendTyping(env, chatId);
-  for (let i = 1; i < times; i++)
+  for (let i = 1; i < times; i++) {
     setTimeout(() => sendTyping(env, chatId), i * intervalMs);
+  }
 }
 
-// sendDocument — щоб Codex давав файл
+// ===== TG: sendDocument (щоб Codex віддавав файл) =====
 async function sendDocument(env, chatId, filename, content, caption) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   if (!token) return;
@@ -154,7 +157,7 @@ async function sendDocument(env, chatId, filename, content, caption) {
   });
 }
 
-// editMessageText — щоб анімувати «пазл»
+// ===== TG: editMessageText (оновити “🧩…”) =====
 async function editMessageText(env, chatId, messageId, newText) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   if (!token || !chatId || !messageId) return;
@@ -169,7 +172,7 @@ async function editMessageText(env, chatId, messageId, newText) {
   });
 }
 
-// base64 з TG (для vision)
+// ===== TG media helpers =====
 async function urlToBase64(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`fetch image ${r.status}`);
@@ -179,7 +182,6 @@ async function urlToBase64(url) {
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
   return btoa(bin);
 }
-// ── media helpers ──
 function pickPhoto(msg) {
   const arr = Array.isArray(msg?.photo) ? msg.photo : null;
   if (!arr?.length) return null;
@@ -279,7 +281,6 @@ async function runLearnNow(env) {
   if (ct.includes("application/json")) return await r.json();
   return { ok: true, summary: await r.text() };
 }
-
 // ===== drive-mode =====
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
@@ -436,7 +437,7 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   return true;
 }
 
-// ===== SystemHint =====
+// ===== systemHint для звичайних відповідей =====
 async function buildSystemHint(env, chatId, userId, preferredLang) {
   const statut = String((await readStatut(env)) || "").trim();
   const dlg = await buildDialogHint(env, userId);
@@ -468,28 +469,85 @@ async function buildSystemHint(env, chatId, userId, preferredLang) {
   return blocks.join("\n\n");
 }
 
-// ===== smart text LLM =====
-async function callSmartLLM(env, userText, opts = {}) {
+// ===== утиліти для Codex, яких не вистачало =====
+
+// збереження/зчитування режиму Codex
+async function setCodexMode(env, userId, on) {
+  const kv = env.STATE_KV || env.CHECKLIST_KV;
+  if (!kv) return;
+  await kv.put(KV.codexMode(userId), on ? "on" : "off", {
+    expirationTtl: 60 * 60 * 24 * 180,
+  });
+}
+async function getCodexMode(env, userId) {
+  const kv = env.STATE_KV || env.CHECKLIST_KV;
+  if (!kv) return false;
+  const val = await kv.get(KV.codexMode(userId), "text");
+  return val === "on";
+}
+
+// витяг тексту з відповіді моделі
+function asText(res) {
+  if (!res) return "";
+  if (typeof res === "string") return res;
+  if (typeof res.text === "string") return res.text;
+  if (Array.isArray(res.choices) && res.choices[0]?.message?.content)
+    return res.choices[0].message.content;
+  return JSON.stringify(res);
+}
+
+// основний виклик для Codex
+async function runCodex(env, userText) {
+  // можна задати окремий порядок моделей для коду
   const order =
-    String(env.MODEL_ORDER || "").trim() ||
+    String(env.CODEX_MODEL_ORDER || "").trim() ||
     "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free";
 
-  const sys =
-    (opts.systemHint || "") +
-    "\n\n[Style]\nKeep answers short and practical by default. Expand only when user says so.";
+  const sys = `You are Senti Codex.
+You ONLY answer with ready-to-use code or file contents.
+If user asks for html/css/js — generate complete file.
+Do not add long explanations, only code.`;
 
-  const res = await askAnyModel(env, order, userText, { systemHint: sys });
-  const full = asText(res) || "Не впевнений.";
-  const short = opts.expand || full.length <= 900 ? full : full.slice(0, 900) + "…";
-  return { full, short };
+  const res = await askAnyModel(env, order, userText, {
+    systemHint: sys,
+  });
+  return asText(res);
+}
+
+// розпарсити відповідь моделі і дістати код + мову
+function extractCodeAndLang(answer) {
+  if (!answer) return { lang: "txt", code: answer || "" };
+
+  // шукаємо ```lang ... ```
+  const m = answer.match(/```(\w+)?\s*([\s\S]*?)```/m);
+  if (m) {
+    const lang = m[1] || "txt";
+    const code = m[2] || "";
+    return { lang, code: code.trim() };
+  }
+
+  return { lang: "txt", code: answer.trim() };
+}
+
+// підібрати ім’я файлу по мові
+function pickFilenameByLang(lang) {
+  const l = (lang || "").toLowerCase();
+  if (l === "html") return "codex.html";
+  if (l === "css") return "codex.css";
+  if (l === "javascript" || l === "js") return "codex.js";
+  if (l === "json") return "codex.json";
+  if (l === "python" || l === "py") return "codex.py";
+  if (l === "php") return "codex.php";
+  if (l === "java") return "Codex.java";
+  return "codex.txt";
 }
 export async function handleTelegramWebhook(req, env) {
-  // ВАЖЛИВО: GET тепер завжди ок
+  // GET — просто показує, що воркер живий
   if (req.method === "GET") {
     return json({ ok: true, worker: "senti", ts: Date.now() });
   }
 
-  // POST: можемо перевірити секрет, але м’яко
+  // POST — м’яка перевірка секрету
   if (req.method === "POST") {
     const expected =
       env.TG_WEBHOOK_SECRET ||
@@ -511,7 +569,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: false }, 400);
   }
 
-  // Callback queries (admin buttons) handled via URLs
+  // callback_query — просто відповідаємо, бо кнопки у нас з URL
   if (update.callback_query) {
     const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
     if (token) {
@@ -548,7 +606,7 @@ export async function handleTelegramWebhook(req, env) {
     }
   };
 
-  // локація
+  // якщо прислали локацію — зберігаємо
   if (msg?.location && userId && chatId) {
     await setUserLocation(env, userId, msg.location);
     await sendPlain(
@@ -586,7 +644,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /admin — одразу даємо URL-кнопки
+  // /admin — одразу даємо 3 посилання
   if (textRaw === "/admin" || textRaw === BTN_ADMIN) {
     await safe(async () => {
       const mo = String(env.MODEL_ORDER || "").trim();
@@ -624,7 +682,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Codex on/off
+  // Codex вкл/вимк
   if (textRaw === BTN_CODEX || textRaw === "/codex") {
     if (!isAdmin) {
       await sendPlain(env, chatId, "🛡️ Codex доступний лише адміну.");
@@ -649,7 +707,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // media routing (drive / vision)
+  // медіа: або в Drive, або на vision
   try {
     const driveOn = await getDriveMode(env, userId);
     const hasAnyMedia = !!detectAttachment(msg) || !!pickPhoto(msg);
@@ -674,45 +732,49 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // додаткові кнопки проекту (лише Codex)
-  if (await getCodexMode(env, userId) && textRaw) {
+  // додаткові команди Codex (/clear_last, /clear_all, /summary)
+  if (await getCodexMode(env, userId)) {
     if (textRaw === "/clear_last") {
-      try {
+      await safe(async () => {
         const arr = await loadCodexMem(env, userId);
         if (!arr.length) {
-          await sendPlain(env, chatId, "Немає файлів для видалення.", { reply_markup: mainKeyboard(isAdmin) });
+          await sendPlain(env, chatId, "Немає файлів для видалення.", {
+            reply_markup: mainKeyboard(isAdmin),
+          });
         } else {
           arr.pop();
           const kv = env.STATE_KV || env.CHECKLIST_KV;
           if (kv) await kv.put(CODEX_MEM_KEY(userId), JSON.stringify(arr));
-          await sendPlain(env, chatId, "Останній файл видалено.", { reply_markup: mainKeyboard(isAdmin) });
+          await sendPlain(env, chatId, "Останній файл видалено.", {
+            reply_markup: mainKeyboard(isAdmin),
+          });
         }
-      } catch (e) {
-        if (isAdmin) await sendPlain(env, chatId, `❌ Error: ${e.message}`);
-      }
+      });
       return json({ ok: true });
     }
     if (textRaw === "/clear_all") {
-      try {
+      await safe(async () => {
         await clearCodexMem(env, userId);
-        await sendPlain(env, chatId, "Усі файли проєкту видалено.", { reply_markup: mainKeyboard(isAdmin) });
-      } catch (e) {
-        if (isAdmin) await sendPlain(env, chatId, `❌ Error: ${e.message}`);
-      }
+        await sendPlain(env, chatId, "Усі файли проєкту видалено.", {
+          reply_markup: mainKeyboard(isAdmin),
+        });
+      });
       return json({ ok: true });
     }
     if (textRaw === "/summary") {
-      try {
+      await safe(async () => {
         const arr = await loadCodexMem(env, userId);
         if (!arr.length) {
-          await sendPlain(env, chatId, "Немає файлів у проєкті.", { reply_markup: mainKeyboard(isAdmin) });
+          await sendPlain(env, chatId, "Немає файлів у проєкті.", {
+            reply_markup: mainKeyboard(isAdmin),
+          });
         } else {
-          const lines = arr.map(f => `- ${f.filename}`).join("\n");
-          await sendPlain(env, chatId, `Файли проєкту:\n${lines}`, { reply_markup: mainKeyboard(isAdmin) });
+          const lines = arr.map((f) => `- ${f.filename}`).join("\n");
+          await sendPlain(env, chatId, `Файли проєкту:\n${lines}`, {
+            reply_markup: mainKeyboard(isAdmin),
+          });
         }
-      } catch (e) {
-        if (isAdmin) await sendPlain(env, chatId, `❌ Error: ${e.message}`);
-      }
+      });
       return json({ ok: true });
     }
   }
@@ -762,7 +824,8 @@ export async function handleTelegramWebhook(req, env) {
       return json({ ok: true });
     }
   }
-// Codex обробка — тільки файл
+
+  // Codex: саме завдання (генерація коду у файл)
   if ((await getCodexMode(env, userId)) && textRaw) {
     await safe(async () => {
       const cur = await getEnergy(env, userId);
@@ -777,7 +840,7 @@ export async function handleTelegramWebhook(req, env) {
         return;
       }
 
-      // індикатор
+      // показали "працюю…"
       const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
       let indicatorId = null;
       if (token) {
@@ -808,15 +871,14 @@ export async function handleTelegramWebhook(req, env) {
       await saveCodexMem(env, userId, { filename: fname, content: code });
       await sendDocument(env, chatId, fname, code, "Ось готовий файл 👇");
 
-      // оновлюємо індикатор
-      await editMessageText(env, chatId, indicatorId, "✅ Готово");
-
-      // все, без довгого коду в чат
+      if (indicatorId) {
+        await editMessageText(env, chatId, indicatorId, "✅ Готово");
+      }
     });
     return json({ ok: true });
   }
 
-  // звичайний текст — як і раніше
+  // звичайний текст
   if (textRaw && !textRaw.startsWith("/")) {
     await safe(async () => {
       const cur = await getEnergy(env, userId);
@@ -838,20 +900,24 @@ export async function handleTelegramWebhook(req, env) {
 
       const systemHint = await buildSystemHint(env, chatId, userId, lang);
       const expand = /\b(детальн|подроб|more|details)\b/i.test(textRaw);
-      const { short, full } = await callSmartLLM(env, textRaw, {
-        lang,
+
+      const order =
+        String(env.MODEL_ORDER || "").trim() ||
+        "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free";
+
+      const res = await askAnyModel(env, order, textRaw, {
         systemHint,
-        expand,
-        adminDiag: isAdmin,
       });
+      const full = asText(res) || "Не впевнений.";
+      const short =
+        expand || full.length <= 900 ? full : full.slice(0, 900) + "…";
 
       await pushTurn(env, userId, "assistant", full);
+
       if (expand && full.length > short.length) {
-        // якщо просили детально — можна й шматками
-        const parts = [];
-        for (let i = 0; i < full.length; i += 3800)
-          parts.push(full.slice(i, i + 3800));
-        for (const p of parts) await sendPlain(env, chatId, p);
+        for (let i = 0; i < full.length; i += 3800) {
+          await sendPlain(env, chatId, full.slice(i, i + 3800));
+        }
       } else {
         await sendPlain(env, chatId, short);
       }
