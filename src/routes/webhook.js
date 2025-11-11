@@ -3,7 +3,7 @@
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
 import { abs } from "../utils/url.js";
-import { think } from "../lib/brain.js";
+import { think } from "../lib/brain.js"; // лишаємо, як було в тебе
 import { readStatut } from "../lib/kvChecklist.js";
 import { askAnyModel } from "../lib/modelRouter.js";
 import { json } from "../lib/utils.js";
@@ -30,7 +30,8 @@ import {
   weatherSummaryByCoords,
 } from "../apis/weather.js";
 import { setUserLocation, getUserLocation } from "../lib/geo.js";
-// віжн тепер тут:
+
+// винесені модулі
 import { handleVisionMedia } from "../lib/visionHandler.js";
 import {
   setCodexMode,
@@ -114,7 +115,7 @@ async function startPuzzleAnimation(env, chatId, messageId, signal) {
   }
 }
 
-// ---- get tg file url + attachment detection (потрібно і drive, і codex, і vision)
+// ---- get tg file url + attachment detection
 async function tgFileUrl(env, file_id) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   const r = await fetch(`https://api.telegram.org/bot${token}/getFile`, {
@@ -191,6 +192,7 @@ function detectAttachment(msg) {
   }
   return pickPhoto(msg);
 }
+
 // admin links
 function buildAdminLinks(env, userId) {
   const base = (path) => abs(env, path);
@@ -212,7 +214,6 @@ function buildAdminLinks(env, userId) {
 
   return { checklist, energy, learn };
 }
-// продовження src/routes/webhook.js
 
 // drive-mode media
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
@@ -233,9 +234,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
         "Щоб зберігати файли, підключи Google Drive.",
       {
         reply_markup: {
-          inline_keyboard: [
-            [{ text: "Підключити Drive", url: connectUrl }],
-          ],
+          inline_keyboard: [[{ text: "Підключити Drive", url: connectUrl }]],
         },
       }
     );
@@ -463,7 +462,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // media before codex: if drive ON → save, else vision
+  // media before codex: якщо drive ON → зберегти, якщо off → vision
   try {
     const driveOn = await getDriveMode(env, userId);
     const hasMedia = !!detectAttachment(msg) || !!pickPhoto(msg);
@@ -495,7 +494,11 @@ export async function handleTelegramWebhook(req, env) {
     }
   } catch (e) {
     if (isAdmin) {
-      await sendPlain(env, chatId, `❌ Media error: ${String(e).slice(0, 180)}`);
+      await sendPlain(
+        env,
+        chatId,
+        `❌ Media error: ${String(e).slice(0, 180)}`
+      );
     } else {
       await sendPlain(env, chatId, "Не вдалося обробити медіа.");
     }
@@ -571,7 +574,8 @@ export async function handleTelegramWebhook(req, env) {
           pickPhoto,
           tgFileUrl,
           urlToBase64,
-          describeImage: null, // вже не треба, у codexHandler свій
+          // тут можна передати describeImage, якщо хочеш щоб codex теж бачив фото
+          describeImage: null,
           sendDocument,
           startPuzzleAnimation,
           editMessageText,
