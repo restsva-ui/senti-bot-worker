@@ -105,3 +105,4 @@ export async function describeImage(
 
   return { text };
 }
+ 
