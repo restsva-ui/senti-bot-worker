@@ -1,934 +1,713 @@
 // src/routes/webhook.js
 
-import { driveSaveFromUrl } from "../integrations/driveSaveFromUrl.js";
-import { tgSendDocument } from "../integrations/tgSendDocument.js";
-import { tgSendPhoto } from "../integrations/tgSendPhoto.js";
-import { tgSendVideo } from "../integrations/tgSendVideo.js";
-import { tgSendAudio } from "../integrations/tgSendAudio.js";
-import { tgSendVoice } from "../integrations/tgSendVoice.js";
-import { tgSendAnimation } from "../integrations/tgSendAnimation.js";
-import { tgSendLocation } from "../integrations/tgSendLocation.js";
-import { tgSendContact } from "../integrations/tgSendContact.js";
-import { tgSendPoll } from "../integrations/tgSendPoll.js };
-import { tgSendQuiz } from "../integrations/tgSendQuiz.js";
-import { tgSendChatAction } from "../integrations/tgSendChatAction.js";
-import { tgEditMessageText } from "../integrations/tgEditMessageText.js";
-import { tgEditMessageCaption } from "../integrations/tgEditMessageCaption.js";
-import { tgEditMessageMedia } from "../integrations/tgEditMessageMedia.js";
-import { tgDeleteMessage } from "../integrations/tgDeleteMessage.js";
-import { tgAnswerCallback } from "../integrations/tgAnswerCallback.js";
-import { tgSetWebhook } from "../integrations/tgSetWebhook.js";
-import { tgGetFileLink } from "../integrations/tgGetFileLink.js";
-import { tgGetChat } from "../integrations/tgGetChat.js";
-import { tgGetUserProfilePhotos } from "../integrations/tgGetUserProfilePhotos.js";
-import { tgKickChatMember } from "../integrations/tgKickChatMember.js";
-import { tgUnbanChatMember } from "../integrations/tgUnbanChatMember.js";
-import { tgRestrictChatMember } from "../integrations/tgRestrictChatMember.js";
-import { tgPromoteChatMember } from "../integrations/tgPromoteChatMember.js";
-import { tgSetChatAdministratorCustomTitle } from "../integrations/tgSetChatAdministratorCustomTitle.js";
-import { tgSetChatPhoto } from "../integrations/tgSetChatPhoto.js";
-import { tgDeleteChatPhoto } from "../integrations/tgDeleteChatPhoto.js";
-import { tgSetChatTitle } from "../integrations/tgSetChatTitle.js";
-import { tgSetChatDescription } from "../integrations/tgSetChatDescription.js";
-import { tgPinChatMessage } from "../integrations/tgPinChatMessage.js";
-import { tgUnpinChatMessage } from "../integrations/tgUnpinChatMessage.js";
-import { tgLeaveChat } from "../integrations/tgLeaveChat.js";
-import { tgGetChatAdministrators } from "../integrations/tgGetChatAdministrators.js";
-import { tgGetChatMembersCount } from "../integrations/tgGetChatMembersCount.js";
-import { tgGetChatMember } from "../integrations/tgGetChatMember.js";
-import { tgSetMyCommands } from "../integrations/tgSetMyCommands.js";
-import { tgGetMyCommands } from "../integrations/tgGetMyCommands.js";
+import { driveSaveFromUrl } from "../lib/drive.js";
+import { getUserTokens } from "../lib/userDrive.js";
+import { abs } from "../utils/url.js";
+import { think } from "../lib/brain.js";
+import { readStatut } from "../lib/kvChecklist.js";
+import { askAnyModel } from "../lib/modelRouter.js";
+import { json } from "../lib/utils.js";
+import { getEnergy, spendEnergy } from "../lib/energy.js";
+import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
+import { loadSelfTune, autoUpdateSelfTune } from "../lib/selfTune.js";
+import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
+import { t, pickReplyLanguage } from "../lib/i18n.js";
+import { TG } from "../lib/tg.js";
+import {
+  enqueueLearn,
+  listQueued,
+  getRecentInsights,
+} from "../lib/kvLearnQueue.js";
+import {
+  dateIntent,
+  timeIntent,
+  replyCurrentDate,
+  replyCurrentTime,
+} from "../apis/time.js";
+import {
+  weatherIntent,
+  weatherSummaryByPlace,
+  weatherSummaryByCoords,
+} from "../apis/weather.js";
+import { setUserLocation, getUserLocation } from "../lib/geo.js";
+import { describeImage } from "../flows/visionDescribe.js";
+import {
+  detectLandmarksFromText,
+  formatLandmarkLines,
+} from "../lib/landmarkDetect.js";
 
-import { humanizeDate } from "../lib/humanizeDate.js";
-import { detectIntent } from "../lib/detectIntent.js";
-import { fetchSentiCore } from "../brain/sentiCore.js";
-import { applyVisionPolicy } from "../flows/visionPolicy.js";
-import { aiRespond } from "../flows/aiRespond.js";
-import { aiImprove } from "../routes/aiImprove.js";
-import { aiTrain } from "../routes/aiTrain.js";
-import { brainApi } from "../routes/brainApi.js";
-import { brainFallbacks } from "../routes/brainFallbacks.js";
-import { brainPromote } from "../routes/brainPromote.js";
-import { brainState } from "../routes/brainState.js";
-
-import { SELF_TEST_LOCAL } from "./selfTestLocal.js";
-import { SELF_TEST } from "./selfTest.js";
-import { HEALTH } from "./health.js";
-import { CI_DEPLOY } from "./ciDeploy.js";
-
-import { handleImageDescribe } from "../flows/visionDescribe.js";
-import { extractOcrFromImage } from "../lib/ocr.js";
-import { detectFaces } from "../lib/faceDetect.js";
-import { detectObjects } from "../lib/objectDetect.js";
-import { detectBrands } from "../lib/brandDetect.js";
-import { detectLandmarks } from "../lib/landmarkDetect.js";
+// ← новий імпорт для винесеного codex
+import {
+  setCodexMode,
+  getCodexMode,
+  clearCodexMem,
+  handleCodexCommand,
+  handleCodexGeneration,
+} from "../lib/codexHandler.js";
 
 const {
   BTN_DRIVE,
-  BTN_DOC,
-  BTN_PHOTO,
-  BTN_VIDEO,
-  BTN_AUDIO,
-  BTN_VOICE,
-  BTN_ANIMATION,
-  BTN_LOCATION,
-  BTN_CONTACT,
-  BTN_POLL,
-  BTN_QUIZ,
-  BTN_CHAT_ACTION,
-  BTN_EDIT_TEXT,
-  BTN_EDIT_CAPTION,
-  BTN_EDIT_MEDIA,
-  BTN_DELETE,
-  BTN_ANSWER_CALLBACK,
-  BTN_SET_WEBHOOK,
-  BTN_GET_FILE_LINK,
-  BTN_GET_CHAT,
-  BTN_GET_USER_PHOTOS,
-  BTN_KICK,
-  BTN_UNBAN,
-  BTN_RESTRICT,
-  BTN_PROMOTE,
-  BTN_SET_ADMIN_TITLE,
-  BTN_SET_CHAT_PHOTO,
-  BTN_DELETE_CHAT_PHOTO,
-  BTN_SET_CHAT_TITLE,
-  BTN_SET_CHAT_DESC,
-  BTN_PIN,
-  BTN_UNPIN,
-  BTN_LEAVE,
-  BTN_GET_ADMINS,
-  BTN_GET_MEMBERS_COUNT,
-  BTN_GET_MEMBER,
-  BTN_SET_COMMANDS,
-  BTN_GET_COMMANDS,
-} = await import("../ui/home.js");
+  BTN_SENTI,
+  BTN_ADMIN,
+  BTN_CODEX,
+  mainKeyboard,
+  ADMIN,
+  energyLinks,
+  sendPlain,
+  askLocationKeyboard,
+} = TG;
 
-const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
-const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "senti1984";
-const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
-const CF_AI_GATEWAY = process.env.CF_AI_GATEWAY || null;
-const DEFAULT_MODEL =
-  process.env.DEFAULT_MODEL ||
-  "@cf/meta/llama-3.1-8b-instruct" ||
-  "@cf/qwen/qwen-2.5-7b-instruct";
+const VISION_MEM_KEY = (uid) => `vision:mem:${uid}`;
 
-const ADMIN_ID = process.env.ADMIN_ID ? Number(process.env.ADMIN_ID) : null;
-
-function isAdmin(userId) {
-  if (!ADMIN_ID) return false;
-  return Number(userId) === ADMIN_ID;
+// ---- vision short-memory
+async function loadVisionMem(env, userId) {
+  try {
+    const raw = await (env.STATE_KV || env.CHECKLIST_KV)?.get(
+      VISION_MEM_KEY(userId),
+      "text"
+    );
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+async function saveVisionMem(env, userId, entry) {
+  const kv = env.STATE_KV || env.CHECKLIST_KV;
+  if (!kv) return;
+  try {
+    const arr = await loadVisionMem(env, userId);
+    arr.unshift({
+      id: entry.id,
+      url: entry.url,
+      caption: entry.caption || "",
+      desc: entry.desc || "",
+      ts: Date.now(),
+    });
+    await kv.put(VISION_MEM_KEY(userId), JSON.stringify(arr.slice(0, 20)), {
+      expirationTtl: 60 * 60 * 24 * 180,
+    });
+  } catch {}
 }
 
-function makeInlineKeyboard() {
+// ---- TG helpers
+async function sendTyping(env, chatId) {
+  try {
+    const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+    if (!token) return;
+    await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, action: "typing" }),
+    });
+  } catch {}
+}
+function pulseTyping(env, chatId, times = 4, intervalMs = 4000) {
+  sendTyping(env, chatId);
+  for (let i = 1; i < times; i++) {
+    setTimeout(() => sendTyping(env, chatId), i * intervalMs);
+  }
+}
+async function sendDocument(env, chatId, filename, content, caption) {
+  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+  if (!token) return;
+  const fd = new FormData();
+  fd.append("chat_id", String(chatId));
+  const file = new File([content], filename, { type: "text/plain" });
+  fd.append("document", file);
+  if (caption) fd.append("caption", caption);
+  await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
+    method: "POST",
+    body: fd,
+  });
+}
+async function editMessageText(env, chatId, messageId, newText) {
+  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+  if (!token || !chatId || !messageId) return;
+  await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
+      text: newText,
+    }),
+  });
+}
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+async function startPuzzleAnimation(env, chatId, messageId, signal) {
+  const frames = [
+    "🧩 Працюю над кодом…",
+    "🧩🟦 Працюю над кодом…",
+    "🧩🟦🟩 Працюю над кодом…",
+  ];
+  let i = 0;
+  while (!signal.done) {
+    await sleep(1300);
+    if (signal.done) break;
+    try {
+      await editMessageText(env, chatId, messageId, frames[i % frames.length]);
+    } catch {}
+    i++;
+  }
+}
+
+// ---- get tg file url + attachment detection
+async function tgFileUrl(env, file_id) {
+  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+  const r = await fetch(`https://api.telegram.org/bot${token}/getFile`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ file_id }),
+  });
+  const data = await r.json().catch(() => null);
+  if (!data?.ok) throw new Error("getFile failed");
+  const path = data.result?.file_path;
+  if (!path) throw new Error("file_path missing");
+  return `https://api.telegram.org/file/bot${token}/${path}`;
+}
+async function urlToBase64(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`fetch image ${r.status}`);
+  const ab = await r.arrayBuffer();
+  const bytes = new Uint8Array(ab);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+function pickPhoto(msg) {
+  const arr = Array.isArray(msg?.photo) ? msg.photo : null;
+  if (!arr?.length) return null;
+  const ph = arr[arr.length - 1];
   return {
-    inline_keyboard: [
-      [
-        { text: "📁 Drive", callback_data: BTN_DRIVE },
-        { text: "📄 Doc", callback_data: BTN_DOC },
-        { text: "🖼 Photo", callback_data: BTN_PHOTO },
-      ],
-      [
-        { text: "🎬 Video", callback_data: BTN_VIDEO },
-        { text: "🎵 Audio", callback_data: BTN_AUDIO },
-        { text: "🎙 Voice", callback_data: BTN_VOICE },
-      ],
-      [
-        { text: "🎞 Gif", callback_data: BTN_ANIMATION },
-        { text: "📍 Location", callback_data: BTN_LOCATION },
-        { text: "👤 Contact", callback_data: BTN_CONTACT },
-      ],
-      [
-        { text: "📊 Poll", callback_data: BTN_POLL },
-        { text: "❓ Quiz", callback_data: BTN_QUIZ },
-        { text: "⌛ Typing", callback_data: BTN_CHAT_ACTION },
-      ],
-      [
-        { text: "✏ Edit text", callback_data: BTN_EDIT_TEXT },
-        { text: "🖼 Edit media", callback_data: BTN_EDIT_MEDIA },
-        { text: "🗑 Delete", callback_data: BTN_DELETE },
-      ],
-      [
-        { text: "🔔 Answer cb", callback_data: BTN_ANSWER_CALLBACK },
-        { text: "🔗 Webhook", callback_data: BTN_SET_WEBHOOK },
-        { text: "📥 File link", callback_data: BTN_GET_FILE_LINK },
-      ],
-      [
-        { text: "ℹ Chat", callback_data: BTN_GET_CHAT },
-        { text: "🖼 User photos", callback_data: BTN_GET_USER_PHOTOS },
-        { text: "🦵 Kick", callback_data: BTN_KICK },
-      ],
-      [
-        { text: "♻ Unban", callback_data: BTN_UNBAN },
-        { text: "🔒 Restrict", callback_data: BTN_RESTRICT },
-        { text: "⭐ Promote", callback_data: BTN_PROMOTE },
-      ],
-      [
-        { text: "📛 Admin title", callback_data: BTN_SET_ADMIN_TITLE },
-        { text: "🖼 Chat photo", callback_data: BTN_SET_CHAT_PHOTO },
-        { text: "🚫 Del photo", callback_data: BTN_DELETE_CHAT_PHOTO },
-      ],
-      [
-        { text: "✏ Chat title", callback_data: BTN_SET_CHAT_TITLE },
-        { text: "📝 Chat desc", callback_data: BTN_SET_CHAT_DESC },
-        { text: "📌 Pin", callback_data: BTN_PIN },
-      ],
-      [
-        { text: "📍 Unpin", callback_data: BTN_UNPIN },
-        { text: "🚪 Leave", callback_data: BTN_LEAVE },
-        { text: "👑 Admins", callback_data: BTN_GET_ADMINS },
-      ],
-      [
-        { text: "📊 Members", callback_data: BTN_GET_MEMBERS_COUNT },
-        { text: "👤 Member", callback_data: BTN_GET_MEMBER },
-        { text: "⚙ Commands", callback_data: BTN_SET_COMMANDS },
-      ],
-      [{ text: "📋 Get commands", callback_data: BTN_GET_COMMANDS }],
-    ],
+    type: "photo",
+    file_id: ph.file_id,
+    name: `photo_${ph.file_unique_id}.jpg`,
   };
 }
-
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    if (url.pathname === "/health") {
-      return HEALTH.fetch(request, env, ctx);
-    }
-    if (url.pathname === "/self-test") {
-      return SELF_TEST.fetch(request, env, ctx);
-    }
-    if (url.pathname === "/self-test-local") {
-      return SELF_TEST_LOCAL.fetch(request, env, ctx);
-    }
-    if (url.pathname === "/ci-deploy") {
-      return CI_DEPLOY.fetch(request, env, ctx);
-    }
-
-    if (request.method === "GET") {
-      return new Response(
-        JSON.stringify(
-          {
-            ok: true,
-            service: "senti-bot-worker",
-            version: "2.4 codex 0.1",
-            tg: !!TG_BOT_TOKEN,
-            webhook_secret: !!WEBHOOK_SECRET,
-            cf_account: !!CF_ACCOUNT_ID,
-            ai_gateway: !!CF_AI_GATEWAY,
-            default_model: DEFAULT_MODEL,
-            admin: !!ADMIN_ID,
-          },
-          null,
-          2
-        ),
-        {
-          headers: { "content-type": "application/json; charset=utf-8" },
-        }
-      );
-    }
-
-    if (request.method !== "POST") {
-      return new Response("Method not allowed", { status: 405 });
-    }
-
-    const signature = request.headers.get("X-Webhook-Secret");
-    if (WEBHOOK_SECRET && signature !== WEBHOOK_SECRET) {
-      return new Response("Unauthorized", { status: 401 });
-    }
-
-    let update;
-    try {
-      update = await request.json();
-    } catch (err) {
-      return new Response("Bad JSON", { status: 400 });
-    }
-
-    try {
-      const res = await handleUpdate(update, env, ctx);
-      return res;
-    } catch (err) {
-      console.error("handleUpdate error", err);
-      return new Response("Internal error", { status: 500 });
-    }
-  },
-};
-async function handleUpdate(update, env, ctx) {
-  const message = update.message || update.edited_message || null;
-  const callbackQuery = update.callback_query || null;
-  const inlineQuery = update.inline_query || null;
-  const chatJoinRequest = update.chat_join_request || null;
-  const myChatMember = update.my_chat_member || null;
-  const chatMember = update.chat_member || null;
-
-  if (callbackQuery) {
-    return handleCallback(callbackQuery, env, ctx);
+function detectAttachment(msg) {
+  if (!msg) return null;
+  if (msg.document) {
+    const d = msg.document;
+    return {
+      type: "document",
+      file_id: d.file_id,
+      name: d.file_name || `doc_${d.file_unique_id}`,
+    };
   }
-
-  if (inlineQuery) {
-    return new Response("OK", { status: 200 });
+  if (msg.video) {
+    const v = msg.video;
+    return {
+      type: "video",
+      file_id: v.file_id,
+      name: v.file_name || `video_${v.file_unique_id}.mp4`,
+    };
   }
-
-  if (chatJoinRequest) {
-    return new Response("OK", { status: 200 });
+  if (msg.audio) {
+    const a = msg.audio;
+    return {
+      type: "audio",
+      file_id: a.file_id,
+      name: a.file_name || `audio_${a.file_unique_id}.mp3`,
+    };
   }
-
-  if (myChatMember || chatMember) {
-    return new Response("OK", { status: 200 });
+  if (msg.voice) {
+    const v = msg.voice;
+    return {
+      type: "voice",
+      file_id: v.file_id,
+      name: `voice_${v.file_unique_id}.ogg`,
+    };
   }
-
-  if (!message) {
-    return new Response("No message", { status: 200 });
+  if (msg.video_note) {
+    const v = msg.video_note;
+    return {
+      type: "video_note",
+      file_id: v.file_id,
+      name: `videonote_${v.file_unique_id}.mp4`,
+    };
   }
+  return pickPhoto(msg);
+}
+// admin links
+function buildAdminLinks(env, userId) {
+  const base = (path) => abs(env, path);
+  const secret =
+    env.WEBHOOK_SECRET ||
+    env.TG_WEBHOOK_SECRET ||
+    env.TELEGRAM_SECRET_TOKEN ||
+    "senti1984";
 
-  if (message.text && message.text.startsWith("/")) {
-    return handleCommand(message, env, ctx);
-  }
+  const checklist = `${base(
+    "/admin/checklist/html"
+  )}?s=${encodeURIComponent(secret)}&u=${userId}`;
+  const energy = `${base(
+    "/admin/energy/html"
+  )}?s=${encodeURIComponent(secret)}&u=${userId}`;
+  const learn = `${base(
+    "/admin/learn/html"
+  )}?s=${encodeURIComponent(secret)}&u=${userId}`;
 
-  if (
-    message.photo ||
-    message.video ||
-    message.document ||
-    message.audio ||
-    message.voice ||
-    message.animation
-  ) {
-    return handleMediaMessage(message, env, ctx);
-  }
-
-  return handleTextMessage(message, env, ctx);
+  return { checklist, energy, learn };
 }
 
-async function handleCommand(message, env, ctx) {
-  const chatId = message.chat.id;
-  const userId = message.from?.id;
-  const text = message.text || "";
-  const [cmd, ...args] = text.split(" ");
-  const argText = args.join(" ").trim();
+// drive-mode media
+async function handleIncomingMedia(env, chatId, userId, msg, lang) {
+  const att = detectAttachment(msg);
+  if (!att) return false;
 
-  if (cmd === "/start") {
-    const kb = makeInlineKeyboard();
-    const welcome =
-      "Привіт! Я Senti 2.4 codex 0.1 🤖\n" +
-      "Я вмію приймати файли, фото, відео і одразу відправляти їх у твоє Drive або обробляти.\n" +
-      "Можу також підключати AI для відповіді.\n" +
-      "Спробуй кнопки нижче.";
-    await tgSendChatAction(TG_BOT_TOKEN, chatId, "typing");
-    await tgSendDocument(TG_BOT_TOKEN, chatId, null, welcome, null, null, kb);
-    return new Response("OK", { status: 200 });
-  }
-
-  if (cmd === "/help") {
-    const help =
-      "Команди:\n" +
-      "/start - показати меню\n" +
-      "/help - ця довідка\n" +
-      "/ai <текст> - запит до AI\n" +
-      "/ocr - витягнути текст з останнього фото\n" +
-      "/vision - описати останнє фото\n" +
-      "/admin - адмін-меню (для власника)\n" +
-      "/self-test - внутрішній тест\n" +
-      "/health - стан воркера";
-    await tgSendChatAction(TG_BOT_TOKEN, chatId, "typing");
-    await tgSendDocument(TG_BOT_TOKEN, chatId, null, help);
-    return new Response("OK", { status: 200 });
-  }
-
-  if (cmd === "/ai") {
-    if (!argText) {
-      await tgSendDocument(
-        TG_BOT_TOKEN,
-        chatId,
-        null,
-        "Дай текст після /ai, напр. /ai поясни як працює Senti"
-      );
-      return new Response("OK", { status: 200 });
-    }
-    await tgSendChatAction(TG_BOT_TOKEN, chatId, "typing");
-    const aiRes = await aiRespond(argText, {
+  let hasTokens = false;
+  try {
+    const tokens = await getUserTokens(env, userId);
+    hasTokens = !!tokens;
+  } catch {}
+  if (!hasTokens) {
+    const connectUrl = abs(env, "/auth/drive");
+    await sendPlain(
       env,
-      ctx,
-      userId,
       chatId,
-    });
-    await tgSendDocument(TG_BOT_TOKEN, chatId, null, aiRes || "Не вийшло 🤔");
-    return new Response("OK", { status: 200 });
-  }
-
-  if (cmd === "/vision") {
-    await tgSendDocument(
-      TG_BOT_TOKEN,
-      chatId,
-      null,
-      "Надішли фото, я спробую його описати."
+      t(lang, "drive_connect_hint") ||
+        "Щоб зберігати файли, підключи Google Drive.",
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Підключити Drive", url: connectUrl }],
+          ],
+        },
+      }
     );
-    return new Response("OK", { status: 200 });
+    return true;
   }
 
-  if (cmd === "/ocr") {
-    await tgSendDocument(
-      TG_BOT_TOKEN,
+  const cur = await getEnergy(env, userId);
+  const need = Number(cur.costImage ?? 5);
+  if ((cur.energy ?? 0) < need) {
+    const links = energyLinks(env, userId);
+    await sendPlain(
+      env,
       chatId,
-      null,
-      "Надішли фото, я витягну з нього текст."
+      t(lang, "need_energy_media", need, links.energy)
     );
-    return new Response("OK", { status: 200 });
+    return true;
   }
+  await spendEnergy(env, userId, need, "media");
 
-  if (cmd === "/admin") {
-    if (!isAdmin(userId)) {
-      await tgSendDocument(
-        TG_BOT_TOKEN,
-        chatId,
-        null,
-        "Це адмін-меню. Доступ заборонено."
-      );
-      return new Response("OK", { status: 200 });
+  const url = await tgFileUrl(env, att.file_id);
+  const saved = await driveSaveFromUrl(env, userId, url, att.name);
+  await sendPlain(
+    env,
+    chatId,
+    `✅ Збережено на Диск: ${saved?.name || att.name}`,
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "Відкрити Диск",
+              url: "https://drive.google.com/drive/my-drive",
+            },
+          ],
+        ],
+      },
     }
-    const adminText =
-      "Адмін-меню:\n" +
-      "- /setwebhook <url>\n" +
-      "- /getchat\n" +
-      "- /getcommands\n" +
-      "- /setcommands\n" +
-      "- /self-test\n" +
-      "- /health";
-    await tgSendDocument(TG_BOT_TOKEN, chatId, null, adminText);
-    return new Response("OK", { status: 200 });
-  }
-
-  if (cmd === "/setwebhook") {
-    if (!isAdmin(userId)) {
-      await tgSendDocument(
-        TG_BOT_TOKEN,
-        chatId,
-        null,
-        "Тільки адмін може ставити вебхук."
-      );
-      return new Response("OK", { status: 200 });
-    }
-    if (!argText) {
-      await tgSendDocument(
-        TG_BOT_TOKEN,
-        chatId,
-        null,
-        "Вкажи URL, напр. /setwebhook https://example.com/webhook"
-      );
-      return new Response("OK", { status: 200 });
-    }
-    const r = await tgSetWebhook(TG_BOT_TOKEN, argText);
-    await tgSendDocument(
-      TG_BOT_TOKEN,
-      chatId,
-      null,
-      "Webhook set: " + JSON.stringify(r)
-    );
-    return new Response("OK", { status: 200 });
-  }
-
-  if (cmd === "/self-test") {
-    return SELF_TEST.fetch(new Request("http://local/self-test"), env, ctx);
-  }
-
-  if (cmd === "/health") {
-    return HEALTH.fetch(new Request("http://local/health"), env, ctx);
-  }
-
-  await tgSendDocument(TG_BOT_TOKEN, chatId, null, "Невідома команда.");
-  return new Response("OK", { status: 200 });
+  );
+  return true;
 }
-async function handleMediaMessage(message, env, ctx) {
-  const chatId = message.chat.id;
-  const userId = message.from?.id;
-  const caption = message.caption || "";
-  const hasPhoto = !!message.photo;
-  const hasVideo = !!message.video;
-  const hasDoc = !!message.document;
-  const hasAudio = !!message.audio;
-  const hasVoice = !!message.voice;
-  const hasAnimation = !!message.animation;
 
-  if (caption && caption.startsWith("/ai")) {
-    const prompt = caption.replace("/ai", "").trim() || "Опиши файл/фото.";
-    await tgSendChatAction(TG_BOT_TOKEN, chatId, "typing");
-    let fileUrl = null;
+// vision-mode (коли не Codex і не drive)
+async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
+  const att = pickPhoto(msg);
+  if (!att) return false;
 
-    if (hasPhoto) {
-      const photo = message.photo[message.photo.length - 1];
-      fileUrl = await tgGetFileLink(TG_BOT_TOKEN, photo.file_id);
-    } else if (hasVideo) {
-      fileUrl = await tgGetFileLink(TG_BOT_TOKEN, message.video.file_id);
-    } else if (hasDoc) {
-      fileUrl = await tgGetFileLink(TG_BOT_TOKEN, message.document.file_id);
-    }
-
-    const aiRes = await aiRespond(prompt, {
+  const cur = await getEnergy(env, userId);
+  const need = Number(cur.costText ?? 1);
+  if ((cur.energy ?? 0) < need) {
+    const links = energyLinks(env, userId);
+    await sendPlain(
       env,
-      ctx,
-      userId,
       chatId,
-      mediaUrl: fileUrl,
+      t(lang, "need_energy_text", need, links.energy)
+    );
+    return true;
+  }
+  await spendEnergy(env, userId, need, "vision");
+  pulseTyping(env, chatId);
+
+  const url = await tgFileUrl(env, att.file_id);
+  const imageBase64 = await urlToBase64(url);
+  const prompt =
+    caption ||
+    (lang.startsWith("uk")
+      ? "Опиши, що на зображенні, коротко і по суті."
+      : "Describe the image briefly and to the point.");
+
+  const visionOrder =
+    "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct";
+
+  try {
+    const { text } = await describeImage(env, {
+      chatId,
+      tgLang: msg.from?.language_code,
+      imageBase64,
+      question: prompt,
+      modelOrder: visionOrder,
     });
-    await tgSendDocument(TG_BOT_TOKEN, chatId, null, aiRes || "Не вийшло 🤔");
-    return new Response("OK", { status: 200 });
-  }
 
-  if (hasPhoto) {
-    const photo = message.photo[message.photo.length - 1];
-    const fileUrl = await tgGetFileLink(TG_BOT_TOKEN, photo.file_id);
+    await saveVisionMem(env, userId, {
+      id: att.file_id,
+      url,
+      caption,
+      desc: text,
+    });
 
-    const visionResult = await applyVisionPolicy(fileUrl, { env, ctx });
-    const ocrText = await extractOcrFromImage(fileUrl, { env, ctx }).catch(
-      () => null
-    );
-    const faces = await detectFaces(fileUrl, { env, ctx }).catch(() => null);
-    const objects = await detectObjects(fileUrl, { env, ctx }).catch(() => null);
-    const brands = await detectBrands(fileUrl, { env, ctx }).catch(() => null);
-    const landmarks = await detectLandmarks(fileUrl, { env, ctx }).catch(
-      () => null
-    );
+    await sendPlain(env, chatId, `🖼️ ${text}`);
 
-    let reply =
-      "Фото отримано ✅\n" +
-      (visionResult?.description
-        ? "Опис: " + visionResult.description + "\n"
-        : "") +
-      (ocrText ? "OCR: " + ocrText.slice(0, 500) + "\n" : "") +
-      (faces ? "Обличчя: " + JSON.stringify(faces) + "\n" : "") +
-      (objects ? "Обʼєкти: " + JSON.stringify(objects) + "\n" : "") +
-      (brands ? "Бренди: " + JSON.stringify(brands) + "\n" : "") +
-      (landmarks ? "Місця: " + JSON.stringify(landmarks) + "\n" : "");
-
-    await tgSendDocument(TG_BOT_TOKEN, chatId, null, reply);
-    return new Response("OK", { status: 200 });
-  }
-
-  if (hasDoc) {
-    const fileUrl = await tgGetFileLink(TG_BOT_TOKEN, message.document.file_id);
-    if (env.DRIVE_ACCESS_TOKEN) {
-      const saved = await driveSaveFromUrl(
-        env.DRIVE_ACCESS_TOKEN,
-        fileUrl,
-        message.document.file_name
-      ).catch(() => null);
-      await tgSendDocument(
-        TG_BOT_TOKEN,
+    const landmarks = detectLandmarksFromText(text, lang);
+    if (landmarks?.length) {
+      const lines = formatLandmarkLines(landmarks, lang);
+      await sendPlain(env, chatId, lines.join("\n"), {
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+      });
+    }
+  } catch (e) {
+    if (ADMIN(env, userId)) {
+      await sendPlain(
+        env,
         chatId,
-        null,
-        saved
-          ? "Документ збережено в Drive ✅"
-          : "Не вдалося зберегти в Drive, але файл отримано."
+        `❌ Vision error: ${String(e.message || e).slice(0, 180)}`
       );
     } else {
-      await tgSendDocument(
-        TG_BOT_TOKEN,
-        chatId,
-        null,
-        "Документ отримано ✅ (Drive не налаштовано)"
-      );
+      await sendPlain(env, chatId, "Поки що не можу проаналізувати фото.");
     }
-    return new Response("OK", { status: 200 });
   }
+  return true;
+}
+// продовження src/routes/webhook.js
 
-  if (hasVideo) {
-    const fileUrl = await tgGetFileLink(TG_BOT_TOKEN, message.video.file_id);
-    await tgSendDocument(
-      TG_BOT_TOKEN,
-      chatId,
-      null,
-      "Відео отримано ✅\n" + (fileUrl ? "Посилання: " + fileUrl : "")
-    );
-    return new Response("OK", { status: 200 });
-  }
-
-  if (hasAudio) {
-    const fileUrl = await tgGetFileLink(TG_BOT_TOKEN, message.audio.file_id);
-    await tgSendDocument(
-      TG_BOT_TOKEN,
-      chatId,
-      null,
-      "Аудіо отримано ✅\n" + (fileUrl ? "Посилання: " + fileUrl : "")
-    );
-    return new Response("OK", { status: 200 });
-  }
-
-  if (hasVoice) {
-    const fileUrl = await tgGetFileLink(TG_BOT_TOKEN, message.voice.file_id);
-    await tgSendDocument(
-      TG_BOT_TOKEN,
-      chatId,
-      null,
-      "Голосове отримано ✅\n" + (fileUrl ? "Посилання: " + fileUrl : "")
-    );
-    return new Response("OK", { status: 200 });
-  }
-
-  if (hasAnimation) {
-    const fileUrl = await tgGetFileLink(TG_BOT_TOKEN, message.animation.file_id);
-    await tgSendDocument(
-      TG_BOT_TOKEN,
-      chatId,
-      null,
-      "GIF/анімація отримана ✅\n" + (fileUrl ? "Посилання: " + fileUrl : "")
-    );
-    return new Response("OK", { status: 200 });
-  }
-
-  await tgSendDocument(
-    TG_BOT_TOKEN,
-    chatId,
-    null,
-    "Файл отримано, але я ще не вмію з ним працювати 💾"
+// system hint
+async function buildSystemHint(env, chatId, userId, preferredLang) {
+  const statut = String((await readStatut(env)) || "").trim();
+  const dlg = await buildDialogHint(env, userId);
+  const tune = await loadSelfTune(env, chatId, { preferredLang }).catch(
+    () => null
   );
-  return new Response("OK", { status: 200 });
-}
-async function handleTextMessage(message, env, ctx) {
-  const chatId = message.chat.id;
-  const userId = message.from?.id;
-  const text = message.text || message.caption || "";
+  let insightsBlock = "";
+  try {
+    const insights = await getRecentInsights(env, { limit: 5 });
+    if (insights?.length) {
+      insightsBlock =
+        "[Нещодавні знання]\n" +
+        insights.map((i) => `• ${i.insight}`).join("\n");
+    }
+  } catch {}
 
-  if (!text) {
-    await tgSendDocument(TG_BOT_TOKEN, chatId, null, "Порожнє повідомлення.");
-    return new Response("OK", { status: 200 });
+  const core = `You are Senti — personal assistant.
+- Reply in user's language.
+- Be concise by default.`;
+
+  const parts = [core];
+  if (statut) parts.push(`[Статут]\n${statut}`);
+  if (tune) parts.push(`[Self-tune]\n${tune}`);
+  if (insightsBlock) parts.push(insightsBlock);
+  if (dlg) parts.push(dlg);
+  return parts.join("\n\n");
+}
+
+// response text
+function asText(res) {
+  if (!res) return "";
+  if (typeof res === "string") return res;
+  if (typeof res.text === "string") return res.text;
+  if (Array.isArray(res.choices) && res.choices[0]?.message?.content)
+    return res.choices[0].message.content;
+  return JSON.stringify(res);
+}
+
+export async function handleTelegramWebhook(req, env) {
+  if (req.method === "GET") {
+    return json({ ok: true, worker: "senti", ts: Date.now() });
   }
 
-  const intent = await detectIntent(text, { env, ctx }).catch(() => null);
+  if (req.method === "POST") {
+    const expected =
+      env.TG_WEBHOOK_SECRET ||
+      env.TELEGRAM_SECRET_TOKEN ||
+      env.WEBHOOK_SECRET ||
+      "";
+    if (expected) {
+      const sec = req.headers.get("x-telegram-bot-api-secret-token");
+      if (sec !== expected)
+        return json({ ok: false, error: "unauthorized" }, 401);
+    }
+  }
 
-  if (intent === "ai") {
-    await tgSendChatAction(TG_BOT_TOKEN, chatId, "typing");
-    const aiRes = await aiRespond(text, {
-      env,
-      ctx,
-      userId,
-      chatId,
+  const update = await req.json();
+  if (update.callback_query) {
+    const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+    if (token) {
+      await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ callback_query_id: update.callback_query.id }),
+      });
+    }
+    return json({ ok: true });
+  }
+
+  const msg =
+    update.message || update.edited_message || update.channel_post;
+  const chatId = msg?.chat?.id;
+  const userId = msg?.from?.id;
+  const isAdmin = ADMIN(env, userId);
+  const textRaw = String(msg?.text || msg?.caption || "").trim();
+  const userLang = msg?.from?.language_code || "uk";
+  let lang = pickReplyLanguage(msg, textRaw);
+
+  const safe = async (fn) => {
+    try {
+      await fn();
+    } catch (e) {
+      if (isAdmin) {
+        await sendPlain(
+          env,
+          chatId,
+          `❌ Error: ${String(e?.message || e).slice(0, 200)}`
+        );
+      } else {
+        await sendPlain(env, chatId, "Сталася помилка, спробуй ще раз.");
+      }
+    }
+  };
+
+  // save location
+  if (msg?.location && userId && chatId) {
+    await setUserLocation(env, userId, msg.location);
+    await sendPlain(env, chatId, "✅ Локацію збережено.", {
+      reply_markup: mainKeyboard(isAdmin),
     });
-    await tgSendDocument(TG_BOT_TOKEN, chatId, null, aiRes || "Не вийшло 🤔");
-    return new Response("OK", { status: 200 });
+    return json({ ok: true });
   }
 
-  if (intent === "vision") {
-    await tgSendDocument(
-      TG_BOT_TOKEN,
+  // /start
+  if (textRaw === "/start") {
+    await safe(async () => {
+      await setCodexMode(env, userId, false);
+      const name = msg?.from?.first_name || "друже";
+      if ((userLang || "").startsWith("uk")) {
+        await sendPlain(env, chatId, `Привіт, ${name}! Як я можу допомогти?`, {
+          reply_markup: mainKeyboard(isAdmin),
+        });
+      } else {
+        await sendPlain(env, chatId, `Hi, ${name}! How can I help?`, {
+          reply_markup: mainKeyboard(isAdmin),
+        });
+      }
+    });
+    return json({ ok: true });
+  }
+
+  // drive on/off
+  if (textRaw === BTN_DRIVE) {
+    await setDriveMode(env, userId, true);
+    return json({ ok: true });
+  }
+  if (textRaw === BTN_SENTI) {
+    await setDriveMode(env, userId, false);
+    await setCodexMode(env, userId, false);
+    return json({ ok: true });
+  }
+
+  // /admin
+  if (textRaw === "/admin" || textRaw === BTN_ADMIN) {
+    await safe(async () => {
+      const { checklist, energy, learn } = buildAdminLinks(env, userId);
+      const mo = String(env.MODEL_ORDER || "").trim();
+
+      const body = [
+        "Admin panel (quick diagnostics):",
+        `MODEL_ORDER: ${mo || "(not set)"}`,
+        `GEMINI key: ${env.GEMINI_API_KEY ? "✅" : "❌"}`,
+        `Cloudflare: ${env.CLOUDFLARE_API_TOKEN ? "✅" : "❌"}`,
+        `OpenRouter: ${env.OPENROUTER_API_KEY ? "✅" : "❌"}`,
+        `FreeLLM: ${env.FREE_LLM_BASE_URL ? "✅" : "❌"}`,
+      ].join("\n");
+
+      await sendPlain(env, chatId, body, {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "📋 Checklist", url: checklist }],
+            [{ text: "⚡ Energy", url: energy }],
+            [{ text: "🧠 Learn", url: learn }],
+          ],
+        },
+      });
+    });
+    return json({ ok: true });
+  }
+
+  // Codex on/off
+  if (textRaw === BTN_CODEX || textRaw === "/codex") {
+    if (!isAdmin) {
+      await sendPlain(env, chatId, "🛡️ Codex тільки для адміну.");
+      return json({ ok: true });
+    }
+    await setCodexMode(env, userId, true);
+    await clearCodexMem(env, userId);
+    await sendPlain(
+      env,
       chatId,
-      null,
-      "Надішли фото, я спробую його описати (vision)."
+      "🧠 Senti Codex увімкнено. Надішли задачу (наприклад: «зроби html тетріс»).",
+      { reply_markup: mainKeyboard(isAdmin) }
     );
-    return new Response("OK", { status: 200 });
+    return json({ ok: true });
+  }
+  if (textRaw === "/codex_off") {
+    await setCodexMode(env, userId, false);
+    await clearCodexMem(env, userId);
+    await sendPlain(env, chatId, "Codex вимкнено.", {
+      reply_markup: mainKeyboard(isAdmin),
+    });
+    return json({ ok: true });
   }
 
-  if (intent === "drive") {
-    await tgSendDocument(
-      TG_BOT_TOKEN,
-      chatId,
-      null,
-      "Надішли файл, я спробую зберегти його у Drive."
-    );
-    return new Response("OK", { status: 200 });
+  // media before codex: if drive ON → save, else vision
+  try {
+    const driveOn = await getDriveMode(env, userId);
+    const hasMedia = !!detectAttachment(msg) || !!pickPhoto(msg);
+
+    if (driveOn && hasMedia && !(await getCodexMode(env, userId))) {
+      if (await handleIncomingMedia(env, chatId, userId, msg, lang))
+        return json({ ok: true });
+    }
+    if (!driveOn && hasMedia && !(await getCodexMode(env, userId))) {
+      if (
+        await handleVisionMedia(env, chatId, userId, msg, lang, msg?.caption)
+      )
+        return json({ ok: true });
+    }
+  } catch (e) {
+    if (isAdmin) {
+      await sendPlain(env, chatId, `❌ Media error: ${String(e).slice(0, 180)}`);
+    } else {
+      await sendPlain(env, chatId, "Не вдалося обробити медіа.");
+    }
+    return json({ ok: true });
   }
 
-  await tgSendChatAction(TG_BOT_TOKEN, chatId, "typing");
-  const aiRes = await aiRespond(text, {
-    env,
-    ctx,
-    userId,
-    chatId,
+  // codex extra cmds (вже в окремому модулі)
+  if (await getCodexMode(env, userId)) {
+    if (await handleCodexCommand(env, chatId, userId, textRaw, sendPlain)) {
+      return json({ ok: true });
+    }
+  }
+
+  // date / time / weather
+  if (textRaw) {
+    const wantsDate = dateIntent(textRaw);
+    const wantsTime = timeIntent(textRaw);
+    const wantsWeather = weatherIntent(textRaw);
+    if (wantsDate || wantsTime || wantsWeather) {
+      await safe(async () => {
+        if (wantsDate) await sendPlain(env, chatId, replyCurrentDate(env, lang));
+        if (wantsTime) await sendPlain(env, chatId, replyCurrentTime(env, lang));
+        if (wantsWeather) {
+          const byPlace = await weatherSummaryByPlace(env, textRaw, lang);
+          if (!/Не вдалося знайти/.test(byPlace.text)) {
+            await sendPlain(env, chatId, byPlace.text, {
+              parse_mode: byPlace.mode || undefined,
+            });
+          } else {
+            const geo = await getUserLocation(env, userId);
+            if (geo?.lat && geo?.lon) {
+              const byCoord = await weatherSummaryByCoords(
+                geo.lat,
+                geo.lon,
+                lang
+              );
+              await sendPlain(env, chatId, byCoord.text, {
+                parse_mode: byCoord.mode || undefined,
+              });
+            } else {
+              await sendPlain(
+                env,
+                chatId,
+                "Надішли локацію — і я покажу погоду.",
+                { reply_markup: askLocationKeyboard() }
+              );
+            }
+          }
+        }
+      });
+      return json({ ok: true });
+    }
+  }
+
+  // Codex main (тепер через handler)
+  if ((await getCodexMode(env, userId)) && (textRaw || pickPhoto(msg))) {
+    await safe(async () => {
+      await handleCodexGeneration(
+        env,
+        {
+          chatId,
+          userId,
+          msg,
+          textRaw,
+          lang,
+          isAdmin,
+        },
+        {
+          getEnergy,
+          spendEnergy,
+          energyLinks,
+          sendPlain,
+          pickPhoto,
+          tgFileUrl,
+          urlToBase64,
+          describeImage,
+          sendDocument,
+          startPuzzleAnimation,
+          editMessageText,
+        }
+      );
+    });
+    return json({ ok: true });
+  }
+
+  // звичайне повідомлення
+  if (textRaw && !textRaw.startsWith("/")) {
+    await safe(async () => {
+      const cur = await getEnergy(env, userId);
+      const need = Number(cur.costText ?? 1);
+      if ((cur.energy ?? 0) < need) {
+        const links = energyLinks(env, userId);
+        await sendPlain(
+          env,
+          chatId,
+          t(lang, "need_energy_text", need, links.energy)
+        );
+        return;
+      }
+      await spendEnergy(env, userId, need, "text");
+      pulseTyping(env, chatId);
+
+      await pushTurn(env, userId, "user", textRaw);
+      await autoUpdateSelfTune(env, userId, lang).catch(() => {});
+      const systemHint = await buildSystemHint(env, chatId, userId, lang);
+      const order =
+        String(env.MODEL_ORDER || "").trim() ||
+        "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free";
+
+      const res = await askAnyModel(env, order, textRaw, { systemHint });
+      const full = asText(res) || "Не впевнений.";
+      await pushTurn(env, userId, "assistant", full);
+      await sendPlain(env, chatId, full);
+    });
+    return json({ ok: true });
+  }
+
+  // дефолт
+  await sendPlain(env, chatId, "Привіт! Що зробимо?", {
+    reply_markup: mainKeyboard(isAdmin),
   });
-  await tgSendDocument(TG_BOT_TOKEN, chatId, null, aiRes || "Не зміг відповісти 🤔");
-  return new Response("OK", { status: 200 });
-}
-async function handleCallback(callbackQuery, env, ctx) {
-  const data = callbackQuery.data;
-  const message = callbackQuery.message;
-  const chatId = message.chat.id;
-  const messageId = message.message_id;
-
-  switch (data) {
-    case BTN_DRIVE: {
-      await tgEditMessageText(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Надішли файл, я збережу його у Drive."
-      );
-      break;
-    }
-    case BTN_DOC: {
-      await tgEditMessageText(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Надішли документ (doc/pdf)."
-      );
-      break;
-    }
-    case BTN_PHOTO: {
-      await tgEditMessageText(TG_BOT_TOKEN, chatId, messageId, "Надішли фото 📷");
-      break;
-    }
-    case BTN_VIDEO: {
-      await tgEditMessageText(TG_BOT_TOKEN, chatId, messageId, "Надішли відео 🎬");
-      break;
-    }
-    case BTN_AUDIO: {
-      await tgEditMessageText(TG_BOT_TOKEN, chatId, messageId, "Надішли аудіо 🎵");
-      break;
-    }
-    case BTN_VOICE: {
-      await tgEditMessageText(TG_BOT_TOKEN, chatId, messageId, "Надішли голосове 🎙");
-      break;
-    }
-    case BTN_ANIMATION: {
-      await tgEditMessageText(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Надішли gif/анімацію 🎞"
-      );
-      break;
-    }
-    case BTN_LOCATION: {
-      await tgEditMessageText(TG_BOT_TOKEN, chatId, messageId, "Надішли локацію 📍");
-      break;
-    }
-    case BTN_CONTACT: {
-      await tgEditMessageText(TG_BOT_TOKEN, chatId, messageId, "Надішли контакт 👤");
-      break;
-    }
-    case BTN_POLL: {
-      await tgSendPoll(
-        TG_BOT_TOKEN,
-        chatId,
-        "Опитування від Senti",
-        ["Варіант 1", "Варіант 2"],
-        false
-      );
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Опитування створено");
-      break;
-    }
-    case BTN_QUIZ: {
-      await tgSendQuiz(
-        TG_BOT_TOKEN,
-        chatId,
-        "Квіз від Senti",
-        ["1", "2", "3"],
-        1
-      );
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Квіз створено");
-      break;
-    }
-    case BTN_CHAT_ACTION: {
-      await tgSendChatAction(TG_BOT_TOKEN, chatId, "typing");
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Typing...");
-      break;
-    }
-    case BTN_EDIT_TEXT: {
-      await tgEditMessageText(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Текст змінено ✅"
-      );
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "OK");
-      break;
-    }
-    case BTN_EDIT_CAPTION: {
-      await tgEditMessageCaption(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Підпис змінено ✅"
-      );
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "OK");
-      break;
-    }
-    case BTN_EDIT_MEDIA: {
-      await tgAnswerCallback(
-        TG_BOT_TOKEN,
-        callbackQuery.id,
-        "Edit media поки не реалізовано"
-      );
-      break;
-    }
-    case BTN_DELETE: {
-      await tgDeleteMessage(TG_BOT_TOKEN, chatId, messageId);
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Видалено");
-      break;
-    }
-    case BTN_ANSWER_CALLBACK: {
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Це callback-відповідь");
-      break;
-    }
-    case BTN_SET_WEBHOOK: {
-      await tgAnswerCallback(
-        TG_BOT_TOKEN,
-        callbackQuery.id,
-        "Використай /setwebhook <url>"
-      );
-      break;
-    }
-    case BTN_GET_FILE_LINK: {
-      await tgAnswerCallback(
-        TG_BOT_TOKEN,
-        callbackQuery.id,
-        "Надішли файл, я дам лінк."
-      );
-      break;
-    }
-    case BTN_GET_CHAT: {
-      const chatInfo = await tgGetChat(TG_BOT_TOKEN, chatId);
-      await tgEditMessageText(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Chat info:\n" + JSON.stringify(chatInfo, null, 2)
-      );
-      break;
-    }
-    case BTN_GET_USER_PHOTOS: {
-      const userId = callbackQuery.from.id;
-      const photos = await tgGetUserProfilePhotos(TG_BOT_TOKEN, userId);
-      await tgEditMessageText(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Photos:\n" + JSON.stringify(photos, null, 2)
-      );
-      break;
-    }
-    case BTN_KICK: {
-      const userId = callbackQuery.from.id;
-      await tgKickChatMember(TG_BOT_TOKEN, chatId, userId);
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Користувача кікнуто");
-      break;
-    }
-    case BTN_UNBAN: {
-      const userId = callbackQuery.from.id;
-      await tgUnbanChatMember(TG_BOT_TOKEN, chatId, userId);
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Розбанено");
-      break;
-    }
-    case BTN_RESTRICT: {
-      const userId = callbackQuery.from.id;
-      await tgRestrictChatMember(TG_BOT_TOKEN, chatId, userId, {
-        can_send_messages: false,
-      });
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Обмежено");
-      break;
-    }
-    case BTN_PROMOTE: {
-      const userId = callbackQuery.from.id;
-      await tgPromoteChatMember(TG_BOT_TOKEN, chatId, userId, {
-        can_change_info: true,
-        can_delete_messages: true,
-        can_invite_users: true,
-      });
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Підвищено");
-      break;
-    }
-    case BTN_SET_ADMIN_TITLE: {
-      const userId = callbackQuery.from.id;
-      await tgSetChatAdministratorCustomTitle(
-        TG_BOT_TOKEN,
-        chatId,
-        userId,
-        "Senti admin"
-      );
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Заголовок поставлено");
-      break;
-    }
-    case BTN_SET_CHAT_PHOTO: {
-      await tgAnswerCallback(
-        TG_BOT_TOKEN,
-        callbackQuery.id,
-        "Надішли фото у чат, я поставлю."
-      );
-      break;
-    }
-    case BTN_DELETE_CHAT_PHOTO: {
-      await tgDeleteChatPhoto(TG_BOT_TOKEN, chatId);
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Фото чату видалено");
-      break;
-    }
-    case BTN_SET_CHAT_TITLE: {
-      await tgSetChatTitle(TG_BOT_TOKEN, chatId, "Новий чат від Senti");
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Тайтл змінено");
-      break;
-    }
-    case BTN_SET_CHAT_DESC: {
-      await tgSetChatDescription(TG_BOT_TOKEN, chatId, "Опис чату від Senti");
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Опис змінено");
-      break;
-    }
-    case BTN_PIN: {
-      await tgPinChatMessage(TG_BOT_TOKEN, chatId, messageId);
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Закріплено");
-      break;
-    }
-    case BTN_UNPIN: {
-      await tgUnpinChatMessage(TG_BOT_TOKEN, chatId, messageId);
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Відкріплено");
-      break;
-    }
-    case BTN_LEAVE: {
-      await tgLeaveChat(TG_BOT_TOKEN, chatId);
-      break;
-    }
-    case BTN_GET_ADMINS: {
-      const admins = await tgGetChatAdministrators(TG_BOT_TOKEN, chatId);
-      await tgEditMessageText(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Admins:\n" + JSON.stringify(admins, null, 2)
-      );
-      break;
-    }
-    case BTN_GET_MEMBERS_COUNT: {
-      const count = await tgGetChatMembersCount(TG_BOT_TOKEN, chatId);
-      await tgEditMessageText(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Members count: " + count
-      );
-      break;
-    }
-    case BTN_GET_MEMBER: {
-      const userId = callbackQuery.from.id;
-      const member = await tgGetChatMember(TG_BOT_TOKEN, chatId, userId);
-      await tgEditMessageText(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Member:\n" + JSON.stringify(member, null, 2)
-      );
-      break;
-    }
-    case BTN_SET_COMMANDS: {
-      await tgSetMyCommands(TG_BOT_TOKEN, [
-        { command: "start", description: "Старт" },
-        { command: "help", description: "Допомога" },
-        { command: "ai", description: "AI-відповідь" },
-        { command: "vision", description: "Опис фото" },
-        { command: "ocr", description: "Текст з фото" },
-      ]);
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Команди встановлено");
-      break;
-    }
-    case BTN_GET_COMMANDS: {
-      const r = await tgGetMyCommands(TG_BOT_TOKEN);
-      await tgEditMessageText(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Commands:\n" + JSON.stringify(r, null, 2)
-      );
-      break;
-    }
-    default: {
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Невідомо");
-      break;
-    }
-  }
-
-  return new Response("OK", { status: 200 });
+  return json({ ok: true });
 }
