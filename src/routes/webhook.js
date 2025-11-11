@@ -3,7 +3,7 @@
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
 import { abs } from "../utils/url.js";
-import { think } from "../lib/brain.js"; // лишаємо, як було в тебе
+import { think } from "../lib/brain.js"; // лишаємо, як було
 import { readStatut } from "../lib/kvChecklist.js";
 import { askAnyModel } from "../lib/modelRouter.js";
 import { json } from "../lib/utils.js";
@@ -29,6 +29,7 @@ import {
   weatherSummaryByPlace,
   weatherSummaryByCoords,
 } from "../apis/weather.js";
+import { saveLastPlace, loadLastPlace } from "../apis/userPrefs.js";
 import { setUserLocation, getUserLocation } from "../lib/geo.js";
 
 // винесені модулі
@@ -314,7 +315,6 @@ function asText(res) {
     return res.choices[0].message.content;
   return JSON.stringify(res);
 }
-
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "GET") {
     return json({ ok: true, worker: "senti", ts: Date.now() });
@@ -462,7 +462,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // media before codex: якщо drive ON → зберегти, якщо off → vision
+  // media before codex
   try {
     const driveOn = await getDriveMode(env, userId);
     const hasMedia = !!detectAttachment(msg) || !!pickPhoto(msg);
@@ -482,23 +482,19 @@ export async function handleTelegramWebhook(req, env) {
           caption: msg?.caption,
         },
         {
-          getEnergy,
-          spendEnergy,
-          energyLinks,
-          sendPlain,
-          tgFileUrl,
-          urlToBase64,
+            getEnergy,
+            spendEnergy,
+            energyLinks,
+            sendPlain,
+            tgFileUrl,
+            urlToBase64,
         }
       );
       if (ok) return json({ ok: true });
     }
   } catch (e) {
     if (isAdmin) {
-      await sendPlain(
-        env,
-        chatId,
-        `❌ Media error: ${String(e).slice(0, 180)}`
-      );
+      await sendPlain(env, chatId, `❌ Media error: ${String(e).slice(0, 180)}`);
     } else {
       await sendPlain(env, chatId, "Не вдалося обробити медіа.");
     }
@@ -512,39 +508,59 @@ export async function handleTelegramWebhook(req, env) {
     }
   }
 
-  // date / time / weather
+  // date / time / weather (із кешем міста)
   if (textRaw) {
     const wantsDate = dateIntent(textRaw);
     const wantsTime = timeIntent(textRaw);
     const wantsWeather = weatherIntent(textRaw);
     if (wantsDate || wantsTime || wantsWeather) {
       await safe(async () => {
-        if (wantsDate) await sendPlain(env, chatId, replyCurrentDate(env, lang));
-        if (wantsTime) await sendPlain(env, chatId, replyCurrentTime(env, lang));
+        if (wantsDate) {
+          await sendPlain(env, chatId, replyCurrentDate(env, lang));
+        }
+        if (wantsTime) {
+          await sendPlain(env, chatId, replyCurrentTime(env, lang));
+        }
         if (wantsWeather) {
           const byPlace = await weatherSummaryByPlace(env, textRaw, lang);
           if (!/Не вдалося знайти/.test(byPlace.text)) {
             await sendPlain(env, chatId, byPlace.text, {
               parse_mode: byPlace.mode || undefined,
             });
+            // збережемо останній запит користувача
+            await saveLastPlace(env, userId, { place: textRaw });
           } else {
-            const geo = await getUserLocation(env, userId);
-            if (geo?.lat && geo?.lon) {
+            // спроба по кешу
+            const last = await loadLastPlace(env, userId);
+            if (last?.lat && last?.lon) {
               const byCoord = await weatherSummaryByCoords(
-                geo.lat,
-                geo.lon,
+                last.lat,
+                last.lon,
                 lang
               );
               await sendPlain(env, chatId, byCoord.text, {
                 parse_mode: byCoord.mode || undefined,
               });
             } else {
-              await sendPlain(
-                env,
-                chatId,
-                "Надішли локацію — і я покажу погоду.",
-                { reply_markup: askLocationKeyboard() }
-              );
+              // спроба за збереженою локацією
+              const geo = await getUserLocation(env, userId);
+              if (geo?.lat && geo?.lon) {
+                const byCoord = await weatherSummaryByCoords(
+                  geo.lat,
+                  geo.lon,
+                  lang
+                );
+                await sendPlain(env, chatId, byCoord.text, {
+                  parse_mode: byCoord.mode || undefined,
+                });
+              } else {
+                await sendPlain(
+                  env,
+                  chatId,
+                  "Надішли локацію — і я покажу погоду.",
+                  { reply_markup: askLocationKeyboard() }
+                );
+              }
             }
           }
         }
@@ -574,8 +590,7 @@ export async function handleTelegramWebhook(req, env) {
           pickPhoto,
           tgFileUrl,
           urlToBase64,
-          // тут можна передати describeImage, якщо хочеш щоб codex теж бачив фото
-          describeImage: null,
+          describeImage: null, // можемо прокинути, якщо треба
           sendDocument,
           startPuzzleAnimation,
           editMessageText,
