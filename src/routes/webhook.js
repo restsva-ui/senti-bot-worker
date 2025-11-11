@@ -53,7 +53,7 @@ const KV = {
   codexMode: (uid) => `codex:mode:${uid}`,
 };
 
-// додали пам'ять для “останній код зі скріну”
+// пам'ять для останнього витягнутого коду/даних зі скріну
 const LAST_VISION_CODE = (uid) => `vision:last_code:${uid}`;
 
 const VISION_MEM_KEY = (uid) => `vision:mem:${uid}`;
@@ -168,7 +168,7 @@ async function editMessageText(env, chatId, messageId, newText) {
   });
 }
 
-// нова анімація-спінер (сучасніша ніж пазли)
+// сучасна “крутилка” замість пазлів
 async function startSpinnerAnimation(env, chatId, messageId, signal) {
   const frames = [
     "⏳ Обробляю…",
@@ -494,6 +494,21 @@ async function runCodeAnalysis(env, codeText, userLang) {
   return asText(res);
 }
 
+// 🛠 перезапис/валідація JSON/структури
+async function runJsonFix(env, sourceText, userLang) {
+  const order =
+    String(env.CODEX_MODEL_ORDER || "").trim() ||
+    "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct";
+  const sys =
+    "You are a JSON repair tool. User gives possibly broken JSON/array of objects. You MUST return VALID JSON only, no comments, no markdown, no explanation.";
+  const q =
+    (userLang && userLang.startsWith("uk")
+      ? "Виправ цей фрагмент, зроби його валідним JSON. Повертай ТІЛЬКИ JSON:\n"
+      : "Fix this and return VALID JSON only:\n") + (sourceText || "");
+  const res = await askAnyModel(env, order, q, { systemHint: sys });
+  return asText(res);
+}
+
 function extractCodeAndLang(answer) {
   if (!answer) return { lang: "txt", code: "" };
   const m = answer.match(/```(\w+)?\s*([\s\S]*?)```/m);
@@ -519,8 +534,7 @@ function buildTetrisHtml() {
 <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1.0" /><title>Тетріс</title></head>
 <body>...скорочено для прикладу...</body>
 </html>`;
-}
-export async function handleTelegramWebhook(req, env) {
+}export async function handleTelegramWebhook(req, env) {
   if (req.method === "GET") {
     return json({ ok: true, worker: "senti", ts: Date.now() });
   }
@@ -807,14 +821,17 @@ export async function handleTelegramWebhook(req, env) {
       let userPrompt = textRaw || "";
       const photoInCodex = pickPhoto(msg);
 
-      // чи це запит на аналіз?
+      // режими
       const wantsAnalysis = /аналіз|проаналізуй|analy[sz]e|explain|поясни/i.test(
+        userPrompt
+      );
+      const wantsFix = /перепиши|виправ|зроби валідним|fix|correct/i.test(
         userPrompt
       );
 
       const kv = env.STATE_KV || env.CHECKLIST_KV;
 
-      // 📷 якщо прийшло фото — одразу витягуємо код/опис і зберігаємо
+      // 📷 якщо прийшло фото — витягуємо і кладемо в KV
       if (photoInCodex) {
         try {
           const imgUrl = await tgFileUrl(env, photoInCodex.file_id);
@@ -824,20 +841,19 @@ export async function handleTelegramWebhook(req, env) {
             tgLang: msg.from?.language_code,
             imageBase64: imgBase64,
             question:
-              "Якщо на зображенні є код — випиши його ПОВНІСТЮ як текст. Якщо це не код — коротко опиши.",
+              "Якщо на зображенні є код або JSON — випиши його ПОВНІСТЮ як текст. Без пояснень.",
             modelOrder:
               "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct",
           });
           const extracted = (vRes?.text || "").trim();
 
-          // зберігаємо як "останній код зі скріну"
           if (kv && extracted) {
             await kv.put(LAST_VISION_CODE(userId), extracted, {
               expirationTtl: 60 * 60 * 6,
             });
           }
 
-          // якщо юзер взагалі нічого не писав — просто покажемо, що дістали
+          // якщо юзер нічого не просив — покажемо, що знайшли
           if (!userPrompt) {
             await sendPlain(
               env,
@@ -852,19 +868,21 @@ export async function handleTelegramWebhook(req, env) {
             return;
           }
 
-          // якщо юзер просив зробити код по фото — підклеюємо опис
-          const wantsCodeWords =
-            /код|code|html|css|js|javascript|сайт|landing|лендінг|ui|інтерфейс/i.test(
-              userPrompt
+          // якщо просив виправити — одразу фіксимо витягнуте
+          if (wantsFix && extracted) {
+            const fixed = await runJsonFix(
+              env,
+              extracted,
+              msg.from?.language_code
             );
-          if (wantsCodeWords && extracted) {
-            userPrompt =
-              userPrompt +
-              "\n\nОсь код/опис, який був на фото, використай це:\n" +
-              extracted;
+            await sendPlain(env, chatId, fixed.slice(0, 3800));
+            if (indicatorId) {
+              await editMessageText(env, chatId, indicatorId, "✅ Готово");
+            }
+            return;
           }
 
-          // якщо юзер сказав "проаналізуй" і фото було — аналізуємо витягнуте
+          // якщо просив проаналізувати — аналізуємо витягнуте
           if (wantsAnalysis && extracted) {
             const analysis = await runCodeAnalysis(
               env,
@@ -877,12 +895,39 @@ export async function handleTelegramWebhook(req, env) {
             }
             return;
           }
+
+          // якщо просив зробити код по фото — додаємо опис до промпта
+          const wantsCodeWords =
+            /код|code|html|css|js|javascript|сайт|landing|лендінг|ui|інтерфейс/i.test(
+              userPrompt
+            );
+          if (wantsCodeWords && extracted) {
+            userPrompt =
+              userPrompt +
+              "\n\nОсь код/опис, який був на фото, використай це:\n" +
+              extracted;
+          }
         } catch (e) {
-          // якщо не змогли витягнути — підемо далі по тексту
+          // якщо не витягнули — підемо далі
         }
       }
 
-      // якщо це АНАЛІЗ без фото → пробуємо взяти останній збережений код зі скріну
+      // якщо сказав “виправ/перепиши”, але фото НЕ було → беремо з KV
+      if (wantsFix && !photoInCodex) {
+        let source = userPrompt;
+        if (kv) {
+          const last = await kv.get(LAST_VISION_CODE(userId), "text");
+          if (last) source = last;
+        }
+        const fixed = await runJsonFix(env, source, msg.from?.language_code);
+        await sendPlain(env, chatId, fixed.slice(0, 3800));
+        if (indicatorId) {
+          await editMessageText(env, chatId, indicatorId, "✅ Готово");
+        }
+        return;
+      }
+
+      // якщо це АНАЛІЗ без фото → беремо з KV
       if (wantsAnalysis && !photoInCodex) {
         let sourceCode = userPrompt;
         if (kv) {
@@ -903,7 +948,7 @@ export async function handleTelegramWebhook(req, env) {
         return;
       }
 
-      // анімацію крутимо
+      // звичайна генерація
       const animSignal = { done: false };
       if (indicatorId) {
         startSpinnerAnimation(env, chatId, indicatorId, animSignal);
@@ -938,7 +983,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // звичайне текстове повідомлення
+  // звичайний текст
   if (textRaw && !textRaw.startsWith("/")) {
     await safe(async () => {
       const cur = await getEnergy(env, userId);
