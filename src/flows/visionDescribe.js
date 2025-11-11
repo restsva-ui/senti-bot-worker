@@ -1,9 +1,16 @@
 // src/flows/visionDescribe.js
 // Єдина точка для опису зображення з мультимовністю.
+//
 // Правки:
 // 1) каскад за замовчуванням: gemini:gemini-2.5-flash першим;
 // 2) якщо юзер НЕ питав про текст — не показуємо "текст на зображенні";
 // 3) прибрано дублікати рядків.
+//
+// Залежності, які у тебе є в репо:
+// - ../lib/modelRouter.js  → askVision
+// - ./visionPolicy.js      → buildVisionHintByLang, makeVisionUserPrompt, postprocessVisionText
+//
+// Немає залежності від ../lib/langPref.js — тут ми беремо мову з tgLang або fallback "uk".
 
 import { askVision } from "../lib/modelRouter.js";
 import {
@@ -11,7 +18,6 @@ import {
   makeVisionUserPrompt,
   postprocessVisionText,
 } from "./visionPolicy.js";
-import { getUserLang, setUserLang } from "../lib/langPref.js";
 
 // чи юзер явно просив прочитати текст/надпис
 function userAskedForText(q = "") {
@@ -33,6 +39,7 @@ function stripOcrBlocks(text) {
   const out = [];
   for (const ln of lines) {
     const low = ln.trim().toLowerCase();
+    // ці заголовки прибираємо
     if (
       low.startsWith("📝") ||
       low.startsWith("текст на зображенні") ||
@@ -43,6 +50,7 @@ function stripOcrBlocks(text) {
     }
     out.push(ln);
   }
+
   // прибираємо дублікати
   const uniq = [];
   const seen = new Set();
@@ -53,38 +61,38 @@ function stripOcrBlocks(text) {
     seen.add(key);
     uniq.push(ln);
   }
+
   return uniq.join("\n").trim();
 }
 
 /**
+ * Єдиний вхід для опису зображення.
+ *
  * @param {object} env
  * @param {object} p
- * @param {string|number} p.chatId
- * @param {string} [p.tgLang]
- * @param {string} p.imageBase64
- * @param {string} [p.question]
- * @param {string} [p.modelOrder] - можна явно передати свій порядок
+ * @param {string|number} p.chatId   - id чату (може знадобитись потім)
+ * @param {string} [p.tgLang]        - мова телеграму, напр. "uk", "ru", "en"
+ * @param {string} p.imageBase64     - картинка у base64
+ * @param {string} [p.question]      - що саме спитав юзер
+ * @param {string} [p.modelOrder]    - свій порядок моделей (опціонально)
  */
 export async function describeImage(
   env,
   { chatId, tgLang, imageBase64, question, modelOrder }
 ) {
   // 1) визначаємо мову
-  const lang = await getUserLang(env, chatId, tgLang);
-  if (tgLang && tgLang.toLowerCase() !== lang) {
-    await setUserLang(env, chatId, tgLang);
-  }
+  const lang = (tgLang && tgLang.toLowerCase()) || "uk";
 
   // 2) system + user
   const systemHint = buildVisionHintByLang(lang);
   const userPrompt = makeVisionUserPrompt(question, lang);
 
-  // 3) каскад: тепер перша — остання безкоштовна gemini 2.5 flash
+  // 3) каскад: за замовчуванням — gemini перша
   const order =
     modelOrder ||
     "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct";
 
-  // 4) виклик
+  // 4) виклик моделі
   const out = await askVision(env, order, userPrompt, {
     systemHint,
     imageBase64,
@@ -95,7 +103,7 @@ export async function describeImage(
   // 5) постпроц
   let text = postprocessVisionText(out);
 
-  // якщо юзер не питав про текст — прибираємо OCR-блоки
+  // 6) якщо юзер не просив саме про текст — прибираємо OCR-блок
   if (!userAskedForText(question || "")) {
     text = stripOcrBlocks(text);
   }
