@@ -259,7 +259,6 @@ function detectAttachment(msg) {
   }
   return pickPhoto(msg);
 }
-// admin links
 function buildAdminLinks(env, userId) {
   const base = (path) => abs(env, path);
   const secret =
@@ -280,7 +279,6 @@ function buildAdminLinks(env, userId) {
 
   return { checklist, energy, learn };
 }
-
 // drive-mode media
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
@@ -413,6 +411,7 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   }
   return true;
 }
+
 // system hint
 async function buildSystemHint(env, chatId, userId, preferredLang) {
   const statut = String((await readStatut(env)) || "").trim();
@@ -494,7 +493,6 @@ function pickFilenameByLang(lang) {
   if (l === "py" || l === "python") return "codex.py";
   return "codex.txt";
 }
-
 // готовий мобільний тетріс, якщо юзер просить конкретно тетріс
 function buildTetrisHtml() {
   return `<!DOCTYPE html>
@@ -547,7 +545,7 @@ function clearLines(){let lines=0;for(let r=ROWS-1;r>=0;r--){if(board[r].every(v
 function rotate(p){const m=p.shape;const rotated=[];for(let c=0;c<m[0].length;c++){const row=[];for(let r=m.length-1;r>=0;r--){row.push(m[r][c]);}rotated.push(row);}return rotated;}
 function drop(){current.y++;if(collide(board,current)){current.y--;merge(board,current);clearLines();current=randomPiece();if(collide(board,current)){resetBoard();score=0;document.getElementById('score').textContent=0;}}}
 function drawCell(x,y,v){if(v===0)return;ctx.fillStyle=COLORS[v];ctx.fillRect(x*BLOCK,y*BLOCK,BLOCK,BLOCK);ctx.strokeStyle="#111";ctx.strokeRect(x*BLOCK,y*BLOCK,BLOCK,BLOCK);}
-function drawBoard(){ctx.clearRect(0,0,canvas.width,canvas.height);for(let r=0;r<ROWS;r++){for(let c=0;c<COLS;c++){drawCell(c,r,board[r][c]);}}for(let r=0;r<current.shape.length;r++){for(let c=0;c<current.shape[r].length;c++){if(current.shape[r][c]!==0){drawCell(current.x+c,current.y+r,current.type);}}}}
+function drawBoard(){ctx.clearRect(0,0,canvas.width,canvas.height);for(let r=0;r<ROWS;r++){for(let c=0;c<COLS;c++){drawCell(c,r,board[r][c]);}}for(let r=0;r<current.shape.length;r++){for(let c=0;c<current.shape[r].length;c++){if(current.shape[r][c]!==0){drawCell(c+current.x,r+current.y,current.type);}}}}
 function update(time=0){drawBoard();requestAnimationFrame(update);}
 resetBoard();current=randomPiece();update();
 document.getElementById('left').onclick=function(){current.x--;if(collide(board,current))current.x++;};
@@ -680,7 +678,8 @@ export async function handleTelegramWebhook(req, env) {
     });
     return json({ ok: true });
   }
-// Codex on/off
+
+  // Codex on/off
   if (textRaw === BTN_CODEX || textRaw === "/codex") {
     if (!isAdmin) {
       await sendPlain(env, chatId, "🛡️ Codex тільки для адміну.");
@@ -765,7 +764,8 @@ export async function handleTelegramWebhook(req, env) {
       return json({ ok: true });
     }
   }
-// date / time / weather
+
+  // date / time / weather
   if (textRaw) {
     const wantsDate = dateIntent(textRaw);
     const wantsTime = timeIntent(textRaw);
@@ -805,8 +805,7 @@ export async function handleTelegramWebhook(req, env) {
       return json({ ok: true });
     }
   }
-
-  // Codex main: generate file (тут і анімація, і фото → в код)
+// Codex main: generate file (тут і анімація, і фото → в код)
   if ((await getCodexMode(env, userId)) && (textRaw || pickPhoto(msg))) {
     await safe(async () => {
       const cur = await getEnergy(env, userId);
@@ -845,6 +844,24 @@ export async function handleTelegramWebhook(req, env) {
       let userPrompt = textRaw || "";
       const photoInCodex = pickPhoto(msg);
       if (photoInCodex) {
+        // 🔒 додано: якщо є фото, але юзер не сказав, що хоче код — просимо уточнення
+        const wantsCode =
+          /код|code|html|css|js|javascript|сайт|landing|лендінг|ui|інтерфейс/i.test(
+            userPrompt
+          );
+        if (!userPrompt || !wantsCode) {
+          await sendPlain(
+            env,
+            chatId,
+            "🖼 Є фото. Напиши, що зробити: “зроби сайт по фото”, “згенеруй html по фото”, “зроби ui”."
+          );
+          // прибираємо індикатор, якщо був
+          if (indicatorId) {
+            await editMessageText(env, chatId, indicatorId, "🧩 Чекаю інструкцію до фото…");
+          }
+          return;
+        }
+
         try {
           const imgUrl = await tgFileUrl(env, photoInCodex.file_id);
           const imgBase64 = await urlToBase64(imgUrl);
@@ -862,7 +879,9 @@ export async function handleTelegramWebhook(req, env) {
             (userPrompt ? userPrompt + "\n\n" : "") +
             "Ось опис зображення користувача, використай його в коді:\n" +
             imgDesc;
-        } catch {}
+        } catch {
+          // якщо опис фото не вийшов — все одно продовжимо з текстовим prompt
+        }
       }
 
       const animSignal = { done: false };
@@ -890,7 +909,8 @@ export async function handleTelegramWebhook(req, env) {
     });
     return json({ ok: true });
   }
-// звичайне повідомлення
+
+  // звичайне повідомлення
   if (textRaw && !textRaw.startsWith("/")) {
     await safe(async () => {
       const cur = await getEnergy(env, userId);
@@ -921,7 +941,8 @@ export async function handleTelegramWebhook(req, env) {
     });
     return json({ ok: true });
   }
-// дефолт
+
+  // дефолт
   await sendPlain(env, chatId, "Привіт! Що зробимо?", {
     reply_markup: mainKeyboard(isAdmin),
   });
