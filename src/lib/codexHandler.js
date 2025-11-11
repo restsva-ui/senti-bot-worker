@@ -1,11 +1,17 @@
 // src/lib/codexHandler.js
-// Винесений Codex з webhook.js
+// Винесений Codex-хендлер з webhook.js
+// Тут: стан codex-mode, памʼять про файли, команди (/summary, /clear_last, /clear_all)
+// і генерація коду через модель.
 
+// залежності
 import { askAnyModel } from "./modelRouter.js";
+import { describeImage } from "../flows/visionDescribe.js";
 
-// --- KV keys ---
+// KV-ключі
+const KV = {
+  codexMode: (uid) => `codex:mode:${uid}`,
+};
 const CODEX_MEM_KEY = (uid) => `codex:mem:${uid}`;
-const CODEX_MODE_KEY = (uid) => `codex:mode:${uid}`;
 
 // ---- codex project memory
 async function loadCodexMem(env, userId) {
@@ -36,7 +42,7 @@ async function saveCodexMem(env, userId, entry) {
   } catch {}
 }
 
-async function clearCodexMem(env, userId) {
+export async function clearCodexMem(env, userId) {
   try {
     const kv = env.STATE_KV || env.CHECKLIST_KV;
     if (kv) await kv.delete(CODEX_MEM_KEY(userId));
@@ -44,22 +50,22 @@ async function clearCodexMem(env, userId) {
 }
 
 // ---- codex mode state
-async function setCodexMode(env, userId, on) {
+export async function setCodexMode(env, userId, on) {
   const kv = env.STATE_KV || env.CHECKLIST_KV;
   if (!kv) return;
-  await kv.put(CODEX_MODE_KEY(userId), on ? "on" : "off", {
+  await kv.put(KV.codexMode(userId), on ? "on" : "off", {
     expirationTtl: 60 * 60 * 24 * 180,
   });
 }
 
-async function getCodexMode(env, userId) {
+export async function getCodexMode(env, userId) {
   const kv = env.STATE_KV || env.CHECKLIST_KV;
   if (!kv) return false;
-  const val = await kv.get(CODEX_MODE_KEY(userId), "text");
+  const val = await kv.get(KV.codexMode(userId), "text");
   return val === "on";
 }
 
-// ---- call model for code
+// ---- util: відповідь моделі → текст
 function asText(res) {
   if (!res) return "";
   if (typeof res === "string") return res;
@@ -69,6 +75,7 @@ function asText(res) {
   return JSON.stringify(res);
 }
 
+// ---- call model for code
 async function runCodex(env, userText) {
   const order =
     String(env.CODEX_MODEL_ORDER || "").trim() ||
@@ -98,7 +105,7 @@ function pickFilenameByLang(lang) {
   return "codex.txt";
 }
 
-// готовий мобільний тетріс
+// готовий мобільний тетріс, якщо юзер просить конкретно тетріс
 function buildTetrisHtml() {
   return `<!DOCTYPE html>
 <html lang="uk">
@@ -163,8 +170,16 @@ document.getElementById('drop').onclick=function(){while(!collide(board,current)
 </html>`;
 }
 
-// --- admin-style команди всередині codex mode ---
-async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain) {
+// ---- команди codex (/clear_last, /clear_all, /summary)
+export async function handleCodexCommand(
+  env,
+  chatId,
+  userId,
+  textRaw,
+  sendPlain
+) {
+  if (!textRaw) return false;
+
   if (textRaw === "/clear_last") {
     const arr = await loadCodexMem(env, userId);
     if (!arr.length) {
@@ -177,11 +192,13 @@ async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain) {
     }
     return true;
   }
+
   if (textRaw === "/clear_all") {
     await clearCodexMem(env, userId);
     await sendPlain(env, chatId, "Весь проєкт очищено.");
     return true;
   }
+
   if (textRaw === "/summary") {
     const arr = await loadCodexMem(env, userId);
     if (!arr.length) {
@@ -192,13 +209,15 @@ async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain) {
     }
     return true;
   }
+
   return false;
 }
 
-// --- main codex handler (generate file) ---
-async function handleCodexGeneration(env, ctx, helpers) {
-  const { chatId, userId, msg, textRaw, lang } = ctx;
-  const {
+// ---- основна генерація Codex (те, що викликає webhook)
+export async function handleCodexGeneration(
+  env,
+  { chatId, userId, msg, textRaw, lang, isAdmin },
+  {
     getEnergy,
     spendEnergy,
     energyLinks,
@@ -206,12 +225,12 @@ async function handleCodexGeneration(env, ctx, helpers) {
     pickPhoto,
     tgFileUrl,
     urlToBase64,
-    describeImage,
+    describeImage: describeImageInjected,
     sendDocument,
     startPuzzleAnimation,
     editMessageText,
-  } = helpers;
-
+  }
+) {
   const cur = await getEnergy(env, userId);
   const need = Number(cur.costText ?? 2);
   if ((cur.energy ?? 0) < need) {
@@ -219,41 +238,57 @@ async function handleCodexGeneration(env, ctx, helpers) {
     await sendPlain(
       env,
       chatId,
-      (lang && lang.startsWith("uk"))
-        ? `Потрібно енергії: ${need}. Отримати: ${links.energy}`
-        : `Need energy: ${need}. Get: ${links.energy}`
+      lang?.startsWith("uk")
+        ? `Потрібно ${need} енергії. Поповнити: ${links.energy}`
+        : `Need ${need} energy. Top up: ${links.energy}`
     );
-    return true;
+    return;
   }
 
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   let indicatorId = null;
   if (token) {
-    const r = await fetch(
-      `https://api.telegram.org/bot${token}/sendMessage`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: "🧩 Працюю над кодом…",
-        }),
-      }
-    );
-    const d = await r.json().catch(() => null);
-    indicatorId = d?.result?.message_id || null;
+    try {
+      const r = await fetch(
+        `https://api.telegram.org/bot${token}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: "🧩 Працюю над кодом…",
+          }),
+        }
+      );
+      const d = await r.json().catch(() => null);
+      indicatorId = d?.result?.message_id || null;
+    } catch {}
   }
 
   await spendEnergy(env, userId, need, "codex");
 
-  let userPrompt = textRaw || "";
+  // анімація
+  const animSignal = { done: false };
+  if (indicatorId && startPuzzleAnimation) {
+    startPuzzleAnimation(env, chatId, indicatorId, animSignal);
+  }
 
+  // юзерський prompt
+  let userPrompt = textRaw || "";
   const photoInCodex = pickPhoto ? pickPhoto(msg) : null;
-  if (photoInCodex && describeImage) {
+
+  // якщо юзер кинув фото в codex — описуємо і додаємо до промпта
+  if (photoInCodex) {
     try {
       const imgUrl = await tgFileUrl(env, photoInCodex.file_id);
       const imgBase64 = await urlToBase64(imgUrl);
-      const vRes = await describeImage(env, {
+
+      const describeFn =
+        typeof describeImageInjected === "function"
+          ? describeImageInjected
+          : describeImage;
+
+      const vRes = await describeFn(env, {
         chatId,
         tgLang: msg.from?.language_code,
         imageBase64: imgBase64,
@@ -267,16 +302,12 @@ async function handleCodexGeneration(env, ctx, helpers) {
         (userPrompt ? userPrompt + "\n\n" : "") +
         "Ось опис зображення користувача, використай його в коді:\n" +
         imgDesc;
-    } catch {
-      // тихо пропускаємо
+    } catch (e) {
+      // тихо ігноруємо
     }
   }
 
-  const animSignal = { done: false };
-  if (indicatorId) {
-    startPuzzleAnimation(env, chatId, indicatorId, animSignal);
-  }
-
+  // генерація коду
   let codeText;
   if (/тетріс|tetris/i.test(userPrompt)) {
     codeText = buildTetrisHtml();
@@ -286,24 +317,21 @@ async function handleCodexGeneration(env, ctx, helpers) {
     codeText = code;
   }
 
+  // імʼя файлу
   const filename = "codex.html";
   await saveCodexMem(env, userId, { filename, content: codeText });
-  await sendDocument(env, chatId, filename, codeText, "Ось готовий файл 👇");
 
-  if (indicatorId) {
+  // шлемо файл
+  if (sendDocument) {
+    await sendDocument(env, chatId, filename, codeText, "Ось готовий файл 👇");
+  } else {
+    // fallback — просто текстом
+    await sendPlain(env, chatId, codeText.slice(0, 4000));
+  }
+
+  // зупиняємо анімацію
+  if (indicatorId && editMessageText) {
     animSignal.done = true;
     await editMessageText(env, chatId, indicatorId, "✅ Готово");
   }
-
-  return true;
 }
-
-export {
-  CODEX_MEM_KEY,
-  setCodexMode,
-  getCodexMode,
-  clearCodexMem,
-  handleCodexCommand,
-  handleCodexGeneration,
-  buildTetrisHtml,
-}; 
