@@ -30,13 +30,8 @@ import {
   weatherSummaryByCoords,
 } from "../apis/weather.js";
 import { setUserLocation, getUserLocation } from "../lib/geo.js";
-import { describeImage } from "../flows/visionDescribe.js";
-import {
-  detectLandmarksFromText,
-  formatLandmarkLines,
-} from "../lib/landmarkDetect.js";
-
-// ← новий імпорт для винесеного codex
+// віжн тепер тут:
+import { handleVisionMedia } from "../lib/visionHandler.js";
 import {
   setCodexMode,
   getCodexMode,
@@ -56,38 +51,6 @@ const {
   sendPlain,
   askLocationKeyboard,
 } = TG;
-
-const VISION_MEM_KEY = (uid) => `vision:mem:${uid}`;
-
-// ---- vision short-memory
-async function loadVisionMem(env, userId) {
-  try {
-    const raw = await (env.STATE_KV || env.CHECKLIST_KV)?.get(
-      VISION_MEM_KEY(userId),
-      "text"
-    );
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-async function saveVisionMem(env, userId, entry) {
-  const kv = env.STATE_KV || env.CHECKLIST_KV;
-  if (!kv) return;
-  try {
-    const arr = await loadVisionMem(env, userId);
-    arr.unshift({
-      id: entry.id,
-      url: entry.url,
-      caption: entry.caption || "",
-      desc: entry.desc || "",
-      ts: Date.now(),
-    });
-    await kv.put(VISION_MEM_KEY(userId), JSON.stringify(arr.slice(0, 20)), {
-      expirationTtl: 60 * 60 * 24 * 180,
-    });
-  } catch {}
-}
 
 // ---- TG helpers
 async function sendTyping(env, chatId) {
@@ -151,7 +114,7 @@ async function startPuzzleAnimation(env, chatId, messageId, signal) {
   }
 }
 
-// ---- get tg file url + attachment detection
+// ---- get tg file url + attachment detection (потрібно і drive, і codex, і vision)
 async function tgFileUrl(env, file_id) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   const r = await fetch(`https://api.telegram.org/bot${token}/getFile`, {
@@ -249,6 +212,7 @@ function buildAdminLinks(env, userId) {
 
   return { checklist, energy, learn };
 }
+// продовження src/routes/webhook.js
 
 // drive-mode media
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
@@ -312,77 +276,6 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   );
   return true;
 }
-
-// vision-mode (коли не Codex і не drive)
-async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
-  const att = pickPhoto(msg);
-  if (!att) return false;
-
-  const cur = await getEnergy(env, userId);
-  const need = Number(cur.costText ?? 1);
-  if ((cur.energy ?? 0) < need) {
-    const links = energyLinks(env, userId);
-    await sendPlain(
-      env,
-      chatId,
-      t(lang, "need_energy_text", need, links.energy)
-    );
-    return true;
-  }
-  await spendEnergy(env, userId, need, "vision");
-  pulseTyping(env, chatId);
-
-  const url = await tgFileUrl(env, att.file_id);
-  const imageBase64 = await urlToBase64(url);
-  const prompt =
-    caption ||
-    (lang.startsWith("uk")
-      ? "Опиши, що на зображенні, коротко і по суті."
-      : "Describe the image briefly and to the point.");
-
-  const visionOrder =
-    "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct";
-
-  try {
-    const { text } = await describeImage(env, {
-      chatId,
-      tgLang: msg.from?.language_code,
-      imageBase64,
-      question: prompt,
-      modelOrder: visionOrder,
-    });
-
-    await saveVisionMem(env, userId, {
-      id: att.file_id,
-      url,
-      caption,
-      desc: text,
-    });
-
-    await sendPlain(env, chatId, `🖼️ ${text}`);
-
-    const landmarks = detectLandmarksFromText(text, lang);
-    if (landmarks?.length) {
-      const lines = formatLandmarkLines(landmarks, lang);
-      await sendPlain(env, chatId, lines.join("\n"), {
-        parse_mode: "HTML",
-        disable_web_page_preview: true,
-      });
-    }
-  } catch (e) {
-    if (ADMIN(env, userId)) {
-      await sendPlain(
-        env,
-        chatId,
-        `❌ Vision error: ${String(e.message || e).slice(0, 180)}`
-      );
-    } else {
-      await sendPlain(env, chatId, "Поки що не можу проаналізувати фото.");
-    }
-  }
-  return true;
-}
-// продовження src/routes/webhook.js
 
 // system hint
 async function buildSystemHint(env, chatId, userId, preferredLang) {
@@ -580,10 +473,25 @@ export async function handleTelegramWebhook(req, env) {
         return json({ ok: true });
     }
     if (!driveOn && hasMedia && !(await getCodexMode(env, userId))) {
-      if (
-        await handleVisionMedia(env, chatId, userId, msg, lang, msg?.caption)
-      )
-        return json({ ok: true });
+      const ok = await handleVisionMedia(
+        env,
+        {
+          chatId,
+          userId,
+          msg,
+          lang,
+          caption: msg?.caption,
+        },
+        {
+          getEnergy,
+          spendEnergy,
+          energyLinks,
+          sendPlain,
+          tgFileUrl,
+          urlToBase64,
+        }
+      );
+      if (ok) return json({ ok: true });
     }
   } catch (e) {
     if (isAdmin) {
@@ -594,7 +502,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // codex extra cmds (вже в окремому модулі)
+  // codex extra cmds
   if (await getCodexMode(env, userId)) {
     if (await handleCodexCommand(env, chatId, userId, textRaw, sendPlain)) {
       return json({ ok: true });
@@ -642,7 +550,7 @@ export async function handleTelegramWebhook(req, env) {
     }
   }
 
-  // Codex main (тепер через handler)
+  // Codex main
   if ((await getCodexMode(env, userId)) && (textRaw || pickPhoto(msg))) {
     await safe(async () => {
       await handleCodexGeneration(
@@ -663,7 +571,7 @@ export async function handleTelegramWebhook(req, env) {
           pickPhoto,
           tgFileUrl,
           urlToBase64,
-          describeImage,
+          describeImage: null, // вже не треба, у codexHandler свій
           sendDocument,
           startPuzzleAnimation,
           editMessageText,
