@@ -3,7 +3,7 @@
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
 import { abs } from "../utils/url.js";
-import { think } from "../lib/brain.js"; // лишаємо, як було
+import { think } from "../lib/brain.js"; // залишаємо як у твоєму репо
 import { readStatut } from "../lib/kvChecklist.js";
 import { askAnyModel } from "../lib/modelRouter.js";
 import { json } from "../lib/utils.js";
@@ -14,8 +14,6 @@ import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
 import {
-  enqueueLearn,
-  listQueued,
   getRecentInsights,
 } from "../lib/kvLearnQueue.js";
 import {
@@ -315,6 +313,7 @@ function asText(res) {
     return res.choices[0].message.content;
   return JSON.stringify(res);
 }
+
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "GET") {
     return json({ ok: true, worker: "senti", ts: Date.now() });
@@ -482,12 +481,12 @@ export async function handleTelegramWebhook(req, env) {
           caption: msg?.caption,
         },
         {
-            getEnergy,
-            spendEnergy,
-            energyLinks,
-            sendPlain,
-            tgFileUrl,
-            urlToBase64,
+          getEnergy,
+          spendEnergy,
+          energyLinks,
+          sendPlain,
+          tgFileUrl,
+          urlToBase64,
         }
       );
       if (ok) return json({ ok: true });
@@ -527,10 +526,8 @@ export async function handleTelegramWebhook(req, env) {
             await sendPlain(env, chatId, byPlace.text, {
               parse_mode: byPlace.mode || undefined,
             });
-            // збережемо останній запит користувача
             await saveLastPlace(env, userId, { place: textRaw });
           } else {
-            // спроба по кешу
             const last = await loadLastPlace(env, userId);
             if (last?.lat && last?.lon) {
               const byCoord = await weatherSummaryByCoords(
@@ -542,7 +539,6 @@ export async function handleTelegramWebhook(req, env) {
                 parse_mode: byCoord.mode || undefined,
               });
             } else {
-              // спроба за збереженою локацією
               const geo = await getUserLocation(env, userId);
               if (geo?.lat && geo?.lon) {
                 const byCoord = await weatherSummaryByCoords(
@@ -590,7 +586,7 @@ export async function handleTelegramWebhook(req, env) {
           pickPhoto,
           tgFileUrl,
           urlToBase64,
-          describeImage: null, // можемо прокинути, якщо треба
+          describeImage: null,
           sendDocument,
           startPuzzleAnimation,
           editMessageText,
