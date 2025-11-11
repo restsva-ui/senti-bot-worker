@@ -802,16 +802,16 @@ async function handleCallback(callbackQuery, env, ctx) {
 await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "OK");
       break;
     }
-    case BTN_EDIT_CAPTION: {
-      await tgEditMessageCaption(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Підпис змінено ✅"
-      );
-      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "OK");
-      break;
-    }
+    case BTN_EDIT_TEXT: {
+  await tgEditMessageText(
+    TG_BOT_TOKEN,
+    chatId,
+    messageId,
+    "Текст змінено ✅"
+  );
+  await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "OK");
+  break;
+}
     case BTN_EDIT_MEDIA: {
       // Not implemented, just answer
       await tgAnswerCallback(
