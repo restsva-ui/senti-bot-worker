@@ -14,84 +14,71 @@ function revealsAiSelf(out = "") {
     /(^|\b)as an? (ai|language model)\b/.test(s) ||
     /\bi am (an|a)? (ai|language model|large language model)\b/.test(s) ||
     /\bdeveloped by (google|openai|meta|anthropic)\b/.test(s) ||
-    /я\s+(є|—|-)?\s*(штучн|модель|мова)/i.test(out) ||
-    /я\s+(являюсь|есть)\s+(ии|искусственн|языков)/i.test(out) ||
-    /ich bin (ein|eine) (ki|sprachmodell)/i.test(out) ||
-    /je suis (une|un) (ia|mod[èe]le de langue)/i.test(out)
+    /\bi (cannot|can't) (access|browse)\b/.test(s)
   );
 }
-function looksLikeModelDump(s = "") {
-  const x = (s || "").toLowerCase();
-  return /here(?:'|)s a breakdown|model (aliases|mappings|configurations)/i.test(x) ||
-         /gemini-?2\.5|openrouter|deepseek|llama/i.test(x);
+function limitMsg(s = "", max = 4096) {
+  s = String(s);
+  if (s.length <= max) return s;
+  return s.slice(0, max - 3) + "...";
 }
 function looksLikeEmojiStart(s = "") {
-  try { return /^[\u2190-\u2BFF\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u.test(String(s)); }
-  catch { return false; }
+  return /^[\u231A-\uD83E\uDDFF]/.test(s.trim());
 }
 function guessEmoji(text = "") {
-  const tt = (text || "").toLowerCase();
-  if (tt.includes("колес") || tt.includes("wheel")) return "🛞";
-  if (tt.includes("дзеркал") || tt.includes("зеркал") || tt.includes("mirror")) return "🪞";
-  if (tt.includes("машин") || tt.includes("авто") || tt.includes("car")) return "🚗";
-  if (tt.includes("вода") || tt.includes("рідина") || tt.includes("water")) return "💧";
-  if (tt.includes("світл") || tt.includes("light") || tt.includes("солнц")) return "☀️";
-  if (tt.includes("електр") || tt.includes("струм") || tt.includes("current")) return "⚡";
-  return "💡";
+  const low = text.toLowerCase();
+  if (low.includes("фото") || low.includes("картин")) return "🖼";
+  if (low.includes("код") || low.includes("js") || low.includes("script"))
+    return "💻";
+  if (low.includes("помилк") || low.includes("error")) return "⚠️";
+  return "🤖";
 }
-function limitMsg(s, max = 220) {
-  if (!s) return s;
-  return s.length <= max ? s : s.slice(0, max - 1);
-}
+/**
+ * Головна функція відповіді AI
+ * @param {string} text - вхідний запит користувача
+ * @param {object} opts - { env, ctx, userId, chatId, mediaUrl, lang, modelOrder, systemHint, expand }
+ */
+export async function aiRespond(
+  text,
+  { env, ctx, userId, chatId, mediaUrl = null, lang = "uk", modelOrder = null, systemHint = null, expand = false } = {}
+) {
+  // 1) базовий системний хінт, щоб не відписувався "як AI"
+  const baseSystem =
+    systemHint ||
+    "Ти Senti — телеграм-помічник. Пиши коротко, по суті, українською. Не розповідай, що ти AI або модель. Якщо просять код — дай код. Якщо текст — дай текст. Якщо не впевнений — скажи, що не впевнений.";
 
-/** ── Основна функція відповіді ───────────────────────────────────────────── */
-export async function aiRespond(env, { text, lang, name, systemHint, expand }) {
-  const modelOrder = String(env.MODEL_ORDER || "").trim();
-
-  const control = expand
-    ? `You are Senti — a thoughtful, emotionally intelligent assistant. Never say you're an AI, model, or a product of any company. Write ONLY in ${lang}; sound natural and human-like. Be warm and helpful. Split long ideas into short Telegram-friendly messages.`
-    : `You are Senti — an independent, human-like assistant. Never mention being AI/GPT or created by anyone. Write ONLY in ${lang}. Keep it short and helpful (1–3 sentences). Answer directly without restating the question.`;
-
-  const prompt = `Add one relevant emoji at the start if natural.
-User (${name}) says: ${text}
-${control}`;
-
-  // 1) перша спроба (model router або think)
-  let out = modelOrder
-    ? await askAnyModel(env, modelOrder, prompt, { systemHint })
-    : await think(env, prompt, { systemHint });
-
-  out = stripProviderSignature((out || "").trim());
-
-  // 2) якщо почав лити технічний дамп про моделі — страхуємося
-  if (looksLikeModelDump(out)) {
-    const retry = modelOrder
-      ? await askAnyModel(env, modelOrder, prompt, { systemHint })
-      : await think(env, prompt, { systemHint });
-    out = stripProviderSignature((retry || out || "").trim());
+  // 2) якщо присутній mediaUrl — додамо до запиту
+  let userPrompt = text;
+  if (mediaUrl) {
+    userPrompt =
+      text +
+      `\n\n(Користувач надіслав файл/зображення: ${mediaUrl}. Спочатку коротко опиши, що це, потім виконай запит.)`;
   }
 
-  // 3) анти-розкриття «я AI»
+  // 3) вибір моделі: або заданий порядок, або дефолт через think()
+  let out = "";
+  if (modelOrder && Array.isArray(modelOrder) && modelOrder.length > 0) {
+    out = await askAnyModel(env, modelOrder, userPrompt, {
+      systemHint: baseSystem,
+    });
+  } else {
+    out = await think(env, userPrompt, { systemHint: baseSystem });
+  }
+
+  out = (out || "").trim();
+  out = stripProviderSignature(out);
+
+  // 4) прибрати саморозкриття AI
   if (revealsAiSelf(out)) {
-    const fix = `Rewrite the previous answer as Senti. Do NOT mention being an AI/model or any company. Keep it in ${lang}, concise and natural.`;
-    const cleaned = modelOrder
-      ? await askAnyModel(env, modelOrder, fix, { systemHint })
-      : await think(env, fix, { systemHint });
-    out = stripProviderSignature((cleaned || out || "").trim());
+    out = out.replace(/as an? (ai|language model)[^.,]*/gi, "").trim();
   }
-
-  // 4) авто-емодзі + лаконічність
-  if (!looksLikeEmojiStart(out)) {
-    out = `${guessEmoji(text)} ${out}`;
-  }
-
-  // 5) контроль мови: жорстко переписати, якщо випадково не тією мовою
+// 5) контроль мови: жорстко переписати, якщо випадково не тією мовою
   const detected = detectFromText(out);
   if (detected && lang && detected !== lang) {
-    const hardPrompt = `STRICT LANGUAGE MODE: Respond ONLY in ${lang}. If the previous answer used another language, rewrite it now in ${lang}. Keep it concise.`;
+    const hardPrompt = `STRICT LANGUAGE MODE: Respond ONLY in ${lang}. User asked: "${text}". You answered in another language, rewrite it now in ${lang}. Keep it concise.`;
     const fixed = modelOrder
-      ? await askAnyModel(env, modelOrder, hardPrompt, { systemHint })
-      : await think(env, hardPrompt, { systemHint });
+      ? await askAnyModel(env, modelOrder, hardPrompt, { systemHint: baseSystem })
+      : await think(env, hardPrompt, { systemHint: baseSystem });
     const clean = stripProviderSignature((fixed || "").trim());
     out = looksLikeEmojiStart(clean) ? clean : `${guessEmoji(text)} ${clean}`;
   }
