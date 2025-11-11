@@ -9,7 +9,7 @@ import { tgSendVoice } from "../integrations/tgSendVoice.js";
 import { tgSendAnimation } from "../integrations/tgSendAnimation.js";
 import { tgSendLocation } from "../integrations/tgSendLocation.js";
 import { tgSendContact } from "../integrations/tgSendContact.js";
-import { tgSendPoll } from "../integrations/tgSendPoll.js";
+import { tgSendPoll } from "../integrations/tgSendPoll.js };
 import { tgSendQuiz } from "../integrations/tgSendQuiz.js";
 import { tgSendChatAction } from "../integrations/tgSendChatAction.js";
 import { tgEditMessageText } from "../integrations/tgEditMessageText.js";
@@ -190,7 +190,6 @@ function makeInlineKeyboard() {
 
 export default {
   async fetch(request, env, ctx) {
-    // Allow to run local/self tests
     const url = new URL(request.url);
     if (url.pathname === "/health") {
       return HEALTH.fetch(request, env, ctx);
@@ -254,7 +253,6 @@ export default {
   },
 };
 async function handleUpdate(update, env, ctx) {
-  // Telegram update can be: message, edited_message, callback_query, ...
   const message = update.message || update.edited_message || null;
   const callbackQuery = update.callback_query || null;
   const inlineQuery = update.inline_query || null;
@@ -262,25 +260,19 @@ async function handleUpdate(update, env, ctx) {
   const myChatMember = update.my_chat_member || null;
   const chatMember = update.chat_member || null;
 
-  // For debugging
-  // console.log("UPDATE", JSON.stringify(update, null, 2));
-
   if (callbackQuery) {
     return handleCallback(callbackQuery, env, ctx);
   }
 
   if (inlineQuery) {
-    // Inline mode not implemented yet
     return new Response("OK", { status: 200 });
   }
 
   if (chatJoinRequest) {
-    // TODO: approve/deny
     return new Response("OK", { status: 200 });
   }
 
   if (myChatMember || chatMember) {
-    // Bot was added/removed etc.
     return new Response("OK", { status: 200 });
   }
 
@@ -288,12 +280,10 @@ async function handleUpdate(update, env, ctx) {
     return new Response("No message", { status: 200 });
   }
 
-  // If it's a command
   if (message.text && message.text.startsWith("/")) {
     return handleCommand(message, env, ctx);
   }
 
-  // If it's a media message
   if (
     message.photo ||
     message.video ||
@@ -305,7 +295,6 @@ async function handleUpdate(update, env, ctx) {
     return handleMediaMessage(message, env, ctx);
   }
 
-  // Otherwise treat as text
   return handleTextMessage(message, env, ctx);
 }
 
@@ -324,15 +313,7 @@ async function handleCommand(message, env, ctx) {
       "Можу також підключати AI для відповіді.\n" +
       "Спробуй кнопки нижче.";
     await tgSendChatAction(TG_BOT_TOKEN, chatId, "typing");
-    await tgSendDocument(
-      TG_BOT_TOKEN,
-      chatId,
-      null,
-      welcome,
-      null,
-      null,
-      kb
-    );
+    await tgSendDocument(TG_BOT_TOKEN, chatId, null, welcome, null, null, kb);
     return new Response("OK", { status: 200 });
   }
 
@@ -445,18 +426,13 @@ async function handleCommand(message, env, ctx) {
   }
 
   if (cmd === "/self-test") {
-    return SELF_TEST.fetch(
-      new Request("http://local/self-test"),
-      env,
-      ctx
-    );
+    return SELF_TEST.fetch(new Request("http://local/self-test"), env, ctx);
   }
 
   if (cmd === "/health") {
     return HEALTH.fetch(new Request("http://local/health"), env, ctx);
   }
 
-  // Unknown command
   await tgSendDocument(TG_BOT_TOKEN, chatId, null, "Невідома команда.");
   return new Response("OK", { status: 200 });
 }
@@ -471,7 +447,6 @@ async function handleMediaMessage(message, env, ctx) {
   const hasVoice = !!message.voice;
   const hasAnimation = !!message.animation;
 
-  // If user added a caption that starts with /ai - treat as AI request with media
   if (caption && caption.startsWith("/ai")) {
     const prompt = caption.replace("/ai", "").trim() || "Опиши файл/фото.";
     await tgSendChatAction(TG_BOT_TOKEN, chatId, "typing");
@@ -497,22 +472,16 @@ async function handleMediaMessage(message, env, ctx) {
     return new Response("OK", { status: 200 });
   }
 
-  // If it's photo - we can apply vision / OCR
   if (hasPhoto) {
-    const photo = message.photo[message.photo.length - 1]; // biggest size
+    const photo = message.photo[message.photo.length - 1];
     const fileUrl = await tgGetFileLink(TG_BOT_TOKEN, photo.file_id);
 
-    // Apply vision policy
     const visionResult = await applyVisionPolicy(fileUrl, { env, ctx });
-    // Try OCR
     const ocrText = await extractOcrFromImage(fileUrl, { env, ctx }).catch(
       () => null
     );
-    // Try object/faces/brands/landmarks
     const faces = await detectFaces(fileUrl, { env, ctx }).catch(() => null);
-    const objects = await detectObjects(fileUrl, { env, ctx }).catch(
-      () => null
-    );
+    const objects = await detectObjects(fileUrl, { env, ctx }).catch(() => null);
     const brands = await detectBrands(fileUrl, { env, ctx }).catch(() => null);
     const landmarks = await detectLandmarks(fileUrl, { env, ctx }).catch(
       () => null
@@ -533,7 +502,6 @@ async function handleMediaMessage(message, env, ctx) {
     return new Response("OK", { status: 200 });
   }
 
-  // If it's document - save to drive if configured
   if (hasDoc) {
     const fileUrl = await tgGetFileLink(TG_BOT_TOKEN, message.document.file_id);
     if (env.DRIVE_ACCESS_TOKEN) {
@@ -595,10 +563,7 @@ async function handleMediaMessage(message, env, ctx) {
   }
 
   if (hasAnimation) {
-    const fileUrl = await tgGetFileLink(
-      TG_BOT_TOKEN,
-      message.animation.file_id
-    );
+    const fileUrl = await tgGetFileLink(TG_BOT_TOKEN, message.animation.file_id);
     await tgSendDocument(
       TG_BOT_TOKEN,
       chatId,
@@ -626,10 +591,8 @@ async function handleTextMessage(message, env, ctx) {
     return new Response("OK", { status: 200 });
   }
 
-  // Detect intent
   const intent = await detectIntent(text, { env, ctx }).catch(() => null);
 
-  // If intent is AI
   if (intent === "ai") {
     await tgSendChatAction(TG_BOT_TOKEN, chatId, "typing");
     const aiRes = await aiRespond(text, {
@@ -642,7 +605,6 @@ async function handleTextMessage(message, env, ctx) {
     return new Response("OK", { status: 200 });
   }
 
-  // If intent is vision
   if (intent === "vision") {
     await tgSendDocument(
       TG_BOT_TOKEN,
@@ -653,7 +615,6 @@ async function handleTextMessage(message, env, ctx) {
     return new Response("OK", { status: 200 });
   }
 
-  // If intent is drive
   if (intent === "drive") {
     await tgSendDocument(
       TG_BOT_TOKEN,
@@ -664,7 +625,6 @@ async function handleTextMessage(message, env, ctx) {
     return new Response("OK", { status: 200 });
   }
 
-  // Fallback: send to AI
   await tgSendChatAction(TG_BOT_TOKEN, chatId, "typing");
   const aiRes = await aiRespond(text, {
     env,
@@ -675,7 +635,6 @@ async function handleTextMessage(message, env, ctx) {
   await tgSendDocument(TG_BOT_TOKEN, chatId, null, aiRes || "Не зміг відповісти 🤔");
   return new Response("OK", { status: 200 });
 }
-
 async function handleCallback(callbackQuery, env, ctx) {
   const data = callbackQuery.data;
   const message = callbackQuery.message;
@@ -702,39 +661,19 @@ async function handleCallback(callbackQuery, env, ctx) {
       break;
     }
     case BTN_PHOTO: {
-      await tgEditMessageText(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Надішли фото 📷"
-      );
+      await tgEditMessageText(TG_BOT_TOKEN, chatId, messageId, "Надішли фото 📷");
       break;
     }
     case BTN_VIDEO: {
-      await tgEditMessageText(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Надішли відео 🎬"
-      );
+      await tgEditMessageText(TG_BOT_TOKEN, chatId, messageId, "Надішли відео 🎬");
       break;
     }
     case BTN_AUDIO: {
-      await tgEditMessageText(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Надішли аудіо 🎵"
-      );
+      await tgEditMessageText(TG_BOT_TOKEN, chatId, messageId, "Надішли аудіо 🎵");
       break;
     }
     case BTN_VOICE: {
-      await tgEditMessageText(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Надішли голосове 🎙"
-      );
+      await tgEditMessageText(TG_BOT_TOKEN, chatId, messageId, "Надішли голосове 🎙");
       break;
     }
     case BTN_ANIMATION: {
@@ -747,25 +686,15 @@ async function handleCallback(callbackQuery, env, ctx) {
       break;
     }
     case BTN_LOCATION: {
-      await tgEditMessageText(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Надішли локацію 📍"
-      );
+      await tgEditMessageText(TG_BOT_TOKEN, chatId, messageId, "Надішли локацію 📍");
       break;
     }
     case BTN_CONTACT: {
-      await tgEditMessageText(
-        TG_BOT_TOKEN,
-        chatId,
-        messageId,
-        "Надішли контакт 👤"
-      );
+      await tgEditMessageText(TG_BOT_TOKEN, chatId, messageId, "Надішли контакт 👤");
       break;
     }
     case BTN_POLL: {
-      const r = await tgSendPoll(
+      await tgSendPoll(
         TG_BOT_TOKEN,
         chatId,
         "Опитування від Senti",
@@ -776,7 +705,7 @@ async function handleCallback(callbackQuery, env, ctx) {
       break;
     }
     case BTN_QUIZ: {
-      const r = await tgSendQuiz(
+      await tgSendQuiz(
         TG_BOT_TOKEN,
         chatId,
         "Квіз від Senti",
@@ -798,22 +727,20 @@ async function handleCallback(callbackQuery, env, ctx) {
         messageId,
         "Текст змінено ✅"
       );
-      await tgAnswerCallback(TG_BOT_TOKE
-await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "OK");
+      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "OK");
       break;
     }
-    case BTN_EDIT_TEXT: {
-  await tgEditMessageText(
-    TG_BOT_TOKEN,
-    chatId,
-    messageId,
-    "Текст змінено ✅"
-  );
-  await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "OK");
-  break;
-}
+    case BTN_EDIT_CAPTION: {
+      await tgEditMessageCaption(
+        TG_BOT_TOKEN,
+        chatId,
+        messageId,
+        "Підпис змінено ✅"
+      );
+      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "OK");
+      break;
+    }
     case BTN_EDIT_MEDIA: {
-      // Not implemented, just answer
       await tgAnswerCallback(
         TG_BOT_TOKEN,
         callbackQuery.id,
@@ -977,18 +904,14 @@ await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "OK");
       break;
     }
     case BTN_SET_COMMANDS: {
-      const r = await tgSetMyCommands(TG_BOT_TOKEN, [
+      await tgSetMyCommands(TG_BOT_TOKEN, [
         { command: "start", description: "Старт" },
         { command: "help", description: "Допомога" },
         { command: "ai", description: "AI-відповідь" },
         { command: "vision", description: "Опис фото" },
         { command: "ocr", description: "Текст з фото" },
       ]);
-      await tgAnswerCallback(
-        TG_BOT_TOKEN,
-        callbackQuery.id,
-        "Команди встановлено"
-      );
+      await tgAnswerCallback(TG_BOT_TOKEN, callbackQuery.id, "Команди встановлено");
       break;
     }
     case BTN_GET_COMMANDS: {
