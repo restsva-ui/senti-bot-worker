@@ -53,6 +53,9 @@ const KV = {
   codexMode: (uid) => `codex:mode:${uid}`,
 };
 
+// додали пам'ять для “останній код зі скріну”
+const LAST_VISION_CODE = (uid) => `vision:last_code:${uid}`;
+
 const VISION_MEM_KEY = (uid) => `vision:mem:${uid}`;
 const CODEX_MEM_KEY = (uid) => `codex:mem:${uid}`;
 
@@ -164,12 +167,14 @@ async function editMessageText(env, chatId, messageId, newText) {
     }),
   });
 }
-const sleep = (ms) => new Promise((res) => res(), ms);
-async function startPuzzleAnimation(env, chatId, messageId, signal) {
+
+// нова анімація-спінер (сучасніша ніж пазли)
+async function startSpinnerAnimation(env, chatId, messageId, signal) {
   const frames = [
-    "🧩 Працюю над кодом…",
-    "🧩🟦 Працюю над кодом…",
-    "🧩🟦🟩 Працюю над кодом…",
+    "⏳ Обробляю…",
+    "🔄 Обробляю…",
+    "⚙️ Обробляю…",
+    "🛠 Обробляю…",
   ];
   let i = 0;
   while (!signal.done) {
@@ -341,6 +346,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   );
   return true;
 }
+
 // vision-mode (коли не Codex і не drive)
 async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   const att = pickPhoto(msg);
@@ -410,7 +416,6 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   }
   return true;
 }
-
 async function buildSystemHint(env, chatId, userId, preferredLang) {
   const statut = String((await readStatut(env)) || "").trim();
   const dlg = await buildDialogHint(env, userId);
@@ -506,6 +511,7 @@ function pickFilenameByLang(lang) {
   if (l === "py" || l === "python") return "codex.py";
   return "codex.txt";
 }
+
 // готовий тетріс
 function buildTetrisHtml() {
   return `<!DOCTYPE html>
@@ -514,7 +520,6 @@ function buildTetrisHtml() {
 <body>...скорочено для прикладу...</body>
 </html>`;
 }
-
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "GET") {
     return json({ ok: true, worker: "senti", ts: Date.now() });
@@ -788,7 +793,7 @@ export async function handleTelegramWebhook(req, env) {
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
               chat_id: chatId,
-              text: "🧩 Працюю…",
+              text: "⏳ Обробляю…",
             }),
           }
         );
@@ -802,13 +807,15 @@ export async function handleTelegramWebhook(req, env) {
       let userPrompt = textRaw || "";
       const photoInCodex = pickPhoto(msg);
 
-      // 🔎 чи це запит на аналіз?
+      // чи це запит на аналіз?
       const wantsAnalysis = /аналіз|проаналізуй|analy[sz]e|explain|поясни/i.test(
         userPrompt
       );
 
-      // якщо є фото і при цьому юзер просить АНАЛІЗ → витягуємо код з фото і даємо текст
-      if (photoInCodex && wantsAnalysis) {
+      const kv = env.STATE_KV || env.CHECKLIST_KV;
+
+      // 📷 якщо прийшло фото — одразу витягуємо код/опис і зберігаємо
+      if (photoInCodex) {
         try {
           const imgUrl = await tgFileUrl(env, photoInCodex.file_id);
           const imgBase64 = await urlToBase64(imgUrl);
@@ -817,35 +824,76 @@ export async function handleTelegramWebhook(req, env) {
             tgLang: msg.from?.language_code,
             imageBase64: imgBase64,
             question:
-              "Витягни з цього зображення код (якщо це код) у вигляді чистого тексту.",
+              "Якщо на зображенні є код — випиши його ПОВНІСТЮ як текст. Якщо це не код — коротко опиши.",
             modelOrder:
               "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct",
           });
           const extracted = (vRes?.text || "").trim();
-          if (!extracted) {
-            await sendPlain(env, chatId, "Не вдалося витягнути код з фото.");
-          } else {
+
+          // зберігаємо як "останній код зі скріну"
+          if (kv && extracted) {
+            await kv.put(LAST_VISION_CODE(userId), extracted, {
+              expirationTtl: 60 * 60 * 6,
+            });
+          }
+
+          // якщо юзер взагалі нічого не писав — просто покажемо, що дістали
+          if (!userPrompt) {
+            await sendPlain(
+              env,
+              chatId,
+              extracted
+                ? "Витягнув код зі скріну 👇\n" + extracted.slice(0, 1500)
+                : "Схоже, це не код. Якщо треба щось конкретне — напиши."
+            );
+            if (indicatorId) {
+              await editMessageText(env, chatId, indicatorId, "✅ Готово");
+            }
+            return;
+          }
+
+          // якщо юзер просив зробити код по фото — підклеюємо опис
+          const wantsCodeWords =
+            /код|code|html|css|js|javascript|сайт|landing|лендінг|ui|інтерфейс/i.test(
+              userPrompt
+            );
+          if (wantsCodeWords && extracted) {
+            userPrompt =
+              userPrompt +
+              "\n\nОсь код/опис, який був на фото, використай це:\n" +
+              extracted;
+          }
+
+          // якщо юзер сказав "проаналізуй" і фото було — аналізуємо витягнуте
+          if (wantsAnalysis && extracted) {
             const analysis = await runCodeAnalysis(
               env,
               extracted,
               msg.from?.language_code
             );
             await sendPlain(env, chatId, analysis.slice(0, 3800));
+            if (indicatorId) {
+              await editMessageText(env, chatId, indicatorId, "✅ Готово");
+            }
+            return;
           }
         } catch (e) {
-          await sendPlain(env, chatId, "Не зміг проаналізувати фото-код.");
+          // якщо не змогли витягнути — підемо далі по тексту
         }
-        if (indicatorId) {
-          await editMessageText(env, chatId, indicatorId, "✅ Готово");
-        }
-        return;
       }
 
-      // якщо це АНАЛІЗ без фото → просто аналізуємо текст як код
+      // якщо це АНАЛІЗ без фото → пробуємо взяти останній збережений код зі скріну
       if (wantsAnalysis && !photoInCodex) {
+        let sourceCode = userPrompt;
+        if (kv) {
+          const fromVision = await kv.get(LAST_VISION_CODE(userId), "text");
+          if (fromVision) {
+            sourceCode = fromVision;
+          }
+        }
         const analysis = await runCodeAnalysis(
           env,
-          userPrompt,
+          sourceCode,
           msg.from?.language_code
         );
         await sendPlain(env, chatId, analysis.slice(0, 3800));
@@ -855,52 +903,10 @@ export async function handleTelegramWebhook(req, env) {
         return;
       }
 
-      // якщо є фото, але не було явного запиту на код — попросимо уточнення
-      if (photoInCodex && !wantsAnalysis) {
-        const wantsCodeWords =
-          /код|code|html|css|js|javascript|сайт|landing|лендінг|ui|інтерфейс/i.test(
-            userPrompt
-          );
-        if (!userPrompt || !wantsCodeWords) {
-          await sendPlain(
-            env,
-            chatId,
-            "🖼 Є фото. Напиши, що зробити: “зроби сайт по фото”, “згенеруй html по фото”, “зроби ui”."
-          );
-          if (indicatorId) {
-            await editMessageText(
-              env,
-              chatId,
-              indicatorId,
-              "🧩 Чекаю інструкцію до фото…"
-            );
-          }
-          return;
-        }
-        // тут як було: описали картинку → додали в промпт
-        try {
-          const imgUrl = await tgFileUrl(env, photoInCodex.file_id);
-          const imgBase64 = await urlToBase64(imgUrl);
-          const vRes = await describeImage(env, {
-            chatId,
-            tgLang: msg.from?.language_code,
-            imageBase64: imgBase64,
-            question:
-              "Опиши це зображення так, щоб за описом можна було написати HTML/JS/CSS проєкт.",
-            modelOrder:
-              "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct",
-          });
-          const imgDesc = vRes?.text || "";
-          userPrompt =
-            (userPrompt ? userPrompt + "\n\n" : "") +
-            "Ось опис зображення користувача, використай його в коді:\n" +
-            imgDesc;
-        } catch {}
-      }
-
+      // анімацію крутимо
       const animSignal = { done: false };
       if (indicatorId) {
-        startPuzzleAnimation(env, chatId, indicatorId, animSignal);
+        startSpinnerAnimation(env, chatId, indicatorId, animSignal);
       }
 
       let codeText;
