@@ -1,6 +1,6 @@
 // src/flows/visionPolicy.js
 // Політика для vision-відповідей Senti з підтримкою кількох мов.
-// ВАЖЛИВО: тепер OCR не є обовʼязковим — витягуємо текст тільки якщо юзер про це попросив,
+// ВАЖЛИВО: OCR не обовʼязковий — витягуємо текст тільки якщо юзер про це попросив
 // або якщо запит явно про текст/написи.
 
 const BASE_RULES = `
@@ -43,7 +43,7 @@ ${BASE_RULES}
   ru: `
 Ты — Senti, ассистент, который описывает изображения на русском.
 ${BASE_RULES}
-`.trim()
+`.trim(),
 };
 
 export function buildVisionHintByLang(langCode) {
@@ -56,7 +56,7 @@ export function buildVisionHintByLang(langCode) {
   return HINTS.uk;
 }
 
-// доппомічник: чи це запит про текст
+// чи це запит про текст
 function isTextQuery(q = "") {
   const s = q.toLowerCase();
   return (
@@ -73,9 +73,9 @@ function isTextQuery(q = "") {
 export function makeVisionUserPrompt(question, lang = "uk") {
   const q = String(question || "").trim();
   const base = (t) => t.join(" ");
-
   const needsText = isTextQuery(q);
 
+  // якщо користувач просто надіслав фото без питання
   if (!q) {
     return base([
       lang.startsWith("en")
@@ -86,7 +86,7 @@ export function makeVisionUserPrompt(question, lang = "uk") {
         : "НЕ додавай розділ з текстом, якщо користувач не питав про текст.",
       lang.startsWith("en")
         ? "Brands/models only if clearly visible."
-        : "Бренди/моделі — лише за явними ознаками."
+        : "Бренди/моделі — лише за явними ознаками.",
     ]);
   }
 
@@ -107,12 +107,13 @@ export function makeVisionUserPrompt(question, lang = "uk") {
       : "Користувач не питав про текст — не додавай розділ з текстом.",
     lang.startsWith("en")
       ? "If the answer is not possible due to lack of data — say: Not sure."
-      : "Якщо відповідь неможлива через брак даних — скажи: Не впевнений."
+      : "Якщо відповідь неможлива через брак даних — скажи: Не впевнений.",
   ]);
 }
 
 export function postprocessVisionText(text) {
   let t = String(text || "").trim();
+
   // прибираємо зайві \r і надмірні переноси
   t = t
     .replace(/\r/g, "")
@@ -125,7 +126,7 @@ export function postprocessVisionText(text) {
     (_m, label, p1) => `${label}: "${p1}"`
   );
 
-  // іноді модель дублює той самий рядок двічі — приберемо дубль
+  // прибирання дублів рядків
   const lines = t.split("\n");
   const seen = new Set();
   const out = [];
@@ -139,5 +140,6 @@ export function postprocessVisionText(text) {
     seen.add(key);
     out.push(ln);
   }
+
   return out.join("\n").trim();
 }
