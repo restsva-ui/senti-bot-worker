@@ -1,78 +1,78 @@
 // src/lib/tg.js
 import { abs } from "../utils/url.js";
 
-/* ───────────────────── КНОПКИ ───────────────────── */
+/* ───────────────────── КНОПКИ (reply) ───────────────────── */
 export const BTN_DRIVE = "Google Drive";
 export const BTN_SENTI = "Senti";
 export const BTN_CODEX = "Codex";
 export const BTN_LEARN = "Learn";
 export const BTN_ADMIN = "Admin";
 
-/* ───────────────── ГОЛОВНА КЛАВІАТУРА ───────────── */
-/**
- * isAdmin=true → показуємо Codex + Admin
- * isAdmin=false → тільки публічні кнопки
- */
+/* ──────────────── CALLBACK DATA (inline) ──────────────── */
+// Єдине місце істини для callback_data — щоб не роз’їхалось між файлами.
+export const CB = {
+  CODEX_PROJECT_NEW: "codex:project:new",
+  CODEX_PROJECT_LIST: "codex:project:list",
+  CODEX_PROJECT_STATUS: "codex:project:status",
+  CODEX_IDEA_LOCK: "codex:project:idea:lock",
+  CODEX_IDEA_UNLOCK: "codex:project:idea:unlock",
+};
+
+/* ───────────────── ГОЛОВНА КЛАВІАТУРА (reply) ───────────── */
 export const mainKeyboard = (isAdmin = false) => {
   const rows = [];
-
-  // базовий рядок для всіх
-  const baseRow = [
-    { text: BTN_DRIVE },
-    { text: BTN_SENTI },
-  ];
+  const baseRow = [{ text: BTN_DRIVE }, { text: BTN_SENTI }];
   rows.push(baseRow);
-
-  // Codex тільки адмінам
   if (isAdmin) {
     rows[0].push({ text: BTN_CODEX });
     rows.push([{ text: BTN_ADMIN }]);
   }
-
   return { keyboard: rows, resize_keyboard: true };
 };
 
-/* ───────────────── АДМІН ─────────────── */
+/* ────────────────── ІНЛАЙН-МЕНЮ CODEX ────────────────── */
 /**
- * Визначаємо адміна:
- * - по ID: TELEGRAM_ADMIN_ID, TELEGRAM_OWNER_ID, ADMIN_USER_ID, ADMIN_ID, ADMINS="id1,id2"
- * - по username: ADMIN_USERNAME, ADMIN_USERNAMES="@name1,@name2"
- * webhook має викликати ADMIN(env, id, username)
+ * Меню управління Codex-проєктами.
+ * Використовується у вебхуку при ввімкненні Codex або за командою.
  */
+export const codexProjectMenu = () => ({
+  inline_keyboard: [
+    [
+      { text: "🆕 New Project", callback_data: CB.CODEX_PROJECT_NEW },
+      { text: "📂 Use / List", callback_data: CB.CODEX_PROJECT_LIST },
+      { text: "📊 Status", callback_data: CB.CODEX_PROJECT_STATUS },
+    ],
+    [
+      { text: "🔒 Lock Idea", callback_data: CB.CODEX_IDEA_LOCK },
+      { text: "🔓 Unlock Idea", callback_data: CB.CODEX_IDEA_UNLOCK },
+    ],
+  ],
+});
+
+/* ───────────────── АДМІН ─────────────── */
 export const ADMIN = (env, userId, username) => {
   const idStr = String(userId || "");
-
-  // IDs з багатьох полів, включно з тим, що у тебе реально стоїть у воркері
   const idCandidates = [
     env.TELEGRAM_ADMIN_ID,
     env.TELEGRAM_OWNER_ID,
     env.ADMIN_USER_ID,
     env.ADMIN_ID,
-    env.ADMINS, // може бути "123,456"
+    env.ADMINS,
   ]
     .filter(Boolean)
     .join(",")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-
   const idMatch = idCandidates.some((v) => v === idStr);
 
-  // usernames
-  const uname = String(username || "")
-    .replace("@", "")
-    .toLowerCase();
-
-  const unameCandidates = [
-    env.ADMIN_USERNAME,
-    env.ADMIN_USERNAMES,
-  ]
+  const uname = String(username || "").replace("@", "").toLowerCase();
+  const unameCandidates = [env.ADMIN_USERNAME, env.ADMIN_USERNAMES]
     .filter(Boolean)
     .join(",")
     .split(",")
     .map((s) => s.replace("@", "").trim().toLowerCase())
     .filter(Boolean);
-
   const unameMatch = uname && unameCandidates.includes(uname);
 
   return idMatch || unameMatch;
@@ -93,9 +93,7 @@ function splitForTelegram(text, chunk = 3900) {
   const s = String(text ?? "");
   if (s.length <= chunk) return [s];
   const out = [];
-  for (let i = 0; i < s.length; i += chunk) {
-    out.push(s.slice(i, i + chunk));
-  }
+  for (let i = 0; i < s.length; i += chunk) out.push(s.slice(i, i + chunk));
   return out;
 }
 
@@ -103,7 +101,6 @@ function splitForTelegram(text, chunk = 3900) {
 export async function sendPlain(env, chatId, text, extra = {}) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
-
   const chunks = splitForTelegram(text);
   for (const part of chunks) {
     const body = {
@@ -113,7 +110,6 @@ export async function sendPlain(env, chatId, text, extra = {}) {
     };
     if (extra.parse_mode) body.parse_mode = extra.parse_mode;
     if (extra.reply_markup) body.reply_markup = extra.reply_markup;
-
     await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -138,7 +134,6 @@ export async function sendChatAction(env, chatId, action = "typing") {
     body: JSON.stringify({ chat_id: chatId, action }),
   });
 }
-
 export async function withTyping(env, chatId, fn) {
   await sendChatAction(env, chatId, "typing");
   return await fn();
@@ -177,22 +172,24 @@ export async function startSpinner(env, chatId, base = "Думаю над від
     }).catch(() => {});
   }, 1400);
 
-  return {
-    stop: async () => {
-      alive = false;
-      clearInterval(timer);
-    },
-  };
+  return { stop: async () => { alive = false; clearInterval(timer); } };
 }
 
 /* ───────────────── ЕКСПОРТ ─────────────── */
 export const TG = {
+  // reply
   BTN_DRIVE,
   BTN_SENTI,
   BTN_CODEX,
   BTN_LEARN,
   BTN_ADMIN,
   mainKeyboard,
+
+  // inline
+  CB,
+  codexProjectMenu,
+
+  // utils
   ADMIN,
   energyLinks,
   sendPlain,
