@@ -7,7 +7,7 @@ import { describeImage } from "../flows/visionDescribe.js";
 import {
   detectLandmarksFromText,
   formatLandmarkLines,
-} from "../lib/landmarkDetect.js";
+} from "./landmarkDetect.js"; // ✅ виправлено шлях
 
 const VISION_MEM_KEY = (uid) => `vision:mem:${uid}`;
 
@@ -42,6 +42,30 @@ async function saveVisionMem(env, userId, entry) {
   } catch {}
 }
 
+// Вибір зображення з повідомлення: photo або document(image/*)
+function pickImageFromMsg(msg) {
+  // 1) document як зображення
+  const doc = msg?.document;
+  if (doc?.mime_type && /^image\//i.test(doc.mime_type)) {
+    return {
+      type: "document",
+      file_id: doc.file_id,
+      name: doc.file_name || `image_${doc.file_unique_id}`,
+    };
+  }
+  // 2) звичайне фото
+  const arr = Array.isArray(msg?.photo) ? msg.photo : null;
+  if (arr?.length) {
+    const ph = arr[arr.length - 1]; // найбільше
+    return {
+      type: "photo",
+      file_id: ph.file_id,
+      name: `photo_${ph.file_unique_id}.jpg`,
+    };
+  }
+  return null;
+}
+
 /**
  * Головний обробник фото, який ми тепер викликаємо з webhook.js
  *
@@ -54,15 +78,13 @@ export async function handleVisionMedia(
   { chatId, userId, msg, lang, caption },
   { getEnergy, spendEnergy, energyLinks, sendPlain, tgFileUrl, urlToBase64 }
 ) {
-  // беремо фото з повідомлення
-  const arr = Array.isArray(msg?.photo) ? msg.photo : null;
-  if (!arr?.length) return false;
-  const ph = arr[arr.length - 1]; // найбільше
-  const fileId = ph.file_id;
+  // беремо зображення з повідомлення (photo або document image/*)
+  const img = pickImageFromMsg(msg);
+  if (!img?.file_id) return false;
 
-  // енергія
+  // енергія: знімаємо costImage (fallback → costText → 1)
   const cur = await getEnergy(env, userId);
-  const need = Number(cur.costText ?? 1);
+  const need = Number(cur.costImage ?? cur.costText ?? 1); // ✅ виправлено
   if ((cur.energy ?? 0) < need) {
     const links = energyLinks(env, userId);
     await sendPlain(
@@ -78,7 +100,7 @@ export async function handleVisionMedia(
 
   // качаємо файл TG → base64
   try {
-    const url = await tgFileUrl(env, fileId);
+    const url = await tgFileUrl(env, img.file_id);
     const imageBase64 = await urlToBase64(url);
 
     // формуємо запит: або caption, або дефолт
@@ -91,7 +113,7 @@ export async function handleVisionMedia(
     // опис зображення через новий flows/visionDescribe.js
     const { text } = await describeImage(env, {
       chatId,
-      tgLang: msg.from?.language_code,
+      tgLang: msg?.from?.language_code,
       imageBase64,
       question,
       // порядок моделей можна не передавати — там уже стоїть gemini першим
@@ -99,7 +121,7 @@ export async function handleVisionMedia(
 
     // зберігаємо в памʼять
     await saveVisionMem(env, userId, {
-      id: fileId,
+      id: img.file_id,
       url,
       caption,
       desc: text,
