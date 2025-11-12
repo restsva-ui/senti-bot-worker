@@ -36,6 +36,9 @@ import {
   clearCodexMem,
   handleCodexCommand,
   handleCodexGeneration,
+  // нове: UI Codex (inline + force-reply)
+  buildCodexKeyboard,
+  handleCodexUi,
 } from "../lib/codexHandler.js";
 
 const {
@@ -48,12 +51,9 @@ const {
   energyLinks,
   sendPlain,
   askLocationKeyboard,
-  // нове: inline для Codex Project
-  codexProjectMenu,
-  CB,
 } = TG;
 
-// ---- TG helpers
+/* ───────────────── TG helpers ───────────────── */
 async function sendTyping(env, chatId) {
   try {
     const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
@@ -115,7 +115,7 @@ async function startPuzzleAnimation(env, chatId, messageId, signal) {
   }
 }
 
-// ---- get tg file url + attachment detection
+/* ─────────── get tg file url + attachment detection ─────────── */
 async function tgFileUrl(env, file_id) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   const r = await fetch(`https://api.telegram.org/bot${token}/getFile`, {
@@ -193,7 +193,7 @@ function detectAttachment(msg) {
   return pickPhoto(msg);
 }
 
-// admin links
+/* ───────────────── admin links ───────────────── */
 function buildAdminLinks(env, userId) {
   const base = (path) => abs(env, path);
   const secret =
@@ -215,7 +215,7 @@ function buildAdminLinks(env, userId) {
   return { checklist, energy, learn };
 }
 
-// drive-mode media
+/* ───────────────── drive-mode media ───────────────── */
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
   if (!att) return false;
@@ -276,7 +276,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   return true;
 }
 
-// system hint
+/* ───────────────── system hint ───────────────── */
 async function buildSystemHint(env, chatId, userId, preferredLang) {
   const statut = String((await readStatut(env)) || "").trim();
   const dlg = await buildDialogHint(env, userId);
@@ -305,7 +305,7 @@ async function buildSystemHint(env, chatId, userId, preferredLang) {
   return parts.join("\n\n");
 }
 
-// response text
+/* ───────────────── response text ───────────────── */
 function asText(res) {
   if (!res) return "";
   if (typeof res === "string") return res;
@@ -314,6 +314,8 @@ function asText(res) {
     return res.choices[0].message.content;
   return JSON.stringify(res);
 }
+
+/* ───────────────── webhook ───────────────── */
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "GET") {
     return json({ ok: true, worker: "senti", ts: Date.now() });
@@ -334,51 +336,41 @@ export async function handleTelegramWebhook(req, env) {
 
   const update = await req.json();
 
-  // ───── callback_query (inline Codex Project) ─────
+  /* ───── callback_query (inline Codex UI) ───── */
   if (update.callback_query) {
+    const cq = update.callback_query;
     const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
-    const chatId = update.callback_query?.message?.chat?.id;
-    const userId = update.callback_query?.from?.id;
-    const data = update.callback_query?.data;
+    const chatId = cq?.message?.chat?.id;
+    const userId = cq?.from?.id;
 
+    // спершу спробуємо обробити UI Codex
+    if (await getCodexMode(env, userId)) {
+      const handled = await handleCodexUi(
+        env,
+        chatId,
+        userId,
+        { cbData: cq.data },
+        { sendPlain, tgFileUrl, driveSaveFromUrl, getUserTokens }
+      );
+      if (handled) {
+        if (token) {
+          await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ callback_query_id: cq.id }),
+          });
+        }
+        return json({ ok: true });
+      }
+    }
+
+    // за замовчуванням просто підтвердимо callback
     if (token) {
       await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ callback_query_id: update.callback_query.id }),
+        body: JSON.stringify({ callback_query_id: cq.id }),
       });
-    }
-
-    // Маршрутизація інлайн-команд Codex Project
-    try {
-      if (!chatId || !userId || !data) return json({ ok: true });
-
-      if (data === CB.CODEX_PROJECT_NEW) {
-        await sendPlain(
-          env,
-          chatId,
-          "Створи проєкт:\n`/project new <Назва> ; idea: <коротка ідея>`",
-          { parse_mode: "Markdown" }
-        );
-        return json({ ok: true });
-      }
-
-      const map = {
-        [CB.CODEX_PROJECT_LIST]: "/project list",
-        [CB.CODEX_PROJECT_STATUS]: "/project status",
-        [CB.CODEX_IDEA_LOCK]: "/project idea lock",
-        [CB.CODEX_IDEA_UNLOCK]: "/project idea unlock",
-      };
-
-      if (map[data]) {
-        await handleCodexCommand(env, chatId, userId, map[data], sendPlain);
-      }
-    } catch (e) {
-      await sendPlain(
-        env,
-        update.callback_query?.message?.chat?.id,
-        `❌ Callback error: ${String(e?.message || e).slice(0, 200)}`
-      );
     }
     return json({ ok: true });
   }
@@ -407,7 +399,7 @@ export async function handleTelegramWebhook(req, env) {
     }
   };
 
-  // save location
+  /* ───── save location ───── */
   if (msg?.location && userId && chatId) {
     await setUserLocation(env, userId, msg.location);
     await sendPlain(env, chatId, "✅ Локацію збережено.", {
@@ -416,7 +408,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /start
+  /* ───── /start ───── */
   if (textRaw === "/start") {
     await safe(async () => {
       await setCodexMode(env, userId, false);
@@ -434,7 +426,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // drive on/off
+  /* ───── drive on/off ───── */
   if (textRaw === BTN_DRIVE) {
     await setDriveMode(env, userId, true);
     return json({ ok: true });
@@ -445,7 +437,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /admin
+  /* ───── /admin ───── */
   if (textRaw === "/admin" || textRaw === BTN_ADMIN) {
     await safe(async () => {
       const { checklist, energy, learn } = buildAdminLinks(env, userId);
@@ -473,7 +465,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // Codex on/off
+  /* ───── Codex on/off ───── */
   if (textRaw === BTN_CODEX || textRaw === "/codex") {
     if (!isAdmin) {
       await sendPlain(env, chatId, "🛡️ Codex тільки для адміну.");
@@ -482,20 +474,13 @@ export async function handleTelegramWebhook(req, env) {
     await setCodexMode(env, userId, true);
     await clearCodexMem(env, userId);
 
-    // 1) покажемо інформаційне повідомлення
+    // Єдине повідомлення з inline-меню Codex (без «Клавіатура оновлена.»)
     await sendPlain(
       env,
       chatId,
       "🧠 Senti Codex увімкнено. Надішли задачу або створи/обери проєкт.",
-      // inline меню Codex Project
-      { reply_markup: codexProjectMenu() }
+      { reply_markup: buildCodexKeyboard() }
     );
-
-    // 2) окремо повернемо звичну reply-клавіатуру (щоб не пропала)
-    await sendPlain(env, chatId, "Клавіатура оновлена.", {
-      reply_markup: mainKeyboard(isAdmin),
-    });
-
     return json({ ok: true });
   }
   if (textRaw === "/codex_off") {
@@ -507,7 +492,7 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // media before codex
+  /* ───── media before codex ───── */
   try {
     const driveOn = await getDriveMode(env, userId);
     const hasMedia = !!detectAttachment(msg) || !!pickPhoto(msg);
@@ -546,14 +531,15 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // codex extra cmds
+  /* ───── codex extra cmds (сумісність зі старими /project) ───── */
   if (await getCodexMode(env, userId)) {
+    // якщо користувач у стані «назва/ідея», це перехопить handleCodexUi зсередини handleCodexGeneration
     if (await handleCodexCommand(env, chatId, userId, textRaw, sendPlain)) {
       return json({ ok: true });
     }
   }
 
-  // date / time / weather (із кешем міста)
+  /* ───── date / time / weather ───── */
   if (textRaw) {
     const wantsDate = dateIntent(textRaw);
     const wantsTime = timeIntent(textRaw);
@@ -572,7 +558,6 @@ export async function handleTelegramWebhook(req, env) {
             await sendPlain(env, chatId, byPlace.text, {
               parse_mode: byPlace.mode || undefined,
             });
-            // мінімальний кеш — збережемо сирий текст (координати, якщо треба, можна додати у weatherSummaryByPlace)
             await saveLastPlace(env, userId, { place: textRaw });
           } else {
             const last = await loadLastPlace(env, userId);
@@ -612,9 +597,10 @@ export async function handleTelegramWebhook(req, env) {
     }
   }
 
-  // Codex main
+  /* ───── Codex main ───── */
   if ((await getCodexMode(env, userId)) && (textRaw || pickPhoto(msg))) {
     await safe(async () => {
+      // всередині handleCodexGeneration першим кроком викликається handleCodexUi для force-reply / збору ідеї
       await handleCodexGeneration(
         env,
         {
@@ -633,17 +619,20 @@ export async function handleTelegramWebhook(req, env) {
           pickPhoto,
           tgFileUrl,
           urlToBase64,
-          describeImage: null, // опис зображення всередині codexHandler
+          describeImage: null,
           sendDocument,
           startPuzzleAnimation,
           editMessageText,
+          // для збереження медіа у ідеї:
+          driveSaveFromUrl,
+          getUserTokens,
         }
       );
     });
     return json({ ok: true });
   }
 
-  // звичайне повідомлення
+  /* ───── звичайне повідомлення ───── */
   if (textRaw && !textRaw.startsWith("/")) {
     await safe(async () => {
       const cur = await getEnergy(env, userId);
