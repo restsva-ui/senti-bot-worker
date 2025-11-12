@@ -474,7 +474,7 @@ export async function handleTelegramWebhook(req, env) {
     await setCodexMode(env, userId, true);
     await clearCodexMem(env, userId);
 
-    // Єдине повідомлення з inline-меню Codex (без «Клавіатура оновлена.»)
+    // одне повідомлення з inline-меню Codex
     await sendPlain(
       env,
       chatId,
@@ -533,7 +533,7 @@ export async function handleTelegramWebhook(req, env) {
 
   /* ───── codex extra cmds (сумісність зі старими /project) ───── */
   if (await getCodexMode(env, userId)) {
-    // якщо користувач у стані «назва/ідея», це перехопить handleCodexUi зсередини handleCodexGeneration
+    // якщо користувач у стані «назва/ідея», це перехопиться в handleCodexGeneration
     if (await handleCodexCommand(env, chatId, userId, textRaw, sendPlain)) {
       return json({ ok: true });
     }
@@ -600,7 +600,6 @@ export async function handleTelegramWebhook(req, env) {
   /* ───── Codex main ───── */
   if ((await getCodexMode(env, userId)) && (textRaw || pickPhoto(msg))) {
     await safe(async () => {
-      // всередині handleCodexGeneration першим кроком викликається handleCodexUi для force-reply / збору ідеї
       await handleCodexGeneration(
         env,
         {
