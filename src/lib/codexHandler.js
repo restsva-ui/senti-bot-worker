@@ -24,6 +24,13 @@ function pickKV(env) {
   return env.STATE_KV || env.CHECKLIST_KV || env.ENERGY_LOG_KV || env.LEARN_QUEUE_KV || null;
 }
 function nowIso() { return new Date().toISOString(); }
+function safeProjectFolder(name) {
+  return String(name || "Project")
+    .replace(/[\\/:*?"<>|]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+}
 
 /* ───────────────── вкл/викл Codex ───────────────── */
 export async function setCodexMode(env, userId, on) {
@@ -78,7 +85,7 @@ async function listProjects(env, userId) {
   let cursor = undefined;
   do {
     const res = await kv.list({ prefix: PROJ_PREFIX_LIST(userId), cursor });
-    for (const k of res.keys || []) {
+    for (const k of (res.keys || [])) {
       const parts = k.name.split(":"); // codex:project:meta:<uid>:<name>
       const name = parts.slice(-1)[0];
       if (name && !out.includes(name)) out.push(name);
@@ -125,7 +132,7 @@ ${initialIdea || "Опишіть бачення/цілі/обмеження. Ц�
 - Коротко, маркерами.`;
 }
 function templateSpec() {
-  // ВАЖЛИВО: тільки ASCII-бектики, жодних «кривих» лапок
+  // лише ASCII-бектики
   return `# Специфікація / Архітектура
 - Модулі:
 - API/Інтеграції:
@@ -197,6 +204,7 @@ Rules:
 
   return { name, hint };
 }
+
 /* ───────────────── Inline-меню та UI обробка ───────────────── */
 export function buildCodexKeyboard() {
   return {
@@ -232,7 +240,7 @@ export async function handleCodexUi(env, chatId, userId, payload, helpers) {
         await sendPlain(env, chatId, "Немає проєктів. Створи новий.");
         return true;
       }
-      // згенеруємо кнопки вибору (красиво, без сирого тексту)
+      // красивий список з вибором
       const rows = [];
       for (const n of items) rows.push([{ text: `📁 ${n}`, callback_data: `codex:use:${n}` }]);
       await sendPlain(env, chatId, "Оберіть активний проєкт:", { reply_markup: { inline_keyboard: rows } });
@@ -277,7 +285,7 @@ export async function handleCodexUi(env, chatId, userId, payload, helpers) {
     }
   }
 
-  // 2) Якщо йде майстер створення проєкту
+  // 2) Майстер створення проєкту
   if (state?.mode === "ask_name" && payload?.text) {
     const name = payload.text.trim().replace(/\s+/g, " ").slice(0, 80);
     if (!name) {
@@ -295,11 +303,11 @@ export async function handleCodexUi(env, chatId, userId, payload, helpers) {
   if (state?.mode === "ask_idea") {
     // збираємо текст + медіа
     let textAdded = false;
+    const folder = safeProjectFolder(state.name);
 
     if (payload?.text) {
       const txt = payload.text.trim();
       if (txt) {
-        // створимо проєкт (якщо ще ні) і додамо ідею
         const exists = (await listProjects(env, userId)).includes(state.name);
         if (!exists) await createProject(env, userId, state.name, txt);
         else await writeSection(env, userId, state.name, "idea.md", templateIdea(txt));
@@ -308,16 +316,17 @@ export async function handleCodexUi(env, chatId, userId, payload, helpers) {
       }
     }
 
-    // медіа → якщо є токени — у Drive і запис у progress/idea (посиланням)
+    // медіа → якщо є токени — у Drive під проєкт (idea/)
     if (payload?.attachments?.length && tgFileUrl && driveSaveFromUrl && getUserTokens) {
       let hasTokens = false;
       try { hasTokens = !!(await getUserTokens(env, userId)); } catch {}
       for (const att of payload.attachments) {
         try {
           const url = await tgFileUrl(env, att.file_id);
+          const niceName = `${folder}/idea/${nowIso().replace(/[:.]/g, "-")}_${att.name || "file"}`;
           if (hasTokens) {
-            const saved = await driveSaveFromUrl(env, userId, url, att.name || "file");
-            await appendSection(env, userId, state.name, "progress.md", `- ${nowIso()} — Додано файл до ідеї: ${saved?.name || att.name || "file"}`);
+            const saved = await driveSaveFromUrl(env, userId, url, niceName);
+            await appendSection(env, userId, state.name, "progress.md", `- ${nowIso()} — Додано файл до ідеї: ${saved?.name || niceName}`);
           } else {
             await appendSection(env, userId, state.name, "progress.md", `- ${nowIso()} — Додано файл (без Drive): ${att.name || "file"}`);
           }
@@ -334,8 +343,7 @@ export async function handleCodexUi(env, chatId, userId, payload, helpers) {
 }
 
 /* ───────────────── команди Codex (/project …) ───────────────── */
-// Залишаємо базові /project new|use|list|progress|task|status для сумісності.
-// Lock/Unlock видалено — Codex дотримується ідеї автоматично.
+// Базові /project new|use|list|progress|task|status залишаємо для сумісності.
 export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain) {
   const txt = String(textRaw || "").trim();
 
@@ -489,7 +497,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
   const { chatId, userId, msg, textRaw, lang } = ctx;
   const { sendPlain, pickPhoto, tgFileUrl, urlToBase64 } = helpers;
 
-  // 0) першим кроком — можливі UI-стани (назва/ідея/медіа під час створення)
+  // 0) Спершу — можливі UI-стани (назва/ідея/медіа під час створення)
   const attachments = [];
   if (msg?.document) attachments.push({ type: "document", file_id: msg.document.file_id, name: msg.document.file_name });
   if (msg?.photo?.length) {
