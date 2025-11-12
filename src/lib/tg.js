@@ -2,19 +2,32 @@
 import { abs } from "../utils/url.js";
 
 /* ───────────────────── КНОПКИ (reply) ───────────────────── */
-export const BTN_DRIVE = "Google Drive"; // залишаємо константу для сумісності, але не показуємо в меню
+export const BTN_DRIVE = "Google Drive"; // лишаємо константу для сумісності (в меню не показуємо звичним юзерам)
 export const BTN_SENTI = "Senti";
 export const BTN_CODEX = "Codex";
 export const BTN_LEARN = "Learn";
 export const BTN_ADMIN = "Admin";
 
 /* ──────────────── CALLBACK DATA (inline) ──────────────── */
-/** Єдине місце істини для callback_data — узгоджено з codexHandler.js */
+/**
+ * Єдине місце істини для callback_data.
+ * Нові ключі: CB.NEW / CB.USE / CB.LIST / CB.STATUS
+ * Для сумісності додані аліаси під старі назви (CODEX_PROJECT_*).
+ */
 export const CB = {
+  // новий формат
   NEW: "codex:new",
   USE: "codex:use",
   LIST: "codex:list",
   STATUS: "codex:status",
+
+  // аліаси для зворотної сумісності (не видаляти, поки все не мігрує)
+  CODEX_PROJECT_NEW: "codex:new",
+  CODEX_PROJECT_LIST: "codex:list",
+  CODEX_PROJECT_STATUS: "codex:status",
+  // (lock/unlock були прибрані з UX; залишаємо аліаси на випадок старих викликів)
+  CODEX_IDEA_LOCK: "codex:idea:lock:deprecated",
+  CODEX_IDEA_UNLOCK: "codex:idea:unlock:deprecated",
 };
 
 /* ───────────────── ГОЛОВНА КЛАВІАТУРА (reply) ───────────── */
@@ -24,11 +37,8 @@ export const CB = {
  */
 export const mainKeyboard = (isAdmin = false) => {
   if (!isAdmin) {
-    // Прибрати клавіатуру для звичайних користувачів
     return { remove_keyboard: true };
   }
-
-  // Для адміна — компактний набір
   const rows = [];
   rows.push([{ text: BTN_SENTI }, { text: BTN_CODEX }]);
   rows.push([{ text: BTN_ADMIN }]);
