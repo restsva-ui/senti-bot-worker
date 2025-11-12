@@ -1,17 +1,17 @@
 // src/lib/visionHandler.js
-// Винесена логіка обробки фото/віжн з webhook.js
-// Використовує новий опис зображення з src/flows/visionDescribe.js
-// та зберігає коротку памʼять по зображеннях у KV.
+// Винесена логіка обробки фото/візуальних медіа з webhook.js.
+// Використовує flows/visionDescribe.js для опису зображення
+// і коротку пам'ять у KV (останні 20 записів).
 
 import { describeImage } from "../flows/visionDescribe.js";
 import {
   detectLandmarksFromText,
   formatLandmarkLines,
-} from "../lib/landmarkDetect.js";
+} from "./landmarkDetect.js"; // локальний імпорт (файл у тій же теці)
 
 const VISION_MEM_KEY = (uid) => `vision:mem:${uid}`;
 
-// ---- vision short-memory (аналог того, що було в webhook.js)
+// ---- коротка пам'ять по фото (KV) ----
 async function loadVisionMem(env, userId) {
   try {
     const raw = await (env.STATE_KV || env.CHECKLIST_KV)?.get(
@@ -37,17 +37,18 @@ async function saveVisionMem(env, userId, entry) {
       ts: Date.now(),
     });
     await kv.put(VISION_MEM_KEY(userId), JSON.stringify(arr.slice(0, 20)), {
-      expirationTtl: 60 * 60 * 24 * 180,
+      expirationTtl: 60 * 60 * 24 * 180, // 180 днів
     });
   } catch {}
 }
 
 /**
- * Головний обробник фото, який ми тепер викликаємо з webhook.js
+ * Головний обробник фото. Викликається з webhook.js
  *
  * @param {Env} env
  * @param {object} ctx - { chatId, userId, msg, lang, caption }
  * @param {object} deps - { getEnergy, spendEnergy, energyLinks, sendPlain, tgFileUrl, urlToBase64 }
+ * @returns {Promise<boolean>} true якщо перехопили медіа
  */
 export async function handleVisionMedia(
   env,
@@ -60,28 +61,27 @@ export async function handleVisionMedia(
   const ph = arr[arr.length - 1]; // найбільше
   const fileId = ph.file_id;
 
-  // енергія
+  // енергія: пріоритет vision → image → text
   const cur = await getEnergy(env, userId);
-  const need = Number(cur.costText ?? 1);
-  if ((cur.energy ?? 0) < need) {
+  const need = Number(
+    (cur && (cur.costVision ?? cur.costImage ?? cur.costText)) ?? 1
+  );
+  if ((cur?.energy ?? 0) < need) {
     const links = energyLinks(env, userId);
-    await sendPlain(
-      env,
-      chatId,
-      lang?.startsWith("uk")
-        ? `Потрібно ${need} енергії. Поповни тут: ${links.energy}`
-        : `Need ${need} energy. Top up: ${links.energy}`
-    );
+    const msgText = lang?.startsWith("uk")
+      ? `Потрібно ${need} енергії. Поповни тут: ${links.energy}`
+      : `Need ${need} energy. Top up: ${links.energy}`;
+    await sendPlain(env, chatId, msgText);
     return true;
   }
   await spendEnergy(env, userId, need, "vision");
 
-  // качаємо файл TG → base64
+  // TG → base64
   try {
     const url = await tgFileUrl(env, fileId);
     const imageBase64 = await urlToBase64(url);
 
-    // формуємо запит: або caption, або дефолт
+    // питання: з caption або дефолт
     const question =
       caption ||
       (lang?.startsWith("uk")
@@ -91,14 +91,14 @@ export async function handleVisionMedia(
     // опис зображення через новий flows/visionDescribe.js
     const out = await describeImage(env, {
       chatId,
-      tgLang: msg.from?.language_code,
+      tgLang: msg?.from?.language_code,
       imageBase64,
       question,
-      // порядок моделей можна не передавати — там уже стоїть gemini першим
+      // порядок моделей вже виставлений у flows/visionDescribe.js (Gemini перший)
     });
     const text = typeof out === "string" ? out : (out?.text || "");
 
-    // зберігаємо в памʼять
+    // зберігаємо в памʼять (останні 20)
     await saveVisionMem(env, userId, {
       id: fileId,
       url,
@@ -106,10 +106,10 @@ export async function handleVisionMedia(
       desc: text,
     });
 
-    // шлемо основну відповідь
+    // основна відповідь
     await sendPlain(env, chatId, `🖼️ ${text || "Не впевнений."}`);
 
-    // пробуємо витягти обʼєкти/локації з опису
+    // витяг маркерів/локацій з опису
     const landmarks = detectLandmarksFromText(text, lang);
     if (landmarks?.length) {
       const lines = formatLandmarkLines(landmarks, lang);
@@ -118,8 +118,8 @@ export async function handleVisionMedia(
         disable_web_page_preview: true,
       });
     }
-  } catch (e) {
-    // тихий фолбек без шуму, тільки коротке повідомлення
+  } catch {
+    // тихий фолбек
     await sendPlain(
       env,
       chatId,
@@ -131,3 +131,7 @@ export async function handleVisionMedia(
 
   return true;
 }
+
+export default {
+  handleVisionMedia,
+};
