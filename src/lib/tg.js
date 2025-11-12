@@ -2,49 +2,53 @@
 import { abs } from "../utils/url.js";
 
 /* ───────────────────── КНОПКИ (reply) ───────────────────── */
-export const BTN_DRIVE = "Google Drive";
+export const BTN_DRIVE = "Google Drive"; // залишаємо константу для сумісності, але не показуємо в меню
 export const BTN_SENTI = "Senti";
 export const BTN_CODEX = "Codex";
 export const BTN_LEARN = "Learn";
 export const BTN_ADMIN = "Admin";
 
 /* ──────────────── CALLBACK DATA (inline) ──────────────── */
-// Єдине місце істини для callback_data — щоб не роз’їхалось між файлами.
+/** Єдине місце істини для callback_data — узгоджено з codexHandler.js */
 export const CB = {
-  CODEX_PROJECT_NEW: "codex:project:new",
-  CODEX_PROJECT_LIST: "codex:project:list",
-  CODEX_PROJECT_STATUS: "codex:project:status",
-  CODEX_IDEA_LOCK: "codex:project:idea:lock",
-  CODEX_IDEA_UNLOCK: "codex:project:idea:unlock",
+  NEW: "codex:new",
+  USE: "codex:use",
+  LIST: "codex:list",
+  STATUS: "codex:status",
 };
 
 /* ───────────────── ГОЛОВНА КЛАВІАТУРА (reply) ───────────── */
+/**
+ * isAdmin=true  → показуємо Senti + Codex + Admin
+ * isAdmin=false → прибираємо клавіатуру повністю
+ */
 export const mainKeyboard = (isAdmin = false) => {
-  const rows = [];
-  const baseRow = [{ text: BTN_DRIVE }, { text: BTN_SENTI }];
-  rows.push(baseRow);
-  if (isAdmin) {
-    rows[0].push({ text: BTN_CODEX });
-    rows.push([{ text: BTN_ADMIN }]);
+  if (!isAdmin) {
+    // Прибрати клавіатуру для звичайних користувачів
+    return { remove_keyboard: true };
   }
+
+  // Для адміна — компактний набір
+  const rows = [];
+  rows.push([{ text: BTN_SENTI }, { text: BTN_CODEX }]);
+  rows.push([{ text: BTN_ADMIN }]);
   return { keyboard: rows, resize_keyboard: true };
 };
 
 /* ────────────────── ІНЛАЙН-МЕНЮ CODEX ────────────────── */
 /**
- * Меню управління Codex-проєктами.
- * Використовується у вебхуку при ввімкненні Codex або за командою.
+ * Меню керування Codex-проєктами (без lock/unlock).
+ * Використовується у вебхуку при ввімкненні Codex.
  */
 export const codexProjectMenu = () => ({
   inline_keyboard: [
     [
-      { text: "🆕 New Project", callback_data: CB.CODEX_PROJECT_NEW },
-      { text: "📂 Use / List", callback_data: CB.CODEX_PROJECT_LIST },
-      { text: "📊 Status", callback_data: CB.CODEX_PROJECT_STATUS },
+      { text: "➕ Створити проєкт", callback_data: CB.NEW },
+      { text: "📂 Обрати проєкт", callback_data: CB.USE },
     ],
     [
-      { text: "🔒 Lock Idea", callback_data: CB.CODEX_IDEA_LOCK },
-      { text: "🔓 Unlock Idea", callback_data: CB.CODEX_IDEA_UNLOCK },
+      { text: "🗂 Список", callback_data: CB.LIST },
+      { text: "📊 Статус", callback_data: CB.STATUS },
     ],
   ],
 });
@@ -178,7 +182,7 @@ export async function startSpinner(env, chatId, base = "Думаю над від
 /* ───────────────── ЕКСПОРТ ─────────────── */
 export const TG = {
   // reply
-  BTN_DRIVE,
+  BTN_DRIVE, // лишили для сумісності (в меню не використовується)
   BTN_SENTI,
   BTN_CODEX,
   BTN_LEARN,
