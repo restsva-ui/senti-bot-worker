@@ -1,16 +1,19 @@
 // src/lib/codexHandler.js
-// Senti Codex: режим коду + "Project Mode" з простим UI (inline + force-reply).
+// Senti Codex: режим коду + "Project Mode" з простим UI (inline + force-reply)
+// + інтеграція Google Drive для структури проєктів, активів і snapshot-експорту.
+//
 // Експорти: CODEX_MEM_KEY, setCodexMode, getCodexMode, clearCodexMem,
 //          handleCodexCommand, handleCodexGeneration,
 //          buildCodexKeyboard, handleCodexUi
 
 import { askAnyModel, askVision } from "./modelRouter.js";
+import { getUserTokens, putUserTokens } from "./userDrive.js";
 
 // -------------------- базові ключі/допоміжні --------------------
 const CODEX_MODE_KEY = (uid) => `codex:mode:${uid}`;                   // "true"/"false"
 export const CODEX_MEM_KEY = (uid) => `codex:mem:${uid}`;              // довготривала пам'ять
 
-// Project Mode: активний проєкт юзера + метадані + секції
+// Project Mode: активний проєкт юзера + метадані + секції (зберігаємо в KV)
 const PROJ_CURR_KEY = (uid) => `codex:project:current:${uid}`;         // string
 const PROJ_META_KEY = (uid, name) => `codex:project:meta:${uid}:${name}`; // json
 const PROJ_FILE_KEY = (uid, name, file) => `codex:project:file:${uid}:${name}:${file}`; // text/md/json
@@ -18,14 +21,14 @@ const PROJ_TASKSEQ_KEY = (uid, name) => `codex:project:taskseq:${uid}:${name}`; 
 const PROJ_PREFIX_LIST = (uid) => `codex:project:meta:${uid}:`;        // для .list()
 
 // UI-стани (простенька FSM у KV)
-const UI_AWAIT_KEY = (uid) => `codex:ui:await:${uid}`;                 // none|proj_name|idea
-const UI_TMPNAME_KEY = (uid) => `codex:ui:tmpname:${uid}`;             // тимчасова назва
+const UI_AWAIT_KEY = (uid) => `codex:ui:await:${uid}`;                 // none|proj_name|use_name|idea
+const UI_TMPNAME_KEY = (uid) => `codex:ui:tmpname:${uid}`;             // тимчасова назва проєкту
 
 // callback data (inline)
 export const CB = {
   NEW: "codex:new",
   LIST: "codex:list",
-  USE: "codex:use",        // далі очікуємо текст з назвою
+  USE: "codex:use",
   STATUS: "codex:status",
 };
 
@@ -49,7 +52,7 @@ export async function clearCodexMem(env, userId) {
   await kv.delete(CODEX_MEM_KEY(userId));
 }
 
-// -------------------- Project Mode: CRUD --------------------
+// -------------------- Project Mode: CRUD у KV --------------------
 async function setCurrentProject(env, userId, name) {
   const kv = pickKV(env); if (!kv) return;
   await kv.put(PROJ_CURR_KEY(userId), name, { expirationTtl: 60 * 60 * 24 * 365 });
@@ -71,6 +74,8 @@ async function readMeta(env, userId, name) {
 async function writeSection(env, userId, name, file, content) {
   const kv = pickKV(env); if (!kv) return;
   await kv.put(PROJ_FILE_KEY(userId, name, file), content, { expirationTtl: 60 * 60 * 24 * 365 });
+  // пробуємо синхронізувати оновлену секцію на Drive
+  await driveSyncSection(env, userId, name, file, content).catch(() => {});
 }
 async function readSection(env, userId, name, file) {
   const kv = pickKV(env); if (!kv) return null;
@@ -160,23 +165,140 @@ function templateTasks() { return `# Tasks\n\n| ID | State | Title |\n|----|----
 function templateDecisions() { return `# ADR\n\n`; }
 function templateRisks() { return `# Ризики\n\n`; }
 function templateTestplan() { return `# Test Plan\n\n- Саніті\n- Інтегр. тести\n- Приймання\n`; }
+// ---- Google Drive інтеграція (локальні утиліти в цьому файлі) -------------
+const SEC = () => Math.floor(Date.now() / 1000);
 
-async function createProject(env, userId, name, initialIdea) {
-  const meta = { name, createdAt: nowIso() };
-  await saveMeta(env, userId, name, meta);
-  await writeSection(env, userId, name, "README.md", templateReadme(name));
-  await writeSection(env, userId, name, "idea.md", templateIdea(initialIdea));
-  await writeSection(env, userId, name, "spec.md", templateSpec());
-  await writeSection(env, userId, name, "connectors.md", templateConnectors());
-  await writeSection(env, userId, name, "progress.md", templateProgress());
-  await writeSection(env, userId, name, "tasks.md", templateTasks());
-  await writeSection(env, userId, name, "decisions.md", templateDecisions());
-  await writeSection(env, userId, name, "risks.md", templateRisks());
-  await writeSection(env, userId, name, "testplan.md", templateTestplan());
-  await setCurrentProject(env, userId, name);
+async function refreshAccessToken(env, tokens) {
+  const params = new URLSearchParams();
+  params.set("client_id", env.GOOGLE_CLIENT_ID);
+  params.set("client_secret", env.GOOGLE_CLIENT_SECRET);
+  params.set("grant_type", "refresh_token");
+  params.set("refresh_token", tokens.refresh_token);
+
+  const r = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: params,
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`google_refresh_failed: ${r.status} ${r.statusText} :: ${JSON.stringify(d)}`);
+  return {
+    access_token: d.access_token,
+    refresh_token: tokens.refresh_token,
+    expiry: SEC() + Number(d.expires_in || 3600) - 60,
+  };
+}
+async function ensureAccessToken(env, userId) {
+  let tokens = await getUserTokens(env, userId);
+  if (!tokens || !tokens.access_token) throw new Error("no_tokens");
+  if (Number(tokens.expiry || 0) > SEC() + 15) return tokens;
+  if (tokens.refresh_token) {
+    const next = await refreshAccessToken(env, tokens);
+    await putUserTokens(env, userId, next);
+    return next;
+  }
+  throw new Error("expired_no_refresh");
 }
 
-// утиліти для таблиці tasks.md
+async function driveFetch(env, userId, url, init = {}) {
+  const tokens = await ensureAccessToken(env, userId);
+  const headers = new Headers(init.headers || {});
+  headers.set("Authorization", `Bearer ${tokens.access_token}`);
+  return await fetch(url, { ...init, headers });
+}
+
+// пошук/створення папки за назвою в межах батьківської
+async function driveFindOrCreateFolder(env, userId, name, parentId = "root") {
+  const q = `'${parentId}' in parents and name='${String(name).replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const listUrl = new URL("https://www.googleapis.com/drive/v3/files");
+  listUrl.searchParams.set("q", q);
+  listUrl.searchParams.set("fields", "files(id,name)");
+  const r = await driveFetch(env, userId, listUrl.toString());
+  const j = await r.json().catch(() => ({}));
+  const found = Array.isArray(j.files) && j.files[0];
+  if (found) return found.id;
+
+  // створюємо
+  const create = await driveFetch(env, userId, "https://www.googleapis.com/drive/v3/files", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name,
+      mimeType: "application/vnd.google-apps.folder",
+      parents: parentId === "root" ? undefined : [parentId],
+    }),
+  });
+  const created = await create.json().catch(() => ({}));
+  if (!create.ok || !created?.id) throw new Error("drive_folder_create_failed");
+  return created.id;
+}
+
+// шлях із кількох папок: повертає id останньої
+async function driveEnsurePath(env, userId, parts) {
+  let parent = "root";
+  for (const name of parts) parent = await driveFindOrCreateFolder(env, userId, name, parent);
+  return parent;
+}
+
+// завантаження текстового файлу (створити/перезаписати) у конкретну папку
+async function driveUploadText(env, userId, { parentId, name, content }) {
+  const boundary = `senti-${crypto.randomUUID()}`;
+  const metadata = { name, mimeType: "text/markdown", parents: parentId === "root" ? undefined : [parentId] };
+  const enc = new TextEncoder();
+  const pre =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\nContent-Type: text/markdown; charset=UTF-8\r\n\r\n`;
+  const post = `\r\n--${boundary}--`;
+  const body = new Blob([enc.encode(pre), enc.encode(content || ""), enc.encode(post)], { type: `multipart/related; boundary=${boundary}` });
+
+  const url = new URL("https://www.googleapis.com/upload/drive/v3/files");
+  url.searchParams.set("uploadType", "multipart");
+  url.searchParams.set("fields", "id,name,webViewLink");
+  const up = await driveFetch(env, userId, url.toString(), { method: "POST", body });
+  const data = await up.json().catch(() => ({}));
+  if (!up.ok) throw new Error(`drive_upload_text_failed ${up.status} ${up.statusText}`);
+  return data;
+}
+
+// синхронізація однієї секції у /repo
+async function driveSyncSection(env, userId, project, file, content) {
+  try {
+    const root = await driveEnsurePath(env, userId, ["SentiCodex", String(userId), project, "repo"]);
+    await driveUploadText(env, userId, { parentId: root, name: file, content });
+  } catch (_) { /* тихо ігноруємо, щоб нічого не ламати */ }
+}
+
+// початкова структура та пуш усіх секцій
+async function driveBootstrapProject(env, userId, name, initialSections) {
+  try {
+    const base = await driveEnsurePath(env, userId, ["SentiCodex", String(userId), name]);
+    await driveEnsurePath(env, userId, ["SentiCodex", String(userId), name, "assets"]);
+    const repo = await driveEnsurePath(env, userId, ["SentiCodex", String(userId), name, "repo"]);
+    await driveEnsurePath(env, userId, ["SentiCodex", String(userId), name, "exports"]);
+    // первинний вивантаж секцій
+    for (const [fname, body] of Object.entries(initialSections || {})) {
+      await driveUploadText(env, userId, { parentId: repo, name: fname, content: body || "" });
+    }
+    return base;
+  } catch (_) { return null; }
+}
+
+// створення snapshot-папки з поточними секціями (для подальшого «Download as ZIP» у Drive)
+async function driveExportSnapshot(env, userId, project, snapshotName, allSections) {
+  try {
+    const exportsId = await driveEnsurePath(env, userId, ["SentiCodex", String(userId), project, "exports", snapshotName]);
+    for (const [fname, body] of Object.entries(allSections || {})) {
+      await driveUploadText(env, userId, { parentId: exportsId, name: fname, content: body || "" });
+    }
+    // README з інструкцією
+    const readme =
+`Це знімок проєкту "${project}".
+Щоб отримати ZIP: у Google Drive оберіть цю папку → "Download".`;
+    await driveUploadText(env, userId, { parentId: exportsId, name: "README.txt", content: readme });
+  } catch (_) { /* ігнор */ }
+}
+
+// ---- утиліти таблиці tasks.md ----
 function mdAddTaskRow(md, id, title) {
   const line = `| ${id} | TODO | ${title} |`;
   return md.endsWith("\n") ? md + line + "\n" : md + "\n" + line + "\n";
@@ -223,13 +345,12 @@ export function buildCodexKeyboard() {
 
 /**
  * handleCodexUi: обробляє callback_data з inline-меню.
- * helpers: { sendPlain, tgFileUrl, driveSaveFromUrl, getUserTokens }
+ * helpers: { sendPlain }
  */
 export async function handleCodexUi(env, chatId, userId, { cbData }, helpers = {}) {
   const kv = pickKV(env); if (!kv) return false;
   const { sendPlain } = helpers;
 
-  // NEW → просимо назву через force_reply
   if (cbData === CB.NEW) {
     await kv.put(UI_AWAIT_KEY(userId), "proj_name", { expirationTtl: 3600 });
     await sendPlain(env, chatId,
@@ -239,7 +360,6 @@ export async function handleCodexUi(env, chatId, userId, { cbData }, helpers = {
     return true;
   }
 
-  // USE → просимо назву існуючого проєкту
   if (cbData === CB.USE) {
     await kv.put(UI_AWAIT_KEY(userId), "use_name", { expirationTtl: 3600 });
     await sendPlain(env, chatId,
@@ -249,7 +369,6 @@ export async function handleCodexUi(env, chatId, userId, { cbData }, helpers = {
     return true;
   }
 
-  // LIST → покажемо акуратно
   if (cbData === CB.LIST) {
     const all = await listProjects(env, userId);
     const cur = await getCurrentProject(env, userId);
@@ -262,13 +381,9 @@ export async function handleCodexUi(env, chatId, userId, { cbData }, helpers = {
     return true;
   }
 
-  // STATUS → короткий дайджест
   if (cbData === CB.STATUS) {
     const cur = await getCurrentProject(env, userId);
-    if (!cur) {
-      await sendPlain(env, chatId, "Активуй або створи проєкт.");
-      return true;
-    }
+    if (!cur) { await sendPlain(env, chatId, "Активуй або створи проєкт."); return true; }
     const idea = (await readSection(env, userId, cur, "idea.md")) || "";
     const progress = (await readSection(env, userId, cur, "progress.md")) || "";
     const tasks = (await readSection(env, userId, cur, "tasks.md")) || "";
@@ -290,7 +405,6 @@ export async function handleCodexUi(env, chatId, userId, { cbData }, helpers = {
 
   return false;
 }
-
 // -------------------- /project ... (сумісність) --------------------
 export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain) {
   const txt = String(textRaw || "").trim();
@@ -388,6 +502,27 @@ export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain
     return true;
   }
 
+  // /project export — створити snapshot у Drive/exports/<timestamp> (звідти Download as ZIP)
+  if (/^\/project\s+export\b/i.test(txt)) {
+    const cur = await getCurrentProject(env, userId);
+    if (!cur) { await sendPlain(env, chatId, "Активуй проєкт: /project use <name>"); return true; }
+    const sections = {
+      "README.md": (await readSection(env, userId, cur, "README.md")) || "",
+      "idea.md": (await readSection(env, userId, cur, "idea.md")) || "",
+      "spec.md": (await readSection(env, userId, cur, "spec.md")) || "",
+      "connectors.md": (await readSection(env, userId, cur, "connectors.md")) || "",
+      "progress.md": (await readSection(env, userId, cur, "progress.md")) || "",
+      "tasks.md": (await readSection(env, userId, cur, "tasks.md")) || "",
+      "decisions.md": (await readSection(env, userId, cur, "decisions.md")) || "",
+      "risks.md": (await readSection(env, userId, cur, "risks.md")) || "",
+      "testplan.md": (await readSection(env, userId, cur, "testplan.md")) || "",
+    };
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    await driveExportSnapshot(env, userId, cur, stamp, sections).catch(()=>{});
+    await sendPlain(env, chatId, `📦 Експорт створено: exports/${stamp}\nУ Google Drive обери цю папку → Download, щоб отримати ZIP.`);
+    return true;
+  }
+
   // /project status — дайджест
   if (/^\/project\s+status\b/i.test(txt)) {
     const cur = await getCurrentProject(env, userId);
@@ -413,6 +548,32 @@ export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain
 
   // не наша команда
   return false;
+}
+
+// -------------------- створення проєкту (+ Drive bootstrap) --------------------
+async function createProject(env, userId, name, initialIdea) {
+  const meta = { name, createdAt: nowIso() };
+  await saveMeta(env, userId, name, meta);
+
+  const sections = {
+    "README.md": templateReadme(name),
+    "idea.md": templateIdea(initialIdea),
+    "spec.md": templateSpec(),
+    "connectors.md": templateConnectors(),
+    "progress.md": templateProgress(),
+    "tasks.md": templateTasks(),
+    "decisions.md": templateDecisions(),
+    "risks.md": templateRisks(),
+    "testplan.md": templateTestplan(),
+  };
+
+  for (const [fname, body] of Object.entries(sections)) {
+    await writeSection(env, userId, name, fname, body);
+  }
+
+  // Стартова структура на Drive (якщо вже підключений)
+  await driveBootstrapProject(env, userId, name, sections).catch(()=>{});
+  await setCurrentProject(env, userId, name);
 }
 
 // -------------------- аналіз зображень для Codex --------------------
@@ -453,31 +614,22 @@ async function analyzeImageForCodex(env, { lang = "uk", imageBase64, question })
 /**
  * ctx: { chatId, userId, msg, textRaw, lang, isAdmin }
  * helpers: {
- *   getEnergy, spendEnergy, energyLinks, sendPlain, pickPhoto, tgFileUrl, urlToBase64,
- *   describeImage, sendDocument, startPuzzleAnimation, editMessageText,
- *   driveSaveFromUrl, getUserTokens
+ *   sendPlain, pickPhoto, tgFileUrl, urlToBase64
  * }
  */
 export async function handleCodexGeneration(env, ctx, helpers) {
   const { chatId, userId, msg, textRaw, lang } = ctx;
-  const {
-    sendPlain, pickPhoto, tgFileUrl, urlToBase64,
-    driveSaveFromUrl, getUserTokens,
-  } = helpers;
-
+  const { sendPlain, pickPhoto, tgFileUrl, urlToBase64 } = helpers;
   const kv = pickKV(env);
 
-  // --------- 0) UI-стани: створення/вибір/ідея ----------
+  // 0) UI-стани (force-reply): створення назви, вибір проєкту, набір ідеї з медіа
   const awaiting = (await kv.get(UI_AWAIT_KEY(userId), "text")) || "none";
 
-  // користувач щойно ввів назву нового проєкту
+  // нова назва проєкту
   if (awaiting === "proj_name" && textRaw) {
     const name = textRaw.trim();
     await kv.delete(UI_AWAIT_KEY(userId));
-    if (!name) {
-      await sendPlain(env, chatId, "Пуста назва. Спробуй ще раз через меню.");
-      return;
-    }
+    if (!name) { await sendPlain(env, chatId, "Пуста назва. Спробуй ще раз через меню."); return; }
     await createProject(env, userId, name, "");
     await sendPlain(env, chatId, `✅ Проєкт «${name}» створено і активовано.\nТепер опиши коротко ідею (можеш додавати фото/файли) — все прикріплю до проєкту.`);
     await kv.put(UI_AWAIT_KEY(userId), "idea", { expirationTtl: 3600 });
@@ -485,76 +637,72 @@ export async function handleCodexGeneration(env, ctx, helpers) {
     return;
   }
 
-  // користувач вибирає вже існуючий проєкт
+  // вибір існуючого проєкту
   if (awaiting === "use_name" && textRaw) {
     const name = textRaw.trim();
     await kv.delete(UI_AWAIT_KEY(userId));
     const all = await listProjects(env, userId);
-    if (!all.includes(name)) {
-      await sendPlain(env, chatId, `Не знайдено: ${name}`);
-      return;
-    }
+    if (!all.includes(name)) { await sendPlain(env, chatId, `Не знайдено: ${name}`); return; }
     await setCurrentProject(env, userId, name);
     await sendPlain(env, chatId, `Активний проєкт: ${name}`);
     return;
   }
 
-  // режим набору ідеї: приймаємо текст і медіа, записуємо в idea.md, медіа — на Drive
+  // режим набору ідеї: приймаємо текст і медіа, пишемо в idea.md + кладемо файли в Drive/assets
   if (awaiting === "idea") {
     const cur = (await getCurrentProject(env, userId)) || (await kv.get(UI_TMPNAME_KEY(userId), "text"));
-    if (!cur) {
-      await kv.delete(UI_AWAIT_KEY(userId));
-      await sendPlain(env, chatId, "Не бачу активного проєкту. Створи або обери в меню.");
-      return;
-    }
+    if (!cur) { await kv.delete(UI_AWAIT_KEY(userId)); await sendPlain(env, chatId, "Не бачу активного проєкту. Створи або обери в меню."); return; }
 
-    // 0) текст → у idea.md
-    if (textRaw) {
-      await appendSection(env, userId, cur, "idea.md", `\n\n${textRaw.trim()}`);
-    }
+    if (textRaw) await appendSection(env, userId, cur, "idea.md", `\n\n${textRaw.trim()}`);
 
-    // 1) медіа → у Drive (намагаємось); якщо токенів нема — просто пропустимо збереження
     const photo = pickPhoto ? pickPhoto(msg) : null;
-    const doc = msg?.document || null;
+    const doc   = msg?.document || null;
     const voice = msg?.voice || null;
     const video = msg?.video || null;
 
-    const tokenOk = !!(await getUserTokens(env, userId).catch(() => null));
-    async function saveAny(fileId, defaultName) {
-      if (!tokenOk) return null;
-      const url = await tgFileUrl(env, fileId);
-      // Якщо driveSaveFromUrl підтримує шлях як ім'я — кладемо в папку проєкту:
-      const nameOnDrive = `SentiCodex/${userId}/${cur}/assets/${defaultName}`;
-      return await driveSaveFromUrl(env, userId, url, nameOnDrive).catch(() => null);
+    async function saveAsset(fileId, defaultName) {
+      try {
+        // Отримаємо прямий URL файлу TG
+        const url = await tgFileUrl(env, fileId);
+        // Кладемо у папку assets:
+        const base = await driveEnsurePath(env, userId, ["SentiCodex", String(userId), cur, "assets"]);
+        // Використаємо пряме multipart-завантаження, як для текстів:
+        // (просте збереження за URL теж можливе, але тут все під одним API)
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error("tg_file_fetch_failed");
+        const buf = await resp.arrayBuffer();
+
+        // Multipart для будь-якого типу
+        const boundary = `senti-${crypto.randomUUID()}`;
+        const meta = { name: defaultName, parents: [base] };
+        const pre = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
+                    `--${boundary}\r\nContent-Type: application/octet-stream\r\n\r\n`;
+        const post = `\r\n--${boundary}--`;
+        const body = new Blob([new TextEncoder().encode(pre), new Uint8Array(buf), new TextEncoder().encode(post)], { type: `multipart/related; boundary=${boundary}` });
+
+        const urlUp = new URL("https://www.googleapis.com/upload/drive/v3/files");
+        urlUp.searchParams.set("uploadType", "multipart");
+        urlUp.searchParams.set("fields", "id,name,webViewLink");
+        const up = await driveFetch(env, userId, urlUp.toString(), { method: "POST", body });
+        if (!up.ok) throw new Error("asset_upload_failed");
+        return true;
+      } catch { return false; }
     }
 
     const saved = [];
-    if (photo?.file_id) {
-      const s = await saveAny(photo.file_id, photo.name || `photo_${Date.now()}.jpg`);
-      if (s?.name) saved.push(s.name);
-    }
-    if (doc?.file_id) {
-      const s = await saveAny(doc.file_id, doc.file_name || `doc_${Date.now()}`);
-      if (s?.name) saved.push(s.name);
-    }
-    if (voice?.file_id) {
-      const s = await saveAny(voice.file_id, `voice_${voice.file_unique_id}.ogg`);
-      if (s?.name) saved.push(s.name);
-    }
-    if (video?.file_id) {
-      const s = await saveAny(video.file_id, video.file_name || `video_${Date.now()}.mp4`);
-      if (s?.name) saved.push(s.name);
-    }
+    if (photo?.file_id) if (await saveAsset(photo.file_id, photo.name || `photo_${Date.now()}.jpg`)) saved.push("photo");
+    if (doc?.file_id)   if (await saveAsset(doc.file_id,   doc.file_name || `doc_${Date.now()}`)) saved.push("document");
+    if (voice?.file_id) if (await saveAsset(voice.file_id, `voice_${voice.file_unique_id}.ogg`)) saved.push("voice");
+    if (video?.file_id) if (await saveAsset(video.file_id, video.file_name || `video_${Date.now()}.mp4`)) saved.push("video");
 
     if (saved.length) {
       await appendSection(env, userId, cur, "idea.md", `\n\nДодаткові матеріали (${nowIso()}):\n- ${saved.join("\n- ")}`);
     }
-
-    await sendPlain(env, chatId, "Прийнято. Можеш додавати ще ідей/матеріалів або просто продовжуй роботу в цьому проєкті.");
+    await sendPlain(env, chatId, "Прийнято. Можеш додавати ще ідей/матеріалів або продовжуй роботу в цьому проєкті.");
     return;
   }
 
-  // --------- 1) Проєктний контекст для відповіді ----------
+  // 1) Проєктний контекст
   const proj = await buildProjectContext(env, userId);
   const systemBlocks = [
     "You are Senti Codex — precise, practical, no hallucinations.",
@@ -563,7 +711,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
   if (proj.name) systemBlocks.push(proj.hint);
   const systemHint = systemBlocks.join("\n\n");
 
-  // --------- 2) Якщо прийшло фото — аналіз (без HTML)
+  // 2) Якщо прийшло фото — аналітика (без HTML)
   const ph = pickPhoto ? pickPhoto(msg) : null;
   if (ph?.file_id) {
     const url = await tgFileUrl(env, ph.file_id);
@@ -577,7 +725,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
     return;
   }
 
-  // --------- 3) Текстове завдання з урахуванням ідеї/специфікації ----------
+  // 3) Текстове завдання
   const order = String(env.MODEL_ORDER || "").trim()
     || "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free";
 
