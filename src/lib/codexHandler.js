@@ -1,413 +1,436 @@
 // src/lib/codexHandler.js
-// Senti Codex: analyze/fix/code/explain/extract/refactor/design + фото-аналіз.
-// Мобільна оптимізація HTML, plain-text для "extract", м'який retry моделей.
+// Senti Codex: режим коду + "Project Mode" (створення/ведення проєктів разом з юзером).
+// Експорти: CODEX_MEM_KEY, setCodexMode, getCodexMode, clearCodexMem,
+//          handleCodexCommand, handleCodexGeneration
 
-// ==== KV keys ===============================================================
-const KV = {
-  codexMode: (uid) => `codex:mode:${uid}`,
-  codexMem:  (uid) => `codex:mem:${uid}`,
-  lastPhoto: (uid) => `codex:last-photo:${uid}`,
-  lastMode:  (uid) => `codex:last-mode:${uid}`,
-};
+import { askAnyModel, askVision } from "./modelRouter.js";
+import { json } from "./utils.js";
+
+// -------------------- базові ключі/допоміжні --------------------
+const CODEX_MODE_KEY = (uid) => `codex:mode:${uid}`;                // "true"/"false"
+export const CODEX_MEM_KEY = (uid) => `codex:mem:${uid}`;           // довготривала пам'ять
+
+// Project Mode: активний проєкт юзера + метадані + секції
+const PROJ_CURR_KEY = (uid) => `codex:project:current:${uid}`;      // string
+const PROJ_META_KEY = (uid, name) => `codex:project:meta:${uid}:${name}`; // json
+const PROJ_FILE_KEY = (uid, name, file) => `codex:project:file:${uid}:${name}:${file}`; // text/md/json
+const PROJ_TASKSEQ_KEY = (uid, name) => `codex:project:taskseq:${uid}:${name}`;         // number
+const PROJ_PREFIX_LIST = (uid) => `codex:project:meta:${uid}:`;     // для .list()
 
 function pickKV(env) {
   return env.STATE_KV || env.CHECKLIST_KV || env.ENERGY_LOG_KV || env.LEARN_QUEUE_KV || null;
 }
-const now = () => Date.now();
+function nowIso() { return new Date().toISOString().replace('T', ' ').replace('Z', 'Z'); }
 
-// ==== tiny utils ============================================================
-function asText(res) {
-  if (!res) return "";
-  if (typeof res === "string") return res;
-  if (typeof res.text === "string") return res.text;
-  if (Array.isArray(res.choices) && res.choices[0]?.message?.content)
-    return res.choices[0].message.content;
-  return JSON.stringify(res);
-}
-
-function extractCodeAndLang(answer) {
-  if (!answer) return { lang: "txt", code: "" };
-  const m = answer.match(/```(\w+)?\s*([\s\S]*?)```/m);
-  if (m) return { lang: (m[1] || "txt").toLowerCase(), code: m[2].trim() };
-  return { lang: "txt", code: String(answer).trim() };
-}
-
-function stripMarkdownToText(md) {
-  let s = String(md || "");
-  s = s.replace(/```[\s\S]*?```/g, (m) => m.replace(/```[^\n]*\n?/, "").replace(/```$/, "")); // код-блоки → чистий код
-  s = s.replace(/^>+\s?/gm, "");                     // цитати
-  s = s.replace(/!\[[^\]]*\]\([^)]+\)/g, "");        // картинки
-  s = s.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");     // посилання
-  s = s.replace(/^#{1,6}\s*/gm, "");                 // заголовки
-  s = s.replace(/[*_]{1,3}([^*_]+)[*_]{1,3}/g, "$1");// жир/курсив
-  s = s.replace(/^\s*[-*+]\s+/gm, "- ");             // списки
-  s = s.replace(/\n{3,}/g, "\n\n");
-  return s.trim();
-}
-
-function pickFilenameByLangOrMode(mode, lang) {
-  const L = String(lang || "").toLowerCase();
-  if (mode === "extract") return "codex.extract.txt";           // ⬅ plain text
-  if (mode === "fix")     return "codex.fix.md";
-  if (mode === "analyze" || mode === "explain" || mode === "design")
-    return `codex.${mode}.md`;
-  if (L === "html") return "codex.html";
-  if (L === "css")  return "codex.css";
-  if (L === "js" || L === "javascript") return "codex.js";
-  if (L === "json") return "codex.json";
-  if (L === "py" || L === "python") return "codex.py";
-  if (L === "ts" || L === "typescript") return "codex.ts";
-  return "codex.txt";
-}
-
-// мобільна обгортка для HTML
-function ensureMobileHtml(html) {
-  const h = String(html || "");
-  const hasViewport = /<meta[^>]*name=["']viewport["']/i.test(h);
-  if (hasViewport && /class=["']senti-mobile["']/.test(h)) return h; // вже ок
-
-  const body = h.includes("<body") ? h : `<body>${h}</body>`;
-  const headInject = `
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<style>
-  :root { color-scheme: dark light; }
-  body.senti-mobile { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu; background:#111; color:#eee; }
-  .wrap { max-width: 720px; margin: 0 auto; padding: 12px; }
-  button, .btn { padding: 12px 16px; font-size: 16px; border-radius: 12px; border:0; background:#2b2b2b; color:#fff; }
-  canvas, pre, code { max-width:100%; }
-  .grid { display:grid; gap:12px; grid-template-columns: 1fr 1fr; }
-  @media (max-width:560px){ .grid { grid-template-columns: 1fr; } }
-</style>`.trim();
-
-  const head = `<head>${headInject}</head>`;
-  const wrapped =
-`<!DOCTYPE html><html lang="uk">
-${head}
-${body.replace("<body", '<body class="senti-mobile"').replace(/<body[^>]*>/, m => m + '<div class="wrap">').replace("</body>", '</div></body>')}
-</html>`;
-  return wrapped;
-}
-
-// простий 2D тетріс як sanity-тест (залишаємо)
-function buildTetrisHtml() {
-  return `<!DOCTYPE html><html lang="uk"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>Тетріс</title><style>body{background:#111;margin:0;font-family:system-ui;display:flex;flex-direction:column;align-items:center;min-height:100vh;color:#fff}#game{margin:10px;background:#222;padding:10px;border-radius:12px}canvas{background:#000;border:2px solid #444;border-radius:8px}#hud{display:flex;gap:16px;justify-content:center;margin-bottom:8px}.btn{background:#2b2b2b;border:none;color:#fff;padding:12px 16px;border-radius:12px;font-size:16px;margin:2px}</style></head><body><h2>Тетріс</h2><div id="game"><div id="hud">Score: <span id="score">0</span></div><canvas id="board" width="240" height="400"></canvas><div><button class="btn" id="left">◀</button><button class="btn" id="rot">⟳</button><button class="btn" id="right">▶</button><button class="btn" id="down">▼</button><button class="btn" id="drop">⬇</button></div></div><script>const c=document.getElementById('board'),x=c.getContext('2d');const COLS=10,ROWS=20,S=20,CLR=['#000','#0ff','#00f','#f0f','#f90','#0f0','#f00','#ff0'];const SH=[[],[[1,1,1,1]],[[2,0,0],[2,2,2]],[[0,0,3],[3,3,3]],[[4,4],[4,4]],[[0,5,5],[5,5,0]],[[0,6,0],[6,6,6]],[[7,7,0],[0,7,7]]];let B=[],cur,score=0;function reset(){B=[];for(let r=0;r<ROWS;r++){B[r]=[];for(let c=0;c<COLS;c++)B[r][c]=0}}function rnd(){const t=1+Math.floor(Math.random()*(SH.length-1));const s=SH[t];return{x:Math.floor((COLS-s[0].length)/2),y:0,shape:s,type:t}}function col(b,p){for(let r=0;r<p.shape.length;r++)for(let c=0;c<p.shape[r].length;c++)if(p.shape[r][c]){const nr=p.y+r,nc=p.x+c;if(nr<0||nr>=ROWS||nc<0||nc>=COLS||b[nr][nc])return true}return false}function merge(b,p){for(let r=0;r<p.shape.length;r++)for(let c=0;c<p.shape[r].length;c++)if(p.shape[r][c])b[p.y+r][p.x+c]=p.type}function lines(){let L=0;for(let r=ROWS-1;r>=0;r--)if(B[r].every(v=>v)){B.splice(r,1);B.unshift(new Array(COLS).fill(0));L++;r++}if(L){score+=L*100;document.getElementById('score').textContent=score}}function rot(p){const m=p.shape,o=[];for(let c=0;c<m[0].length;c++){const row=[];for(let r=m.length-1;r>=0;r--)row.push(m[r][c]);o.push(row)}return o}function drop(){cur.y++;if(col(B,cur)){cur.y--;merge(B,cur);lines();cur=rnd();if(col(B,cur)){reset();score=0;document.getElementById('score').textContent=0}}}function cell(xi,yi,v){if(!v)return;x.fillStyle=CLR[v];x.fillRect(xi*S,yi*S,S,S);x.strokeStyle='#111';x.strokeRect(xi*S,yi*S,S,S)}function draw(){x.clearRect(0,0,c.width,c.height);for(let r=0;r<ROWS;r++)for(let q=0;q<COLS;q++)cell(q,r,B[r][q]);for(let r=0;r<cur.shape.length;r++)for(let q=0;q<cur.shape[r].length;q++)if(cur.shape[r][q])cell(cur.x+q,cur.y+r,cur.type);requestAnimationFrame(draw)}reset();cur=rnd();draw();addEventListener('keydown',e=>{if(e.key==='ArrowLeft'){cur.x--;if(col(B,cur))cur.x++}if(e.key==='ArrowRight'){cur.x++;if(col(B,cur))cur.x--}if(e.key==='ArrowUp'){const o=cur.shape;cur.shape=rot(cur);if(col(B,cur))cur.shape=o}if(e.key==='ArrowDown')drop()});document.getElementById('left').onclick=()=>{cur.x--;if(col(B,cur))cur.x++};document.getElementById('right').onclick=()=>{cur.x++;if(col(B,cur))cur.x--};document.getElementById('rot').onclick=()=>{const o=cur.shape;cur.shape=rot(cur);if(col(B,cur))cur.shape=o};document.getElementById('down').onclick=drop;document.getElementById('drop').onclick=()=>{while(!col(B,cur))cur.y++;cur.y--;merge(B,cur);lines();cur=rnd()};</script></body></html>`;
-}
-
-// простий 3D старт (Three.js) — по команді /tetris3d
-function buildTetris3DHtml() {
-  const inner = `
-  <div class="wrap"><h2>3D Tetris (prototype)</h2><canvas id="c"></canvas></div>
-  <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-  <script>
-    const canvas=document.getElementById('c'); const renderer=new THREE.WebGLRenderer({canvas, antialias:true});
-    function resize(){ const w=Math.min(innerWidth,720); const h= Math.min(innerHeight-40, w*1.2); renderer.setSize(w,h); camera.aspect=w/h; camera.updateProjectionMatrix(); }
-    const scene=new THREE.Scene(); scene.background=new THREE.Color(0x101010);
-    const camera=new THREE.PerspectiveCamera(45,1,0.1,100); camera.position.set(6,10,18); camera.lookAt(0,5,0);
-    const light=new THREE.DirectionalLight(0xffffff,1); light.position.set(5,10,7); scene.add(light);
-    const amb=new THREE.AmbientLight(0x404040); scene.add(amb);
-    const grid=new THREE.GridHelper(10,10); grid.position.y=-0.01; scene.add(grid);
-
-    const box=new THREE.BoxGeometry(1,1,1);
-    function cube(color,x,y,z){const m=new THREE.MeshPhongMaterial({color}); const c=new THREE.Mesh(box,m); c.position.set(x,y,z); scene.add(c); return c;}
-    let pieces=[];
-    function spawn(){ const baseY=18; const colors=[0xff5555,0x55ffcc,0xaa66ff,0xffaa00,0x66ff66]; const col=colors[Math.floor(Math.random()*colors.length)];
-      const type=Math.floor(Math.random()*5);
-      const p=[];
-      if(type===0){ for(let i=0;i<4;i++) p.push(cube(col,0,baseY,-i)); } // I
-      if(type===1){ p.push(cube(col,0,baseY,0),cube(col,1,baseY,0),cube(col,-1,baseY,0),cube(col,0,baseY,-1)); } // T
-      if(type===2){ p.push(cube(col,0,baseY,0),cube(col,1,baseY,0),cube(col,0,baseY,-1),cube(col,1,baseY,-1)); } // O
-      if(type===3){ p.push(cube(col,0,baseY,0),cube(col,-1,baseY,0),cube(col,0,baseY,-1),cube(col,1,baseY,-1)); } // S-like
-      if(type===4){ p.push(cube(col,0,baseY,0),cube(col,1,baseY,0),cube(col,0,baseY,-1),cube(col,-1,baseY,-1)); } // Z-like
-      pieces.push(p);
-    }
-    const downSpeed=0.04; let acc=0;
-    function tick(t){requestAnimationFrame(tick); renderer.render(scene,camera); acc+=downSpeed; if(acc>1){acc=0; for(const p of pieces) for(const c of p) c.position.y-=1; if(pieces.length<5) spawn(); }}
-    spawn(); resize(); addEventListener('resize',resize); requestAnimationFrame(tick);
-  </script>`;
-  return ensureMobileHtml(inner);
-}
-
-// ==== external deps ==========================================================
-import { askAnyModel } from "./modelRouter.js";
-import { describeImage } from "../flows/visionDescribe.js";
-
-// ==== public state API =======================================================
+// -------------------- вкл/викл Codex --------------------
 export async function setCodexMode(env, userId, on) {
   const kv = pickKV(env); if (!kv) return;
-  await kv.put(KV.codexMode(userId), on ? "on" : "off", { expirationTtl: 60*60*24*180 });
+  await kv.put(CODEX_MODE_KEY(userId), on ? "true" : "false", { expirationTtl: 60 * 60 * 24 * 180 });
 }
 export async function getCodexMode(env, userId) {
   const kv = pickKV(env); if (!kv) return false;
-  return (await kv.get(KV.codexMode(userId), "text")) === "on";
-}
-async function loadCodexMem(env, userId) {
-  const kv = pickKV(env); if (!kv) return [];
-  try { const raw = await kv.get(KV.codexMem(userId), "text"); return raw ? JSON.parse(raw) : []; } catch { return []; }
-}
-async function saveCodexMem(env, userId, entry) {
-  const kv = pickKV(env); if (!kv) return;
-  try {
-    const arr = await loadCodexMem(env, userId);
-    arr.push({ filename: entry.filename, content: entry.content, ts: now() });
-    await kv.put(KV.codexMem(userId), JSON.stringify(arr.slice(-50)), { expirationTtl: 60*60*24*180 });
-  } catch {}
+  const v = await kv.get(CODEX_MODE_KEY(userId), "text");
+  return v === "true";
 }
 export async function clearCodexMem(env, userId) {
-  const kv = pickKV(env); if (!kv) return; try { await kv.delete(KV.codexMem(userId)); } catch {}
-}
-async function saveLastPhoto(env, userId, photo) {
   const kv = pickKV(env); if (!kv) return;
-  try { await kv.put(KV.lastPhoto(userId), JSON.stringify({ ...photo, ts: now() }), { expirationTtl: 60*60*24*7 }); } catch {}
+  await kv.delete(CODEX_MEM_KEY(userId));
 }
-async function loadLastPhoto(env, userId) {
+
+// -------------------- Project Mode: CRUD --------------------
+async function setCurrentProject(env, userId, name) {
+  const kv = pickKV(env); if (!kv) return;
+  await kv.put(PROJ_CURR_KEY(userId), name, { expirationTtl: 60 * 60 * 24 * 365 });
+}
+async function getCurrentProject(env, userId) {
   const kv = pickKV(env); if (!kv) return null;
-  try { const raw = await kv.get(KV.lastPhoto(userId), "text"); return raw ? JSON.parse(raw) : null; } catch { return null; }
+  return await kv.get(PROJ_CURR_KEY(userId), "text");
 }
-async function saveLastMode(env, userId, mode) {
-  const kv = pickKV(env); if (!kv) return; try { await kv.put(KV.lastMode(userId), mode, { expirationTtl: 60*60*24*7 }); } catch {}
+async function saveMeta(env, userId, name, meta) {
+  const kv = pickKV(env); if (!kv) return;
+  await kv.put(PROJ_META_KEY(userId, name), JSON.stringify(meta), { expirationTtl: 60 * 60 * 24 * 365 });
 }
-
-// ==== intent & mode detection ===============================================
-function detectMode(text, hasPhoto) {
-  const s = String(text || "").trim().toLowerCase();
-  if (/^1$/.test(s)) return "analyze";
-  if (/^2$/.test(s)) return "explain";
-  if (/^3$/.test(s)) return "extract";
-  if (/refactor|рефактор|перероби\s*код/.test(s)) return "refactor";
-  if (/design|архітектур|спроєктуй|спроектируй/.test(s)) return "design";
-  if (/fix|пофікс|виправ|исправ/i.test(s)) return "fix";
-  if (/explain|поясни|объясни/.test(s)) return "explain";
-  if (/extract|витягни|вытащи|структур/i.test(s)) return "extract";
-  if (/code|зроби\s*код|напиши\s*код|сгенеруй/i.test(s)) return "code";
-  if (hasPhoto) return /error|failed|помилк|ошибк|could not|build failed|trace/i.test(s) ? "fix" : "analyze";
-  if (/error|failed|could not|trace|stack/i.test(s)) return "fix";
-  if (/html|css|js|javascript|py|python|json|yaml|ts|typescript|react/i.test(s)) return "code";
-  return "explain";
+async function readMeta(env, userId, name) {
+  const kv = pickKV(env); if (!kv) return null;
+  const raw = await kv.get(PROJ_META_KEY(userId, name));
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
 }
-
-// ==== prompts ===============================================================
-function buildSystemHintForMode(mode) {
-  const base = `You are Senti Codex — a pragmatic software engineer.
-- Prefer minimal, working solutions.
-- Return FULL file content; avoid hallucinations. If insufficient data — say "Не впевнений".`;
-  const map = {
-    analyze: base + `\nTask: Analyze the input (image/log/code) and produce a concise technical report as Markdown.`,
-    explain: base + `\nTask: Explain concisely in Markdown with key insights.`,
-    extract: base + `\nTask: Extract structured essentials as PLAIN TEXT (no Markdown).`,
-    fix:     base + `\nTask: Root-cause analysis + concrete fix steps. Output Markdown with sections.`,
-    design:  base + `\nTask: Propose architecture/plan. Output Markdown.`,
-    refactor:base + `\nTask: Refactor for clarity/robustness. Return only the full refactored file.`,
-    code:    base + `\nTask: Generate a COMPLETE single-file solution; no extra commentary.`,
-  };
-  return map[mode] || base;
+async function writeSection(env, userId, name, file, content) {
+  const kv = pickKV(env); if (!kv) return;
+  await kv.put(PROJ_FILE_KEY(userId, name, file), content, { expirationTtl: 60 * 60 * 24 * 365 });
 }
-
-function buildUserPrompt({ mode, userText, photoDesc, projectFilesList }) {
-  const parts = [];
-  if (projectFilesList?.length) parts.push(`[Context files]\n${projectFilesList.map(f => `- ${f}`).join("\n")}`);
-  if (photoDesc) parts.push(`[Image description]\n${photoDesc}`);
-  if (userText) parts.push(`[User]\n${userText}`);
-  if (mode === "fix") {
-    parts.push(`Output: Markdown sections -> Summary; Root cause; Fix steps; Patches; Post-checks.`);
-  } else if (mode === "extract") {
-    parts.push(`Output MUST be plain text (.txt), no Markdown syntax.`);
-  } else if (mode === "analyze" || mode === "explain" || mode === "design") {
-    parts.push(`Write concise, actionable Markdown. Avoid fluff.`);
-  } else if (mode === "code" || mode === "refactor") {
-    parts.push(`Return ONLY full code of a single file (no explanations).`);
-  }
-  return parts.join("\n\n");
+async function readSection(env, userId, name, file) {
+  const kv = pickKV(env); if (!kv) return null;
+  return await kv.get(PROJ_FILE_KEY(userId, name, file));
+}
+async function appendSection(env, userId, name, file, line) {
+  const prev = (await readSection(env, userId, name, file)) || "";
+  const next = prev ? (prev.endsWith("\n") ? prev + line : prev + "\n" + line) : line;
+  await writeSection(env, userId, name, file, next);
+}
+async function listProjects(env, userId) {
+  const kv = pickKV(env); if (!kv || !kv.list) return [];
+  const out = [];
+  let cursor = undefined;
+  do {
+    const res = await kv.list({ prefix: PROJ_PREFIX_LIST(userId), cursor });
+    for (const k of res.keys || []) {
+      const parts = k.name.split(":"); // codex:project:meta:<uid>:<name>
+      const name = parts.slice(-1)[0];
+      if (name && !out.includes(name)) out.push(name);
+    }
+    cursor = res.cursor || null;
+  } while (cursor);
+  return out.sort();
+}
+async function nextTaskId(env, userId, name) {
+  const kv = pickKV(env); if (!kv) return 1;
+  const k = PROJ_TASKSEQ_KEY(userId, name);
+  const curStr = await kv.get(k); const cur = Number(curStr || "0");
+  const nxt = isFinite(cur) ? cur + 1 : 1;
+  await kv.put(k, String(nxt), { expirationTtl: 60 * 60 * 24 * 365 });
+  return nxt;
 }
 
-// ==== model calling with soft retry =========================================
-async function callCodexModel(env, text, { systemHint }) {
-  let order =
-    String(env.CODEX_MODEL_ORDER || "").trim() ||
-    "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free";
-  try {
-    const res = await askAnyModel(env, order, text, { systemHint, temperature: 0.2 });
-    return asText(res);
-  } catch {
-    // переставимо порядок і спробуємо ще раз
-    const alt = "cf:@cf/meta/llama-3.2-11b-instruct, gemini:gemini-2.5-flash, free:meta-llama/llama-4-scout:free";
-    const res2 = await askAnyModel(env, alt, text, { systemHint, temperature: 0.2 });
-    return asText(res2);
-  }
+// шаблонні секції нового проєкту
+function templateReadme(name) {
+  return `# ${name}
+Senti Codex Project
+
+- \`idea.md\` — контракт ідеї (LOCKED - якщо true, Codex не відхиляється).
+- \`spec.md\` — вимоги/архітектура.
+- \`connectors.md\` — інтеграції/секрети/чеклісти.
+- \`progress.md\` — журнал прогресу.
+- \`tasks.md\` — TODO/DOING/DONE.
+- \`decisions.md\` — ADR (журнал рішень).
+- \`risks.md\` — ризики/пом'якшення.
+- \`testplan.md\` — тести/приймання.
+`;
+}
+function templateIdea(initialIdea = "") {
+  return `LOCKED: false
+
+## Ідея (контракт)
+${initialIdea || "Опишіть бачення/цілі/обмеження. Це — джерело істини."}
+
+## Anti-goals
+- Що **не** робимо та чого уникаємо.
+
+## Цільова аудиторія
+- Кого обслуговує продукт.
+
+## Ключові принципи
+- Коротко, маркерами.`;
+}
+function templateSpec() {
+  return `# Специфікація / Архітектура
+- Модулі:
+- API/Інтеграції:
+- Дані/Сховища:
+- Edge/Workers/Limits:
+`;
+}
+function templateConnectors() {
+  return `# Інтеграції та секрети (плейсхолдери)
+GEMINI_API_KEY=<set in secrets>
+CLOUDFLARE_API_TOKEN=<set in secrets>
+OPENROUTER_API_KEY=<set in secrets>
+
+## Чекліст
+- [ ] Додати ключі в Secrets/Bindings
+- [ ] Перевірити змінні в wrangler.toml
+`;
+}
+function templateProgress() { return `# Прогрес\n`; }
+function templateTasks() { return `# Tasks\n\n| ID | State | Title |\n|----|-------|-------|\n`; }
+function templateDecisions() { return `# ADR\n\n`; }
+function templateRisks() { return `# Ризики\n\n`; }
+function templateTestplan() { return `# Test Plan\n\n- Саніті\n- Інтерг.тести\n- Приймання\n`; }
+
+async function createProject(env, userId, name, initialIdea) {
+  const meta = { name, createdAt: nowIso(), lockedIdea: false };
+  await saveMeta(env, userId, name, meta);
+  await writeSection(env, userId, name, "README.md", templateReadme(name));
+  await writeSection(env, userId, name, "idea.md", templateIdea(initialIdea));
+  await writeSection(env, userId, name, "spec.md", templateSpec());
+  await writeSection(env, userId, name, "connectors.md", templateConnectors());
+  await writeSection(env, userId, name, "progress.md", templateProgress());
+  await writeSection(env, userId, name, "tasks.md", templateTasks());
+  await writeSection(env, userId, name, "decisions.md", templateDecisions());
+  await writeSection(env, userId, name, "risks.md", templateRisks());
+  await writeSection(env, userId, name, "testplan.md", templateTestplan());
+  await setCurrentProject(env, userId, name);
 }
 
-// ==== public command handlers ===============================================
+function mdAddTaskRow(md, id, title) {
+  const line = `| ${id} | TODO | ${title} |`;
+  return md.endsWith("\n") ? md + line + "\n" : md + "\n" + line + "\n";
+}
+function mdMarkTaskDone(md, id) {
+  const lines = md.split("\n");
+  const rx = new RegExp(`^\\|\\s*${id}\\s*\\|\\s*[^|]*\\|`);
+  return lines.map(l => (rx.test(l) ? l.replace(/\|[^|]*\|/, "| DONE |") : l)).join("\n");
+}
+
+// -------------------- збирання Project Context для підказки --------------------
+async function buildProjectContext(env, userId) {
+  const name = await getCurrentProject(env, userId);
+  if (!name) return { name: null, hint: "" };
+
+  const idea = (await readSection(env, userId, name, "idea.md")) || "";
+  const spec = (await readSection(env, userId, name, "spec.md")) || "";
+  const locked = /^LOCKED:\s*true/mi.test(idea);
+
+  const hint =
+`[Project: ${name}]
+[Idea Contract]
+${idea.slice(0, 2500)}
+
+[Spec (excerpt)]
+${spec.slice(0, 2000)}
+
+Rules:
+- Answers MUST align with "Idea Contract".${locked ? " (LOCKED)" : ""}
+- If user request contradicts the idea, say "Не впевнений — суперечить ідеї" and propose updating idea or unlocking.`;
+
+  return { name, hint, locked };
+}
+// -------------------- команди Codex (/project …) --------------------
 export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain) {
-  const s = String(textRaw || "").trim();
+  const txt = String(textRaw || "").trim();
 
-  if (s === "/clear_last") {
-    const arr = await loadCodexMem(env, userId);
-    if (!arr.length) await sendPlain(env, chatId, "Немає файлів для видалення.");
-    else {
-      arr.pop();
-      const kv = pickKV(env); if (kv) await kv.put(KV.codexMem(userId), JSON.stringify(arr));
-      await sendPlain(env, chatId, "Останній файл прибрано.");
+  // /project new <name> [; idea: ...]
+  if (/^\/project\s+new\s+/i.test(txt)) {
+    const m = txt.match(/^\/project\s+new\s+(.+)$/i);
+    if (!m) return false;
+    const tail = m[1].trim();
+    let name = tail;
+    let idea = "";
+    const semi = tail.split(";"); // allow: /project new MyApp ; idea: Simple notes app
+    if (semi.length > 1) {
+      name = semi[0].trim();
+      const ideaM = tail.match(/idea\s*:\s*(.+)$/i);
+      idea = ideaM ? ideaM[1].trim() : "";
+    }
+    if (!name) { await sendPlain(env, chatId, "Вкажи назву: /project new <name>"); return true; }
+
+    await createProject(env, userId, name, idea);
+    await sendPlain(env, chatId, `✅ Проєкт **${name}** створено і активовано.\nДоступні секції: README.md, idea.md, spec.md, connectors.md, progress.md, tasks.md, decisions.md, risks.md, testplan.md.`);
+    return true;
+  }
+
+  // /project use <name>
+  if (/^\/project\s+use\s+/i.test(txt)) {
+    const name = txt.replace(/^\/project\s+use\s+/i, "").trim();
+    if (!name) { await sendPlain(env, chatId, "Вкажи назву: /project use <name>"); return true; }
+    const all = await listProjects(env, userId);
+    if (!all.includes(name)) { await sendPlain(env, chatId, `Не знайдено: ${name}`); return true; }
+    await setCurrentProject(env, userId, name);
+    await sendPlain(env, chatId, `🔸 Активний проєкт: **${name}**`);
+    return true;
+  }
+
+  // /project list
+  if (/^\/project\s+list/i.test(txt)) {
+    const all = await listProjects(env, userId);
+    const cur = await getCurrentProject(env, userId);
+    if (!all.length) { await sendPlain(env, chatId, "Немає проєктів. Створи: /project new <name>"); return true; }
+    const body = all.map(n => (n === cur ? `• **${n}**  ← active` : `• ${n}`)).join("\n");
+    await sendPlain(env, chatId, `Проєкти:\n${body}`);
+    return true;
+  }
+
+  // /project idea lock|unlock
+  if (/^\/project\s+idea\s+(lock|unlock)/i.test(txt)) {
+    const cur = await getCurrentProject(env, userId);
+    if (!cur) { await sendPlain(env, chatId, "Активуй проєкт: /project use <name>"); return true; }
+    const wantLock = /lock/i.test(txt);
+    let idea = (await readSection(env, userId, cur, "idea.md")) || "";
+    if (/^LOCKED:/m.test(idea)) {
+      idea = idea.replace(/^LOCKED:\s*(true|false)/mi, `LOCKED: ${wantLock ? "true" : "false"}`);
+    } else {
+      idea = `LOCKED: ${wantLock ? "true" : "false"}\n\n` + idea;
+    }
+    await writeSection(env, userId, cur, "idea.md", idea);
+    await saveMeta(env, userId, cur, { ...(await readMeta(env, userId, cur)), lockedIdea: !!wantLock });
+    await sendPlain(env, chatId, wantLock ? "🔒 Ідею зафіксовано (LOCKED)." : "🔓 Ідею розблоковано.");
+    return true;
+  }
+
+  // /project idea set <text> | /project idea add <text>
+  if (/^\/project\s+idea\s+(set|add)\s+/i.test(txt)) {
+    const cur = await getCurrentProject(env, userId);
+    if (!cur) { await sendPlain(env, chatId, "Активуй проєкт: /project use <name>"); return true; }
+    const [, action, rest] = txt.match(/^\/project\s+idea\s+(set|add)\s+([\s\S]+)$/i) || [];
+    if (!rest) { await sendPlain(env, chatId, "Дай текст після команди."); return true; }
+    if (action === "set") {
+      // перезаписуємо, LOCKED лишаємо як було (якщо був)
+      const prev = (await readSection(env, userId, cur, "idea.md")) || "";
+      const locked = /^LOCKED:\s*true/mi.test(prev);
+      const head = `LOCKED: ${locked ? "true" : "false"}\n\n`;
+      await writeSection(env, userId, cur, "idea.md", head + rest.trim());
+      await sendPlain(env, chatId, "✅ Ідею оновлено (set).");
+    } else {
+      await appendSection(env, userId, cur, "idea.md", `\n\n${rest.trim()}`);
+      await sendPlain(env, chatId, "➕ Додано до ідеї (add).");
     }
     return true;
   }
 
-  if (s === "/clear_all") {
-    await clearCodexMem(env, userId);
-    await sendPlain(env, chatId, "Весь проєкт очищено.");
+  // /project progress add <text>
+  if (/^\/project\s+progress\s+add\s+/i.test(txt)) {
+    const cur = await getCurrentProject(env, userId);
+    if (!cur) { await sendPlain(env, chatId, "Активуй проєкт: /project use <name>"); return true; }
+    const text = txt.replace(/^\/project\s+progress\s+add\s+/i, "").trim();
+    if (!text) { await sendPlain(env, chatId, "Дай текст: /project progress add <що зроблено>"); return true; }
+    await appendSection(env, userId, cur, "progress.md", `- ${nowIso()} — ${text}`);
+    await sendPlain(env, chatId, "📝 Додано у прогрес.");
     return true;
   }
 
-  if (s === "/summary") {
-    const arr = await loadCodexMem(env, userId);
-    if (!arr.length) await sendPlain(env, chatId, "У проєкті поки що порожньо.");
-    else await sendPlain(env, chatId, `Файли:\n${arr.map(f => `- ${f.filename}`).join("\n")}`);
+  // /project task add <title>
+  if (/^\/project\s+task\s+add\s+/i.test(txt)) {
+    const cur = await getCurrentProject(env, userId);
+    if (!cur) { await sendPlain(env, chatId, "Активуй проєкт: /project use <name>"); return true; }
+    const title = txt.replace(/^\/project\s+task\s+add\s+/i, "").trim();
+    if (!title) { await sendPlain(env, chatId, "Формат: /project task add <title>"); return true; }
+    const id = await nextTaskId(env, userId, cur);
+    const md = (await readSection(env, userId, cur, "tasks.md")) || templateTasks();
+    await writeSection(env, userId, cur, "tasks.md", mdAddTaskRow(md, id, title));
+    await sendPlain(env, chatId, `✅ Task #${id} додано.`);
     return true;
   }
 
-  if (s === "/tetris3d") {
-    const html = buildTetris3DHtml();
-    const filename = "codex-3d.html";
-    const kv = pickKV(env);
-    if (kv) await saveCodexMem(env, userId, { filename, content: html });
-    await sendPlain(env, chatId, "Генерую 3D тетріс…");
-    await sendDocument(env, chatId, filename, html, "Ось готовий файл 👇");
+  // /project task done <id>
+  if (/^\/project\s+task\s+done\s+/i.test(txt)) {
+    const cur = await getCurrentProject(env, userId);
+    if (!cur) { await sendPlain(env, chatId, "Активуй проєкт: /project use <name>"); return true; }
+    const id = Number(txt.replace(/^\/project\s+task\s+done\s+/i, "").trim());
+    if (!Number.isFinite(id)) { await sendPlain(env, chatId, "Формат: /project task done <id>"); return true; }
+    const md = (await readSection(env, userId, cur, "tasks.md")) || templateTasks();
+    await writeSection(env, userId, cur, "tasks.md", mdMarkTaskDone(md, id));
+    await sendPlain(env, chatId, `✔️ Task #${id} → DONE.`);
     return true;
   }
 
+  // /project status — дайджест
+  if (/^\/project\s+status\b/i.test(txt)) {
+    const cur = await getCurrentProject(env, userId);
+    if (!cur) { await sendPlain(env, chatId, "Активуй проєкт: /project use <name>"); return true; }
+    const idea = (await readSection(env, userId, cur, "idea.md")) || "";
+    const progress = (await readSection(env, userId, cur, "progress.md")) || "";
+    const tasks = (await readSection(env, userId, cur, "tasks.md")) || "";
+    const locked = /^LOCKED:\s*true/mi.test(idea);
+    const body = [
+      `📁 ${cur}`,
+      locked ? "🔒 Idea: LOCKED" : "🔓 Idea: UNLOCKED",
+      "",
+      "— Ідея (уривок):",
+      "```",
+      idea.trim().slice(0, 500),
+      "```",
+      "",
+      "— Останній прогрес:",
+      progress.trim().split("\n").slice(-5).join("\n") || "—",
+      "",
+      "— Tasks (останні рядки):",
+      tasks.trim().split("\n").slice(-6).join("\n") || "—",
+    ].join("\n");
+    await sendPlain(env, chatId, body, { parse_mode: "Markdown" });
+    return true;
+  }
+
+  // не наша команда
   return false;
 }
+// -------------------- генерація/аналіз у Codex з урахуванням проєкту --------------------
+async function toBase64FromUrl(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`fetch image ${r.status}`);
+  const ab = await r.arrayBuffer(); const bytes = new Uint8Array(ab);
+  let bin = ""; for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
 
-// ==== main generation ========================================================
-export async function handleCodexGeneration(env, params, helpers) {
-  const { chatId, userId, msg, textRaw, lang, isAdmin } = params;
-  const {
-    getEnergy, spendEnergy, energyLinks, sendPlain,
-    pickPhoto, tgFileUrl, urlToBase64,
-    sendDocument, startPuzzleAnimation, editMessageText
-  } = helpers;
+async function analyzeImageForCodex(env, { lang = "uk", imageBase64, question }) {
+  const order = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct";
+  const systemHint =
+`You are Senti Codex. Analyze screenshots/code/logs.
+- Be concise: bullet insights + next steps.
+- If the image is a log/build error, extract exact errors and probable fixes.
+- No HTML. Markdown only.`;
 
-  // енергія
-  const cur = await getEnergy(env, userId);
-  const need = Number(cur.costText ?? 2);
-  if ((cur.energy ?? 0) < need) {
-    const links = energyLinks(env, userId);
-    await sendPlain(env, chatId, (lang || "uk").startsWith("uk")
-      ? `Не вистачає енергії. Потрібно ${need}. Поповнення: ${links.energy}`
-      : `Not enough energy. Need ${need}. Top-up: ${links.energy}`);
-    return;
-  }
+  const userPrompt = question && question.trim()
+    ? (lang.startsWith("en") ? `User asks: "${question}"` : `Користувач питає: "${question}"`)
+    : (lang.startsWith("en")
+        ? "Analyze this image for errors, code context and actionable steps."
+        : "Проаналізуй зображення: витягни помилки/контекст коду і дай кроки виправлення.");
 
-  // індикатор
-  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
-  let indicatorId = null;
-  if (token) {
-    try {
-      const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text: "🧩 Працюю над завданням…" }),
-      });
-      const d = await r.json().catch(() => null);
-      indicatorId = d?.result?.message_id || null;
-    } catch {}
-  }
-
-  await spendEnergy(env, userId, need, "codex");
-
-  // фото → опис (тихо, без помилки в чаті)
-  let photoDesc = "";
-  let hasPhoto = false;
-  const photo = pickPhoto(msg);
-  if (photo) {
-    hasPhoto = true;
-    try {
-      const imgUrl = await tgFileUrl(env, photo.file_id);
-      const imgBase64 = await urlToBase64(imgUrl);
-      const vRes = await describeImage(env, {
-        chatId,
-        tgLang: msg.from?.language_code,
-        imageBase64: imgBase64,
-        question:
-          "Опиши зображення для інженерного аналізу (логи/код/інтерфейс/предмети). Текст OCR додавай лише якщо явно просили.",
-        modelOrder: "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct",
-      });
-      photoDesc = vRes?.text || "";
-      await saveLastPhoto(env, userId, {
-        id: photo.file_id, url: imgUrl, caption: msg?.caption || "", desc: photoDesc,
-      });
-    } catch (e) {
-      // тихо логнемо, але не ламаємо пайплайн
-      console.warn("Vision error:", e?.message || e);
-    }
-  } else {
-    const last = await loadLastPhoto(env, userId);
-    if (last?.desc) photoDesc = last.desc;
-  }
-
-  // режим
-  const mode = detectMode(textRaw, hasPhoto);
-  await saveLastMode(env, userId, mode);
-
-  // спеціальний тригер "тетріс" лишаємо як 2D швидкий демо
-  if (/тетріс|tetris/i.test(textRaw || "")) {
-    const codeText = buildTetrisHtml();
-    const filename = "codex.html";
-    await saveCodexMem(env, userId, { filename, content: codeText });
-    await sendDocument(env, chatId, filename, codeText, "Ось готовий файл 👇");
-    if (indicatorId) await editMessageText(env, chatId, indicatorId, "✅ Готово");
-    return;
-  }
-
-  // контекст файлів
-  const mem = await loadCodexMem(env, userId);
-  const filesList = mem.map(f => f.filename);
-
-  // промпти
-  const systemHint = buildSystemHintForMode(mode);
-  const userPrompt = buildUserPrompt({
-    mode, userText: textRaw || "", photoDesc, projectFilesList: filesList
+  const out = await askVision(env, order, userPrompt, {
+    systemHint,
+    imageBase64,
+    imageMime: "image/png",
+    temperature: 0.2,
   });
+  if (typeof out === "string") return out;
+  if (out?.text) return out.text;
+  return JSON.stringify(out);
+}
 
-  // анімація
-  const animSignal = { done: false };
-  if (indicatorId) startPuzzleAnimation(env, chatId, indicatorId, animSignal);
+/**
+ * Головний генератор Codex.
+ * ctx: { chatId, userId, msg, textRaw, lang, isAdmin }
+ * helpers: { getEnergy, spendEnergy, energyLinks, sendPlain, pickPhoto, tgFileUrl, urlToBase64, describeImage, sendDocument, startPuzzleAnimation, editMessageText }
+ */
+export async function handleCodexGeneration(env, ctx, helpers) {
+  const { chatId, userId, msg, textRaw, lang } = ctx;
+  const { sendPlain, pickPhoto, tgFileUrl, urlToBase64, sendDocument, startPuzzleAnimation, editMessageText } = helpers;
 
-  // генерація
-  let answer = await callCodexModel(env, userPrompt, { systemHint });
+  // 1) Проєктний контекст
+  const proj = await buildProjectContext(env, userId);
+  const systemBlocks = [
+    "You are Senti Codex — precise, practical, no hallucinations.",
+    "Answer shortly by default. Prefer Markdown.",
+  ];
+  if (proj.name) systemBlocks.push(proj.hint);
+  const systemHint = systemBlocks.join("\n\n");
 
-  // підготовка виходу
-  let outText = "";
-  let filename = "";
+  // 2) Якщо прийшло фото — робимо аналітику (без HTML)
+  const ph = pickPhoto ? pickPhoto(msg) : null;
+  if (ph?.file_id) {
+    const url = await tgFileUrl(env, ph.file_id);
+    const b64 = urlToBase64 ? await urlToBase64(url) : await toBase64FromUrl(url);
+    const analysis = await analyzeImageForCodex(env, { lang, imageBase64: b64, question: textRaw || "" });
 
-  if (mode === "code" || mode === "refactor") {
-    const { lang, code } = extractCodeAndLang(answer);
-    outText = code;
-    filename = pickFilenameByLangOrMode(mode, lang);
-    if (!outText.trim()) {
-      const again = await callCodexModel(env, `${userPrompt}\n\nReturn only a single code block.`, { systemHint });
-      const e2 = extractCodeAndLang(again);
-      outText = e2.code || "/* Не впевнений */";
-      filename = pickFilenameByLangOrMode(mode, e2.lang);
+    // лог: додамо у progress.md якщо є активний проєкт
+    if (proj.name) {
+      await appendSection(env, userId, proj.name, "progress.md", `- ${nowIso()} — Аналіз зображення: коротко: ${analysis.slice(0,120)}…`);
     }
-    // якщо HTML — мобільна обгортка
-    if (filename.endsWith(".html")) outText = ensureMobileHtml(outText);
-  } else if (mode === "extract") {
-    // plain text
-    outText = stripMarkdownToText(answer);
-    filename = pickFilenameByLangOrMode(mode, "txt");
-  } else {
-    // Markdown режими
-    outText = String(answer || "").trim() || "Не впевнений.";
-    filename = pickFilenameByLangOrMode(mode, "md");
+
+    await sendPlain(env, chatId, analysis);
+    return;
   }
 
-  // зберігаємо та шлемо
-  await saveCodexMem(env, userId, { filename, content: outText });
-  await sendDocument(env, chatId, filename, outText, "Ось готовий файл 👇");
+  // 3) Текстове завдання → просимо модель з урахуванням ідеї/специфікації
+  const order = String(env.MODEL_ORDER || "").trim()
+    || "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free";
 
-  // фінал
-  if (indicatorId) {
-    animSignal.done = true;
-    await editMessageText(env, chatId, indicatorId, "✅ Готово");
+  // Якщо ідея LOCKED і запит схоже суперечить (дуже просто: містить "зміни ідеї"), відмовляємось
+  if (proj.locked && /зміни\s+іде[їі]|change\s+idea/i.test(textRaw || "")) {
+    await sendPlain(env, chatId, "Не впевнений — суперечить поточній зафіксованій ідеї (LOCKED). Розблокуй: /project idea unlock.");
+    return;
   }
+
+  const res = await askAnyModel(env, order, textRaw || "Продовжуй", { systemHint, temperature: 0.2 });
+  const outText = typeof res === "string"
+    ? res
+    : (res?.choices?.[0]?.message?.content || res?.text || JSON.stringify(res));
+
+  // авто-лог у прогрес
+  if (proj.name) {
+    await appendSection(env, userId, proj.name, "progress.md", `- ${nowIso()} — Відповідь Codex: ${ (outText||"").slice(0,120) }…`);
+  }
+
+  await sendPlain(env, chatId, outText || "Не впевнений.");
 }
