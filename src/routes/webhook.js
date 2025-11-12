@@ -13,9 +13,7 @@ import { loadSelfTune, autoUpdateSelfTune } from "../lib/selfTune.js";
 import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
-import {
-  getRecentInsights,
-} from "../lib/kvLearnQueue.js";
+import { getRecentInsights } from "../lib/kvLearnQueue.js";
 import {
   dateIntent,
   timeIntent,
@@ -50,6 +48,9 @@ const {
   energyLinks,
   sendPlain,
   askLocationKeyboard,
+  // нове: inline для Codex Project
+  codexProjectMenu,
+  CB,
 } = TG;
 
 // ---- TG helpers
@@ -313,7 +314,6 @@ function asText(res) {
     return res.choices[0].message.content;
   return JSON.stringify(res);
 }
-
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "GET") {
     return json({ ok: true, worker: "senti", ts: Date.now() });
@@ -333,8 +333,14 @@ export async function handleTelegramWebhook(req, env) {
   }
 
   const update = await req.json();
+
+  // ───── callback_query (inline Codex Project) ─────
   if (update.callback_query) {
     const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+    const chatId = update.callback_query?.message?.chat?.id;
+    const userId = update.callback_query?.from?.id;
+    const data = update.callback_query?.data;
+
     if (token) {
       await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
         method: "POST",
@@ -342,14 +348,45 @@ export async function handleTelegramWebhook(req, env) {
         body: JSON.stringify({ callback_query_id: update.callback_query.id }),
       });
     }
+
+    // Маршрутизація інлайн-команд Codex Project
+    try {
+      if (!chatId || !userId || !data) return json({ ok: true });
+
+      if (data === CB.CODEX_PROJECT_NEW) {
+        await sendPlain(
+          env,
+          chatId,
+          "Створи проєкт:\n`/project new <Назва> ; idea: <коротка ідея>`",
+          { parse_mode: "Markdown" }
+        );
+        return json({ ok: true });
+      }
+
+      const map = {
+        [CB.CODEX_PROJECT_LIST]: "/project list",
+        [CB.CODEX_PROJECT_STATUS]: "/project status",
+        [CB.CODEX_IDEA_LOCK]: "/project idea lock",
+        [CB.CODEX_IDEA_UNLOCK]: "/project idea unlock",
+      };
+
+      if (map[data]) {
+        await handleCodexCommand(env, chatId, userId, map[data], sendPlain);
+      }
+    } catch (e) {
+      await sendPlain(
+        env,
+        update.callback_query?.message?.chat?.id,
+        `❌ Callback error: ${String(e?.message || e).slice(0, 200)}`
+      );
+    }
     return json({ ok: true });
   }
 
-  const msg =
-    update.message || update.edited_message || update.channel_post;
+  const msg = update.message || update.edited_message || update.channel_post;
   const chatId = msg?.chat?.id;
   const userId = msg?.from?.id;
-  const isAdmin = ADMIN(env, userId);
+  const isAdmin = ADMIN(env, userId, msg?.from?.username);
   const textRaw = String(msg?.text || msg?.caption || "").trim();
   const userLang = msg?.from?.language_code || "uk";
   let lang = pickReplyLanguage(msg, textRaw);
@@ -444,12 +481,21 @@ export async function handleTelegramWebhook(req, env) {
     }
     await setCodexMode(env, userId, true);
     await clearCodexMem(env, userId);
+
+    // 1) покажемо інформаційне повідомлення
     await sendPlain(
       env,
       chatId,
-      "🧠 Senti Codex увімкнено. Надішли задачу (наприклад: «зроби html тетріс»).",
-      { reply_markup: mainKeyboard(isAdmin) }
+      "🧠 Senti Codex увімкнено. Надішли задачу або створи/обери проєкт.",
+      // inline меню Codex Project
+      { reply_markup: codexProjectMenu() }
     );
+
+    // 2) окремо повернемо звичну reply-клавіатуру (щоб не пропала)
+    await sendPlain(env, chatId, "Клавіатура оновлена.", {
+      reply_markup: mainKeyboard(isAdmin),
+    });
+
     return json({ ok: true });
   }
   if (textRaw === "/codex_off") {
@@ -526,6 +572,7 @@ export async function handleTelegramWebhook(req, env) {
             await sendPlain(env, chatId, byPlace.text, {
               parse_mode: byPlace.mode || undefined,
             });
+            // мінімальний кеш — збережемо сирий текст (координати, якщо треба, можна додати у weatherSummaryByPlace)
             await saveLastPlace(env, userId, { place: textRaw });
           } else {
             const last = await loadLastPlace(env, userId);
@@ -586,7 +633,7 @@ export async function handleTelegramWebhook(req, env) {
           pickPhoto,
           tgFileUrl,
           urlToBase64,
-          describeImage: null,
+          describeImage: null, // опис зображення всередині codexHandler
           sendDocument,
           startPuzzleAnimation,
           editMessageText,
