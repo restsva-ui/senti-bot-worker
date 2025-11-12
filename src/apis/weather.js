@@ -117,65 +117,28 @@ async function smartGeocode(place, lang = "uk") {
 
 /** Короткий опис за кодами погоди */
 function summarizeWeather(json, lang = "uk") {
-  const curT = json?.current?.temperature_2m;
-  const code = json?.current?.weather_code;
-  const wind = json?.current?.wind_speed_10m;
+  // Prefer new "current" API; fallback to legacy "current_weather"
+  const cur = json?.current || {};
+  const legacy = json?.current_weather || {};
+
+  const curT = (cur.temperature_2m ?? legacy.temperature);
+  const wind = (cur.wind_speed_10m ?? legacy.windspeed);
+  const code = (cur.weather_code ?? legacy.weathercode);
 
   let icon = "🌤️";
-  let desc = {
-    uk: "хмарно з проясненнями",
-    ru: "переменная облачность",
-    en: "partly cloudy",
-    de: "wolkig",
-    fr: "nuageux",
-  };
+  let desc = { uk: "хмарно з проясненнями", ru: "переменная облачность", en: "partly cloudy", de: "wolkig", fr: "nuageux" };
   const W = Number(code);
-  if ([0].includes(W)) {
-    icon = "☀️";
-    desc = {
-      uk: "сонячно",
-      ru: "солнечно",
-      en: "sunny",
-      de: "sonnig",
-      fr: "ensoleillé",
-    };
-  } else if ([45, 48].includes(W)) {
-    icon = "🌫️";
-    desc = { uk: "туман", ru: "туман", en: "fog", de: "Nebel", fr: "brouillard" };
-  } else if ([51, 53, 55, 56, 57].includes(W)) {
-    icon = "🌦️";
-    desc = {
-      uk: "мряка/дощ",
-      ru: "морось/дождь",
-      en: "drizzle/rain",
-      de: "Niesel/regen",
-      fr: "bruine/pluie",
-    };
-  } else if ([61, 63, 65, 80, 81, 82].includes(W)) {
-    icon = "🌧️";
-    desc = { uk: "дощ", ru: "дождь", en: "rain", de: "Regen", fr: "pluie" };
-  } else if ([71, 73, 75, 77, 85, 86].includes(W)) {
-    icon = "❄️";
-    desc = { uk: "сніг", ru: "снег", en: "snow", de: "Schnee", fr: "neige" };
-  } else if ([95, 96, 99].includes(W)) {
-    icon = "⛈️";
-    desc = {
-      uk: "гроза",
-      ru: "гроза",
-      en: "thunderstorm",
-      de: "Gewitter",
-      fr: "orage",
-    };
-  }
+  if ([0].includes(W))                 { icon = "☀️"; desc = {uk:"сонячно",ru:"солнечно",en:"sunny",de:"sonnig",fr:"ensoleillé"}; }
+  else if ([45,48].includes(W))        { icon = "🌫️"; desc = {uk:"туман",ru:"туман",en:"fog",de:"Nebel",fr:"brouillard"}; }
+  else if ([51,53,55,56,57].includes(W)){ icon = "🌦️"; desc = {uk:"мряка/дощ",ru:"морось/дождь",en:"drizzle/rain",de:"Niesel/regen",fr:"bruine/pluie"}; }
+  else if ([61,63,65,80,81,82].includes(W)){ icon = "🌧️"; desc = {uk:"дощ",ru:"дождь",en:"rain",de:"Regen",fr:"pluie"}; }
+  else if ([71,73,75,77,85,86].includes(W)){ icon = "❄️"; desc = {uk:"сніг",ru:"снег",en:"snow",de:"Schnee",fr:"neige"}; }
+  else if ([95,96,99].includes(W))     { icon = "⛈️"; desc = {uk:"гроза",ru:"гроза",en:"thunderstorm",de:"Gewitter",fr:"orage"}; }
 
-  const L = lang2(lang);
-  const d = desc[L] || desc.uk;
-
-  const t = fmt(curT, "°C");
-  const w = fmt(wind, " м/с");
-
-  // тут не буде NaN, бо fmt дає "—" для нечислових значень
-  return `${icon} ${d}. Температура близько ${t}. Вітер ${w}.`;
+  const d = (m) => (desc[m] || desc.uk);
+  const tStr = Number.isFinite(Number(curT)) ? Math.round(Number(curT)) : "—";
+  const wStr = Number.isFinite(Number(wind)) ? Math.round(Number(wind)) : "—";
+  return `${icon} ${d(lang.slice(0,2)) || d("uk")}. Температура близько ${tStr}°C. Вітер ${wStr} м/с.`;
 }
 
 /** Допоміжне: стабільне погодне посилання */
