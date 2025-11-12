@@ -60,7 +60,7 @@ function normalizePlace(raw = "") {
   s = s.replace(/[«»“”"']/g, "").replace(/\s+/g, " ").replace(/[.,;:!?]$/g, "");
 
   // прибираємо початкові прийменники: "в/у/у місті/in/at/en/bei/à/au/aux/..."
-  s = s.replace(/^(?:в|у|у\s+місті|в\s+місті|в\s+городе|у\s+городі|in|at|en|bei|in der|im|à|au|aux)\s+/iu, "");
+  s = s.replace(/^(?:в|у|у\\s+місті|в\\s+місті|в\\s+городе|у\\s+городі|in|at|en|bei|in der|im|à|au|aux)\\s+/iu, "");
 
   // часті українські локативи -> називний
   const uaCases = [
@@ -84,16 +84,16 @@ function parsePlaceFromText(text = "") {
   const s = String(text || "").trim();
 
   // загальний хук на "погода/weather/wetter/météo/meteo/temps"
-  const m = s.match(/(?:погода|погоду|погоди|weather|wetter|m[ée]t[ée]o|meteo|temps)\s+(.*)$/i);
+  const m = s.match(/(?:погода|погоду|погоди|weather|wetter|m[ée]t[ée]o|meteo|temps)\\s+(.*)$/i);
   let chunk = m?.[1] || s;
 
   // якщо є " in/в/у/à/au/en/bei " — беремо частину ПІСЛЯ останнього входження
-  const split = chunk.split(/\s(?:in|at|en|bei|à|au|aux|в|у)\s/i);
+  const split = chunk.split(/\\s(?:in|at|en|bei|à|au|aux|в|у)\\s/i);
   if (split.length > 1) chunk = split[split.length - 1];
 
   // прибираємо слова часу
   chunk = chunk
-    .replace(/\b(сьогодні|сегодня|today|heute|aujourd'?hui|oggi|demain|tomorrow|morgen)\b/ig, "")
+    .replace(/\\b(сьогодні|сегодня|today|heute|aujourd'?hui|oggi|demain|tomorrow|morgen)\\b/ig, "")
     .trim();
 
   return chunk ? normalizePlace(chunk) : null;
@@ -105,9 +105,9 @@ export function weatherIntent(text = "") {
   return /(погод|weather|wetter|météo|meteo|temps)/i.test(s);
 }
 
-/** Геокодер Open-Meteо */
+/** Геокодер Open-Mетео */
 async function geocode(place, lang = "uk") {
-  const url = `${OM_GEOCODE}?name=${encodeURIComponent(place)}&count=5&language=${encodeURIComponent(lang)}&format=json`;
+  const url = `${OM_GEOCODE}?name=${encodeURIComponent(place)}&count=5&language=${encodeURIComponent(lang)}&format=json";
   const r = await fetch(url);
   const data = await r.json().catch(() => null);
   return Array.isArray(data?.results) ? data.results : [];
@@ -192,7 +192,7 @@ export async function weatherSummaryByPlace(env, userText, lang = "uk") {
 
   const out = await weatherSummaryByCoords(lat, lon, lang);
   const pre = { uk: "У", ru: "В", en: "In", de: "In", fr: "À" }[lang.slice(0,2)] || "У";
-  return { text: out.text.replace(/^([^\s]+)/, `$1 ${pre} ${name}`), mode: out.mode, timezone: out.timezone };
+  return { text: out.text.replace(/^([^\\s]+)/, `$1 ${pre} ${name}`), mode: out.mode, timezone: out.timezone };
 }
 
 export default {
