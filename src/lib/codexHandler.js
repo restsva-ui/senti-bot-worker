@@ -14,25 +14,15 @@ const CODEX_MODE_KEY = (uid) => `codex:mode:${uid}`;                   // "true"
 export const CODEX_MEM_KEY = (uid) => `codex:mem:${uid}`;              // довготривала пам'ять
 
 // Project Mode: активний проєкт юзера + метадані + секції (зберігаємо в KV)
-const PROJ_CURR_KEY  = (uid)              => `codex:project:current:${uid}`;                     // string
-const PROJ_META_KEY  = (uid, name)        => `codex:project:meta:${uid}:${name}`;                // json
-const PROJ_FILE_KEY  = (uid, name, file)  => `codex:project:file:${uid}:${name}:${file}`;        // text/md/json
-const PROJ_TASKSEQ_KEY = (uid, name)      => `codex:project:taskseq:${uid}:${name}`;             // number
-const PROJ_PREFIX_LIST = (uid)            => `codex:project:meta:${uid}:`;                       // для .list()
+const PROJ_CURR_KEY = (uid) => `codex:project:current:${uid}`;         // string
+const PROJ_META_KEY = (uid, name) => `codex:project:meta:${uid}:${name}`; // json
+const PROJ_FILE_KEY = (uid, name, file) => `codex:project:file:${uid}:${name}:${file}`; // text/md/json
+const PROJ_TASKSEQ_KEY = (uid, name) => `codex:project:taskseq:${uid}:${name}`;         // number
+const PROJ_PREFIX_LIST = (uid) => `codex:project:meta:${uid}:`;        // для .list()
 
 // UI-стани (простенька FSM у KV)
-const UI_AWAIT_KEY   = (uid)              => `codex:ui:await:${uid}`;                            // none|proj_name|use_name|idea
-const UI_TMPNAME_KEY = (uid)              => `codex:ui:tmpname:${uid}`;
-
-// Назва без лапок/дужок/кутових скобок, нормалізована для порівняння
-function normName(s = "") {
-  return String(s || "").replace(/[<>\\"'`]/g, "").replace(/^\s+|\s+$/g, "").toLowerCase();
-}
-function sanitizeProjectName(s = "") {
-  // те ж саме, але зберігаємо видиму форму без < >
-  return String(s || "").replace(/[<>\\"'`]/g, "").trim();
-}
-                          // тимчасова назва проєкту
+const UI_AWAIT_KEY = (uid) => `codex:ui:await:${uid}`;                 // none|proj_name|use_name|idea
+const UI_TMPNAME_KEY = (uid) => `codex:ui:tmpname:${uid}`;             // тимчасова назва проєкту
 
 // callback data (inline)
 export const CB = {
@@ -54,11 +44,16 @@ function pickKV(env) {
 function nowIso() {
   return new Date().toISOString().replace("T", " ").replace("Z", "Z");
 }
-const normName = (s) =>
-  String(s || "")
+
+// ЄДИНА реалізація normName (дубль прибрано)
+// — прибирає лапки/дужки, зайві пробіли, зводить до lower-case для порівнянь.
+function normName(s = "") {
+  return String(s || "")
+    .replace(/[<>"'`]/g, "")
+    .replace(/\s+/g, " ")
     .trim()
-    .replace(/^[<«„“"'\s]+|[>»„“"'\s]+$/g, "") // зрізаємо лапки/кутові дужки/пробіли
-    .replace(/\s+/g, " ");
+    .toLowerCase();
+}
 
 // -------------------- вкл/викл Codex --------------------
 export async function setCodexMode(env, userId, on) {
@@ -117,7 +112,7 @@ async function writeSection(env, userId, name, file, content) {
   await kv.put(PROJ_FILE_KEY(userId, name, file), content, {
     expirationTtl: 60 * 60 * 24 * 365,
   });
-  // пробуємо синхронізувати оновлену секцію на Drive
+  // синхронізуємо оновлену секцію на Drive
   await driveSyncSection(env, userId, name, file, content).catch(() => {});
 }
 async function readSection(env, userId, name, file) {
@@ -127,11 +122,7 @@ async function readSection(env, userId, name, file) {
 }
 async function appendSection(env, userId, name, file, line) {
   const prev = (await readSection(env, userId, name, file)) || "";
-  const next = prev
-    ? prev.endsWith("\n")
-      ? prev + line
-      : prev + "\n" + line
-    : line;
+  const next = prev ? (prev.endsWith("\n") ? prev + line : prev + "\n" + line) : line;
   await writeSection(env, userId, name, file, next);
 }
 async function listProjects(env, userId) {
@@ -156,7 +147,7 @@ async function nextTaskId(env, userId, name) {
   const k = PROJ_TASKSEQ_KEY(userId, name);
   const curStr = await kv.get(k);
   const cur = Number(curStr || "0");
-  const nxt = Number.isFinite(cur) ? cur + 1 : 1;
+  const nxt = isFinite(cur) ? cur + 1 : 1;
   await kv.put(k, String(nxt), { expirationTtl: 60 * 60 * 24 * 365 });
   return nxt;
 }
@@ -211,11 +202,21 @@ OPENROUTER_API_KEY=<set in secrets>
 - [ ] Перевірити змінні в wrangler.toml
 `;
 }
-function templateProgress() { return `# Прогрес\n`; }
-function templateTasks()    { return `# Tasks\n\n| ID | State | Title |\n|----|-------|-------|\n`; }
-function templateDecisions(){ return `# ADR\n\n`; }
-function templateRisks()    { return `# Ризики\n\n`; }
-function templateTestplan() { return `# Test Plan\n\n- Саніті\n- Інтегр. тести\n- Приймання\n`; }
+function templateProgress() {
+  return `# Прогрес\n`;
+}
+function templateTasks() {
+  return `# Tasks\n\n| ID | State | Title |\n|----|-------|-------|\n`;
+}
+function templateDecisions() {
+  return `# ADR\n\n`;
+}
+function templateRisks() {
+  return `# Ризики\n\n`;
+}
+function templateTestplan() {
+  return `# Test Plan\n\n- Саніті\n- Інтегр. тести\n- Приймання\n`;
+}
 
 // ---- Google Drive інтеграція (локальні утиліти в цьому файлі) -------------
 const SEC = () => Math.floor(Date.now() / 1000);
@@ -293,7 +294,8 @@ async function driveFindOrCreateFolder(env, userId, name, parentId = "root") {
     }
   );
   const created = await create.json().catch(() => ({}));
-  if (!create.ok || !created?.id) throw new Error("drive_folder_create_failed");
+  if (!create.ok || !created?.id)
+    throw new Error("drive_folder_create_failed");
   return created.id;
 }
 
@@ -349,11 +351,7 @@ async function driveSyncSection(env, userId, project, file, content) {
       project,
       "repo",
     ]);
-    await driveUploadText(env, userId, {
-      parentId: root,
-      name: file,
-      content,
-    });
+    await driveUploadText(env, userId, { parentId: root, name: file, content });
   } catch (_) {
     /* тихо ігноруємо, щоб нічого не ламати */
   }
@@ -510,16 +508,10 @@ export async function handleCodexUi(env, chatId, userId, { cbData }, helpers = {
     const all = await listProjects(env, userId);
     const cur = await getCurrentProject(env, userId);
     if (!all.length) {
-      await sendPlain(
-        env,
-        chatId,
-        "Поки що немає проєктів. Натисни «Створити проєкт»."
-      );
+      await sendPlain(env, chatId, "Поки що немає проєктів. Натисни «Створити проєкт».");
       return true;
     }
-    const body = all
-      .map((n, i) => `${i + 1}. ${n}${n === cur ? " (active)" : ""}`)
-      .join("\n");
+    const body = all.map((n, i) => `${i + 1}. ${n}${n === cur ? " (active)" : ""}`).join("\n");
     await sendPlain(env, chatId, `Проєкти:\n${body}`);
     return true;
   }
@@ -556,18 +548,6 @@ export async function handleCodexUi(env, chatId, userId, { cbData }, helpers = {
 export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain) {
   const txt = String(textRaw || "").trim();
 
-  // /idea — швидкий вхід у режим набору ідеї
-  if (/^\/idea\b/i.test(txt) || /^\/project\s+idea\s+mode\b/i.test(txt)) {
-    const kv = pickKV(env);
-    await kv.put(UI_AWAIT_KEY(userId), "idea", { expirationTtl: 3600 });
-    await sendPlain(
-      env,
-      chatId,
-      "Режим «Ідея»: надсилай текст, фото, файли — я збережу їх у проєкті (idea.md + assets/)."
-    );
-    return true;
-  }
-
   // /project new <name> [; idea: ...]
   if (/^\/project\s+new\s+/i.test(txt)) {
     const m = txt.match(/^\/project\s+new\s+(.+)$/i);
@@ -581,40 +561,31 @@ export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain
       const ideaM = tail.match(/idea\s*:\s*(.+)$/i);
       idea = ideaM ? ideaM[1].trim() : "";
     }
-    name = normName(name);
     if (!name) {
       await sendPlain(env, chatId, "Вкажи назву: /project new <name>");
       return true;
     }
 
     await createProject(env, userId, name, idea);
-    await sendPlain(env, chatId, `✅ Проєкт ${name} створено і активовано.\nОпиши коротко ідею — можеш додавати фото/файли.`);
-    // зручний автоперехід у режим «ідея»
-    const kv = pickKV(env);
-    await kv.put(UI_AWAIT_KEY(userId), "idea", { expirationTtl: 3600 });
-    await kv.put(UI_TMPNAME_KEY(userId), name, { expirationTtl: 3600 });
+    await sendPlain(env, chatId, `✅ Проєкт ${name} створено і активовано.`);
     return true;
   }
 
   // /project use <name>
   if (/^\/project\s+use\s+/i.test(txt)) {
-    const raw = txt.replace(/^\/project\s+use\s+/i, "").trim();
-    const nameReq = normName(raw);
-    if (!nameReq) {
+    const nameInput = txt.replace(/^\/project\s+use\s+/i, "").trim();
+    if (!nameInput) {
       await sendPlain(env, chatId, "Вкажи назву: /project use <name>");
       return true;
     }
     const all = await listProjects(env, userId);
-    // толерантний матч (без регістру/лапок/дужок)
-    const matched =
-      all.find((n) => normName(n).toLowerCase() === nameReq.toLowerCase()) ||
-      null;
-    if (!matched) {
-      await sendPlain(env, chatId, `Не знайдено: ${raw}`);
+    const target = all.find((n) => normName(n) === normName(nameInput));
+    if (!target) {
+      await sendPlain(env, chatId, `Не знайдено: ${nameInput}`);
       return true;
     }
-    await setCurrentProject(env, userId, matched);
-    await sendPlain(env, chatId, `Активний проєкт: ${matched}`);
+    await setCurrentProject(env, userId, target);
+    await sendPlain(env, chatId, `Активний проєкт: ${target}`);
     return true;
   }
 
@@ -640,8 +611,9 @@ export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain
       await sendPlain(env, chatId, "Активуй проєкт: /project use <name>");
       return true;
     }
-    const [, action, rest] =
-      txt.match(/^\/project\s+idea\s+(set|add)\s+([\s\S]+)$/i) || [];
+    const [, action, rest] = txt.match(
+      /^\/project\s+idea\s+(set|add)\s+([\s\S]+)$/i
+    ) || [];
     if (!rest) {
       await sendPlain(env, chatId, "Дай текст після команди.");
       return true;
@@ -671,20 +643,10 @@ export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain
     }
     const text = txt.replace(/^\/project\s+progress\s+add\s+/i, "").trim();
     if (!text) {
-      await sendPlain(
-        env,
-        chatId,
-        "Дай текст: /project progress add <що зроблено>"
-      );
+      await sendPlain(env, chatId, "Дай текст: /project progress add <що зроблено>");
       return true;
     }
-    await appendSection(
-      env,
-      userId,
-      cur,
-      "progress.md",
-      `- ${nowIso()} — ${text}`
-    );
+    await appendSection(env, userId, cur, "progress.md", `- ${nowIso()} — ${text}`);
     await sendPlain(env, chatId, "📝 Додано у прогрес.");
     return true;
   }
@@ -790,12 +752,11 @@ export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain
 
 // -------------------- створення проєкту (+ Drive bootstrap) --------------------
 async function createProject(env, userId, name, initialIdea) {
-  const clean = normName(name);
-  const meta = { name: clean, createdAt: nowIso() };
-  await saveMeta(env, userId, clean, meta);
+  const meta = { name, createdAt: nowIso() };
+  await saveMeta(env, userId, name, meta);
 
   const sections = {
-    "README.md": templateReadme(clean),
+    "README.md": templateReadme(name),
     "idea.md": templateIdea(initialIdea),
     "spec.md": templateSpec(),
     "connectors.md": templateConnectors(),
@@ -807,12 +768,12 @@ async function createProject(env, userId, name, initialIdea) {
   };
 
   for (const [fname, body] of Object.entries(sections)) {
-    await writeSection(env, userId, clean, fname, body);
+    await writeSection(env, userId, name, fname, body);
   }
 
   // Стартова структура на Drive (якщо вже підключений)
-  await driveBootstrapProject(env, userId, clean, sections).catch(() => {});
-  await setCurrentProject(env, userId, clean);
+  await driveBootstrapProject(env, userId, name, sections).catch(() => {});
+  await setCurrentProject(env, userId, name);
 }
 
 // -------------------- аналіз зображень для Codex --------------------
@@ -840,8 +801,8 @@ async function analyzeImageForCodex(env, { lang = "uk", imageBase64, question })
           ? `User asks: "${question}"`
           : `Користувач питає: "${question}"`)
       : lang.startsWith("en")
-      ? "Analyze this image for errors, code context and actionable steps."
-      : "Проаналізуй зображення: витягни помилки/контекст коду і дай кроки виправлення.";
+        ? "Analyze this image for errors, code context and actionable steps."
+        : "Проаналізуй зображення: витягни помилки/контекст коду і дай кроки виправлення.";
 
   const out = await askVision(env, order, userPrompt, {
     systemHint,
@@ -871,14 +832,10 @@ export async function handleCodexGeneration(env, ctx, helpers) {
 
   // нова назва проєкту
   if (awaiting === "proj_name" && textRaw) {
-    const name = normName(textRaw);
+    const name = textRaw.trim();
     await kv.delete(UI_AWAIT_KEY(userId));
     if (!name) {
-      await sendPlain(
-        env,
-        chatId,
-        "Пуста назва. Спробуй ще раз через меню."
-      );
+      await sendPlain(env, chatId, "Пуста назва. Спробуй ще раз через меню.");
       return;
     }
     await createProject(env, userId, name, "");
@@ -894,19 +851,16 @@ export async function handleCodexGeneration(env, ctx, helpers) {
 
   // вибір існуючого проєкту
   if (awaiting === "use_name" && textRaw) {
-    const raw = textRaw.trim();
+    const nameInput = textRaw.trim();
     await kv.delete(UI_AWAIT_KEY(userId));
     const all = await listProjects(env, userId);
-    const m =
-      all.find(
-        (n) => normName(n).toLowerCase() === normName(raw).toLowerCase()
-      ) || null;
-    if (!m) {
-      await sendPlain(env, chatId, `Не знайдено: ${raw}`);
+    const target = all.find((n) => normName(n) === normName(nameInput));
+    if (!target) {
+      await sendPlain(env, chatId, `Не знайдено: ${nameInput}`);
       return;
     }
-    await setCurrentProject(env, userId, m);
-    await sendPlain(env, chatId, `Активний проєкт: ${m}`);
+    await setCurrentProject(env, userId, target);
+    await sendPlain(env, chatId, `Активний проєкт: ${target}`);
     return;
   }
 
@@ -925,10 +879,11 @@ export async function handleCodexGeneration(env, ctx, helpers) {
       return;
     }
 
-    if (textRaw) await appendSection(env, userId, cur, "idea.md", `\n\n${textRaw.trim()}`);
+    if (textRaw)
+      await appendSection(env, userId, cur, "idea.md", `\n\n${textRaw.trim()}`);
 
     const photo = pickPhoto ? pickPhoto(msg) : null;
-    const doc   = msg?.document || null;
+    const doc = msg?.document || null;
     const voice = msg?.voice || null;
     const video = msg?.video || null;
 
@@ -943,7 +898,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
           cur,
           "assets",
         ]);
-        // Завантажуємо як multipart
+        // Завантаження multipart
         const resp = await fetch(url);
         if (!resp.ok) throw new Error("tg_file_fetch_failed");
         const buf = await resp.arrayBuffer();
@@ -965,7 +920,9 @@ export async function handleCodexGeneration(env, ctx, helpers) {
           { type: `multipart/related; boundary=${boundary}` }
         );
 
-        const urlUp = new URL("https://www.googleapis.com/upload/drive/v3/files");
+        const urlUp = new URL(
+          "https://www.googleapis.com/upload/drive/v3/files"
+        );
         urlUp.searchParams.set("uploadType", "multipart");
         urlUp.searchParams.set("fields", "id,name,webViewLink");
         const up = await driveFetch(env, userId, urlUp.toString(), {
@@ -981,7 +938,12 @@ export async function handleCodexGeneration(env, ctx, helpers) {
 
     const saved = [];
     if (photo?.file_id)
-      if (await saveAsset(photo.file_id, photo.name || `photo_${Date.now()}.jpg`))
+      if (
+        await saveAsset(
+          photo.file_id,
+          photo.name || `photo_${Date.now()}.jpg`
+        )
+      )
         saved.push("photo");
     if (doc?.file_id)
       if (await saveAsset(doc.file_id, doc.file_name || `doc_${Date.now()}`))
@@ -990,7 +952,12 @@ export async function handleCodexGeneration(env, ctx, helpers) {
       if (await saveAsset(voice.file_id, `voice_${voice.file_unique_id}.ogg`))
         saved.push("voice");
     if (video?.file_id)
-      if (await saveAsset(video.file_id, video.file_name || `video_${Date.now()}.mp4`))
+      if (
+        await saveAsset(
+          video.file_id,
+          video.file_name || `video_${Date.now()}.mp4`
+        )
+      )
         saved.push("video");
 
     if (saved.length) {
@@ -1023,8 +990,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
   const ph = pickPhoto ? pickPhoto(msg) : null;
   if (ph?.file_id) {
     const url = await tgFileUrl(env, ph.file_id);
-    const b64 =
-      urlToBase64 ? await urlToBase64(url) : await toBase64FromUrl(url);
+    const b64 = urlToBase64 ? await urlToBase64(url) : await toBase64FromUrl(url);
     const analysis = await analyzeImageForCodex(env, {
       lang,
       imageBase64: b64,
