@@ -343,7 +343,7 @@ export async function handleTelegramWebhook(req, env) {
     const chatId = cq?.message?.chat?.id;
     const userId = cq?.from?.id;
 
-    // спершу спробуємо обробити UI Codex
+    // Спершу пробуємо обробити UI Codex (створення/вибір проєкту, статус тощо)
     if (await getCodexMode(env, userId)) {
       const handled = await handleCodexUi(
         env,
@@ -364,7 +364,7 @@ export async function handleTelegramWebhook(req, env) {
       }
     }
 
-    // за замовчуванням просто підтвердимо callback
+    // За замовчуванням просто підтвердимо callback
     if (token) {
       await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
         method: "POST",
@@ -474,7 +474,7 @@ export async function handleTelegramWebhook(req, env) {
     await setCodexMode(env, userId, true);
     await clearCodexMem(env, userId);
 
-    // одне повідомлення з inline-меню Codex
+    // Одне повідомлення з інлайн-UI Codex (кнопки + force-reply, якщо потрібно)
     await sendPlain(
       env,
       chatId,
@@ -622,7 +622,7 @@ export async function handleTelegramWebhook(req, env) {
           sendDocument,
           startPuzzleAnimation,
           editMessageText,
-          // для збереження медіа у ідеї:
+          // для збереження медіа/артефактів у «ідеї»/папках проєкту:
           driveSaveFromUrl,
           getUserTokens,
         }
