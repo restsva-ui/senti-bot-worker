@@ -22,7 +22,17 @@ const PROJ_PREFIX_LIST = (uid)            => `codex:project:meta:${uid}:`;      
 
 // UI-стани (простенька FSM у KV)
 const UI_AWAIT_KEY   = (uid)              => `codex:ui:await:${uid}`;                            // none|proj_name|use_name|idea
-const UI_TMPNAME_KEY = (uid)              => `codex:ui:tmpname:${uid}`;                          // тимчасова назва проєкту
+const UI_TMPNAME_KEY = (uid)              => `codex:ui:tmpname:${uid}`;
+
+// Назва без лапок/дужок/кутових скобок, нормалізована для порівняння
+function normName(s = "") {
+  return String(s || "").replace(/[<>\\"'`]/g, "").replace(/^\s+|\s+$/g, "").toLowerCase();
+}
+function sanitizeProjectName(s = "") {
+  // те ж саме, але зберігаємо видиму форму без < >
+  return String(s || "").replace(/[<>\\"'`]/g, "").trim();
+}
+                          // тимчасова назва проєкту
 
 // callback data (inline)
 export const CB = {
