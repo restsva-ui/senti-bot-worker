@@ -75,7 +75,7 @@ async function listProjects(env, userId) {
   let cursor = undefined;
   do {
     const res = await kv.list({ prefix: PROJ_PREFIX_LIST(userId), cursor });
-    for (const k of res.keys || []) {
+    for (const k of (res.keys || [])) {
       const parts = k.name.split(":"); // codex:project:meta:<uid>:<name>
       const name = parts.slice(-1)[0];
       if (name && !out.includes(name)) out.push(name);
@@ -344,7 +344,60 @@ export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain
   // не наша команда
   return false;
 }
-// -------------------- генерація/аналіз у Codex з урахуванням проєкту --------------------
+
+// -------------------- утиліти: інтенти, код-блоки, файли --------------------
+function detectUserIntent(text = "") {
+  const s = String(text || "").toLowerCase();
+  const wantFile = /\b(створи|зроби|create|generate|make)\b/.test(s) || /\b(file|файл)\b/.test(s);
+  const wantExtract = /структур|structure|extract structure/.test(s);
+  const wantAnalyze = /аналіз|analy(s|z)e|розбір|explain|diagnos/.test(s);
+  return { wantFile, wantExtract, wantAnalyze };
+}
+
+function extractFirstCodeBlock(md = "") {
+  const rx = /```([\w+-]*)\s*([\s\S]*?)```/m;
+  const m = md.match(rx);
+  if (!m) return null;
+  return { lang: (m[1] || "").toLowerCase(), code: m[2] || "" };
+}
+function langToExt(lang = "") {
+  const map = {
+    html: "html", js: "js", javascript: "js", ts: "ts", tsx: "tsx",
+    css: "css", json: "json", yaml: "yaml", yml: "yml",
+    py: "py", python: "py", md: "md", markdown: "md",
+    sh: "sh", bash: "sh", zsh: "sh", c: "c", cpp: "cpp", h: "h", hpp: "hpp",
+    java: "java", go: "go", rs: "rs", rust: "rs", php: "php",
+    sql: "sql", kt: "kt", kotlin: "kt", swift: "swift",
+    vue: "vue", svelte: "svelte", jsx: "jsx",
+  };
+  return map[lang] || (lang ? lang : "txt");
+}
+function ensureMobileMeta(html) {
+  if (!/<!doctype html>/i.test(html)) return html; // не чіпаємо фрагменти
+  if (/name=["']viewport["']/i.test(html)) return html;
+  return html.replace(/<head>/i, `<head>\n<meta name="viewport" content="width=device-width, initial-scale=1">`);
+}
+
+// -------------------- зірочки енергії --------------------
+async function ensureEnergy(env, helpers, userId, chatId, kind /* "text" | "image" */) {
+  const { getEnergy, spendEnergy, energyLinks, sendPlain } = helpers;
+  if (!getEnergy || !spendEnergy) return true; // якщо не передали — не блокуємо
+
+  const cur = await getEnergy(env, userId);
+  const need =
+    kind === "image" ? Number(cur.costImage ?? 5)
+                     : Number(cur.costCodexText ?? cur.costText ?? 2);
+
+  if ((cur.energy ?? 0) < need) {
+    const links = energyLinks?.(env, userId);
+    await sendPlain(env, chatId, `⚡ Недостатньо енергії (${cur.energy ?? 0}/${need}). Поповнення: ${links?.energy || "-"}`);
+    return false;
+  }
+  await spendEnergy(env, userId, need, kind === "image" ? "codex_image" : "codex_text");
+  return true;
+}
+
+// -------------------- візійний аналіз --------------------
 async function toBase64FromUrl(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`fetch image ${r.status}`);
@@ -396,41 +449,75 @@ export async function handleCodexGeneration(env, ctx, helpers) {
   if (proj.name) systemBlocks.push(proj.hint);
   const systemHint = systemBlocks.join("\n\n");
 
-  // 2) Якщо прийшло фото — робимо аналітику (без HTML)
+  // 2) Якщо прийшло фото — аналіз (і файл)
   const ph = pickPhoto ? pickPhoto(msg) : null;
   if (ph?.file_id) {
+    if (!(await ensureEnergy(env, helpers, userId, chatId, "image"))) return;
+
     const url = await tgFileUrl(env, ph.file_id);
     const b64 = urlToBase64 ? await urlToBase64(url) : await toBase64FromUrl(url);
-    const analysis = await analyzeImageForCodex(env, { lang, imageBase64: b64, question: textRaw || "" });
 
-    // лог: додамо у progress.md якщо є активний проєкт
+    const intent = detectUserIntent(textRaw || "");
+    const analysis = await analyzeImageForCodex(env, { lang, imageBase64: b64, question: textRaw || "" });
+    const fname = intent.wantExtract ? "codex.extract.md" : "codex.analyze.md";
+
     if (proj.name) {
-      await appendSection(env, userId, proj.name, "progress.md", `- ${nowIso()} — Аналіз зображення: коротко: ${analysis.slice(0,120)}…`);
+      await appendSection(env, userId, proj.name, "progress.md", `- ${nowIso()} — Аналіз зображення: ${analysis.slice(0,120)}…`);
     }
 
     await sendPlain(env, chatId, analysis);
+    if (sendDocument) {
+      await sendDocument(env, chatId, fname, analysis, "Ось готовий файл 👇");
+    }
     return;
   }
 
-  // 3) Текстове завдання → просимо модель з урахуванням ідеї/специфікації
-  const order = String(env.MODEL_ORDER || "").trim()
-    || "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free";
+  // 3) Текстове завдання
+  if (!(await ensureEnergy(env, helpers, userId, chatId, "text"))) return;
 
-  // Якщо ідея LOCKED і запит схоже суперечить (дуже просто: містить "зміни ідеї"), відмовляємось
+  // Якщо ідея LOCKED і запит суперечить — відмова
   if (proj.locked && /зміни\s+іде[їі]|change\s+idea/i.test(textRaw || "")) {
     await sendPlain(env, chatId, "Не впевнений — суперечить поточній зафіксованій ідеї (LOCKED). Розблокуй: /project idea unlock.");
     return;
   }
+
+  const order = String(env.MODEL_ORDER || "").trim()
+    || "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free";
 
   const res = await askAnyModel(env, order, textRaw || "Продовжуй", { systemHint, temperature: 0.2 });
   const outText = typeof res === "string"
     ? res
     : (res?.choices?.[0]?.message?.content || res?.text || JSON.stringify(res));
 
+  const intent = detectUserIntent(textRaw || "");
+
   // авто-лог у прогрес
   if (proj.name) {
     await appendSection(env, userId, proj.name, "progress.md", `- ${nowIso()} — Відповідь Codex: ${ (outText||"").slice(0,120) }…`);
   }
 
+  // Віддати як текст
   await sendPlain(env, chatId, outText || "Не впевнений.");
+
+  // За потреби — зробити артефакт-файл
+  if (intent.wantFile && sendDocument) {
+    const block = extractFirstCodeBlock(outText || "");
+    let filename = "codex.txt";
+    let content = outText || "";
+
+    if (block) {
+      const ext = langToExt(block.lang);
+      filename = `codex.${ext}`;
+      content = block.code;
+
+      if (ext === "html") {
+        content = ensureMobileMeta(content);
+      }
+    } else {
+      // немає код-блоку → кладемо як md
+      filename = "codex.md";
+    }
+
+    await sendDocument(env, chatId, filename, content, "Ось готовий файл 👇");
+  }
 }
