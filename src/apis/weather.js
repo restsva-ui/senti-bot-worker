@@ -24,10 +24,9 @@ function normalizePlace(raw = "") {
 
   // часті українські локативи -> називний
   const uaCases = [
-    [/(єві)$/i, "їв"], // Києві -> Київ
-    [/(ові)$/i, "ів"], // Львові/Харкові -> Львів/Харків
-    [/ниці$/i, "ниця"], // Вінниці -> Вінниця
-    [/ті$/i, "та"], // Полтаві -> Полтава (грубо, але ок)
+    [/(єві)$/i, "їв"],     // Києві -> Київ
+    [/(ові)$/i, "ів"],     // Львові/Харкові -> Львів/Харків
+    [/ниці$/i, "ниця"],    // Вінниці -> Вінниця
   ];
   for (const [rx, rep] of uaCases) {
     if (rx.test(s)) {
@@ -38,10 +37,12 @@ function normalizePlace(raw = "") {
 
   const SPECIAL = {
     "києві": "київ",
+    "киеве": "киев",
     "львові": "львів",
     "харкові": "харків",
     "дніпрі": "дніпро",
     "одесі": "одеса",
+    "черкасах": "черкаси",
   };
   if (SPECIAL[s.toLowerCase()]) s = SPECIAL[s.toLowerCase()];
 
@@ -59,9 +60,7 @@ function parsePlaceFromText(text = "") {
   let chunk = m?.[1] || s;
 
   // якщо є " in/в/у/à/au/en/bei " — беремо частину ПІСЛЯ останнього входження
-  const split = chunk.split(
-    /\s(?:in|at|en|bei|à|au|aux|в|у)\s/i
-  );
+  const split = chunk.split(/\s(?:in|at|en|bei|à|au|aux|в|у)\s/i);
   if (split.length > 1) chunk = split[split.length - 1];
 
   // прибираємо слова часу
@@ -203,6 +202,56 @@ function weatherDeepLink(lat, lon) {
   const ll = `${Number(lat).toFixed(3)},${Number(lon).toFixed(3)},9`;
   return `https://www.windy.com/?${ll}`;
 }
+
+/** Вибір найкрачого населеного пункту з результатів геокодера */
+function pickBestLocation(results, place) {
+  if (!Array.isArray(results) || !results.length) return null;
+
+  const norm = String(place || "").toLowerCase();
+
+  // 1) точний матч по назві
+  let candidates = results.filter(
+    (r) => String(r.name || "").toLowerCase() === norm
+  );
+
+  // 2) якщо немає — беремо ті, що починаються з назви
+  if (!candidates.length) {
+    candidates = results.filter((r) =>
+      String(r.name || "").toLowerCase().startsWith(norm)
+    );
+  }
+
+  // 3) якщо досі пусто — беремо всі
+  if (!candidates.length) candidates = results;
+
+  let best = candidates[0];
+
+  for (const r of candidates) {
+    const pop = Number(r.population || 0);
+    const bestPop = Number(best.population || 0);
+
+    const country = String(r.country_code || r.country || "").toUpperCase();
+    const bestCountry = String(
+      best.country_code || best.country || ""
+    ).toUpperCase();
+
+    const isUa = country === "UA" || country === "UKR";
+    const bestIsUa = bestCountry === "UA" || bestCountry === "UKR";
+
+    // спочатку віддаємо перевагу Україні, якщо запит по-українськи
+    if (isUa && !bestIsUa) {
+      best = r;
+      continue;
+    }
+
+    // далі — за найбільшою population
+    if (isUa === bestIsUa && pop > bestPop) {
+      best = r;
+    }
+  }
+
+  return best;
+}
 /** Прогноз за координатами */
 export async function weatherSummaryByCoords(lat, lon, lang = "uk") {
   const url =
@@ -252,13 +301,9 @@ export async function weatherSummaryByPlace(env, userText, lang = "uk") {
     };
   }
 
-  const normPlace = place.toLowerCase();
-  // намагаємось знайти максимально точний матч за назвою
-  let best =
-    results.find((r) => (r.name || "").toLowerCase() === normPlace) ||
-    results[0];
-
+  const best = pickBestLocation(results, place) || results[0];
   const { latitude: lat, longitude: lon, name } = best;
+
   const base = await weatherSummaryByCoords(lat, lon, lang);
 
   const preMap = {
