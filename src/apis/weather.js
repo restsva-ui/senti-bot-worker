@@ -1,7 +1,7 @@
 // src/apis/weather.js
 //
 // Open-Meteo: геокодер + поточна погода.
-// Повертає короткий текст і стрілку ↗︎ (HTML) на Windy по координатах міста.
+// Повертає короткий текст і стрілку ↗︎ (HTML) на Windy по_COORDINATAХ міста.
 //
 // Головні фікси:
 //  - жодних шаблонних змінних у одинарних лапках (лише `backticks`);
@@ -16,14 +16,15 @@ const OM_FORECAST = "https://api.open-meteo.com/v1/forecast";
 function normalizePlace(raw = "") {
   let s = String(raw || "").trim();
 
-  // прибираємо лапки/зайву пунктуацію/подвійні пробіли
-  s = s.replace(/[«»“”"']/g, "").replace(/\s+/g, " ").replace(/[.,;:!?]$/g, "");
+  // Прибираємо зайві лапки / крапки / коми в кінці
+  s = s.replace(/^[«"“]+/, "").replace(/[»"”.,!?\s]+$/g, "");
 
   // локатив → називний (найчастіші)
   s = s
     .replace(/Вінниці$/i, "Вінниця")
     .replace(/Києві$/i, "Київ")
     .replace(/Львові$/i, "Львів")
+    .replace(/Відні$/i, "Відень")
     .replace(/Харкові$/i, "Харків")
     .replace(/Дніпрі$/i, "Дніпро");
 
@@ -62,6 +63,7 @@ function parsePlaceFromText(text = "") {
 export function weatherIntent(text = "") {
   return /(погод|weather|wetter|météo|meteo|forecast)/i.test(String(text || ""));
 }
+
 /** Геокодер Open-Meteо */
 async function geocode(place, lang = "uk") {
   const url =
@@ -89,11 +91,10 @@ async function smartGeocode(place, lang = "uk") {
   }
 
   // останній шанс — англійська
-  res = await geocode(place, "en");
-  return res;
+  const enRes = await geocode(place, "en");
+  return Array.isArray(enRes) ? enRes : [];
 }
 
-/** Безпечний друк числа */
 function fmt(n) {
   const v = Number(n);
   return Number.isFinite(v) ? String(Math.round(v)) : "—";
@@ -105,7 +106,7 @@ function summaryByCode(code, lang = "uk") {
   let icon = "🌤️";
   let desc = {
     uk: "хмарно з проясненнями",
-    ru: "переменная облачность",
+    ru: "облачно с прояснениями",
     en: "partly cloudy",
     de: "wolkig",
     fr: "nuageux",
@@ -141,27 +142,32 @@ function windyLink(lat, lon) {
   const ll = `${Number(lat).toFixed(3)},${Number(lon).toFixed(3)},9`;
   return `https://www.windy.com/?${ll}`;
 }
+
 /** Прогноз за координатами (короткий опис) */
 export async function weatherSummaryByCoords(lat, lon, lang = "uk") {
   const url =
     `${OM_FORECAST}?latitude=${lat}&longitude=${lon}` +
-    `&current=temperature_2m,weather_code,wind_speed_10m&timezone=auto`;
+    `&current_weather=true&timezone=auto`;
 
   const r = await fetch(url);
   const data = await r.json().catch(() => null);
-  if (!data) return { text: "⚠️ Не вдалося отримати погоду." };
+  const cw = data?.current_weather;
+  if (!cw) return { text: "⚠️ Не вдалося отримати погоду." };
 
-  const temp = fmt(data?.current?.temperature_2m);
-  const wind = fmt(data?.current?.wind_speed_10m);
-  const { icon, text } = summaryByCode(data?.current?.weather_code, lang);
+  const temp = fmt(cw.temperature);
+  const wind = fmt(cw.windspeed);
+  const { icon, text } = summaryByCode(cw.weathercode, lang);
 
   // ВАЖЛИВО: тільки шаблонні рядки в backticks — без одинарних лапок!
   const line = `${icon} ${text}. Температура близько ${temp}°C. Вітер ${wind} м/с.`;
   const arrow = `<a href="${windyLink(lat, lon)}">↗︎</a>`;
 
-  return { text: `${line}\n${arrow}`, mode: "HTML", timezone: data.timezone || "UTC" };
+  return {
+    text: `${line}\n${arrow}`,
+    mode: "HTML",
+    timezone: data?.timezone || data?.timezone_abbreviation || "UTC",
+  };
 }
-
 /** Прогноз за назвою населеного пункту (з фрази користувача) */
 export async function weatherSummaryByPlace(env, userText, lang = "uk") {
   const placeRaw = parsePlaceFromText(userText);
