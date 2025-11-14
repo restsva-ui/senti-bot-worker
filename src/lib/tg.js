@@ -33,15 +33,19 @@ export const CB = {
 /* ───────────────── ГОЛОВНА КЛАВІАТУРА (reply) ───────────── */
 /**
  * isAdmin=true  → показуємо Senti + Codex + Admin
- * isAdmin=false → прибираємо клавіатуру повністю
+ * isAdmin=false → показуємо Senti + Codex (без Admin)
+ *
+ * Так усі користувачі бачать основні функції,
+ * а адмін отримує додаткову кнопку Admin.
  */
 export const mainKeyboard = (isAdmin = false) => {
-  if (!isAdmin) {
-    return { remove_keyboard: true };
-  }
   const rows = [];
+  // Базовий рядок для всіх: Senti + Codex
   rows.push([{ text: BTN_SENTI }, { text: BTN_CODEX }]);
-  rows.push([{ text: BTN_ADMIN }]);
+  // Другий рядок тільки для адмінів
+  if (isAdmin) {
+    rows.push([{ text: BTN_ADMIN }]);
+  }
   return { keyboard: rows, resize_keyboard: true };
 };
 
@@ -97,92 +101,88 @@ export const energyLinks = (env, userId) => {
   const base = abs(env, "/admin/energy");
   return {
     energy: `${base}?u=${encodeURIComponent(userId)}`,
-    learn: abs(env, "/admin/learn"),
-    checklist: abs(env, "/admin/checklist"),
   };
 };
+/* ───────────────── TG SEND HELPERS ─────────────── */
 
-/* ───────────────── РОЗБИВКА ПОВІДОМЛЕНЬ ─────────── */
-function splitForTelegram(text, chunk = 3900) {
-  const s = String(text ?? "");
-  if (s.length <= chunk) return [s];
-  const out = [];
-  for (let i = 0; i < s.length; i += chunk) out.push(s.slice(i, i + chunk));
-  return out;
-}
-
-/* ───────────────── ВІДПРАВКА ТЕКСТУ ─────────────── */
 export async function sendPlain(env, chatId, text, extra = {}) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
-  const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const chunks = splitForTelegram(text);
-  for (const part of chunks) {
-    const body = {
-      chat_id: chatId,
-      text: part,
-      disable_web_page_preview: true,
-    };
-    if (extra.parse_mode) body.parse_mode = extra.parse_mode;
-    if (extra.reply_markup) body.reply_markup = extra.reply_markup;
-    await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  }
+  if (!token || !chatId || !text) return;
+  const body = {
+    chat_id: chatId,
+    text,
+    ...extra,
+  };
+  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(() => {});
 }
 
-/* ───────────────── ЗАПИТ ЛОКАЦІЇ ─────────────── */
+/** Клавіатура-запит локації (для погоди) */
 export const askLocationKeyboard = () => ({
   keyboard: [[{ text: "📍 Надіслати локацію", request_location: true }]],
   resize_keyboard: true,
   one_time_keyboard: true,
 });
 
-/* ───────────────── ДІЇ ЧАТУ ─────────────── */
-export async function sendChatAction(env, chatId, action = "typing") {
+/** Базова обгортка для sendChatAction */
+export async function sendChatAction(env, chatId, action) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+  if (!token || !chatId || !action) return;
   await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, action }),
-  });
-}
-export async function withTyping(env, chatId, fn) {
-  await sendChatAction(env, chatId, "typing");
-  return await fn();
-}
-export async function withUploading(env, chatId, fn) {
-  await sendChatAction(env, chatId, "upload_document");
-  return await fn();
+  }).catch(() => {});
 }
 
-/* ───────────────── Спінер ─────────────── */
-export async function startSpinner(env, chatId, base = "Думаю над відповіддю") {
+export const withTyping = (env, chatId, fn) =>
+  withChatAction(env, chatId, "typing", fn);
+export const withUploading = (env, chatId, fn) =>
+  withChatAction(env, chatId, "upload_document", fn);
+
+/** Спіннер (periodic sendChatAction) для довгих операцій */
+async function withChatAction(env, chatId, action, fn) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+  if (!token || !chatId || !action) return fn();
+
   let alive = true;
-  let dot = 0;
 
-  const msg = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text: base }),
-  })
-    .then((r) => r.json())
-    .catch(() => null);
-
-  const timer = setInterval(async () => {
-    if (!alive || !msg?.result?.message_id) return;
-    dot = (dot + 1) % 4;
-    const text = base + ".".repeat(dot);
-    await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
+  // Тікер, поки alive=true
+  const timer = setInterval(() => {
+    if (!alive) return;
+    fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        message_id: msg.result.message_id,
-        text,
-      }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, action }),
+    }).catch(() => {});
+  }, 4500);
+
+  try {
+    return await fn();
+  } finally {
+    alive = false;
+    clearInterval(timer);
+  }
+}
+
+/** Обгортка для "спінера" з можливістю зупинки ззовні */
+export async function startSpinner(env, chatId, action = "typing") {
+  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+  if (!token || !chatId || !action) {
+    return { stop: async () => {} };
+  }
+
+  let alive = true;
+
+  const timer = setInterval(() => {
+    if (!alive) return;
+    fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, action }),
     }).catch(() => {});
   }, 1400);
 
