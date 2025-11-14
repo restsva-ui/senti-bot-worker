@@ -1,42 +1,29 @@
 // src/apis/weather.js
+//
 // Open-Meteo + розумний парсер міста.
-// Короткий текст + мінімалістичне посилання на карту (Windy).
+// Відповідь містить короткий текст і мінімалістичну клікабельну стрілку ↗︎ (HTML).
 
 const OM_GEOCODE = "https://geocoding-api.open-meteo.com/v1/search";
 const OM_FORECAST = "https://api.open-meteo.com/v1/forecast";
 
-/**
- * Грубий детектор мови за текстом запиту.
- * Потрібен, щоб на російський запит відповідати російською, а на укр — українською.
- */
-function detectLangFromText(text = "", fallback = "uk") {
+/** Просте визначення мови з тексту (uk / ru / en / de / fr) */
+function detectLangFromText(text = "") {
   const s = String(text || "").toLowerCase();
 
-  // явні російські маркери
-  if (
-    /[ыэё]/.test(s) ||
-    /\b(какая|сейчас|сегодня|завтра|городе)\b/.test(s)
-  ) {
-    return "ru";
-  }
+  // явні українські символи
+  if (/[іїєґ]/i.test(s)) return "uk";
+  // явні російські символи
+  if (/[ыэёъ]/i.test(s)) return "ru";
 
-  // явні українські маркери
-  if (
-    /[іїєґ]/.test(s) ||
-    /\b(яка|сьогодні|завтра|місті|городі)\b/.test(s)
-  ) {
-    return "uk";
-  }
+  // ключові слова
+  if (/weather|today|tomorrow/i.test(s)) return "en";
+  if (/wetter|heute|morgen/i.test(s)) return "de";
+  if (/météo|meteo|aujourd'?hui|demain/i.test(s)) return "fr";
 
-  // простий хук на латинку
-  if (/[a-z]/.test(s)) return "en";
-
-  return (fallback || "uk").slice(0, 2);
+  return null;
 }
 
-/**
- * ---------- нормалізація топонімів (укр./ru/en/de/fr) ----------
- */
+/** ---------- нормалізація топонімів (укр./ru/en/de/fr) ---------- */
 function normalizePlace(raw = "") {
   let s = String(raw || "").trim();
 
@@ -57,6 +44,7 @@ function normalizePlace(raw = "") {
     [/(єві)$/i, "їв"], // Києві -> Київ
     [/(ові)$/i, "ів"], // Львові/Харкові -> Львів/Харків
     [/ниці$/i, "ниця"], // Вінниці -> Вінниця
+    [/ті$/i, "та"], // Полтаві -> Полтава (грубо, але ок)
   ];
   for (const [rx, rep] of uaCases) {
     if (rx.test(s)) {
@@ -65,23 +53,31 @@ function normalizePlace(raw = "") {
     }
   }
 
-  const SPECIAL = {
+  // спец-кейси українських форм
+  const SPECIAL_UA = {
     "києві": "київ",
-    "киеве": "киев",
     "львові": "львів",
     "харкові": "харків",
     "дніпрі": "дніпро",
     "одесі": "одеса",
-    "черкасах": "черкаси",
   };
-  if (SPECIAL[s.toLowerCase()]) s = SPECIAL[s.toLowerCase()];
+  if (SPECIAL_UA[s.toLowerCase()]) s = SPECIAL_UA[s.toLowerCase()];
+
+  // спец-кейси російських форм у місцевому відмінку
+  const SPECIAL_RU = {
+    "киеве": "киев",
+    "львове": "львов",
+    "одессе": "одесса",
+    "виннице": "винница",
+    "днепре": "днепр",
+    "харькове": "харьков",
+  };
+  if (SPECIAL_RU[s.toLowerCase()]) s = SPECIAL_RU[s.toLowerCase()];
 
   return s;
 }
 
-/**
- * Витягнути місто з фрази (багатомовно)
- */
+/** Витягнути місто з фрази (багатомовно) */
 function parsePlaceFromText(text = "") {
   const s = String(text || "").trim();
 
@@ -92,7 +88,9 @@ function parsePlaceFromText(text = "") {
   let chunk = m?.[1] || s;
 
   // якщо є " in/в/у/à/au/en/bei " — беремо частину ПІСЛЯ останнього входження
-  const split = chunk.split(/\s(?:in|at|en|bei|à|au|aux|в|у)\s/i);
+  const split = chunk.split(
+    /\s(?:in|at|en|bei|à|au|aux|в|у)\s/i
+  );
   if (split.length > 1) chunk = split[split.length - 1];
 
   // прибираємо слова часу
@@ -111,22 +109,18 @@ export function weatherIntent(text = "") {
   const s = String(text || "").toLowerCase();
   return /(погод|weather|wetter|météo|meteo|temps)/i.test(s);
 }
-/**
- * Геокодер Open-Meteo
- */
+
+/** Геокодер Open-Meteo */
 async function geocode(place, lang = "uk") {
   const url =
     `${OM_GEOCODE}?name=${encodeURIComponent(place)}` +
     `&count=10&language=${encodeURIComponent(lang)}&format=json`;
-
   const r = await fetch(url);
   const data = await r.json().catch(() => null);
   return Array.isArray(data?.results) ? data.results : [];
 }
 
-/**
- * Smart-геокодер (робить кілька автопідстановок)
- */
+/** Smart-геокодер (робить кілька автопідстановок) */
 async function smartGeocode(place, lang = "uk") {
   let res = await geocode(place, lang);
   if (res.length) return res;
@@ -146,30 +140,26 @@ async function smartGeocode(place, lang = "uk") {
   return res;
 }
 
-/**
- * Короткий опис за поточного стану погоди
- */
+/** Короткий опис за поточного стану погоди (локалізований текст) */
 function summarizeWeather(json, lang = "uk") {
   const cw = json?.current_weather || {};
   const curT = cw.temperature;
   const code = cw.weathercode;
   const wind = cw.windspeed;
 
-  const W = Number(code);
-  const lang2 = (lang || "uk").slice(0, 2);
-
   let icon = "🌤️";
-  let descTable = {
+  let desc = {
     uk: "хмарно з проясненнями",
     ru: "переменная облачность",
     en: "partly cloudy",
     de: "wolkig",
     fr: "nuageux",
   };
+  const W = Number(code);
 
   if ([0].includes(W)) {
     icon = "☀️";
-    descTable = {
+    desc = {
       uk: "сонячно",
       ru: "солнечно",
       en: "sunny",
@@ -177,7 +167,8 @@ function summarizeWeather(json, lang = "uk") {
       fr: "ensoleillé",
     };
   } else if ([45, 48].includes(W)) {
-    descTable = {
+    icon = "🌫️";
+    desc = {
       uk: "туман",
       ru: "туман",
       en: "fog",
@@ -185,7 +176,8 @@ function summarizeWeather(json, lang = "uk") {
       fr: "brouillard",
     };
   } else if ([51, 53, 55, 56, 57].includes(W)) {
-    descTable = {
+    icon = "🌦️";
+    desc = {
       uk: "мряка/дощ",
       ru: "морось/дождь",
       en: "drizzle/rain",
@@ -193,7 +185,8 @@ function summarizeWeather(json, lang = "uk") {
       fr: "bruine/pluie",
     };
   } else if ([61, 63, 65, 80, 81, 82].includes(W)) {
-    descTable = {
+    icon = "🌧️";
+    desc = {
       uk: "дощ",
       ru: "дождь",
       en: "rain",
@@ -202,7 +195,7 @@ function summarizeWeather(json, lang = "uk") {
     };
   } else if ([71, 73, 75, 77, 85, 86].includes(W)) {
     icon = "❄️";
-    descTable = {
+    desc = {
       uk: "сніг",
       ru: "снег",
       en: "snow",
@@ -211,7 +204,7 @@ function summarizeWeather(json, lang = "uk") {
     };
   } else if ([95, 96, 99].includes(W)) {
     icon = "⛈️";
-    descTable = {
+    desc = {
       uk: "гроза",
       ru: "гроза",
       en: "thunderstorm",
@@ -220,90 +213,58 @@ function summarizeWeather(json, lang = "uk") {
     };
   }
 
-  const desc = descTable[lang2] || descTable.uk;
+  const lang2 = (lang || "uk").slice(0, 2);
 
-  const T = {
-    uk: { temp: "Температура близько", wind: "Вітер", unitWind: "м/с" },
-    ru: { temp: "Температура около", wind: "Ветер", unitWind: "м/с" },
-    en: { temp: "Temperature around", wind: "Wind", unitWind: "m/s" },
-    de: { temp: "Temperatur etwa", wind: "Wind", unitWind: "m/s" },
-    fr: { temp: "Température autour de", wind: "Vent", unitWind: "m/s" },
-  };
-  const t = T[lang2] || T.uk;
+  const phrase = {
+    uk: {
+      temp: (x) => `Температура близько ${x}°C`,
+      wind: (x) => `Вітер ${x} м/с`,
+    },
+    ru: {
+      temp: (x) => `Температура около ${x}°C`,
+      wind: (x) => `Ветер ${x} м/с`,
+    },
+    en: {
+      temp: (x) => `Temperature around ${x}°C`,
+      wind: (x) => `Wind ${x} m/s`,
+    },
+    de: {
+      temp: (x) => `Temperatur etwa ${x}°C`,
+      wind: (x) => `Wind ${x} m/s`,
+    },
+    fr: {
+      temp: (x) => `Température autour de ${x}°C`,
+      wind: (x) => `Vent ${x} m/s`,
+    },
+  }[lang2] || phraseFallback();
 
-  const parts = [`${icon} ${desc}`];
-
-  if (Number.isFinite(curT)) {
-    parts.push(`${t.temp} ${Math.round(curT)}°C`);
+  function phraseFallback() {
+    return {
+      temp: (x) => `Температура близько ${x}°C`,
+      wind: (x) => `Вітер ${x} м/с`,
+    };
   }
-  if (Number.isFinite(wind)) {
-    parts.push(`${t.wind} ${Math.round(wind)} ${t.unitWind}`);
-  }
+
+  const d = (m) => desc[m] || desc.uk;
+
+  const tVal = Number.isFinite(curT) ? Math.round(curT) : null;
+  const wVal = Number.isFinite(wind) ? Math.round(wind) : null;
+
+  const parts = [`${icon} ${d(lang2)}`];
+  if (tVal !== null) parts.push(phrase.temp(tVal));
+  if (wVal !== null) parts.push(phrase.wind(wVal));
 
   return parts.join(". ") + ".";
 }
 
-/**
- * Допоміжне: стабільне погодне посилання
- */
+/** Допоміжне: стабільне погодне посилання */
 function weatherDeepLink(lat, lon) {
-  // Windy: формат "?lat,lon,zoom"
+  // Windy: стабільний формат "?lat,lon,zoom"
   const ll = `${Number(lat).toFixed(3)},${Number(lon).toFixed(3)},9`;
   return `https://www.windy.com/?${ll}`;
 }
 
-/**
- * Вибір найкращого населеного пункту з результатів геокодера
- */
-function pickBestLocation(results, place) {
-  if (!Array.isArray(results) || !results.length) return null;
-
-  const norm = String(place || "").toLowerCase();
-
-  // 1) точний матч по назві
-  let candidates = results.filter(
-    (r) => String(r.name || "").toLowerCase() === norm
-  );
-
-  // 2) якщо немає — беремо ті, що починаються з назви
-  if (!candidates.length) {
-    candidates = results.filter((r) =>
-      String(r.name || "").toLowerCase().startsWith(norm)
-    );
-  }
-
-  // 3) якщо досі пусто — беремо всі
-  if (!candidates.length) candidates = results;
-
-  let best = candidates[0];
-
-  for (const r of candidates) {
-    const pop = Number(r.population || 0);
-    const bestPop = Number(best.population || 0);
-
-    const country = String(r.country_code || r.country || "").toUpperCase();
-    const bestCountry = String(best.country_code || best.country || "").toUpperCase();
-
-    const isUa = country === "UA" || country === "UKR";
-    const bestIsUa = bestCountry === "UA" || bestCountry === "UKR";
-
-    // спочатку віддаємо перевагу Україні, якщо запит по-українськи
-    if (isUa && !bestIsUa) {
-      best = r;
-      continue;
-    }
-
-    // далі — за найбільшою population
-    if (isUa === bestIsUa && pop > bestPop) {
-      best = r;
-    }
-  }
-
-  return best;
-}
-/**
- * Прогноз за координатами
- */
+/** Прогноз за координатами */
 export async function weatherSummaryByCoords(lat, lon, lang = "uk") {
   const url =
     `${OM_FORECAST}?latitude=${encodeURIComponent(lat)}` +
@@ -312,22 +273,17 @@ export async function weatherSummaryByCoords(lat, lon, lang = "uk") {
 
   const r = await fetch(url);
   const data = await r.json().catch(() => null);
-
   if (!data || !data.current_weather) {
     return {
-      text: lang.startsWith("ru")
-        ? "⚠️ Не удалось получить погоду."
-        : lang.startsWith("en")
-        ? "⚠️ Failed to fetch weather."
-        : "⚠️ Не вдалося отримати погоду.",
+      text: lang.startsWith("uk")
+        ? "⚠️ Не вдалося отримати погоду."
+        : "⚠️ Failed to fetch weather.",
     };
   }
 
   const textCore = summarizeWeather(data, lang);
   const wx = weatherDeepLink(lat, lon);
-
-  // мінімалістична клікабельна стрілка
-  const arrow = `<a href="${wx}">↗︎</a>`;
+  const arrow = `<a href="${wx}">↗︎</a>`; // мінімалістична клікабельна стрілка
 
   return {
     text: `${textCore}\n${arrow}`,
@@ -336,43 +292,46 @@ export async function weatherSummaryByCoords(lat, lon, lang = "uk") {
   };
 }
 
-/**
- * Прогноз за назвою міста (витягуємо з фрази)
- *
- * @param {Env} env  – залишений для сумісності з webhook, але тут не використовується
- * @param {string} userText – фраза користувача ("Яка завтра погода у Вінниці?")
- * @param {string} lang     – базова мова з KV, типово "uk"
- */
+/** Прогноз за назвою міста (витягуємо з фрази) */
 export async function weatherSummaryByPlace(env, userText, lang = "uk") {
-  // Визначаємо мову зі свіжого тексту, щоб на російський запит відповідати російською
-  const langDetected = detectLangFromText(userText, lang);
-  let place = parsePlaceFromText(userText);
+  // 0) локальний детектор мови, якщо pickReplyLanguage дав щось не те
+  const autoLang = detectLangFromText(userText);
+  const effLang = autoLang || lang || "uk";
 
+  let place = parsePlaceFromText(userText);
   if (!place) {
     return {
-      text: langDetected === "ru"
+      text: effLang.startsWith("uk")
+        ? "Не вдалося розпізнати населений пункт."
+        : effLang.startsWith("ru")
         ? "Не удалось распознать населённый пункт."
-        : langDetected === "en"
-        ? "Could not detect a location."
-        : "Не вдалося розпізнати населений пункт.",
+        : "Could not detect a location.",
     };
   }
 
-  let results = await smartGeocode(place, langDetected);
+  let results = await smartGeocode(place, effLang);
   if (!results.length) {
     return {
-      text: langDetected === "ru"
+      text: effLang.startsWith("uk")
+        ? "Не вдалося знайти такий населений пункт."
+        : effLang.startsWith("ru")
         ? "Не удалось найти такой населённый пункт."
-        : langDetected === "en"
-        ? "No such place found."
-        : "Не вдалося знайти такий населений пункт.",
+        : "No such place found.",
     };
   }
 
-  const best = pickBestLocation(results, place) || results[0];
-  const { latitude: lat, longitude: lon, name } = best;
+  const normPlace = place.toLowerCase();
 
-  const base = await weatherSummaryByCoords(lat, lon, langDetected);
+  // спочатку шукаємо точний матч за назвою,
+  // потім — місто в Україні (щоб «Вінниця» не стрибала в іншу країну),
+  // і лише потім беремо перший результат
+  let best =
+    results.find((r) => (r.name || "").toLowerCase() === normPlace) ||
+    results.find((r) => r.country_code === "UA") ||
+    results[0];
+
+  const { latitude: lat, longitude: lon, name } = best;
+  const base = await weatherSummaryByCoords(lat, lon, effLang);
 
   const preMap = {
     uk: "У",
@@ -381,8 +340,7 @@ export async function weatherSummaryByPlace(env, userText, lang = "uk") {
     de: "In",
     fr: "À",
   };
-  const pre = preMap[langDetected] || "У";
-
+  const pre = preMap[effLang.slice(0, 2)] || "У";
   const label = `${pre} ${name || place}`;
 
   // додаємо місто перед основним текстом
