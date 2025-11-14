@@ -1,12 +1,19 @@
 // src/apis/weather.js
 //
-// НОВИЙ провайдер погоди: wttr.in
-// Без API-ключів, простий JSON, працює з назвами міст і координатами.
-// Експорти сумісні зі старим кодом: weatherIntent, weatherSummaryByPlace, weatherSummaryByCoords.
+// Провайдер погоди: wttr.in
+// - Без API-ключів
+// - Працює з назвами міст і з координатами
+// - Повертає короткий текст + HTML-посилання на детальний прогноз
+//
+// Сумісний зі старим кодом Senti:
+//   - export function weatherIntent(text)
+//   - export async function weatherSummaryByPlace(env, userText, langHint?)
+//   - export async function weatherSummaryByCoords(lat, lon, langHint?)
+//   - export default { weatherIntent, weatherSummaryByPlace, weatherSummaryByCoords }
 
 const WTTR_BASE = "https://wttr.in";
 
-/* ───────────── ВИЗНАЧЕННЯ, ЧИ ЦЕ ЗАПИТ ПРО ПОГОДУ ───────────── */
+/* ────────────────────── INTENT: це про погоду? ────────────────────── */
 
 export function weatherIntent(text = "") {
   const s = String(text || "").toLowerCase();
@@ -17,20 +24,25 @@ export function weatherIntent(text = "") {
     /погода|температур[аи]|яка сьогодні погода|яка погода|дощ|сніг|гроза/.test(s)
   )
     return true;
-  if (/какая погода|погода в|какая сегодня погода/.test(s)) return true;
+  if (/какая погода|погода в|погода у|какая сегодня погода/.test(s)) return true;
 
-  // англ
+  // англійська
   if (/weather|what's the weather|whats the weather|forecast/.test(s)) return true;
 
-  // інші мови при потребі
+  // німецька / французька при потребі можна додати окремо
   return false;
 }
 
-/* ───────────── ПАРСИНГ МІСТА З ФРАЗИ ───────────── */
+/* ────────────────────── Парсинг міста з фрази ────────────────────── */
 
+/**
+ * Вирізає службові слова на початку фрази:
+ * "яка сьогодні погода у києві" → "києві"
+ * "weather in London" → "London"
+ */
 function stripWeatherWords(text = "") {
-  let lower = String(text || "").toLowerCase().trim();
-  let original = String(text || "").trim();
+  const original = String(text || "").trim();
+  const lower = original.toLowerCase();
 
   const patterns = [
     // українська
@@ -43,20 +55,23 @@ function stripWeatherWords(text = "") {
     "погода в ",
     "погода у ",
     "погода ",
+
     // російська
-    "какая погода в ",
-    "какая погода у ",
     "какая сегодня погода в ",
     "какая сегодня погода у ",
     "какая сегодня погода ",
+    "какая погода в ",
+    "какая погода у ",
     "какая погода ",
     "погода в ",
     "погода у ",
-    // англ
+    "погода ",
+
+    // англійська
+    "what's the weather like in ",
+    "what is the weather like in ",
     "what's the weather in ",
     "what is the weather in ",
-    "what's the weather like in ",
-    "what's the weather like ",
     "weather in ",
     "weather at ",
     "weather ",
@@ -71,6 +86,7 @@ function stripWeatherWords(text = "") {
   return original;
 }
 
+/** Нормалізація назви: прибираємо "місто", "city", зайві коми, дубль-пробіли */
 function normalizePlaceName(place = "") {
   let s = String(place || "").trim();
   s = s.replace(/^(місто|город|city)\s+/i, "");
@@ -79,45 +95,75 @@ function normalizePlaceName(place = "") {
   return s.trim();
 }
 
+/** Остаточне витягування міста з тексту користувача */
 function extractPlaceFromText(text = "") {
   const stripped = stripWeatherWords(text);
-  const norm = normalizePlaceName(stripped);
-  return norm;
+  return normalizePlaceName(stripped);
 }
 
-/* ───────────── РОБОТА З wttr.in ───────────── */
+/* ────────────────────── Допоміжні: визначення мови ────────────────────── */
 
-async function fetchWttrJson(path) {
-  // path: "Kyiv" або "50.45,30.52"
-  const url = `${WTTR_BASE}/${encodeURIComponent(path)}?format=j1`;
-  const res = await fetch(url).catch(() => null);
-  if (!res || !res.ok) {
-    // це буде інтерпретовано як "помилка сервера погоди" у webhook
-    throw new Error("weather-server");
-  }
-  const data = await res.json().catch(() => null);
-  if (!data) {
-    throw new Error("weather-no-data");
-  }
-  return data;
+function detectLangFromText(text = "") {
+  const s = String(text || "").toLowerCase();
+  if (/[іїєґ]/.test(s)) return "uk";
+  if (/[ыэёъ]/.test(s)) return "ru";
+  if (/weather|today|tomorrow/.test(s)) return "en";
+  if (/wetter|heute|morgen/.test(s)) return "de";
+  if (/météo|meteo|aujourd'hui|demain/.test(s)) return "fr";
+  return "uk"; // дефолт
 }
 
+/** Переклад коротких фраз за мовою */
+function tr(map, lang = "uk") {
+  return map[lang] || map.uk || Object.values(map)[0] || "";
+}
+
+/* ────────────────────── Робота з wttr.in ────────────────────── */
+
+/**
+ * Виклик wttr.in у JSON-форматі
+ * @param {string} location - "Kyiv" або "50.45,30.52"
+ * @param {string} lang    - "uk", "ru", "en", "de", "fr"
+ */
+async function fetchWttr(location, lang = "uk") {
+  const loc = encodeURIComponent(location);
+  const url = `${WTTR_BASE}/${loc}?format=j1&lang=${encodeURIComponent(lang)}`;
+
+  const res = await fetch(url, {
+    headers: {
+      // wttr.in просить адекватний User-Agent
+      "User-Agent": "SentiBot/1.0 (+https://senti.restsva.app)",
+    },
+  }).catch(() => null);
+
+  if (!res || !res.ok) return null;
+
+  try {
+    const json = await res.json();
+    return json;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Формує короткий опис погоди з JSON wttr.in
+ */
 function summarizeFromWttrJson(data, lang = "uk") {
-  const cc =
-    data &&
-    Array.isArray(data.current_condition) &&
-    data.current_condition[0]
-      ? data.current_condition[0]
-      : null;
-
-  if (!cc) {
-    return lang === "ru"
-      ? "Нет данных о погоде."
-      : lang === "en"
-      ? "No weather data."
-      : "Немає даних про погоду.";
+  if (!data || !Array.isArray(data.current_condition)) {
+    return tr(
+      {
+        uk: "Немає даних про погоду.",
+        ru: "Нет данных о погоде.",
+        en: "No weather data.",
+        de: "Keine Wetterdaten.",
+        fr: "Pas de données météo.",
+      },
+      lang
+    );
   }
 
+  const cc = data.current_condition[0] || {};
   const tempC = cc.temp_C ?? cc.temp_C === 0 ? cc.temp_C : null;
   const wind = cc.windspeedKmph;
   const desc =
@@ -131,95 +177,211 @@ function summarizeFromWttrJson(data, lang = "uk") {
   else if (/snow|сніг|снег/i.test(dLower)) icon = "🌨️";
   else if (/rain|дощ|дожд/i.test(dLower)) icon = "🌧️";
   else if (/cloud|хмар|облачно|пасмур/i.test(dLower)) icon = "☁️";
-  else if (/fog|туман/i.test(dLower)) icon = "🌫️";
+  else if (/mist|туман|fog/i.test(dLower)) icon = "🌫️";
   else if (/sun|ясно|clear/i.test(dLower)) icon = "☀️";
 
-  const tPart =
+  const tempPart =
     tempC === null
       ? ""
-      : lang === "en"
-      ? `${tempC}°C`
-      : `${tempC}°C`;
+      : tr(
+          {
+            uk: `${tempC}°C`,
+            ru: `${tempC}°C`,
+            en: `${tempC}°C`,
+            de: `${tempC}°C`,
+            fr: `${tempC}°C`,
+          },
+          lang
+        );
 
   const windPart =
     wind == null
       ? ""
-      : lang === "ru"
-      ? `, ветер ${wind} км/ч`
-      : lang === "en"
-      ? `, wind ${wind} km/h`
-      : `, вітер ${wind} км/год`;
+      : tr(
+          {
+            uk: `, вітер ${wind} км/год`,
+            ru: `, ветер ${wind} км/ч`,
+            en: `, wind ${wind} km/h`,
+            de: `, Wind ${wind} km/h`,
+            fr: `, vent ${wind} km/h`,
+          },
+          lang
+        );
 
-  const descUa =
-    lang === "ru" || lang === "en"
-      ? desc
-      : desc; // wttr.in сам дає англ опис; ми просто показуємо як є
+  const baseDesc =
+    desc ||
+    tr(
+      {
+        uk: "поточна погода",
+        ru: "текущая погода",
+        en: "current weather",
+        de: "aktuelles Wetter",
+        fr: "météo actuelle",
+      },
+      lang
+    );
 
-  if (tPart && descUa) {
-    return `${icon} ${descUa}, ${tPart}${windPart}`;
-  }
-  if (tPart) return `${icon} ${tPart}${windPart}`;
-  if (descUa) return `${icon} ${descUa}${windPart}`;
+  let summary = `${icon} ${baseDesc}`;
+  if (tempPart) summary += `, ${tempPart}`;
+  if (windPart) summary += windPart;
 
-  return lang === "ru"
-    ? "Нет данных о погоде."
-    : lang === "en"
-    ? "No weather data."
-    : "Немає даних про погоду.";
+  return summary;
 }
 
-/* ───────────── ПУБЛІЧНІ ФУНКЦІЇ ДЛЯ Senti ───────────── */
+/**
+ * HTML-посилання на докладний прогноз для міста або координат
+ */
+function weatherLinkForLocation(location, lang = "uk") {
+  const loc = encodeURIComponent(location);
+  const url = `${WTTR_BASE}/${loc}`;
+  const label = tr(
+    {
+      uk: "детальніше",
+      ru: "подробнее",
+      en: "details",
+      de: "Details",
+      fr: "détails",
+    },
+    lang
+  );
+  return ` <a href="${url}">↗ ${label}</a>`;
+}
+
+/* ────────────────────── Публічні функції ────────────────────── */
 
 /**
- * Погода за координатами (lat, lon).
- * Повертає об'єкт { text, mode }
+ * Погода за координатами (для останньої локації / geo-share).
+ * Використовується webhook'ом як fallback.
  */
-export async function weatherSummaryByCoords(lat, lon, lang = "uk") {
-  const path = `${lat},${lon}`;
-  const data = await fetchWttrJson(path);
+export async function weatherSummaryByCoords(lat, lon, langHint = "uk") {
+  const lang = langHint || "uk";
+  const locationStr = `${lat},${lon}`;
+
+  const data = await fetchWttr(locationStr, lang);
+  if (!data) {
+    return {
+      text: tr(
+        {
+          uk: "⚠️ Не вдалося отримати погоду (помилка сервера погоди).",
+          ru: "⚠️ Не удалось получить погоду (ошибка сервера погоды).",
+          en: "⚠️ Failed to get weather (weather server error).",
+          de: "⚠️ Wetter konnte nicht abgerufen werden (Serverfehler).",
+          fr: "⚠️ Impossible d’obtenir la météo (erreur du serveur météo).",
+        },
+        lang
+      ),
+      mode: "HTML",
+    };
+  }
+
   const summary = summarizeFromWttrJson(data, lang);
+  const link = weatherLinkForLocation(locationStr, lang);
+
+  const prefix = tr(
+    {
+      uk: "На твоїй локації:",
+      ru: "В твоей локации:",
+      en: "At your location:",
+      de: "An deinem Standort:",
+      fr: "À ta position :",
+    },
+    lang
+  );
 
   return {
-    text: summary,
+    text: `${prefix} ${summary}${link}`,
     mode: "HTML",
   };
 }
 
 /**
- * Погода за фразою користувача (назва міста).
- * Сигнатура сумісна з існуючим кодом:
- *    weatherSummaryByPlace(env, userText, langHint?)
+ * Погода за текстом користувача: "Погода у Києві", "Weather in London"
+ * env зараз не використовується, але лишений для сумісності з webhook.
  */
 export async function weatherSummaryByPlace(env, userText, langHint = "uk") {
-  const lang = langHint || "uk";
-  const place = extractPlaceFromText(userText);
-  if (!place) {
-    const msg =
-      lang === "ru"
-        ? "Не понял, для какого города показать погоду."
-        : lang === "en"
-        ? "I did not catch which city you mean."
-        : "Не зрозумів, для якого міста показати погоду.";
-    return { text: msg, mode: "HTML" };
+  const lang = detectLangFromText(userText || "") || langHint || "uk";
+  const placeRaw = extractPlaceFromText(userText || "");
+
+  if (!placeRaw) {
+    return {
+      text: tr(
+        {
+          uk: "Не зрозумів, для якого міста показати погоду.",
+          ru: "Не понял, для какого города показать погоду.",
+          en: "I did not catch which city you mean.",
+          de: "Ich habe nicht verstanden, für welche Stadt das Wetter angezeigt werden soll.",
+          fr: "Je n’ai pas compris pour quelle ville afficher la météo.",
+        },
+        lang
+      ),
+      mode: "HTML",
+    };
   }
 
-  const data = await fetchWttrJson(place);
-  const summary = summarizeFromWttrJson(data, lang);
+  const data = await fetchWttr(placeRaw, lang);
 
-  const label =
-    lang === "ru"
-      ? `В ${place}:`
-      : lang === "en"
-      ? `In ${place}:`
-      : `У ${place}:`;
+  if (!data) {
+    // сервер wttr.in впав або недоступний
+    return {
+      text: tr(
+        {
+          uk: "⚠️ Не вдалося отримати погоду (помилка сервера погоди).",
+          ru: "⚠️ Не удалось получить погоду (ошибка сервера погоды).",
+          en: "⚠️ Failed to get weather (weather server error).",
+          de: "⚠️ Wetter konnte nicht abgerufen werden (Serverfehler).",
+          fr: "⚠️ Impossible d’obtenir la météo (erreur du serveur météo).",
+        },
+        lang
+      ),
+      mode: "HTML",
+    };
+  }
+
+  // Дістаємо "людську" назву міста й країни.
+  let cityName = placeRaw;
+  let country = "";
+
+  try {
+    const area = Array.isArray(data.nearest_area) ? data.nearest_area[0] : null;
+    if (area) {
+      const aName =
+        (Array.isArray(area.areaName) && area.areaName[0]?.value) ||
+        area.areaName ||
+        "";
+      const cName =
+        (Array.isArray(area.country) && area.country[0]?.value) ||
+        area.country ||
+        "";
+      if (aName) cityName = aName;
+      if (cName) country = cName;
+    }
+  } catch {
+    // тихо ігноруємо
+  }
+
+  const summary = summarizeFromWttrJson(data, lang);
+  const link = weatherLinkForLocation(placeRaw, lang);
+
+  const preposition = tr(
+    {
+      uk: "У",
+      ru: "В",
+      en: "In",
+      de: "In",
+      fr: "À",
+    },
+    lang
+  );
+
+  const label = country ? `${preposition} ${cityName}, ${country}:` : `${preposition} ${cityName}:`;
 
   return {
-    text: `${label} ${summary}`,
+    text: `${label} ${summary}${link}`,
     mode: "HTML",
   };
 }
 
-/* ───────────── DEFAULT EXPORT ───────────── */
+/* ────────────────────── Default export ────────────────────── */
 
 export default {
   weatherIntent,
