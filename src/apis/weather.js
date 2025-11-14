@@ -88,9 +88,7 @@ function parsePlaceFromText(text = "") {
   let chunk = m?.[1] || s;
 
   // якщо є " in/в/у/à/au/en/bei " — беремо частину ПІСЛЯ останнього входження
-  const split = chunk.split(
-    /\s(?:in|at|en|bei|à|au|aux|в|у)\s/i
-  );
+  const split = chunk.split(/\s(?:in|at|en|bei|à|au|aux|в|у)\s/i);
   if (split.length > 1) chunk = split[split.length - 1];
 
   // прибираємо слова часу
@@ -115,8 +113,15 @@ async function geocode(place, lang = "uk") {
   const url =
     `${OM_GEOCODE}?name=${encodeURIComponent(place)}` +
     `&count=10&language=${encodeURIComponent(lang)}&format=json`;
-  const r = await fetch(url);
-  const data = await r.json().catch(() => null);
+
+  let data = null;
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return [];
+    data = await r.json().catch(() => null);
+  } catch {
+    return [];
+  }
   return Array.isArray(data?.results) ? data.results : [];
 }
 
@@ -139,7 +144,6 @@ async function smartGeocode(place, lang = "uk") {
   res = await geocode(place, "en");
   return res;
 }
-
 /** Короткий опис за поточного стану погоди (локалізований текст) */
 function summarizeWeather(json, lang = "uk") {
   const cw = json?.current_weather || {};
@@ -236,14 +240,10 @@ function summarizeWeather(json, lang = "uk") {
       temp: (x) => `Température autour de ${x}°C`,
       wind: (x) => `Vent ${x} m/s`,
     },
-  }[lang2] || phraseFallback();
-
-  function phraseFallback() {
-    return {
-      temp: (x) => `Температура близько ${x}°C`,
-      wind: (x) => `Вітер ${x} м/с`,
-    };
-  }
+  }[lang2] || {
+    temp: (x) => `Температура близько ${x}°C`,
+    wind: (x) => `Вітер ${x} м/с`,
+  };
 
   const d = (m) => desc[m] || desc.uk;
 
@@ -266,14 +266,72 @@ function weatherDeepLink(lat, lon) {
 
 /** Прогноз за координатами */
 export async function weatherSummaryByCoords(lat, lon, lang = "uk") {
-  const url =
-    `${OM_FORECAST}?latitude=${encodeURIComponent(lat)}` +
-    `&longitude=${encodeURIComponent(lon)}` +
-    `&current_weather=true&timezone=auto`;
+  const qs = new URLSearchParams({
+    latitude: String(lat),
+    longitude: String(lon),
+    current_weather: "true",
+    hourly: "temperature_2m,weathercode",
+    timezone: "auto",
+  });
 
-  const r = await fetch(url);
-  const data = await r.json().catch(() => null);
-  if (!data || !data.current_weather) {
+  let data = null;
+
+  try {
+    const r = await fetch(`${OM_FORECAST}?${qs.toString()}`);
+    if (!r.ok) {
+      return {
+        text: lang.startsWith("uk")
+          ? "⚠️ Не вдалося отримати погоду (помилка сервера погоди)."
+          : "⚠️ Failed to fetch weather (upstream error).",
+      };
+    }
+    data = await r.json().catch(() => null);
+  } catch {
+    return {
+      text: lang.startsWith("uk")
+        ? "⚠️ Не вдалося отримати погоду (помилка мережі)."
+        : "⚠️ Failed to fetch weather (network error).",
+    };
+  }
+
+  if (!data) {
+    return {
+      text: lang.startsWith("uk")
+        ? "⚠️ Не вдалося отримати погоду."
+        : "⚠️ Failed to fetch weather.",
+    };
+  }
+
+  // Якщо current_weather відсутній — синтезуємо його з hourly
+  if (!data.current_weather && data.hourly && Array.isArray(data.hourly.time)) {
+    const times = data.hourly.time;
+    const temps = data.hourly.temperature_2m || [];
+    const codes = data.hourly.weathercode || [];
+
+    const now = Date.now();
+    let bestIdx = -1;
+    let bestDiff = Infinity;
+
+    for (let i = 0; i < times.length; i++) {
+      const t = Date.parse(times[i]);
+      if (Number.isNaN(t)) continue;
+      const diff = Math.abs(t - now);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestIdx = i;
+      }
+    }
+
+    if (bestIdx >= 0) {
+      data.current_weather = {
+        temperature: temps[bestIdx],
+        weathercode: codes[bestIdx],
+        windspeed: undefined,
+      };
+    }
+  }
+
+  if (!data.current_weather) {
     return {
       text: lang.startsWith("uk")
         ? "⚠️ Не вдалося отримати погоду."
