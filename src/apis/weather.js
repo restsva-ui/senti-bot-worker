@@ -1,11 +1,11 @@
 // src/apis/weather.js
 //
-// Провайдер погоди: wttr.in
-// - Без API-ключів
-// - Працює з назвами міст і з координатами
-// - Повертає короткий текст + HTML-посилання на детальний прогноз
+// Провайдер погоди: wttr.in (JSON API)
+// – Без API-ключів
+// – Працює з назвами міст і координатами
+// – Повертає короткий текст + HTML-посилання на мобільний Google Weather
 //
-// Сумісний зі старим кодом Senti:
+// Інтерфейс сумісний з кодом Senti:
 //   - export function weatherIntent(text)
 //   - export async function weatherSummaryByPlace(env, userText, langHint?)
 //   - export async function weatherSummaryByCoords(lat, lon, langHint?)
@@ -13,7 +13,7 @@
 
 const WTTR_BASE = "https://wttr.in";
 
-/* ────────────────────── INTENT: це про погоду? ────────────────────── */
+/* ───────────── INTENT: чи це запит про погоду? ───────────── */
 
 export function weatherIntent(text = "") {
   const s = String(text || "").toLowerCase();
@@ -29,17 +29,12 @@ export function weatherIntent(text = "") {
   // англійська
   if (/weather|what's the weather|whats the weather|forecast/.test(s)) return true;
 
-  // німецька / французька при потребі можна додати окремо
+  // можна розширити іншими мовами
   return false;
 }
 
-/* ────────────────────── Парсинг міста з фрази ────────────────────── */
+/* ───────────── Парсинг міста з фрази ───────────── */
 
-/**
- * Вирізає службові слова на початку фрази:
- * "яка сьогодні погода у києві" → "києві"
- * "weather in London" → "London"
- */
 function stripWeatherWords(text = "") {
   const original = String(text || "").trim();
   const lower = original.toLowerCase();
@@ -86,7 +81,6 @@ function stripWeatherWords(text = "") {
   return original;
 }
 
-/** Нормалізація назви: прибираємо "місто", "city", зайві коми, дубль-пробіли */
 function normalizePlaceName(place = "") {
   let s = String(place || "").trim();
   s = s.replace(/^(місто|город|city)\s+/i, "");
@@ -95,13 +89,12 @@ function normalizePlaceName(place = "") {
   return s.trim();
 }
 
-/** Остаточне витягування міста з тексту користувача */
 function extractPlaceFromText(text = "") {
   const stripped = stripWeatherWords(text);
   return normalizePlaceName(stripped);
 }
 
-/* ────────────────────── Допоміжні: визначення мови ────────────────────── */
+/* ───────────── Визначення мови + переклад ───────────── */
 
 function detectLangFromText(text = "") {
   const s = String(text || "").toLowerCase();
@@ -110,28 +103,21 @@ function detectLangFromText(text = "") {
   if (/weather|today|tomorrow/.test(s)) return "en";
   if (/wetter|heute|morgen/.test(s)) return "de";
   if (/météo|meteo|aujourd'hui|demain/.test(s)) return "fr";
-  return "uk"; // дефолт
+  return "uk";
 }
 
-/** Переклад коротких фраз за мовою */
 function tr(map, lang = "uk") {
   return map[lang] || map.uk || Object.values(map)[0] || "";
 }
 
-/* ────────────────────── Робота з wttr.in ────────────────────── */
+/* ───────────── Робота з wttr.in ───────────── */
 
-/**
- * Виклик wttr.in у JSON-форматі
- * @param {string} location - "Kyiv" або "50.45,30.52"
- * @param {string} lang    - "uk", "ru", "en", "de", "fr"
- */
 async function fetchWttr(location, lang = "uk") {
   const loc = encodeURIComponent(location);
   const url = `${WTTR_BASE}/${loc}?format=j1&lang=${encodeURIComponent(lang)}`;
 
   const res = await fetch(url, {
     headers: {
-      // wttr.in просить адекватний User-Agent
       "User-Agent": "SentiBot/1.0 (+https://senti.restsva.app)",
     },
   }).catch(() => null);
@@ -139,16 +125,12 @@ async function fetchWttr(location, lang = "uk") {
   if (!res || !res.ok) return null;
 
   try {
-    const json = await res.json();
-    return json;
+    return await res.json();
   } catch {
     return null;
   }
 }
 
-/**
- * Формує короткий опис погоди з JSON wttr.in
- */
 function summarizeFromWttrJson(data, lang = "uk") {
   if (!data || !Array.isArray(data.current_condition)) {
     return tr(
@@ -164,7 +146,7 @@ function summarizeFromWttrJson(data, lang = "uk") {
   }
 
   const cc = data.current_condition[0] || {};
-  const tempC = cc.temp_C ?? cc.temp_C === 0 ? cc.temp_C : null;
+  const tempC = cc.temp_C ?? (cc.temp_C === 0 ? 0 : null);
   const wind = cc.windspeedKmph;
   const desc =
     (Array.isArray(cc.weatherDesc) && cc.weatherDesc[0]?.value) ||
@@ -227,13 +209,16 @@ function summarizeFromWttrJson(data, lang = "uk") {
 
   return summary;
 }
-
 /**
- * HTML-посилання на докладний прогноз для міста або координат
+ * Мобільне посилання: Google Weather, а не wttr.in
+ * Клік по лінку відкриває звичну гуглівську карточку погоди.
  */
 function weatherLinkForLocation(location, lang = "uk") {
-  const loc = encodeURIComponent(location);
-  const url = `${WTTR_BASE}/${loc}`;
+  const langMap = { uk: "uk", ru: "ru", en: "en", de: "de", fr: "fr" };
+  const hl = langMap[lang] || "uk";
+  const q = encodeURIComponent(`weather ${location}`);
+  const url = `https://www.google.com/search?q=${q}&hl=${hl}`;
+
   const label = tr(
     {
       uk: "детальніше",
@@ -244,15 +229,12 @@ function weatherLinkForLocation(location, lang = "uk") {
     },
     lang
   );
+
   return ` <a href="${url}">↗ ${label}</a>`;
 }
 
-/* ────────────────────── Публічні функції ────────────────────── */
+/* ───────────── Публічні функції ───────────── */
 
-/**
- * Погода за координатами (для останньої локації / geo-share).
- * Використовується webhook'ом як fallback.
- */
 export async function weatherSummaryByCoords(lat, lon, langHint = "uk") {
   const lang = langHint || "uk";
   const locationStr = `${lat},${lon}`;
@@ -294,10 +276,6 @@ export async function weatherSummaryByCoords(lat, lon, langHint = "uk") {
   };
 }
 
-/**
- * Погода за текстом користувача: "Погода у Києві", "Weather in London"
- * env зараз не використовується, але лишений для сумісності з webhook.
- */
 export async function weatherSummaryByPlace(env, userText, langHint = "uk") {
   const lang = detectLangFromText(userText || "") || langHint || "uk";
   const placeRaw = extractPlaceFromText(userText || "");
@@ -321,7 +299,6 @@ export async function weatherSummaryByPlace(env, userText, langHint = "uk") {
   const data = await fetchWttr(placeRaw, lang);
 
   if (!data) {
-    // сервер wttr.in впав або недоступний
     return {
       text: tr(
         {
@@ -337,7 +314,7 @@ export async function weatherSummaryByPlace(env, userText, langHint = "uk") {
     };
   }
 
-  // Дістаємо "людську" назву міста й країни.
+  // акуратніше дістаємо місто/країну з wttr.in
   let cityName = placeRaw;
   let country = "";
 
@@ -356,11 +333,11 @@ export async function weatherSummaryByPlace(env, userText, langHint = "uk") {
       if (cName) country = cName;
     }
   } catch {
-    // тихо ігноруємо
+    // ігноруємо, залишимо placeRaw
   }
 
   const summary = summarizeFromWttrJson(data, lang);
-  const link = weatherLinkForLocation(placeRaw, lang);
+  const link = weatherLinkForLocation(cityName, lang);
 
   const preposition = tr(
     {
@@ -373,7 +350,9 @@ export async function weatherSummaryByPlace(env, userText, langHint = "uk") {
     lang
   );
 
-  const label = country ? `${preposition} ${cityName}, ${country}:` : `${preposition} ${cityName}:`;
+  const label = country
+    ? `${preposition} ${cityName}, ${country}:`
+    : `${preposition} ${cityName}:`;
 
   return {
     text: `${label} ${summary}${link}`,
@@ -381,7 +360,7 @@ export async function weatherSummaryByPlace(env, userText, langHint = "uk") {
   };
 }
 
-/* ────────────────────── Default export ────────────────────── */
+/* ───────────── Default export ───────────── */
 
 export default {
   weatherIntent,
