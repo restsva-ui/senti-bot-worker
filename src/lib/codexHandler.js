@@ -1,4 +1,4 @@
-/* Senti Codex 3.0 — AI Architect */
+/* Senti Codex 3.1 — AI Architect */
 
 import { askAnyModel, askVision } from "./modelRouter.js";
 import {
@@ -14,9 +14,9 @@ const PROJ_CURR_KEY = (uid) => `codex:project:current:${uid}`;
 const PROJ_META_KEY = (uid, name) => `codex:project:meta:${uid}:${name}`;
 const PROJ_FILE_KEY = (uid, name, file) =>
   `codex:project:file:${uid}:${name}:${file}`;
-const PROJ_PREFIX_LIST = (uid) => `codex:project:meta:${uid}:`;
 const PROJ_TASKSEQ_KEY = (uid, name) =>
   `codex:project:taskseq:${uid}:${name}`;
+const PROJ_INDEX_KEY = (uid) => `codex:project:index:${uid}`;
 const CODEX_TMP_NAME_KEY = (uid) => `codex:ui:tmpname:${uid}`;
 const IDEA_DRAFT_KEY = (uid) => `codex:ideaDraft:${uid}`;
 
@@ -67,6 +67,7 @@ export function buildCodexKeyboard() {
 
 // -------------------- утиліти --------------------
 function pickKV(env) {
+  // для Codex використовуємо один KV
   return (
     env.STATE_KV ||
     env.CHECKLIST_KV ||
@@ -75,22 +76,6 @@ function pickKV(env) {
     env.TODO_KV ||
     env.DIALOG_KV
   );
-}
-
-// окремо — KV, який точно вміє .list()
-function pickKVWithList(env) {
-  const candidates = [
-    env.CHECKLIST_KV,
-    env.STATE_KV,
-    env.ENERGY_LOG_KV,
-    env.LEARN_QUEUE_KV,
-    env.TODO_KV,
-    env.DIALOG_KV,
-  ];
-  for (const kv of candidates) {
-    if (kv && typeof kv.list === "function") return kv;
-  }
-  return null;
 }
 
 function nowIso() {
@@ -143,6 +128,35 @@ export async function clearCodexMem(env, userId) {
   await kv.delete(CODEX_MEM_KEY(userId));
 }
 
+// ----- індекс проєктів (щоб не використовувати kv.list() там, де його немає) -----
+async function loadProjectIndex(kv, userId) {
+  const raw = await kv.get(PROJ_INDEX_KEY(userId), "text");
+  if (!raw) return [];
+  const obj = safeJsonParse(raw);
+  if (!Array.isArray(obj)) return [];
+  const uniq = [...new Set(obj)].filter(Boolean);
+  return uniq;
+}
+
+async function saveProjectIndex(kv, userId, arr) {
+  const uniq = [...new Set(arr)].filter(Boolean);
+  await kv.put(PROJ_INDEX_KEY(userId), JSON.stringify(uniq), {
+    expirationTtl: 60 * 60 * 24 * 365,
+  });
+}
+
+async function addProjectToIndex(kv, userId, name) {
+  const list = await loadProjectIndex(kv, userId);
+  if (!list.includes(name)) list.push(name);
+  await saveProjectIndex(kv, userId, list);
+}
+
+async function removeProjectFromIndex(kv, userId, name) {
+  const list = await loadProjectIndex(kv, userId);
+  const filtered = list.filter((n) => n !== name);
+  await saveProjectIndex(kv, userId, filtered);
+}
+
 // -------------------- проєкти в KV --------------------
 async function createProject(env, userId, name, ideaText = "") {
   const kv = pickKV(env);
@@ -161,6 +175,7 @@ async function createProject(env, userId, name, ideaText = "") {
       expirationTtl: 60 * 60 * 24 * 365,
     });
   }
+  await addProjectToIndex(kv, userId, normalized);
   await setCurrentProject(env, userId, normalized);
 }
 
@@ -178,37 +193,33 @@ async function readMeta(env, userId, name) {
 }
 
 async function listProjects(env, userId) {
-  const kv = pickKVWithList(env);
+  const kv = pickKV(env);
   if (!kv) return [];
-  const out = [];
-  let cursor;
-  do {
-    const res = await kv.list({ prefix: PROJ_PREFIX_LIST(userId), cursor });
-    for (const k of res.keys || []) {
-      const parts = k.name.split(":");
-      const name = parts.slice(-1)[0];
-      if (name && !out.includes(name)) out.push(name);
-    }
-    cursor = res.list_complete ? undefined : res.cursor;
-  } while (cursor);
-  return out;
+  const idx = await loadProjectIndex(kv, userId);
+  if (idx.length) return idx;
+
+  // fallback: якщо індекс ще не створений, хоча б повертаємо активний проєкт
+  const cur = await kv.get(PROJ_CURR_KEY(userId), "text");
+  if (cur) return [normalizeProjectName(cur)];
+  return [];
 }
 
 async function deleteProject(env, userId, name) {
   const kv = pickKV(env);
-  const kvList = pickKVWithList(env);
   if (!kv) return;
   const normalized = normalizeProjectName(name);
 
   await kv.delete(PROJ_META_KEY(userId, normalized));
+  await removeProjectFromIndex(kv, userId, normalized);
 
-  if (kvList && kvList.list) {
+  // спробуємо прибрати файли, якщо в цьому KV є list()
+  if (typeof kv.list === "function") {
     const prefix = `codex:project:file:${userId}:${normalized}:`;
     let cursor;
     do {
-      const res = await kvList.list({ prefix, cursor });
+      const res = await kv.list({ prefix, cursor });
       for (const k of res.keys || []) {
-        await kvList.delete(k.name);
+        await kv.delete(k.name);
       }
       cursor = res.list_complete ? undefined : res.cursor;
     } while (cursor);
@@ -1192,7 +1203,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
   }
 
   const systemHint = [
-    "Ти — Senti Codex 3.0 (AI Architect).",
+    "Ти — Senti Codex 3.1 (AI Architect).",
     "Ти поєднуєш ролі: архітектор, senior-розробник і аналітик вимог.",
     "Працюєш у режимі проєкту; зберігай цілісну картину й будуй відповідь так, щоб нею можна було керувати розробкою.",
     "",
