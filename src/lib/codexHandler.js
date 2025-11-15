@@ -1,12 +1,11 @@
 /* Senti Codex 3.0 — AI Architect */
 
-import { askAnyModel } from "./modelRouter";
-import { askVision } from "./visionHandler";
+import { askAnyModel, askVision } from "./modelRouter.js";
 import {
   codexUploadAssetFromUrl,
   codexExportSnapshot,
   codexSyncSection,
-} from "./codexDrive";
+} from "./codexDrive.js";
 
 // -------------------- ключі KV --------------------
 export const CODEX_MEM_KEY = (uid) => `codex:mem:${uid}`;
@@ -796,12 +795,21 @@ async function analyzeImageForCodex(env, { lang = "uk", imageBase64, question })
     question ||
     "Опиши, що на зображенні, з фокусом на компоненти інтерфейсу, блоки, сітку, шрифти, кольори, структуру верстки.";
 
-  const res = await askVision(env, {
-    imageBase64,
+  const modelOrder =
+    env.MODEL_ORDER_VISION ||
+    env.MODEL_ORDER ||
+    env.MODEL_ORDER_TEXT;
+
+  const res = await askVision(
+    env,
+    modelOrder,
     prompt,
-    systemHint: system,
-    temperature: 0.2,
-  });
+    {
+      systemHint: system,
+      imageBase64,
+      temperature: 0.2,
+    }
+  );
 
   const text =
     typeof res === "string"
