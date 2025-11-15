@@ -10,15 +10,14 @@ import {
 // -------------------- ключі KV --------------------
 export const CODEX_MEM_KEY = (uid) => `codex:mem:${uid}`;
 
-// проєкти: поточний + метадані + секції (KV)
-const PROJ_CURR_KEY = (uid) => `codex:project:current:${uid}`; // string
-const PROJ_META_KEY = (uid, name) => `codex:project:meta:${uid}:${name}`; // json
+const PROJ_CURR_KEY = (uid) => `codex:project:current:${uid}`;
+const PROJ_META_KEY = (uid, name) => `codex:project:meta:${uid}:${name}`;
 const PROJ_FILE_KEY = (uid, name, file) =>
-  `codex:project:file:${uid}:${name}:${file}`; // text/md/json
+  `codex:project:file:${uid}:${name}:${file}`;
 const PROJ_PREFIX_LIST = (uid) => `codex:project:meta:${uid}:`;
 const PROJ_TASKSEQ_KEY = (uid, name) =>
-  `codex:project:taskseq:${uid}:${name}`; // auto increment
-const CODEX_TMP_NAME_KEY = (uid) => `codex:ui:tmpname:${uid}`; // тимчасова назва проєкту
+  `codex:project:taskseq:${uid}:${name}`;
+const CODEX_TMP_NAME_KEY = (uid) => `codex:ui:tmpname:${uid}`;
 const IDEA_DRAFT_KEY = (uid) => `codex:ideaDraft:${uid}`;
 
 // callback data (inline)
@@ -38,16 +37,16 @@ const CB_DELETE_PREFIX = "codex:del:";
 function normalizeProjectName(name) {
   if (!name) return "Без назви";
   let n = String(name).trim();
-  n = n.replace(/^["']+|["']+$/g, ""); // прибираємо лапки на початку/кінці
-  n = n.replace(/^[\[\(\{]+|[\]\)\}]+$/g, ""); // прибираємо дужки
+  n = n.replace(/^["']+|["']+$/g, ""); // лапки
+  n = n.replace(/^[\[\(\{<«]+|[\]\)\}>»]+$/g, ""); // дужки/скоби
   n = n.replace(/\s+/g, " ");
-  if (!n) return "Без назви";
-  return n;
+  return n || "Без назви";
 }
 
 // -------------------- опис режиму Codex --------------------
 const CODEX_MODE_INLINE = {
-  text: "Senti Codex увімкнено. Натисни «Створити проєкт» — і я допоможу спроєктувати бота, сайт чи систему, збережу ідею, tasks та прогрес.",
+  text:
+    "🧠 Senti Codex увімкнено. Натисни «Створити проєкт» — і я увімкну режим збору ідей: просто пиши текст і кидай фото/файли/посилання, все збережу в idea.md та assets. Або обери існуючий проєкт.",
 };
 
 const CODEX_UI_PREFIX = (uid) => `codex:ui:${uid}:`;
@@ -164,11 +163,11 @@ async function listProjects(env, userId) {
   const kv = pickKV(env);
   if (!kv || !kv.list) return [];
   const out = [];
-  let cursor = undefined;
+  let cursor;
   do {
     const res = await kv.list({ prefix: PROJ_PREFIX_LIST(userId), cursor });
     for (const k of res.keys || []) {
-      const parts = k.name.split(":"); // codex:project:meta:<uid>:<name>
+      const parts = k.name.split(":");
       const name = parts.slice(-1)[0];
       if (name && !out.includes(name)) out.push(name);
     }
@@ -182,12 +181,10 @@ async function deleteProject(env, userId, name) {
   if (!kv || !kv.list) return;
   const normalized = normalizeProjectName(name);
 
-  // видаляємо метадані
   await kv.delete(PROJ_META_KEY(userId, normalized));
 
-  // видаляємо файли проєкту
   const prefix = `codex:project:file:${userId}:${normalized}:`;
-  let cursor = undefined;
+  let cursor;
   do {
     const res = await kv.list({ prefix, cursor });
     for (const k of res.keys || []) {
@@ -196,7 +193,6 @@ async function deleteProject(env, userId, name) {
     cursor = res.list_complete ? undefined : res.cursor;
   } while (cursor);
 
-  // якщо активний — скидаємо
   const cur = await kv.get(PROJ_CURR_KEY(userId), "text");
   if (cur && normalizeProjectName(cur) === normalized) {
     await kv.delete(PROJ_CURR_KEY(userId));
@@ -265,7 +261,6 @@ export async function handleCodexUi(
   if (!kv) return false;
   const { sendPlain } = helpers;
 
-  // Створення нового проєкту
   if (cbData === CB.NEW) {
     await kv.put(UI_AWAIT_KEY(userId), "proj_name", { expirationTtl: 3600 });
     await sendPlain(env, chatId, "Введи назву нового проєкту:", {
@@ -277,7 +272,6 @@ export async function handleCodexUi(
     return true;
   }
 
-  // Обрати проєкт зі списку
   if (cbData === CB.USE) {
     const all = await listProjects(env, userId);
     if (!all.length) {
@@ -305,7 +299,6 @@ export async function handleCodexUi(
     return true;
   }
 
-  // Текстовий список усіх проєктів
   if (cbData === CB.LIST) {
     const all = await listProjects(env, userId);
     if (!all.length) {
@@ -324,14 +317,13 @@ export async function handleCodexUi(
     return true;
   }
 
-  // Вибір конкретного проєкту з інлайн-клавіатури
   if (cbData.startsWith(CB_USE_PREFIX)) {
     const raw = cbData.slice(CB_USE_PREFIX.length);
     let name = raw;
     try {
       name = decodeURIComponent(raw);
     } catch {
-      // залишаємо raw
+      // ignore
     }
     if (!name) {
       await sendPlain(env, chatId, "Не вдалося розпізнати назву проєкту.");
@@ -359,13 +351,12 @@ export async function handleCodexUi(
       ],
     };
 
-    await sendPlain(env, chatId, `✅ Активний проєкт: «${nice}»`, {
+    await sendPlain(env, chatId, `✅ Активний проєкт: <b>${nice}</b>`, {
       reply_markup: perProjectKb,
     });
     return true;
   }
 
-  // Кнопка "Ідея" – діалог по формуванню ідеї
   if (cbData === CB.IDEA) {
     const cur = await getCurrentProject(env, userId);
     if (!cur) {
@@ -378,7 +369,7 @@ export async function handleCodexUi(
       env,
       chatId,
       [
-        `Опиши ідею для проєкту «${nice}».`,
+        `Опиши ідею для проєкту <b>${nice}</b>.`,
         "",
         "Напиши вільним текстом, що ти хочеш отримати.",
         "Я як Senti Codex Architect поставлю уточнюючі питання, сформую структурований опис і попрошу підтвердження перед збереженням.",
@@ -387,7 +378,6 @@ export async function handleCodexUi(
     return true;
   }
 
-  // Snapshot проєкту
   if (cbData === CB.SNAPSHOT) {
     const cur = await getCurrentProject(env, userId);
     if (!cur) {
@@ -405,7 +395,6 @@ export async function handleCodexUi(
     return true;
   }
 
-  // Огляд основних файлів/секцій (idea, tasks, progress)
   if (cbData === CB.FILES) {
     const cur = await getCurrentProject(env, userId);
     if (!cur) {
@@ -440,7 +429,7 @@ export async function handleCodexUi(
       .slice(0, 1200);
 
     const body = [
-      `📁 Проєкт: ${nice}`,
+      `📁 Проєкт: <b>${nice}</b>`,
       "",
       "🧠 Ідея (уривок):",
       ideaShort || "— (ще немає опису ідеї)",
@@ -456,14 +445,13 @@ export async function handleCodexUi(
     return true;
   }
 
-  // Видалення проєкту
   if (cbData.startsWith(CB_DELETE_PREFIX)) {
     const raw = cbData.slice(CB_DELETE_PREFIX.length);
     let name = raw;
     try {
       name = decodeURIComponent(raw);
     } catch {
-      // ігноруємо
+      // ignore
     }
     if (!name) {
       await sendPlain(
@@ -475,11 +463,10 @@ export async function handleCodexUi(
     }
     const nice = normalizeProjectName(name);
     await deleteProject(env, userId, name);
-    await sendPlain(env, chatId, `🗑 Проєкт «${nice}» видалено.`);
+    await sendPlain(env, chatId, `🗑 Проєкт <b>${nice}</b> видалено.`);
     return true;
   }
 
-  // Статус поточного проєкту (короткий звіт)
   if (cbData === CB.STATUS) {
     const cur = await getCurrentProject(env, userId);
     if (!cur) {
@@ -512,7 +499,7 @@ export async function handleCodexUi(
       .slice(-6);
 
     const body = [
-      `📁 Проєкт: ${nice}`,
+      `📁 Проєкт: <b>${nice}</b>`,
       "",
       "🧠 Ідея (уривок):",
       ideaClean || "— (ще немає опису ідеї)",
@@ -531,13 +518,19 @@ export async function handleCodexUi(
   return false;
 }
 
-// ----------
-export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain) {
+// -------------------- /project-команди --------------------
+export async function handleCodexCommand(
+  env,
+  chatId,
+  userId,
+  textRaw,
+  sendPlain
+) {
   const text = (textRaw || "").trim();
 
   if (text === "/codex_on") {
     await setCodexMode(env, userId, true);
-    await sendPlain(env, chatId, "Senti Codex увімкнено.", {
+    await sendPlain(env, chatId, CODEX_MODE_INLINE.text, {
       reply_markup: buildCodexKeyboard(),
     });
     return true;
@@ -573,7 +566,7 @@ export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain
     await sendPlain(
       env,
       chatId,
-      `✅ Створено проєкт "${name}". Опиши ідею (я збережу її в idea.md).`
+      `✅ Створено проєкт "<b>${name}</b>". Опиши ідею (я збережу її в idea.md).`
     );
     const kv = pickKV(env);
     if (kv) {
@@ -614,7 +607,11 @@ export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain
       return true;
     }
     await setCurrentProject(env, userId, meta.name || name);
-    await sendPlain(env, chatId, `✅ Активний проєкт: "${meta.name || name}".`);
+    await sendPlain(
+      env,
+      chatId,
+      `✅ Активний проєкт: <b>${meta.name || name}</b>.`
+    );
     return true;
   }
 
@@ -651,7 +648,7 @@ export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain
       .slice(-6);
 
     const body = [
-      `📁 Проєкт: ${nice}`,
+      `📁 Проєкт: <b>${nice}</b>`,
       "",
       "🧠 Ідея (уривок):",
       ideaClean || "— (ще немає опису ідеї)",
@@ -689,7 +686,7 @@ export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain
     return true;
   }
 
-  // /project task <text> — додаємо задачу
+  // /project task <text>
   if (/^\/project\s+task\b/i.test(text)) {
     const cur = await getCurrentProject(env, userId);
     if (!cur) {
@@ -707,7 +704,7 @@ export async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain
     return true;
   }
 
-  // /project progress <text> — додаємо запис прогресу
+  // /project progress <text>
   if (/^\/project\s+progress\b/i.test(text)) {
     const cur = await getCurrentProject(env, userId);
     if (!cur) {
@@ -800,16 +797,11 @@ async function analyzeImageForCodex(env, { lang = "uk", imageBase64, question })
     env.MODEL_ORDER ||
     env.MODEL_ORDER_TEXT;
 
-  const res = await askVision(
-    env,
-    modelOrder,
-    prompt,
-    {
-      systemHint: system,
-      imageBase64,
-      temperature: 0.2,
-    }
-  );
+  const res = await askVision(env, modelOrder, prompt, {
+    systemHint: system,
+    imageBase64,
+    temperature: 0.2,
+  });
 
   const text =
     typeof res === "string"
@@ -842,7 +834,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
     return true;
   }
 
-  // обробка UI-режимів (force-reply)
+  // ---------- UI-стани ----------
   if (awaiting === "proj_name" && textRaw) {
     const name = textRaw.trim();
     await kv.delete(UI_AWAIT_KEY(userId));
@@ -867,7 +859,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
     await sendPlain(
       env,
       chatId,
-      `✅ Створено проєкт "${name}". Опиши ідею (я збережу її в idea.md).`
+      `✅ Створено проєкт "<b>${name}</b>". Опиши ідею (я збережу її в idea.md).`
     );
     await kv.put(UI_AWAIT_KEY(userId), "idea_text", { expirationTtl: 3600 });
     return true;
@@ -897,24 +889,24 @@ export async function handleCodexGeneration(env, ctx, helpers) {
 
     const system = [
       "Ти — Senti Codex Architect.",
-      "Твоє завдання — допомогти юзеру сформувати чітку, структуровану ідею проєкту.",
+      "Твоє завдання — допомогти юзеру сформувати чітку, структурувану ідею проєкту.",
       "Сконструюй опис так, щоб його можна було використовувати як основу для архітектури та постановки задач.",
       "",
       "Вимоги до результату:",
       "- пиши українською;",
-      "- використовуй зрозумілі підзаголовки (Мета, Ключові можливості, Обмеження, Технології, Наступні кроки);",
+      "- використовуй підзаголовки (Мета, Ключові можливості, Обмеження, Технології, Наступні кроки);",
       "- не вигадуй неможливих речей, опирайся на текст користувача;",
-      "- якщо чогось не вистачає — зроби розумні припущення, але явно познач їх як «припущення»."
+      "- якщо чогось не вистачає — зроби розумні припущення, але познач їх як «припущення»."
     ].join("\n");
 
     const prompt = [
       `Проєкт: ${projName}`,
       "",
       "Попередній опис (може бути порожнім):",
-      prevIdea ? `"""\\n${prevIdea.slice(0, 1500)}\\n"""` : "(ще не було ідеї)",
+      prevIdea ? `\"\"\"\\n${prevIdea.slice(0, 1500)}\\n\"\"\"` : "(ще не було ідеї)",
       "",
       "Новий опис ідеї від користувача:",
-      `"""\\n${ideaRaw.slice(0, 2000)}\\n"""`,
+      `\"\"\"\\n${ideaRaw.slice(0, 2000)}\\n\"\"\"`,
       "",
       "Сформуй одну узгоджену, структуровану чернетку ідеї."
     ].join("\n");
@@ -946,7 +938,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
     await kv.put(UI_AWAIT_KEY(userId), "idea_confirm", { expirationTtl: 3600 });
 
     const msgLines = [
-      `🧠 Чернетка ідеї для проєкту «${projName}»:`,
+      `🧠 Чернетка ідеї для проєкту <b>${projName}</b>:`,
       "",
       draft,
       "",
@@ -999,7 +991,6 @@ export async function handleCodexGeneration(env, ctx, helpers) {
       return true;
     }
 
-    // Інтерпретуємо як правки до ідеї
     const meta = (await readMeta(env, userId, cur)) || {};
     const projName = normalizeProjectName(meta.name || cur);
     const prevDraft = String(draftObj.ideaDraft || "");
@@ -1019,10 +1010,10 @@ export async function handleCodexGeneration(env, ctx, helpers) {
       `Проєкт: ${projName}`,
       "",
       "Попередня чернетка:",
-      `"""\\n${prevDraft.slice(0, 3000)}\\n"""`,
+      `\"\"\"\\n${prevDraft.slice(0, 3000)}\\n\"\"\"`,
       "",
       "Коментарі / правки від користувача:",
-      `"""\\n${note.slice(0, 2000)}\\n"""`,
+      `\"\"\"\\n${note.slice(0, 2000)}\\n\"\"\"`,
       "",
       "Поверни оновлену чернетку ідеї.",
     ].join("\n");
@@ -1049,7 +1040,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
     });
 
     const respLines = [
-      `🧠 Оновлена чернетка ідеї для «${projName}»:`,
+      `🧠 Оновлена чернетка ідеї для <b>${projName}</b>:`,
       "",
       newDraft,
       "",
@@ -1073,7 +1064,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
       return true;
     }
     await setCurrentProject(env, userId, name);
-    await sendPlain(env, chatId, `✅ Активний проєкт: "${name}".`);
+    await sendPlain(env, chatId, `✅ Активний проєкт: <b>${name}</b>.`);
     return true;
   }
 
@@ -1087,8 +1078,15 @@ export async function handleCodexGeneration(env, ctx, helpers) {
     return true;
   }
 
+  // /project-команди
   if (textRaw && textRaw.startsWith("/project")) {
-    const handled = await handleCodexCommand(env, chatId, userId, textRaw, sendPlain);
+    const handled = await handleCodexCommand(
+      env,
+      chatId,
+      userId,
+      textRaw,
+      sendPlain
+    );
     return handled;
   }
 
@@ -1097,13 +1095,91 @@ export async function handleCodexGeneration(env, ctx, helpers) {
   const progress =
     (await readSection(env, userId, curName, "progress.md")) || "";
 
+  // Fallback: якщо ідея ще не задана, а Codex не в стані idea_text,
+  // трактуємо перший текст як опис ідеї та запускаємо Architect-діалог.
+  if (
+    awaiting === "none" &&
+    textRaw &&
+    !textRaw.startsWith("/") &&
+    !hasPhoto &&
+    !hasDocument &&
+    (!idea || !idea.trim())
+  ) {
+    const cur = curName;
+    const ideaRaw = textRaw.trim();
+
+    const meta = (await readMeta(env, userId, cur)) || {};
+    const projName = normalizeProjectName(meta.name || cur);
+    const prevIdea = idea || "";
+
+    const system = [
+      "Ти — Senti Codex Architect.",
+      "Твоє завдання — допомогти юзеру сформувати чітку, структурувану ідею проєкту.",
+      "",
+      "Вимоги до результату:",
+      "- пиши українською;",
+      "- використовуй підзаголовки (Мета, Ключові можливості, Обмеження, Технології, Наступні кроки);",
+      "- не вигадуй неможливих речей, опирайся на текст користувача;",
+      "- якщо чогось не вистачає — зроби розумні припущення, але познач їх як «припущення»."
+    ].join("\n");
+
+    const prompt = [
+      `Проєкт: ${projName}`,
+      "",
+      "Попередній опис (може бути порожнім):",
+      prevIdea ? `\"\"\"\\n${prevIdea.slice(0, 1500)}\\n\"\"\"` : "(ще не було ідеї)",
+      "",
+      "Новий опис ідеї від користувача:",
+      `\"\"\"\\n${ideaRaw.slice(0, 2000)}\\n\"\"\"`,
+      "",
+      "Сформуй одну узгоджену, структуровану чернетку ідеї."
+    ].join("\n");
+
+    const res = await askAnyModel(
+      env,
+      env.MODEL_ORDER_TEXT || env.MODEL_ORDER || env.MODEL_ORDER_CODE,
+      prompt,
+      {
+        systemHint: system,
+        temperature: 0.3,
+      }
+    );
+
+    const draft = extractTextFromModel(res).trim() || ideaRaw;
+
+    const draftObj = {
+      project: cur,
+      projectName: projName,
+      ideaDraft: draft,
+      userIdea: ideaRaw,
+      previousIdea: prevIdea,
+      createdAt: nowIso(),
+    };
+
+    await kv.put(IDEA_DRAFT_KEY(userId), JSON.stringify(draftObj), {
+      expirationTtl: 3600,
+    });
+    await kv.put(UI_AWAIT_KEY(userId), "idea_confirm", { expirationTtl: 3600 });
+
+    const msgLines = [
+      `🧠 Чернетка ідеї для проєкту <b>${projName}</b>:`,
+      "",
+      draft,
+      "",
+      "Якщо все ок — напиши «+» або «зберегти».",
+      "Якщо потрібно щось змінити — напиши, що саме переробити.",
+    ];
+    await sendPlain(env, chatId, msgLines.join("\n"));
+    return true;
+  }
+
   const systemHint = [
     "Ти — Senti Codex 3.0 (AI Architect).",
     "Ти поєднуєш ролі: архітектор, senior-розробник і аналітик вимог.",
     "Працюєш у режимі проєкту; зберігай цілісну картину й будуй відповідь так, щоб нею можна було керувати розробкою.",
     "",
     "Коли немає чіткого запиту на конкретний код — спершу дай архітектуру, структуру файлів/модулів, список задач і план кроків.",
-    "Коли бачиш фрагменти коду — роби короткий огляд, потім пропонуй зміни (diff/рефакторинг) і лише після цього показуй приклад коду.",
+    "Коли бачиш фрагменти коду — спочатку короткий огляд, потім пропонуй зміни (diff/рефакторинг), і лише після цього приклади коду.",
     "Для зображень та assets пояснюй, як саме їх краще використати в проєкті (логотип, банер, UI, іконки, контент).",
     "Не вигадуй вміст зовнішніх посилань: якщо ти його не бачиш у тексті — стався до нього як до невідомого ресурсу й кажи про це прямо.",
     "",
@@ -1134,7 +1210,7 @@ const photo = pickPhoto ? pickPhoto(msg) : null;
       );
       if (ok) assetsSaved.push(label);
     } catch {
-      // ігноруємо
+      // ignore
     }
   }
 
