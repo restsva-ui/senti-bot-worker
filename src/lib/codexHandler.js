@@ -77,6 +77,22 @@ function pickKV(env) {
   );
 }
 
+// окремо — KV, який точно вміє .list()
+function pickKVWithList(env) {
+  const candidates = [
+    env.CHECKLIST_KV,
+    env.STATE_KV,
+    env.ENERGY_LOG_KV,
+    env.LEARN_QUEUE_KV,
+    env.TODO_KV,
+    env.DIALOG_KV,
+  ];
+  for (const kv of candidates) {
+    if (kv && typeof kv.list === "function") return kv;
+  }
+  return null;
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -162,8 +178,8 @@ async function readMeta(env, userId, name) {
 }
 
 async function listProjects(env, userId) {
-  const kv = pickKV(env);
-  if (!kv || !kv.list) return [];
+  const kv = pickKVWithList(env);
+  if (!kv) return [];
   const out = [];
   let cursor;
   do {
@@ -180,20 +196,23 @@ async function listProjects(env, userId) {
 
 async function deleteProject(env, userId, name) {
   const kv = pickKV(env);
-  if (!kv || !kv.list) return;
+  const kvList = pickKVWithList(env);
+  if (!kv) return;
   const normalized = normalizeProjectName(name);
 
   await kv.delete(PROJ_META_KEY(userId, normalized));
 
-  const prefix = `codex:project:file:${userId}:${normalized}:`;
-  let cursor;
-  do {
-    const res = await kv.list({ prefix, cursor });
-    for (const k of res.keys || []) {
-      await kv.delete(k.name);
-    }
-    cursor = res.list_complete ? undefined : res.cursor;
-  } while (cursor);
+  if (kvList && kvList.list) {
+    const prefix = `codex:project:file:${userId}:${normalized}:`;
+    let cursor;
+    do {
+      const res = await kvList.list({ prefix, cursor });
+      for (const k of res.keys || []) {
+        await kvList.delete(k.name);
+      }
+      cursor = res.list_complete ? undefined : res.cursor;
+    } while (cursor);
+  }
 
   const cur = await kv.get(PROJ_CURR_KEY(userId), "text");
   if (cur && normalizeProjectName(cur) === normalized) {
@@ -344,7 +363,10 @@ export async function handleCodexUi(
         [
           { text: "📦 Snapshot", callback_data: CB.SNAPSHOT },
           { text: "🗄 Файли", callback_data: CB.FILES },
-          { text: "🗑", callback_data: CB_DELETE_PREFIX + encodeURIComponent(name) },
+          {
+            text: "🗑",
+            callback_data: CB_DELETE_PREFIX + encodeURIComponent(name),
+          },
         ],
       ],
     };
@@ -1092,8 +1114,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
   const progress =
     (await readSection(env, userId, curName, "progress.md")) || "";
 
-  // Fallback: якщо ідея ще не задана, а Codex не в стані idea_text,
-  // трактуємо перший текст як опис ідеї та запускаємо Architect-діалог.
+  // Fallback: перший текст як ідея, якщо idea.md ще пуста
   if (
     awaiting === "none" &&
     textRaw &&
