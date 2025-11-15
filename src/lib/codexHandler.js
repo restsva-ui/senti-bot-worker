@@ -268,7 +268,7 @@ async function createProject(env, userId, name, initialIdea) {
 }
 
 // -------------------- keyboard Codex --------------------
-function buildCodexKeyboard() {
+export function buildCodexKeyboard() {
   return {
     inline_keyboard: [
       [{ text: "➕ Створити проєкт", callback_data: CB.NEW }],
