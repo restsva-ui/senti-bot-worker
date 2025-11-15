@@ -1,3 +1,5 @@
+# wrangler.toml — частина 1/2
+
 name = "senti-bot-worker"
 main = "src/index.js"
 compatibility_date = "2024-09-25"
@@ -53,16 +55,23 @@ TELEGRAM_PARSE_MODE = "HTML"
 # ─────────────────────────────────────────
 
 # головний (текстовий) порядок
-MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free"
+# 1) Gemini 2.5 (Google API)
+# 2) Qwen 1.5 chat (Cloudflare, безкоштовний)
+# 3) Llama 3.2 instruct (Cloudflare)
+# 4) Qwen 2.5 instruct (OpenRouter free)
+MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen1.5-7b-chat, cf:@cf/meta/llama-3.2-11b-instruct, openrouter:qwen/qwen2.5-7b-instruct:free"
 
 # явний текстовий (якщо десь у коді береться саме TEXT)
-MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free"
+MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen1.5-7b-chat, cf:@cf/meta/llama-3.2-11b-instruct, openrouter:qwen/qwen2.5-7b-instruct:free"
 
 # кодовий
-MODEL_ORDER_CODE = "cf:@cf/meta/llama-3.2-11b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
+# 1) Qwen 2.5 coder (OpenRouter free)
+# 2) Gemini 2.5
+# 3) Llama 3.2 instruct (Cloudflare)
+MODEL_ORDER_CODE = "openrouter:qwen/qwen2.5-coder:free, gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct"
 
-# ВАЖЛИВО: vision — спершу Gemini, потім CF-vision (бо CF може відвалюватись)
-MODEL_ORDER_VISION = "gemini:gemini-1.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct"
+# ВАЖЛИВО: vision — спершу Gemini, потім CF-vision
+MODEL_ORDER_VISION = "gemini:gemini-1.5-flash, gemini:gemini-2.0-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct"
 
 # дефолтні назви моделей (для читабельності в адмінці)
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -78,13 +87,15 @@ FREE_API_BASE_URL = "https://openrouter.ai/api"
 FREE_API_PATH     = "/v1/chat/completions"
 
 # старий/новий неймінг — код у тебе дивиться на обидва
+# тепер замість Meta Scout використовуємо Qwen 2.5 (free)
 FREE_LLM_BASE_URL = "https://openrouter.ai/api"
-FREE_LLM_MODEL    = "meta-llama/llama-4-scout:free"
-FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
+FREE_LLM_MODEL    = "qwen/qwen2.5-7b-instruct:free"
+FREE_API_MODEL    = "qwen/qwen2.5-7b-instruct:free"
 
 # щоб у хедерах OpenRouter було хто ти
 OPENROUTER_SITE_URL = "https://senti.restsva.app"
 OPENROUTER_APP_NAME = "Senti Bot Worker"
+# wrangler.toml — частина 2/2
 
 # ─────────────────────────────────────────
 #     Нічні авто-поліпшення / self-reg
@@ -156,4 +167,4 @@ id = "86a54c59ce674a558780c58bf1a47dfd"
 # ─────────────────────────────────────────
 [[r2_buckets]]
 binding = "LEARN_BUCKET"
-bucket_name = "senti-learn" 
+bucket_name = "senti-learn"
