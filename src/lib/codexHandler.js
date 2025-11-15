@@ -14,29 +14,25 @@ import {
   codexUploadAssetFromUrl,
 } from "./codexDrive.js";
 
-// -------------------- базові ключі/допоміжні --------------------
-const CODEX_MODE_KEY = (uid) => `codex:mode:${uid}`; // "true"/"false"
-export const CODEX_MEM_KEY = (uid) => `codex:mem:${uid}`; // довготривала пам'ять
+// ─────────────────────────────────────────────────────────────────────────────
+// Константи + допоміжні
 
-// Project Mode: активний проєкт юзера + метадані + секції (KV)
-const PROJ_CURR_KEY = (uid) => `codex:project:current:${uid}`; // string
-const PROJ_META_KEY = (uid, name) => `codex:project:meta:${uid}:${name}`; // json
-const PROJ_FILE_KEY = (uid, name, file) =>
-  `codex:project:file:${uid}:${name}:${file}`; // text/md/json
-const PROJ_TASKSEQ_KEY = (uid, name) => `codex:project:taskseq:${uid}:${name}`; // number
-const PROJ_PREFIX_LIST = (uid) => `codex:project:meta:${uid}:`; // для .list()
+const CODEX_MEM_KEY = (uid) => `codex:mem:${uid}`;
+const CODEX_MODE_KEY = (uid) => `codex:mode:${uid}`;
+const PROJ_CURR_KEY = (uid) => `codex:project:current:${uid}`;
+const PROJ_PREFIX_META = (uid) => `codex:project:meta:${uid}:`;
+const PROJ_PREFIX_FILE = (uid) => `codex:project:file:${uid}:`;
+const UI_AWAIT_KEY = (uid) => `codex:await:${uid}`;
 
-// UI-стани (FSM у KV)
-const UI_AWAIT_KEY = (uid) => `codex:ui:await:${uid}`; // none|proj_name|use_name|idea
-const UI_TMPNAME_KEY = (uid) => `codex:ui:tmpname:${uid}`; // тимчасова назва проєкту
-
-// callback data (inline)
-export const CB = {
+// inline-кнопки / callback_data
+const CB = {
   NEW: "codex:new",
   LIST: "codex:list",
   USE: "codex:use",
   STATUS: "codex:status",
 };
+
+const CB_USE_PREFIX = "codex:use:";
 
 function pickKV(env) {
   return (
@@ -52,11 +48,13 @@ function nowIso() {
 }
 
 // -------------------- вкл/викл Codex --------------------
+export const CODEX_MEM_KEY_CONST = CODEX_MEM_KEY;
+
 export async function setCodexMode(env, userId, on) {
   const kv = pickKV(env);
   if (!kv) return;
   await kv.put(CODEX_MODE_KEY(userId), on ? "true" : "false", {
-    expirationTtl: 60 * 60 * 24 * 180,
+    expirationTtl: 60 * 60 * 24 * 365,
   });
 }
 export async function getCodexMode(env, userId) {
@@ -81,48 +79,7 @@ async function setCurrentProject(env, userId, name) {
 async function getCurrentProject(env, userId) {
   const kv = pickKV(env);
   if (!kv) return null;
-  return await kv.get(PROJ_CURR_KEY(userId), "text");
-}
-async function saveMeta(env, userId, name, meta) {
-  const kv = pickKV(env);
-  if (!kv) return;
-  await kv.put(PROJ_META_KEY(userId, name), JSON.stringify(meta), {
-    expirationTtl: 60 * 60 * 24 * 365,
-  });
-}
-async function readMeta(env, userId, name) {
-  const kv = pickKV(env);
-  if (!kv) return null;
-  const raw = await kv.get(PROJ_META_KEY(userId, name));
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-async function writeSection(env, userId, name, file, content) {
-  const kv = pickKV(env);
-  if (!kv) return;
-  await kv.put(PROJ_FILE_KEY(userId, name, file), content, {
-    expirationTtl: 60 * 60 * 24 * 365,
-  });
-  // синхронізуємо оновлену секцію на Drive
-  await codexSyncSection(env, userId, name, file, content).catch(() => {});
-}
-async function readSection(env, userId, name, file) {
-  const kv = pickKV(env);
-  if (!kv) return null;
-  return await kv.get(PROJ_FILE_KEY(userId, name, file));
-}
-async function appendSection(env, userId, name, file, line) {
-  const prev = (await readSection(env, userId, name, file)) || "";
-  const next = prev
-    ? prev.endsWith("\n")
-      ? prev + line
-      : prev + "\n" + line
-    : line;
-  await writeSection(env, userId, name, file, next);
+  return (await kv.get(PROJ_CURR_KEY(userId), "text")) || null;
 }
 async function listProjects(env, userId) {
   const kv = pickKV(env);
@@ -130,7 +87,7 @@ async function listProjects(env, userId) {
   const out = [];
   let cursor = undefined;
   do {
-    const res = await kv.list({ prefix: PROJ_PREFIX_LIST(userId), cursor });
+    const res = await kv.list({ prefix: PROJ_PREFIX_META(userId), cursor });
     for (const k of res.keys || []) {
       const parts = k.name.split(":"); // codex:project:meta:<uid>:<name>
       const name = parts.slice(-1)[0];
@@ -140,185 +97,135 @@ async function listProjects(env, userId) {
   } while (cursor);
   return out.sort();
 }
-async function nextTaskId(env, userId, name) {
+async function readProjectMeta(env, userId, name) {
   const kv = pickKV(env);
-  if (!kv) return 1;
-  const k = PROJ_TASKSEQ_KEY(userId, name);
-  const curStr = await kv.get(k);
-  const cur = Number(curStr || "0");
-  const nxt = Number.isFinite(cur) ? cur + 1 : 1;
-  await kv.put(k, String(nxt), { expirationTtl: 60 * 60 * 24 * 365 });
-  return nxt;
+  if (!kv) return null;
+  const k = PROJ_PREFIX_META(userId) + name;
+  const raw = await kv.get(k, "text");
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+async function writeProjectMeta(env, userId, name, meta) {
+  const kv = pickKV(env);
+  if (!kv) return;
+  const k = PROJ_PREFIX_META(userId) + name;
+  const payload = JSON.stringify({
+    ...meta,
+    updated_at: nowIso(),
+  });
+  await kv.put(k, payload, { expirationTtl: 60 * 60 * 24 * 365 });
+}
+async function readSection(env, userId, projName, sectionName) {
+  const kv = pickKV(env);
+  if (!kv) return null;
+  const k = PROJ_PREFIX_FILE(userId) + `${projName}:${sectionName}`;
+  return (await kv.get(k, "text")) || null;
+}
+async function writeSection(env, userId, projName, sectionName, content) {
+  const kv = pickKV(env);
+  if (!kv) return;
+  const k = PROJ_PREFIX_FILE(userId) + `${projName}:${sectionName}`;
+  await kv.put(k, content, { expirationTtl: 60 * 60 * 24 * 365 });
+}
+async function appendSection(env, userId, projName, sectionName, line) {
+  const prev = (await readSection(env, userId, projName, sectionName)) || "";
+  const next = prev ? `${prev}\n${line}` : line;
+  await writeSection(env, userId, projName, sectionName, next);
 }
 
-// -------------------- шаблони --------------------
-function templateReadme(name) {
-  return `# ${name}
-Senti Codex Project
-
-- \`idea.md\` — контракт ідеї (Codex дотримується автоматично).
-- \`spec.md\` — вимоги/архітектура.
-- \`connectors.md\` — інтеграції/секрети/чеклісти.
-- \`progress.md\` — журнал прогресу.
-- \`tasks.md\` — TODO/DOING/DONE.
-- \`decisions.md\` — ADR (журнал рішень).
-- \`risks.md\` — ризики/пом'якшення.
-- \`testplan.md\` — тести/приймання.
-`;
-}
-function templateIdea(initialIdea = "") {
-  return `## Ідея (контракт)
-${initialIdea || "Опишіть бачення/цілі/обмеження. Це — джерело істини."}
-
-## Anti-goals
-- Що **не** робимо та чого уникаємо.
-
-## Додаткові матеріали
-(Тут Codex автоматично додає посилання/назви на файли/зображення, що ви надішлете.)
-
-## Цільова аудиторія
-- Кого обслуговує продукт.
-
-## Ключові принципи
-- Коротко, маркерами.`;
-}
-function templateSpec() {
-  return `# Специфікація / Архітектура
-- Модулі:
-- API/Інтеграції:
-- Дані/Сховища:
-- Edge/Workers/Limits:
-`;
-}
-function templateConnectors() {
-  return `# Інтеграції та секрети (плейсхолдери)
-GEMINI_API_KEY=<set in secrets>
-CLOUDFLARE_API_TOKEN=<set in secrets>
-OPENROUTER_API_KEY=<set in secrets>
-
-## Чекліст
-- [ ] Додати ключі в Secrets/Bindings
-- [ ] Перевірити змінні в wrangler.toml
-`;
-}
-function templateProgress() {
-  return `# Прогрес\n`;
-}
-function templateTasks() {
-  return `# Tasks\n\n| ID | State | Title |\n|----|-------|-------|\n`;
-}
-function templateDecisions() {
-  return `# ADR\n\n`;
-}
-function templateRisks() {
-  return `# Ризики\n\n`;
-}
-function templateTestplan() {
-  return `# Test Plan\n\n- Саніті\n- Інтегр. тести\n- Приймання\n`;
-}
-
-// ---- утиліти таблиці tasks.md ----
-function mdAddTaskRow(md, id, title) {
-  const line = `| ${id} | TODO | ${title} |`;
-  return md.endsWith("\n") ? md + line + "\n" : md + "\n" + line + "\n";
-}
-function mdMarkTaskDone(md, id) {
-  const lines = md.split("\n");
-  const rx = new RegExp(`^\\|\\s*${id}\\s*\\|\\s*[^|]*\\|`);
-  return lines
-    .map((l) => (rx.test(l) ? l.replace(/\|[^|]*\|/, "| DONE |") : l))
-    .join("\n");
-}
-// -------------------- Project Context для підказки --------------------
-async function buildProjectContext(env, userId) {
-  const name = await getCurrentProject(env, userId);
-  if (!name) return { name: null, hint: "" };
-
-  const idea = (await readSection(env, userId, name, "idea.md")) || "";
-  const spec = (await readSection(env, userId, name, "spec.md")) || "";
-
-  const hint = `[Project: ${name}]
-[Idea Contract]
-${idea.slice(0, 2500)}
-
-[Spec (excerpt)]
-${spec.slice(0, 2000)}
-
-Rules:
-- Answers MUST align with "Idea Contract". If user asks something out-of-scope, say: "Не впевнений — суперечить ідеї" і запропонуй оновити ідею.`;
-
-  return { name, hint };
-}
-
-// -------------------- INLINE UI --------------------
+// -------------------- buildCodexKeyboard --------------------
 export function buildCodexKeyboard() {
   return {
     inline_keyboard: [
       [{ text: "➕ Створити проєкт", callback_data: CB.NEW }],
       [{ text: "📂 Обрати проєкт", callback_data: CB.USE }],
       [{ text: "📋 Статус", callback_data: CB.STATUS }],
-      [{ text: "🗂 Список", callback_data: CB.LIST }],
     ],
   };
 }
 
 /**
  * handleCodexUi: обробляє callback_data з inline-меню.
- * helpers: { sendPlain }
+ * helpers: { sendPlain, tgFileUrl, driveSaveFromUrl, getUserTokens }
  */
-export async function handleCodexUi(
-  env,
-  chatId,
-  userId,
-  { cbData },
-  helpers = {}
-) {
+export async function handleCodexUi(env, chatId, userId, ctx, helpers) {
+  const { cbData } = ctx;
+  const { sendPlain, tgFileUrl, driveSaveFromUrl, getUserTokens } = helpers;
   const kv = pickKV(env);
-  if (!kv) return false;
-  const { sendPlain } = helpers;
+  if (!kv) {
+    await sendPlain(env, chatId, "Codex KV недоступний.");
+    return false;
+  }
 
   if (cbData === CB.NEW) {
     await kv.put(UI_AWAIT_KEY(userId), "proj_name", { expirationTtl: 3600 });
-    await sendPlain(env, chatId, "Введи назву нового проєкту:", {
-      reply_markup: {
-        force_reply: true,
-        input_field_placeholder: "Назва проєкту",
-      },
-    });
-    return true;
-  }
-
-  if (cbData === CB.USE) {
-    await kv.put(UI_AWAIT_KEY(userId), "use_name", { expirationTtl: 3600 });
     await sendPlain(
       env,
       chatId,
-      "Введи назву проєкту, який хочеш зробити активним:",
+      "Введи назву нового проєкту (одним рядком):",
       {
         reply_markup: {
           force_reply: true,
-          input_field_placeholder: "Назва існуючого проєкту",
+          input_field_placeholder: "Назва проєкту для Codex",
         },
       }
     );
     return true;
   }
 
-  if (cbData === CB.LIST) {
+  if (cbData === CB.USE) {
     const all = await listProjects(env, userId);
-    const cur = await getCurrentProject(env, userId);
     if (!all.length) {
       await sendPlain(
         env,
         chatId,
-        "Поки що немає проєктів. Натисни «Створити проєкт»."
+        "Немає проєктів. Спочатку створи /project new <name>."
       );
       return true;
     }
+    const buttons = all.slice(0, 25).map((name) => [{
+      text: `📁 ${name}`,
+      callback_data: CB_USE_PREFIX + encodeURIComponent(name).slice(0, 50),
+    }]);
+    await sendPlain(env, chatId, "Оберіть проєкт:", {
+      reply_markup: {
+        inline_keyboard: buttons,
+      },
+    });
+    return true;
+  }
+
+  if (cbData === CB.LIST) {
+    const all = await listProjects(env, userId);
+    if (!all.length) {
+      await sendPlain(
+        env,
+        chatId,
+        "Немає проєктів. Створи: /project new <name>"
+      );
+      return true;
+    }
+    const cur = await getCurrentProject(env, userId);
     const body = all
-      .map((n, i) => `${i + 1}. ${n}${n === cur ? " (active)" : ""}`)
+      .map((name) => (name === cur ? `👉 ${name} (active)` : `• ${name}`))
       .join("\n");
     await sendPlain(env, chatId, `Проєкти:\n${body}`);
+    return true;
+  }
+
+  if (cbData.startsWith(CB_USE_PREFIX)) {
+    const raw = cbData.slice(CB_USE_PREFIX.length);
+    const name = decodeURIComponent(raw || "");
+    if (!name) {
+      await sendPlain(env, chatId, "Не вдалося розпізнати назву проєкту.");
+      return true;
+    }
+    await setCurrentProject(env, userId, name);
+    await sendPlain(env, chatId, `Активний проєкт: ${name}`);
     return true;
   }
 
@@ -332,7 +239,7 @@ export async function handleCodexUi(
     const progress =
       (await readSection(env, userId, cur, "progress.md")) || "";
     const tasks = (await readSection(env, userId, cur, "tasks.md")) || "";
-    const body = [
+const body = [
       `📁 ${cur}`,
       "",
       "— Ідея (уривок):",
@@ -348,17 +255,12 @@ export async function handleCodexUi(
     return true;
   }
 
+  // інші callback-и – ігноруємо
   return false;
 }
 
-// -------------------- /project ... (сумісність) --------------------
-export async function handleCodexCommand(
-  env,
-  chatId,
-  userId,
-  textRaw,
-  sendPlain
-) {
+// -------------------- handleCodexCommand (текстові /project команди) --------------------
+async function handleCodexCommand(env, chatId, userId, textRaw, sendPlain) {
   const txt = String(textRaw || "").trim();
 
   // /project new <name> [; idea: ...]
@@ -375,29 +277,55 @@ export async function handleCodexCommand(
       idea = ideaM ? ideaM[1].trim() : "";
     }
     if (!name) {
-      await sendPlain(env, chatId, "Вкажи назву: /project new <name>");
+      await sendPlain(env, chatId, "Вкажи назву проєкту.");
       return true;
     }
-
-    await createProject(env, userId, name, idea);
-    await sendPlain(env, chatId, `✅ Проєкт ${name} створено і активовано.`);
+    const metaPrev = await readProjectMeta(env, userId, name);
+    if (metaPrev) {
+      await sendPlain(
+        env,
+        chatId,
+        `Проєкт "${name}" вже існує. Можеш його активувати /project use ${name}`
+      );
+      return true;
+    }
+    const base = {
+      name,
+      created_at: nowIso(),
+      stage: "idea",
+    };
+    await writeProjectMeta(env, userId, name, base);
+    await setCurrentProject(env, userId, name);
+    if (idea) {
+      await writeSection(env, userId, name, "idea.md", idea);
+    }
+    await sendPlain(
+      env,
+      chatId,
+      `✅ Створено проєкт "${name}". Він активний.\n` +
+        (idea
+          ? "Ідея збережена в idea.md.\n"
+          : "Додай ідею: /project idea set <текст>"),
+    );
     return true;
   }
 
   // /project use <name>
   if (/^\/project\s+use\s+/i.test(txt)) {
-    const name = txt.replace(/^\/project\s+use\s+/i, "").trim();
+    const m = txt.match(/^\/project\s+use\s+(.+)$/i);
+    if (!m) return false;
+    const name = m[1].trim();
     if (!name) {
-      await sendPlain(env, chatId, "Вкажи назву: /project use <name>");
+      await sendPlain(env, chatId, "Вкажи назву проєкту.");
       return true;
     }
-    const all = await listProjects(env, userId);
-    if (!all.includes(name)) {
-      await sendPlain(env, chatId, `Не знайдено: ${name}`);
+    const meta = await readProjectMeta(env, userId, name);
+    if (!meta) {
+      await sendPlain(env, chatId, `Проєкт "${name}" не знайдено.`);
       return true;
     }
     await setCurrentProject(env, userId, name);
-    await sendPlain(env, chatId, `Активний проєкт: ${name}`);
+    await sendPlain(env, chatId, `✅ Активний проєкт: "${name}".`);
     return true;
   }
 
@@ -414,21 +342,30 @@ export async function handleCodexCommand(
       return true;
     }
     const body = all
-      .map((n, i) => `${i + 1}. ${n}${n === cur ? " (active)" : ""}`)
+      .map((name) => (name === cur ? `👉 ${name} (active)` : `• ${name}`))
       .join("\n");
     await sendPlain(env, chatId, `Проєкти:\n${body}`);
     return true;
   }
 
-  // /project idea set|add <text>
-  if (/^\/project\s+idea\s+(set|add)\s+/i.test(txt)) {
+  // /project idea set|append ...
+  if (/^\/project\s+idea\s+/i.test(txt)) {
     const cur = await getCurrentProject(env, userId);
     if (!cur) {
-      await sendPlain(env, chatId, "Активуй проєкт: /project use <name>");
+      await sendPlain(env, chatId, "Спочатку активуй проєкт.");
       return true;
     }
-    const [, action, rest] =
-      txt.match(/^\/project\s+idea\s+(set|add)\s+([\s\S]+)$/i) || [];
+    const m = txt.match(/^\/project\s+idea\s+(set|append)\s+([\s\S]+)$/i);
+    if (!m) {
+      await sendPlain(
+        env,
+        chatId,
+        "Синтаксис: /project idea set <текст> або /project idea append <текст>"
+      );
+      return true;
+    }
+    const action = m[1].toLowerCase();
+    const rest = m[2].trim();
     if (!rest) {
       await sendPlain(env, chatId, "Дай текст після команди.");
       return true;
@@ -443,242 +380,144 @@ export async function handleCodexCommand(
       );
       await sendPlain(env, chatId, "✅ Ідею оновлено (set).");
     } else {
-      await appendSection(env, userId, cur, "idea.md", `\n\n${rest.trim()}`);
-      await sendPlain(env, chatId, "➕ Додано до ідеї (add).");
+      await appendSection(env, userId, cur, "idea.md", rest.trim());
+      await sendPlain(env, chatId, "✅ Ідею доповнено (append).");
     }
     return true;
   }
 
-  // /project progress add <text>
-  if (/^\/project\s+progress\s+add\s+/i.test(txt)) {
+  // /project tasks add <line>
+  if (/^\/project\s+tasks\s+/i.test(txt)) {
     const cur = await getCurrentProject(env, userId);
     if (!cur) {
-      await sendPlain(env, chatId, "Активуй проєкт: /project use <name>");
+      await sendPlain(env, chatId, "Спочатку активуй проєкт.");
       return true;
     }
-    const text = txt.replace(/^\/project\s+progress\s+add\s+/i, "").trim();
-    if (!text) {
+    const m = txt.match(/^\/project\s+tasks\s+(add|done)\s+([\s\S]+)$/i);
+    if (!m) {
       await sendPlain(
         env,
         chatId,
-        "Дай текст: /project progress add <що зроблено>"
+        "Синтаксис: /project tasks add <рядок> або /project tasks done <рядок>"
       );
       return true;
     }
-    await appendSection(
-      env,
-      userId,
-      cur,
-      "progress.md",
-      `- ${nowIso()} — ${text}`
-    );
-    await sendPlain(env, chatId, "📝 Додано у прогрес.");
+    const action = m[1].toLowerCase();
+    const line = m[2].trim();
+    if (!line) {
+      await sendPlain(env, chatId, "Вкажи текст tasks.");
+      return true;
+    }
+    const prefix = action === "done" ? "[x] " : "[ ] ";
+    await appendSection(env, userId, cur, "tasks.md", prefix + line);
+    await sendPlain(env, chatId, "✅ Tasks оновлено.");
     return true;
   }
 
-  // /project task add <title>
-  if (/^\/project\s+task\s+add\s+/i.test(txt)) {
+  // /project progress <line>
+  if (/^\/project\s+progress\s+/i.test(txt)) {
     const cur = await getCurrentProject(env, userId);
     if (!cur) {
-      await sendPlain(env, chatId, "Активуй проєкт: /project use <name>");
+      await sendPlain(env, chatId, "Спочатку активуй проєкт.");
       return true;
     }
-    const title = txt.replace(/^\/project\s+task\s+add\s+/i, "").trim();
-    if (!title) {
+    const m = txt.match(/^\/project\s+progress\s+([\s\S]+)$/i);
+    if (!m) {
       await sendPlain(
         env,
         chatId,
-        "Формат: /project task add <title>"
+        "Синтаксис: /project progress <рядок/абзац>"
       );
       return true;
     }
-    const id = await nextTaskId(env, userId, cur);
-    const md =
-      (await readSection(env, userId, cur, "tasks.md")) || templateTasks();
-    await writeSection(
-      env,
-      userId,
-      cur,
-      "tasks.md",
-      mdAddTaskRow(md, id, title)
-    );
-    await sendPlain(env, chatId, `✅ Task #${id} додано.`);
+    const line = m[1].trim();
+    if (!line) {
+      await sendPlain(env, chatId, "Додай текст до progress.");
+      return true;
+    }
+    await appendSection(env, userId, cur, "progress.md", line);
+    await sendPlain(env, chatId, "✅ Progress оновлено.");
     return true;
   }
 
-  // /project task done <id>
-  if (/^\/project\s+task\s+done\s+/i.test(txt)) {
+  // /project snapshot -> export у Drive / zip
+  if (/^\/project\s+snapshot/i.test(txt)) {
     const cur = await getCurrentProject(env, userId);
     if (!cur) {
-      await sendPlain(env, chatId, "Активуй проєкт: /project use <name>");
+      await sendPlain(env, chatId, "Спочатку активуй проєкт.");
       return true;
     }
-    const id = Number(
-      txt.replace(/^\/project\s+task\s+done\s+/i, "").trim()
-    );
-    if (!Number.isFinite(id)) {
-      await sendPlain(
-        env,
-        chatId,
-        "Формат: /project task done <id>"
-      );
+    await sendPlain(env, chatId, "Готую snapshot проєкту…");
+    const res = await codexExportSnapshot(env, userId, cur);
+    if (!res || !res.ok) {
+      await sendPlain(env, chatId, "Не вдалось зробити snapshot.");
       return true;
     }
-    const md =
-      (await readSection(env, userId, cur, "tasks.md")) || templateTasks();
-    await writeSection(
-      env,
-      userId,
-      cur,
-      "tasks.md",
-      mdMarkTaskDone(md, id)
-    );
-    await sendPlain(env, chatId, `✔️ Task #${id} → DONE.`);
-    return true;
-  }
-
-  // /project export — snapshot у Drive/exports/<timestamp>
-  if (/^\/project\s+export\b/i.test(txt)) {
-    const cur = await getCurrentProject(env, userId);
-    if (!cur) {
-      await sendPlain(env, chatId, "Активуй проєкт: /project use <name>");
-      return true;
-    }
-    const sections = {
-      "README.md":
-        (await readSection(env, userId, cur, "README.md")) || "",
-      "idea.md": (await readSection(env, userId, cur, "idea.md")) || "",
-      "spec.md": (await readSection(env, userId, cur, "spec.md")) || "",
-      "connectors.md":
-        (await readSection(env, userId, cur, "connectors.md")) || "",
-      "progress.md":
-        (await readSection(env, userId, cur, "progress.md")) || "",
-      "tasks.md": (await readSection(env, userId, cur, "tasks.md")) || "",
-      "decisions.md":
-        (await readSection(env, userId, cur, "decisions.md")) || "",
-      "risks.md": (await readSection(env, userId, cur, "risks.md")) || "",
-      "testplan.md":
-        (await readSection(env, userId, cur, "testplan.md")) || "",
-    };
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    await codexExportSnapshot(env, userId, cur, stamp, sections);
+    const { url } = res;
     await sendPlain(
       env,
       chatId,
-      `📦 Експорт створено: exports/${stamp}\nУ Google Drive обери цю папку → Download, щоб отримати ZIP.`
+      `Snapshot готовий:\n${url}\n(можеш скачати як zip або переглянути у Drive)`
     );
     return true;
   }
 
-  // /project status — дайджест
-  if (/^\/project\s+status\b/i.test(txt)) {
+  // /project sync idea/progress/tasks -> Brain / Repo
+  if (/^\/project\s+sync\s+/i.test(txt)) {
     const cur = await getCurrentProject(env, userId);
     if (!cur) {
-      await sendPlain(env, chatId, "Активуй проєкт: /project use <name>");
+      await sendPlain(env, chatId, "Спочатку активуй проєкт.");
       return true;
     }
-    const idea = (await readSection(env, userId, cur, "idea.md")) || "";
-    const progress =
-      (await readSection(env, userId, cur, "progress.md")) || "";
-    const tasks = (await readSection(env, userId, cur, "tasks.md")) || "";
-    const body = [
-      `📁 ${cur}`,
-      "",
-      "— Ідея (уривок):",
-      idea.trim().slice(0, 500) || "—",
-      "",
-      "— Останній прогрес:",
-      progress.trim().split("\n").slice(-5).join("\n") || "—",
-      "",
-      "— Tasks (останні рядки):",
-      tasks.trim().split("\n").slice(-6).join("\n") || "—",
-    ].join("\n");
-    await sendPlain(env, chatId, body);
+    const m = txt.match(/^\/project\s+sync\s+(idea|progress|tasks)\b/i);
+    if (!m) {
+      await sendPlain(
+        env,
+        chatId,
+        "Синтаксис: /project sync idea|progress|tasks"
+      );
+      return true;
+    }
+    const section = m[1].toLowerCase();
+    const res = await codexSyncSection(env, userId, cur, section);
+    if (!res || !res.ok) {
+      await sendPlain(env, chatId, "Не вдалося синхронізувати.");
+      return true;
+    }
+    await sendPlain(
+      env,
+      chatId,
+      `✅ Секцію ${section} синхронізовано в Brain/Repo.`
+    );
     return true;
   }
 
-  // не наша команда
   return false;
 }
-// -------------------- створення проєкту (+ Drive bootstrap) --------------------
-async function createProject(env, userId, name, initialIdea) {
-  const meta = { name, createdAt: nowIso() };
-  await saveMeta(env, userId, name, meta);
-
-  const sections = {
-    "README.md": templateReadme(name),
-    "idea.md": templateIdea(initialIdea),
-    "spec.md": templateSpec(),
-    "connectors.md": templateConnectors(),
-    "progress.md": templateProgress(),
-    "tasks.md": templateTasks(),
-    "decisions.md": templateDecisions(),
-    "risks.md": templateRisks(),
-    "testplan.md": templateTestplan(),
-  };
-
-  for (const [fname, body] of Object.entries(sections)) {
-    await writeSection(env, userId, name, fname, body);
-  }
-
-  // Стартова структура на Drive (якщо вже підключений)
-  await codexBootstrapProject(env, userId, name, sections).catch(() => {});
-  await setCurrentProject(env, userId, name);
-}
-
-// -------------------- аналіз зображень для Codex --------------------
-async function toBase64FromUrl(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`fetch image ${r.status}`);
-  const ab = await r.arrayBuffer();
-  const bytes = new Uint8Array(ab);
-  let bin = "";
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  return btoa(bin);
-}
-
-async function analyzeImageForCodex(env, { lang = "uk", imageBase64, question }) {
-  const order =
-    "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct";
-  const systemHint = `You are Senti Codex. Analyze screenshots/code/logs.
-- Be concise: bullet insights + next steps.
-- If the image is a log/build error, extract exact errors and probable fixes.
-- No HTML. Markdown only.`;
-
-  const userPrompt =
-    question && question.trim()
-      ? lang.startsWith("en")
-        ? `User asks: "${question}"`
-        : `Користувач питає: "${question}"`
-      : lang.startsWith("en")
-      ? "Analyze this image for errors, code context and actionable steps."
-      : "Проаналізуй зображення: витягни помилки/контекст коду і дай кроки виправлення.";
-
-  const out = await askVision(env, order, userPrompt, {
-    systemHint,
-    imageBase64,
-    imageMime: "image/png",
-    temperature: 0.2,
-  });
-  if (typeof out === "string") return out;
-  if (out?.text) return out.text;
-  return JSON.stringify(out);
-}
-
-// -------------------- головний генератор Codex --------------------
-/**
- * ctx: { chatId, userId, msg, textRaw, lang, isAdmin }
- * helpers: {
- *   sendPlain, pickPhoto, tgFileUrl, urlToBase64
- * }
- */
-export async function handleCodexGeneration(env, ctx, helpers) {
+// -------------------- handleCodexGeneration --------------------
+async function handleCodexGeneration(env, ctx, helpers) {
   const { chatId, userId, msg, textRaw, lang } = ctx;
   const { sendPlain, pickPhoto, tgFileUrl, urlToBase64 } = helpers;
   const kv = pickKV(env);
 
   // 0) UI-стани (force-reply): створення назви, вибір проєкту, набір ідеї
   const awaiting = (await kv.get(UI_AWAIT_KEY(userId), "text")) || "none";
+
+  // Якщо користувач надіслав лише медіа без тексту і Codex не в режимі очікування
+  // (не створюємо проєкт і не змінюємо ідею) — запитаємо, що зробити з фото/файлом.
+  if (
+    awaiting === "none" &&
+    !textRaw &&
+    msg &&
+    (Array.isArray(msg.photo) && msg.photo.length > 0 || msg.document)
+  ) {
+    await sendPlain(
+      env,
+      chatId,
+      "Я отримав медіа для Codex. Напиши, будь ласка, що саме зробити з цим фото/файлом (наприклад: «зроби логотип», «проаналізуй макет», «згенеруй код сторінки»)."
+    );
+    return true;
+  }
 
   // нова назва проєкту
   if (awaiting === "proj_name" && textRaw) {
@@ -688,177 +527,222 @@ export async function handleCodexGeneration(env, ctx, helpers) {
       await sendPlain(
         env,
         chatId,
-        "Пуста назва. Спробуй ще раз через меню."
+        "Назва порожня. Натисни «Створити проєкт» ще раз і введи коректну."
       );
-      return;
+      return true;
     }
-    await createProject(env, userId, name, "");
-    await sendPlain(
-      env,
-      chatId,
-      `✅ Проєкт «${name}» створено і активовано.\nТепер опиши коротко ідею (можеш додавати фото/файли) — все прикріплю до проєкту.`
-    );
-    await kv.put(UI_AWAIT_KEY(userId), "idea", { expirationTtl: 3600 });
-    await kv.put(UI_TMPNAME_KEY(userId), name, { expirationTtl: 3600 });
-    return;
-  }
-
-  // вибір існуючого проєкту
-  if (awaiting === "use_name" && textRaw) {
-    const name = textRaw.trim();
-    await kv.delete(UI_AWAIT_KEY(userId));
-    const all = await listProjects(env, userId);
-    if (!all.includes(name)) {
-      await sendPlain(env, chatId, `Не знайдено: ${name}`);
-      return;
-    }
-    await setCurrentProject(env, userId, name);
-    await sendPlain(env, chatId, `Активний проєкт: ${name}`);
-    return;
-  }
-
-  // режим набору ідеї: приймаємо текст і медіа (фото/док/voice/video)
-  if (awaiting === "idea") {
-    const cur =
-      (await getCurrentProject(env, userId)) ||
-      (await kv.get(UI_TMPNAME_KEY(userId), "text"));
-    if (!cur) {
-      await kv.delete(UI_AWAIT_KEY(userId));
+    const metaPrev = await readProjectMeta(env, userId, name);
+    if (metaPrev) {
       await sendPlain(
         env,
         chatId,
-        "Не бачу активного проєкту. Створи або обери в меню."
+        `Проєкт "${name}" вже існує. Обери іншу назву або користуйся існуючим.`
       );
-      return;
+      return true;
     }
-
-    if (textRaw) {
-      await appendSection(
-        env,
-        userId,
-        cur,
-        "idea.md",
-        `\n\n${textRaw.trim()}`
-      );
-    }
-
-    const photo = pickPhoto ? pickPhoto(msg) : null;
-    const doc = msg?.document || null;
-    const voice = msg?.voice || null;
-    const video = msg?.video || null;
-
-    const saved = [];
-
-    async function handleAsset(fileId, defaultName, label) {
-      try {
-        const url = await tgFileUrl(env, fileId);
-        const ok = await codexUploadAssetFromUrl(
-          env,
-          userId,
-          cur,
-          url,
-          defaultName
-        );
-        if (ok) saved.push(label);
-      } catch {
-        // ігноруємо конкретну помилку, просто не додаємо label
-      }
-    }
-
-    if (photo?.file_id) {
-      await handleAsset(
-        photo.file_id,
-        photo.name || `photo_${Date.now()}.jpg`,
-        "photo"
-      );
-    }
-    if (doc?.file_id) {
-      await handleAsset(
-        doc.file_id,
-        doc.file_name || `doc_${Date.now()}`,
-        "document"
-      );
-    }
-    if (voice?.file_id) {
-      await handleAsset(
-        voice.file_id,
-        `voice_${voice.file_unique_id || Date.now()}.ogg`,
-        "voice"
-      );
-    }
-    if (video?.file_id) {
-      await handleAsset(
-        video.file_id,
-        video.file_name || `video_${Date.now()}.mp4`,
-        "video"
-      );
-    }
-
-    if (saved.length) {
-      await appendSection(
-        env,
-        userId,
-        cur,
-        "idea.md",
-        `\n\nДодаткові матеріали (${nowIso()}):\n- ${saved.join(
-          "\n- "
-        )}`
-      );
-    }
-
+    const base = {
+      name,
+      created_at: nowIso(),
+      stage: "idea",
+    };
+    await writeProjectMeta(env, userId, name, base);
+    await setCurrentProject(env, userId, name);
     await sendPlain(
       env,
       chatId,
-      "Прийнято. Можеш додавати ще ідей/матеріалів або продовжуй роботу в цьому проєкті."
+      `✅ Створено проєкт "${name}". Тепер опиши ідею (я збережу її в idea.md).`
     );
-    return;
+    await kv.put(UI_AWAIT_KEY(userId), "idea_text", { expirationTtl: 3600 });
+    return true;
   }
 
-  // 1) Проєктний контекст
-  const proj = await buildProjectContext(env, userId);
-  const systemBlocks = [
-    "You are Senti Codex — precise, practical, no hallucinations.",
-    "Answer shortly by default. Prefer Markdown.",
-  ];
-  if (proj.name) systemBlocks.push(proj.hint);
-  const systemHint = systemBlocks.join("\n\n");
+  // набір ідеї після створення проєкту (force-reply)
+  if (awaiting === "idea_text" && textRaw) {
+    const cur = await getCurrentProject(env, userId);
+    await kv.delete(UI_AWAIT_KEY(userId));
+    if (!cur) {
+      await sendPlain(
+        env,
+        chatId,
+        "Не бачу активного проєкту. Натисни ще раз «Створити проєкт»."
+      );
+      return true;
+    }
+    const idea = textRaw.trim();
+    if (!idea) {
+      await sendPlain(env, chatId, "Порожній текст. Спробуй ще раз.");
+      return true;
+    }
+    await writeSection(env, userId, cur, "idea.md", idea);
+    await sendPlain(
+      env,
+      chatId,
+      "✅ Ідею збережено в idea.md. Можеш додавати tasks / progress або кидати вимоги для генерації коду."
+    );
+    return true;
+  }
 
-  // 2) Якщо прийшло фото — аналітика (Markdown, без HTML)
-  const ph = pickPhoto ? pickPhoto(msg) : null;
-  if (ph?.file_id) {
-    const url = await tgFileUrl(env, ph.file_id);
-    const b64 = urlToBase64
-      ? await urlToBase64(url)
-      : await toBase64FromUrl(url);
+  // вибір проєкту по назві (старий режим через force-reply, лишаємо для сумісності)
+  if (awaiting === "use_name" && textRaw) {
+    await kv.delete(UI_AWAIT_KEY(userId));
+    const name = textRaw.trim();
+    if (!name) {
+      await sendPlain(env, chatId, "Порожня назва. Спробуй ще раз.");
+      return true;
+    }
+    const meta = await readProjectMeta(env, userId, name);
+    if (!meta) {
+      await sendPlain(env, chatId, `Проєкт "${name}" не знайдено.`);
+      return true;
+    }
+    await setCurrentProject(env, userId, name);
+    await sendPlain(env, chatId, `✅ Активний проєкт: "${name}".`);
+    return true;
+  }
 
-    const analysis = await analyzeImageForCodex(env, {
-      lang,
-      imageBase64: b64,
-      question: textRaw || "",
-    });
+  // якщо ми тут — жоден force-reply режим не активний
+  const curName = await getCurrentProject(env, userId);
+  if (!curName) {
+    await sendPlain(
+      env,
+      chatId,
+      "Немає активного проєкту. Натисни «Створити проєкт» або «Обрати проєкт»."
+    );
+    return true;
+  }
+  const projMeta = (await readProjectMeta(env, userId, curName)) || {
+    name: curName,
+  };
 
-    if (proj.name) {
-      await appendSection(
+  // 1) Перевірка, чи це /project команда
+  if (textRaw && textRaw.startsWith("/project")) {
+    const handled = await handleCodexCommand(env, chatId, userId, textRaw, sendPlain);
+    return handled;
+  }
+
+  // 2) Підготовка контексту проєкту (idea, tasks, progress)
+  const idea = (await readSection(env, userId, curName, "idea.md")) || "";
+  const tasks = (await readSection(env, userId, curName, "tasks.md")) || "";
+  const progress =
+    (await readSection(env, userId, curName, "progress.md")) || "";
+
+  const systemHint = [
+    "Ти працюєш як Senti Codex — асистент-програміст та архітектор.",
+    "У тебе є поточний проєкт користувача.",
+    `Назва проєкту: ${curName}`,
+    "",
+    "Використовуй наступний контекст:",
+    "=== ІДЕЯ ПРОЄКТУ ===",
+    idea || "(ще не задана)",
+    "",
+    "=== TASKS (task list) ===",
+    tasks || "(ще немає tasks)",
+    "",
+    "=== PROGRESS (щоденник/журнал) ===",
+    progress || "(ще не було progress-записів)",
+    "",
+    "Твої цілі:",
+    "- допомагати проектувати архітектуру;",
+    "- писати структурований, зрозумілий код;",
+    "- пропонувати кроки розвитку проєкту (roadmap);",
+    "- при потребі оновлювати tasks/progress (короткі записи, які можна скопіювати у /project tasks / progress).",
+  ].join("\n");
+
+  // 3) Обробка медіа (фото, документи) → assets
+  const photo = pickPhoto ? pickPhoto(msg) : null;
+  const doc = msg?.document || null;
+  const voice = msg?.voice || null;
+  const video = msg?.video || null;
+
+  const saved = [];
+
+  async function handleAsset(fileId, defaultName, label) {
+    try {
+      const url = await tgFileUrl(env, fileId);
+      const ok = await codexUploadAssetFromUrl(
         env,
         userId,
-        proj.name,
-        "progress.md",
-        `- ${nowIso()} — Аналіз зображення: коротко: ${analysis.slice(
-          0,
-          120
-        )}…`
+        curName,
+        url,
+        defaultName
       );
+      if (ok) saved.push(label);
+    } catch {
+      // ігноруємо конкретну помилку, просто не додаємо label
     }
-    await sendPlain(env, chatId, analysis);
-    return;
   }
 
-  // 3) Текстове завдання
-  const order =
-    String(env.MODEL_ORDER || "").trim() ||
-    "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free";
+  if (photo?.file_id) {
+    await handleAsset(
+      photo.file_id,
+      photo.name || `photo_${Date.now()}.jpg`,
+      "photo"
+    );
+  }
+  if (doc?.file_id) {
+    await handleAsset(
+      doc.file_id,
+      doc.file_name || `doc_${Date.now()}`,
+      "document"
+    );
+  }
 
-  const res = await askAnyModel(env, order, textRaw || "Продовжуй", {
+  // для voice/video можна було б робити транскрипцію, але поки що просто ігноруємо як assets
+let visionSummary = "";
+  if (photo && urlToBase64) {
+    try {
+      const b64 = await urlToBase64(env, await tgFileUrl(env, photo.file_id));
+      const visRes = await askVision(env, {
+        imageBase64: b64,
+        prompt:
+          "Опиши, що на цьому зображенні, з фокусом на UI/UX, структуру, компоненти, шари. Не вигадуй код, просто дай структурований опис, корисний для розробника.",
+      });
+      if (typeof visRes === "string") {
+        visionSummary = visRes;
+      } else {
+        const t =
+          visRes?.choices?.[0]?.message?.content ||
+          visRes?.text ||
+          JSON.stringify(visRes);
+        visionSummary = String(t || "").slice(0, 4000);
+      }
+    } catch {
+      visionSummary = "";
+    }
+  }
+
+  // 4) Підготовка промпта для моделі
+  const userText = String(textRaw || "").trim();
+  const parts = [];
+
+  if (saved.length) {
+    parts.push(
+      `Assets, додані до проєкту: ${saved.join(
+        ", "
+      )}. Використовуй їх у своїх ідеях/коді.`
+    );
+  }
+
+  if (visionSummary) {
+    parts.push("=== ОПИС ЗОБРАЖЕННЯ (VISION) ===");
+    parts.push(visionSummary);
+  }
+
+  if (userText) {
+    parts.push("=== ЗАПИТ КОРИСТУВАЧА ===");
+    parts.push(userText);
+  } else if (!visionSummary && !saved.length) {
+    // тут ми вже відсікли варіант "тільки медіа без тексту" вище
+    parts.push(
+      "Немає явного текстового запиту. Зроби невеликий огляд поточного стану проєкту та запропонуй наступні кроки."
+    );
+  }
+
+  const finalUserPrompt = parts.join("\n\n").trim();
+
+  // 5) Виклик LLM для генерації коду / архітектури / плану
+  const order = env.MODEL_ORDER_CODE || env.MODEL_ORDER || env.MODEL_ORDER_TEXT;
+  const res = await askAnyModel(env, order, finalUserPrompt || "Продовжуй", {
     systemHint,
     temperature: 0.2,
   });
@@ -870,15 +754,31 @@ export async function handleCodexGeneration(env, ctx, helpers) {
         res?.text ||
         JSON.stringify(res);
 
-  if (proj.name) {
+  if (curName) {
     await appendSection(
       env,
       userId,
-      proj.name,
+      curName,
       "progress.md",
-      `- ${nowIso()} — Відповідь Codex: ${(outText || "")
-        .slice(0, 120)}…`
+      `[${nowIso()}] Codex: згенеровано відповідь на запит користувача.`
     );
   }
-  await sendPlain(env, chatId, outText || "Не впевнений.");
+
+  const reply = [
+    `📁 Проєкт: ${curName}`,
+    "",
+    outText || "(порожня відповідь від моделі)",
+    "",
+    "Можеш оновити Tasks/Progress командами /project tasks / /project progress.",
+  ].join("\n");
+
+  await sendPlain(env, chatId, reply);
+  return true;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Експорти
+export {
+  handleCodexCommand,
+  handleCodexGeneration,
+};
