@@ -7,7 +7,6 @@ import { codexUploadAssetFromUrl } from "./codexDrive.js";
 import {
   pickKV,
   nowIso,
-  safeJsonParse,
   extractTextFromModel,
   limitCodexText,
 } from "./codexUtils.js";
@@ -15,17 +14,11 @@ import {
 import {
   createProject,
   readMeta,
-  listProjects,
-  deleteProject,
-  writeSection,
   readSection,
   appendSection,
-  nextTaskSeq,
   setCurrentProject,
   getCurrentProject,
-  normalizeProjectName,
   UI_AWAIT_KEY,
-  IDEA_DRAFT_KEY,
 } from "./codexState.js";
 
 import { handleCodexCommand } from "./codexUi.js";
@@ -37,6 +30,7 @@ async function analyzeImageForCodex(env, { lang = "uk", imageBase64, question })
 - виділити компоненти UI, сітку, блоки, ієрархію, шрифти, кольори;
 - запропонувати, як це зображення може використовуватись у продукті (логотип, банер, екран, іконки тощо).
 Не вигадуй код, якщо про це прямо не просять.`;
+
   const prompt =
     question ||
     "Опиши, що на зображенні, з фокусом на компоненти інтерфейсу, блоки, сітку, шрифти, кольори, структуру верстки.";
@@ -58,6 +52,7 @@ async function analyzeImageForCodex(env, { lang = "uk", imageBase64, question })
       : res?.choices?.[0]?.message?.content ||
         res?.text ||
         JSON.stringify(res);
+
   return String(text || "").slice(0, 4000);
 }
 
@@ -65,6 +60,7 @@ async function analyzeImageForCodex(env, { lang = "uk", imageBase64, question })
 export async function handleCodexGeneration(env, ctx, helpers) {
   const { chatId, userId, msg, textRaw, lang } = ctx;
   const { sendPlain, pickPhoto, tgFileUrl, urlToBase64 } = helpers;
+
   const kv = pickKV(env);
   if (!kv) {
     await sendPlain(env, chatId, "Codex KV недоступний.");
@@ -78,7 +74,6 @@ export async function handleCodexGeneration(env, ctx, helpers) {
 
   // Якщо користувач надсилає лише медіа/файл без тексту — все одно
   // зберігаємо його як asset і одразу пропонуємо ідеї для проєкту.
-  // Додатковий текст-запит не є обовʼязковим.
   if (awaiting === "none" && !textRaw && (hasPhoto || hasDocument)) {
     await sendPlain(
       env,
@@ -180,7 +175,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
   const assetsSaved = [];
 
   if (hasPhoto) {
-    const photo = pickPhoto(msg.photo);
+    const photo = pickPhoto(msg); // ВАЖЛИВО: передаємо весь msg, а не msg.photo
     if (photo) {
       const url = await tgFileUrl(env, photo.file_id);
       const base64 = await urlToBase64(url);
@@ -208,6 +203,17 @@ export async function handleCodexGeneration(env, ctx, helpers) {
             200
           )}…`
         );
+
+        // За можливості завантажуємо в сховище Codex
+        try {
+          await codexUploadAssetFromUrl(env, userId, curName, {
+            url,
+            kind: "image",
+            filename: photo.name,
+          });
+        } catch {
+          // тихо ігноруємо помилки завантаження asset
+        }
       }
     }
   }
@@ -216,13 +222,14 @@ export async function handleCodexGeneration(env, ctx, helpers) {
     const doc = msg.document;
     if (doc && doc.file_id) {
       const url = await tgFileUrl(env, doc.file_id);
-      // просто зберігаємо посилання як asset
+
       assetsSaved.push({
         type: "file",
         url,
         name: doc.file_name || "",
         mime: doc.mime_type || "",
       });
+
       await appendSection(
         env,
         userId,
@@ -230,11 +237,21 @@ export async function handleCodexGeneration(env, ctx, helpers) {
         "progress.md",
         `- ${nowIso()} — додано файл: ${doc.file_name || "без назви"} (${doc.mime_type || "тип невідомий"})`
       );
+
+      try {
+        await codexUploadAssetFromUrl(env, userId, curName, {
+          url,
+          kind: "file",
+          filename: doc.file_name || "asset",
+        });
+      } catch {
+        // ігноруємо помилки
+      }
     }
   }
+
   // Витягуємо URL з тексту, якщо є
-  const urlRegex =
-    /(https?:\/\/[^\s)]+)|(www\.[^\s)]+)/gi;
+  const urlRegex = /(https?:\/\/[^\s)]+)|(www\.[^\s)]+)/gi;
   const urls = [];
   if (userText) {
     let m;
@@ -242,7 +259,6 @@ export async function handleCodexGeneration(env, ctx, helpers) {
       urls.push(m[0]);
     }
   }
-
   // -------------------- побудова промпту для моделі --------------------
   const parts = [];
 
@@ -281,14 +297,14 @@ export async function handleCodexGeneration(env, ctx, helpers) {
     "",
     "Контекст проєкту нижче. Завжди спирайся на нього:",
     "=== ІДЕЯ ПРОЄКТУ ===",
-    idea || \"(ще не задана)\",
+    idea || "(ще не задана)",
     "",
     "=== TASKS (task list) ===",
-    tasks || \"(ще немає tasks)\",
+    tasks || "(ще немає tasks)",
     "",
     "=== PROGRESS (щоденник/журнал) ===",
-    progress || \"(ще не було progress-записів)\",
-  ].join(\"\\n\");
+    progress || "(ще не було progress-записів)",
+  ].join("\n");
 
   parts.push("=== МЕТА ПРОЄКТУ (IDEA) ===");
   parts.push(idea || "(ще не задана)");
@@ -362,5 +378,6 @@ export async function handleCodexGeneration(env, ctx, helpers) {
       `- ${nowIso()} — Відповідь Codex: ${outText.slice(0, 120)}…`
     );
   }
+
   await sendPlain(env, chatId, outText);
 }
