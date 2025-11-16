@@ -21,11 +21,10 @@ export const CB = {
   LIST: "codex:list",
   STATUS: "codex:status",
 
-  // аліаси для зворотної сумісності (не видаляти, поки все не мігрує)
+  // аліаси для зворотної сумісності
   CODEX_PROJECT_NEW: "codex:new",
   CODEX_PROJECT_LIST: "codex:list",
   CODEX_PROJECT_STATUS: "codex:status",
-  // (lock/unlock були прибрані з UX; залишаємо аліаси на випадок старих викликів)
   CODEX_IDEA_LOCK: "codex:idea:lock:deprecated",
   CODEX_IDEA_UNLOCK: "codex:idea:unlock:deprecated",
 };
@@ -33,16 +32,13 @@ export const CB = {
 /* ───────────────── ГОЛОВНА КЛАВІАТУРА (reply) ───────────── */
 /**
  * isAdmin=true  → показуємо Senti + Codex + Admin
- * isAdmin=false → показуємо Senti + Codex (без Admin)
- *
- * Так усі користувачі бачать основні функції,
- * а адмін отримує додаткову кнопку Admin.
+ * isAdmin=false → показуємо Senti + Codex
  */
 export const mainKeyboard = (isAdmin = false) => {
   const rows = [];
-  // Базовий рядок для всіх: Senti + Codex
+  // Основне меню для всіх користувачів
   rows.push([{ text: BTN_SENTI }, { text: BTN_CODEX }]);
-  // Другий рядок тільки для адмінів
+  // Адмінська кнопка
   if (isAdmin) {
     rows.push([{ text: BTN_ADMIN }]);
   }
@@ -51,7 +47,7 @@ export const mainKeyboard = (isAdmin = false) => {
 
 /* ────────────────── ІНЛАЙН-МЕНЮ CODEX ────────────────── */
 /**
- * Меню керування Codex-проєктами (без lock/unlock).
+ * Меню керування Codex-проєктами.
  * Використовується у вебхуку при ввімкненні Codex.
  */
 export const codexProjectMenu = () => ({
@@ -82,6 +78,7 @@ export const ADMIN = (env, userId, username) => {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+
   const idMatch = idCandidates.some((v) => v === idStr);
 
   const uname = String(username || "").replace("@", "").toLowerCase();
@@ -91,6 +88,7 @@ export const ADMIN = (env, userId, username) => {
     .split(",")
     .map((s) => s.replace("@", "").trim().toLowerCase())
     .filter(Boolean);
+
   const unameMatch = uname && unameCandidates.includes(uname);
 
   return idMatch || unameMatch;
@@ -103,16 +101,12 @@ export const energyLinks = (env, userId) => {
     energy: `${base}?u=${encodeURIComponent(userId)}`,
   };
 };
-/* ───────────────── TG SEND HELPERS ─────────────── */
 
+/* ───────────────── TG SEND HELPERS ─────────────── */
 export async function sendPlain(env, chatId, text, extra = {}) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   if (!token || !chatId || !text) return;
-  const body = {
-    chat_id: chatId,
-    text,
-    ...extra,
-  };
+  const body = { chat_id: chatId, text, ...extra };
   await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -143,14 +137,12 @@ export const withTyping = (env, chatId, fn) =>
 export const withUploading = (env, chatId, fn) =>
   withChatAction(env, chatId, "upload_document", fn);
 
-/** Спіннер (periodic sendChatAction) для довгих операцій */
+/** Спіннер для довгих операцій */
 async function withChatAction(env, chatId, action, fn) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   if (!token || !chatId || !action) return fn();
 
   let alive = true;
-
-  // Тікер, поки alive=true
   const timer = setInterval(() => {
     if (!alive) return;
     fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
@@ -168,15 +160,13 @@ async function withChatAction(env, chatId, action, fn) {
   }
 }
 
-/** Обгортка для "спінера" з можливістю зупинки ззовні */
+/** Спіннер із можливістю ручної зупинки */
 export async function startSpinner(env, chatId, action = "typing") {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
-  if (!token || !chatId || !action) {
+  if (!token || !chatId || !action)
     return { stop: async () => {} };
-  }
 
   let alive = true;
-
   const timer = setInterval(() => {
     if (!alive) return;
     fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
@@ -191,19 +181,14 @@ export async function startSpinner(env, chatId, action = "typing") {
 
 /* ───────────────── ЕКСПОРТ ─────────────── */
 export const TG = {
-  // reply
-  BTN_DRIVE, // лишили для сумісності (в меню не використовується)
+  BTN_DRIVE,
   BTN_SENTI,
   BTN_CODEX,
   BTN_LEARN,
   BTN_ADMIN,
   mainKeyboard,
-
-  // inline
   CB,
   codexProjectMenu,
-
-  // utils
   ADMIN,
   energyLinks,
   sendPlain,
