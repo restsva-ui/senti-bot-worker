@@ -1,4 +1,4 @@
-// src/codexGeneration.js
+// src/lib/codexGeneration.js
 // Ядро генерації Codex: Architect + робота з медіа
 
 import { askAnyModel, askVision } from "./modelRouter.js";
@@ -7,6 +7,7 @@ import { codexUploadAssetFromUrl } from "./codexDrive.js";
 import {
   pickKV,
   nowIso,
+  safeJsonParse,
   extractTextFromModel,
   limitCodexText,
 } from "./codexUtils.js";
@@ -14,11 +15,17 @@ import {
 import {
   createProject,
   readMeta,
+  listProjects,
+  deleteProject,
+  writeSection,
   readSection,
   appendSection,
+  nextTaskSeq,
   setCurrentProject,
   getCurrentProject,
+  normalizeProjectName,
   UI_AWAIT_KEY,
+  IDEA_DRAFT_KEY,
 } from "./codexState.js";
 
 import { handleCodexCommand } from "./codexUi.js";
@@ -72,15 +79,14 @@ export async function handleCodexGeneration(env, ctx, helpers) {
   const hasPhoto = Array.isArray(msg?.photo) && msg.photo.length > 0;
   const hasDocument = !!msg?.document;
 
-  // Якщо користувач надсилає лише медіа/файл без тексту — все одно
-  // зберігаємо його як asset і одразу пропонуємо ідеї для проєкту.
+  // Якщо користувач надсилає лише медіа/файл — все одно додаємо в проєкт
   if (awaiting === "none" && !textRaw && (hasPhoto || hasDocument)) {
     await sendPlain(
       env,
       chatId,
       "Я отримав медіа/файл для Codex і додам його до активного проєкту. Зараз запропоную, як краще використати цей матеріал."
     );
-    // Без return: далі Codex обробить asset і згенерує пропозиції.
+    // Далі обробимо як assets + пропозиції
   }
 
   // ---------- UI-стани ----------
@@ -131,7 +137,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
     return true;
   }
 
-  // Якщо це команда /project ... — віддаємо в codexUi
+  // Команди /project … віддаємо в codexUi
   if (/^\/project\b/i.test(textRaw || "")) {
     const handled = await handleCodexCommand(env, ctx, helpers);
     if (handled) return true;
@@ -158,7 +164,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
     return true;
   }
 
-  // Читаємо основні секції проєкту
+  // Читаємо основні секції
   const [ideaMd, tasksMd, progressMd] = await Promise.all([
     readSection(env, userId, curName, "idea.md"),
     readSection(env, userId, curName, "tasks.md"),
@@ -175,12 +181,11 @@ export async function handleCodexGeneration(env, ctx, helpers) {
   const assetsSaved = [];
 
   if (hasPhoto) {
-    const photo = pickPhoto(msg); // ВАЖЛИВО: передаємо весь msg, а не msg.photo
+    const photo = pickPhoto(msg);
     if (photo) {
       const url = await tgFileUrl(env, photo.file_id);
       const base64 = await urlToBase64(url);
       if (base64) {
-        // vision-аналіз
         const visionSummary = await analyzeImageForCodex(env, {
           lang,
           imageBase64: base64,
@@ -192,7 +197,6 @@ export async function handleCodexGeneration(env, ctx, helpers) {
           visionSummary,
         });
 
-        // зберігаємо короткий опис у progress
         await appendSection(
           env,
           userId,
@@ -204,15 +208,11 @@ export async function handleCodexGeneration(env, ctx, helpers) {
           )}…`
         );
 
-        // За можливості завантажуємо в сховище Codex
+        // спробуємо також зберегти як asset у Codex Drive (якщо реалізовано)
         try {
-          await codexUploadAssetFromUrl(env, userId, curName, {
-            url,
-            kind: "image",
-            filename: photo.name,
-          });
+          await codexUploadAssetFromUrl(env, userId, curName, url, photo.name);
         } catch {
-          // тихо ігноруємо помилки завантаження asset
+          // тихо ігноруємо, якщо не налаштовано
         }
       }
     }
@@ -222,14 +222,12 @@ export async function handleCodexGeneration(env, ctx, helpers) {
     const doc = msg.document;
     if (doc && doc.file_id) {
       const url = await tgFileUrl(env, doc.file_id);
-
       assetsSaved.push({
         type: "file",
         url,
         name: doc.file_name || "",
         mime: doc.mime_type || "",
       });
-
       await appendSection(
         env,
         userId,
@@ -237,20 +235,13 @@ export async function handleCodexGeneration(env, ctx, helpers) {
         "progress.md",
         `- ${nowIso()} — додано файл: ${doc.file_name || "без назви"} (${doc.mime_type || "тип невідомий"})`
       );
-
       try {
-        await codexUploadAssetFromUrl(env, userId, curName, {
-          url,
-          kind: "file",
-          filename: doc.file_name || "asset",
-        });
-      } catch {
-        // ігноруємо помилки
-      }
+        await codexUploadAssetFromUrl(env, userId, curName, url, doc.file_name || "file");
+      } catch {}
     }
   }
 
-  // Витягуємо URL з тексту, якщо є
+  // Витягуємо URL з тексту
   const urlRegex = /(https?:\/\/[^\s)]+)|(www\.[^\s)]+)/gi;
   const urls = [];
   if (userText) {
@@ -259,39 +250,22 @@ export async function handleCodexGeneration(env, ctx, helpers) {
       urls.push(m[0]);
     }
   }
+
   // -------------------- побудова промпту для моделі --------------------
-  const parts = [];
-
-  parts.push(
-    "Ти — Senti Codex 3.2 (Dialogue Architect) для цього проєкту. Працюй у діалоговому режимі."
-  );
-  parts.push(
-    "Твоє завдання — допомагати крок за кроком: коротко пояснювати стан проєкту, пропонувати покращення і ставити уточнюючі питання."
-  );
-  parts.push(
-    "ФОКУС: UX, флоу користувача, структура продукту, контент, архітектура, пріоритизація задач."
-  );
-
   const systemHint = [
     "Ти — Senti Codex 3.2 (Dialogue Architect).",
     "Ти поєднуєш ролі: архітектор, senior-розробник і аналітик вимог.",
     "Працюєш у режимі проєкту; тримай у фокусі мету продукту й пропонуй еволюційні покращення, а не один гігантський документ.",
     "",
-    "Діалоговий режим і загальні питання:",
-    "- Якщо запит явно стосується поточного проєкту — аналізуй його з фокусом на продукт.",
-    "- Якщо запит загальний (визначення слів, міст, технологій, історичних фактів тощо) — дай коротку звичайну відповідь як асистент.",
-    "- Після короткої загальної відповіді можеш, за бажанням, одним реченням повʼязати її з проєктом.",
-    "- НІКОЛИ не відмовляйся з формулюванням на кшталт «я не можу відповісти, бо це поза контекстом нашого проєкту». Краще дай стислу відповідь і мʼяко поверни розмову до проєкту.",
-    "",
     "Формат відповіді:",
-    "1) 1–2 короткі речення, що підсумовують поточний стан проєкту (або коротка відповідь на загальне питання).",
-    "2) 3–5 маркованих кроків / ідей, як покращити або розвинути проєкт (функції, UX, контент, технічні задачі).",
+    "1) 1–2 короткі речення, що підсумовують поточний стан проєкту.",
+    "2) 3–5 маркованих кроків / ідей (функції, UX, контент, технічні задачі).",
     "3) 1 коротке запитання користувачу про наступний крок або уточнення.",
     "",
     "Режим діалогу:",
-    "- Відповідь має бути стислою: до 800–1000 символів, не більше 10–12 речень.",
-    "- Якщо інформації дуже багато — дай тільки найважливіше й запропонуй продовжити в наступних ітераціях.",
-    "- Не вивалюй повне ТЗ чи величезні specs без прямого запиту.",
+    "- Відповідь має бути стислою: до 900–1000 символів, не більше 10–12 речень.",
+    "- Якщо інформації дуже багато — дай тільки найважливіше й запропонуй продовжити далі.",
+    "- Не вивалюй величезне ТЗ, якщо про це прямо не просять.",
     "",
     "Код:",
     "- Спочатку опиши ідею/зміни людською мовою.",
@@ -300,29 +274,21 @@ export async function handleCodexGeneration(env, ctx, helpers) {
     "Медіа та матеріали:",
     "- Для зображень та assets пояснюй, як саме їх краще використати в проєкті (логотип, банер, UI-макет, іконки, контент).",
     "- Якщо бачиш зовнішні посилання, але не маєш доступу до їхнього вмісту — чесно скажи, що контент невідомий.",
-    "",
-    "Контекст проєкту нижче. Завжди спирайся на нього:",
-    "=== ІДЕЯ ПРОЄКТУ ===",
-    idea || "(ще не задана)",
-    "",
-    "=== TASKS (task list) ===",
-    tasks || "(ще немає tasks)",
-    "",
-    "=== PROGRESS (щоденник/журнал) ===",
-    progress || "(ще не було progress-записів)",
   ].join("\n");
 
-  parts.push("=== МЕТА ПРОЄКТУ (IDEA) ===");
+  const parts = [];
+
+  parts.push("=== ІДЕЯ ПРОЄКТУ ===");
   parts.push(idea || "(ще не задана)");
 
   if (tasks) {
     parts.push("=== TASKS (список задач) ===");
-    parts.push(tasks.slice(0, 6000));
+    parts.push(tasks.slice(0, 4000));
   }
 
   if (progress) {
     parts.push("=== PROGRESS (щоденник/історія) ===");
-    parts.push(progress.slice(0, 6000));
+    parts.push(progress.slice(0, 4000));
   }
 
   if (assetsSaved.length) {
@@ -330,10 +296,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
     for (const a of assetsSaved) {
       if (a.type === "image") {
         parts.push(
-          `ЗОБРАЖЕННЯ: ${a.url}\nОпис (Vision): ${a.visionSummary.slice(
-            0,
-            1000
-          )}`
+          `ЗОБРАЖЕННЯ: ${a.url}\nОпис (Vision): ${a.visionSummary.slice(0, 800)}`
         );
       } else if (a.type === "file") {
         parts.push(
@@ -368,11 +331,11 @@ export async function handleCodexGeneration(env, ctx, helpers) {
   const res = await askAnyModel(env, modelOrder, finalUserPrompt, {
     systemHint,
     temperature: 0.4,
-    maxTokens: 800,
+    maxTokens: 900,
   });
 
   const outRaw = extractTextFromModel(res);
-  const outText = limitCodexText(String(outRaw || "Не впевнений."), 1600);
+  const outText = limitCodexText(String(outRaw || "Не впевнений."), 1000);
 
   const proj = await readMeta(env, userId, curName);
   if (proj && proj.name) {
@@ -386,4 +349,5 @@ export async function handleCodexGeneration(env, ctx, helpers) {
   }
 
   await sendPlain(env, chatId, outText);
+  return true;
 }
