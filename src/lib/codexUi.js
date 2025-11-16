@@ -17,7 +17,7 @@ import {
   IDEA_DRAFT_KEY,
 } from "./codexState.js";
 
-import { codexImportSnapshot, codexSyncSection } from "./codexDrive.js";
+import { codexSyncSection } from "./codexDrive.js";   // ← ВИПРАВЛЕНО: прибрано codexImportSnapshot
 
 // -------------------- опис режиму Codex --------------------
 const CODEX_MODE_INLINE = {
@@ -63,7 +63,6 @@ export async function handleCodexUi(
 
   if (!cbData) return false;
 
-  // показуємо опис режиму
   if (cbData === "codex:mode") {
     await sendInline(env, chatId, CODEX_MODE_INLINE.text, buildCodexKeyboard());
     return true;
@@ -183,7 +182,7 @@ export async function handleCodexUi(
       userId,
       cur,
       "progress.md",
-      `\n\n=== SNAPSHOT ${nowIso()} ===\n\n${snapshot}\n`
+      `\n\n=== SNAPSHOT ===\n\n${snapshot}\n`
     );
     await sendPlain(env, chatId, "✅ Snapshot додано в progress.md.");
     return true;
@@ -240,28 +239,24 @@ export async function handleCodexCommand(env, ctx, helpers = {}) {
         "/project new — створити новий проєкт",
         "/project use — обрати проєкт",
         "/project idea — показати idea.md",
-        "/project snapshot — зберегти snapshot (idea/tasks/progress) в progress.md",
+        "/project snapshot — зберегти snapshot (idea/tasks/progress)",
         "/project files — показати недавні файли",
-        "/project sync <section> — синхронізувати секцію в Brain/Repo (idea.md/tasks.md/progress.md)",
+        "/project sync <section> — синхронізувати секцію в Brain/Repo",
       ].join("\n")
     );
     return true;
   }
 
-  // /project new
   if (/^\/project\s+new\b/i.test(text)) {
     await sendPlain(
       env,
       chatId,
       "Введи назву нового проєкту (коротко, 1–3 слова):"
     );
-    if (kv) {
-      await kv.put(UI_AWAIT_KEY(userId), "proj_name");
-    }
+    if (kv) await kv.put(UI_AWAIT_KEY(userId), "proj_name");
     return true;
   }
 
-  // /project use
   if (/^\/project\s+use\b/i.test(text)) {
     const all = await listProjects(env, userId);
     if (!all.length) {
@@ -276,18 +271,14 @@ export async function handleCodexCommand(env, ctx, helpers = {}) {
     await sendPlain(
       env,
       chatId,
-      `Доступні проєкти:\n- ${names}\n\nНатисни кнопку «Обрати проєкт» або скористайся inline-меню.`
+      `Доступні проєкти:\n- ${names}`
     );
     return true;
   }
 
-  // /project idea
   if (/^\/project\s+idea\b/i.test(text)) {
     const cur = await getCurrentProject(env, userId);
-    if (!cur) {
-      await sendPlain(env, chatId, "Спочатку активуй проєкт.");
-      return true;
-    }
+    if (!cur) return await sendPlain(env, chatId, "Спочатку активуй проєкт.");
     const ideaMd =
       (await readSection(env, userId, cur, "idea.md")) || "(ще немає ідеї)";
     await sendPlain(
@@ -298,75 +289,57 @@ export async function handleCodexCommand(env, ctx, helpers = {}) {
     return true;
   }
 
-  // /project snapshot
   if (/^\/project\s+snapshot\b/i.test(text)) {
     const cur = await getCurrentProject(env, userId);
-    if (!cur) {
-      await sendPlain(env, chatId, "Спочатку активуй проєкт.");
-      return true;
-    }
-    await sendPlain(
-      env,
-      chatId,
-      "Зараз зберу snapshot проєкту (idea, tasks, progress) і додам у progress.md…"
-    );
+    if (!cur) return await sendPlain(env, chatId, "Спочатку активуй проєкт.");
+    await sendPlain(env, chatId, "Збираю snapshot…");
+
     const [ideaMd, tasksMd, progressMd] = await Promise.all([
       readSection(env, userId, cur, "idea.md"),
       readSection(env, userId, cur, "tasks.md"),
       readSection(env, userId, cur, "progress.md"),
     ]);
-    const snapshotParts = [];
-    snapshotParts.push("=== SNAPSHOT ІДЕЇ ===");
-    snapshotParts.push(ideaMd || "(ще немає ідеї)");
-    snapshotParts.push("=== SNAPSHOT TASKS ===");
-    snapshotParts.push(tasksMd || "(ще немає задач)");
-    snapshotParts.push("=== SNAPSHOT PROGRESS ===");
-    snapshotParts.push(progressMd || "(ще немає історії)");
-    const snapshot = snapshotParts.join("\n\n");
+
+    const snapshot =
+      `=== SNAPSHOT ІДЕЇ ===\n${ideaMd || "(ще немає ідеї)"}\n\n` +
+      `=== SNAPSHOT TASKS ===\n${tasksMd || "(ще немає задач)"}\n\n` +
+      `=== SNAPSHOT PROGRESS ===\n${progressMd || "(ще немає історії)"}`;
+
     await appendSection(
       env,
       userId,
       cur,
       "progress.md",
-      `\n\n=== SNAPSHOT ${nowIso()} ===\n\n${snapshot}\n`
+      `\n\n=== SNAPSHOT ===\n${snapshot}\n`
     );
-    await sendPlain(env, chatId, "✅ Snapshot додано в progress.md.");
+
+    await sendPlain(env, chatId, "Готово.");
     return true;
   }
-  // /project files
+
   if (/^\/project\s+files\b/i.test(text)) {
     const cur = await getCurrentProject(env, userId);
-    if (!cur) {
-      await sendPlain(env, chatId, "Спочатку активуй проєкт.");
-      return true;
-    }
+    if (!cur) return await sendPlain(env, chatId, "Спочатку активуй проєкт.");
+
     const progressMd =
       (await readSection(env, userId, cur, "progress.md")) || "";
     const fileLines = progressMd
       .split("\n")
       .filter((l) => /додано файл:/i.test(l));
+
     if (!fileLines.length) {
-      await sendPlain(env, chatId, "Ще немає збережених файлів для цього проєкту.");
+      await sendPlain(env, chatId, "Ще немає файлів.");
       return true;
     }
-    await sendPlain(
-      env,
-      chatId,
-      `Файли проєкту "${cur}":\n\n${fileLines
-        .slice(-20)
-        .join("\n")
-        .slice(0, 4000)}`
-    );
+
+    await sendPlain(env, chatId, fileLines.slice(-20).join("\n"));
     return true;
   }
 
-  // /project sync <section>
   if (/^\/project\s+sync\b/i.test(text)) {
     const cur = await getCurrentProject(env, userId);
-    if (!cur) {
-      await sendPlain(env, chatId, "Спочатку активуй проєкт.");
-      return true;
-    }
+    if (!cur) return await sendPlain(env, chatId, "Спочатку активуй проєкт.");
+
     const section = text.replace(/^\/project\s+sync\b\s*/i, "").trim();
     if (!section) {
       await sendPlain(
@@ -376,17 +349,11 @@ export async function handleCodexCommand(env, ctx, helpers = {}) {
       );
       return true;
     }
-    await sendPlain(env, chatId, `Синхронізую секцію ${section}…`);
-    const res = await codexSyncSection(env, userId, cur, section);
-    if (!res || !res.ok) {
-      await sendPlain(env, chatId, "Не вдалося синхронізувати.");
-      return true;
-    }
-    await sendPlain(
-      env,
-      chatId,
-      `✅ Секцію ${section} синхронізовано в Brain/Repo.`
-    );
+
+    await sendPlain(env, chatId, `Синхронізую ${section}…`);
+    await codexSyncSection(env, userId, cur, section);
+
+    await sendPlain(env, chatId, `Готово: ${section} синхронізовано.`);
     return true;
   }
 
