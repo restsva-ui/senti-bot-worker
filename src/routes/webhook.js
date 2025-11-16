@@ -99,10 +99,12 @@ async function editMessageText(env, chatId, messageId, newText) {
 }
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 async function startPuzzleAnimation(env, chatId, messageId, signal) {
+  // Сучасна індикація: “спінер” з крапками
   const frames = [
-    "🧩 Працюю над кодом…",
-    "🧩🟦 Працюю над кодом…",
-    "🧩🟦🟩 Працюю над кодом…",
+    "🤖 Працюю над запитом…",
+    "🤖 Працюю над запитом… ·",
+    "🤖 Працюю над запитом… ··",
+    "🤖 Працюю над запитом… ···",
   ];
   let i = 0;
   while (!signal.done) {
@@ -314,7 +316,6 @@ function asText(res) {
     return res.choices[0].message.content;
   return JSON.stringify(res);
 }
-
 /* ───────────────── webhook ───────────────── */
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "GET") {
@@ -354,11 +355,14 @@ export async function handleTelegramWebhook(req, env) {
       );
       if (handled) {
         if (token) {
-          await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ callback_query_id: cq.id }),
-          });
+          await fetch(
+            `https://api.telegram.org/bot${token}/answerCallbackQuery`,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ callback_query_id: cq.id }),
+            }
+          );
         }
         return json({ ok: true });
       }
@@ -366,11 +370,14 @@ export async function handleTelegramWebhook(req, env) {
 
     // За замовчуванням просто підтвердимо callback
     if (token) {
-      await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ callback_query_id: cq.id }),
-      });
+      await fetch(
+        `https://api.telegram.org/bot${token}/answerCallbackQuery`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ callback_query_id: cq.id }),
+        }
+      );
     }
     return json({ ok: true });
   }
@@ -426,14 +433,26 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  /* ───── drive on/off ───── */
+  /* ───── drive / Senti / Codex off ───── */
   if (textRaw === BTN_DRIVE) {
+    // Увімкнути drive-режим (збереження медіа у Drive / Codex-матеріали)
     await setDriveMode(env, userId, true);
     return json({ ok: true });
   }
-  if (textRaw === BTN_SENTI) {
+
+  if (textRaw === BTN_SENTI || textRaw === "/senti") {
+    // Повернення у звичайний Senti-режим:
+    // - вимикаємо drive-режим
+    // - вимикаємо Codex
+    // - чистимо памʼять Codex
     await setDriveMode(env, userId, false);
     await setCodexMode(env, userId, false);
+    await clearCodexMem(env, userId);
+
+    await sendPlain(env, chatId, "🔁 Режим Senti активовано.", {
+      reply_markup: mainKeyboard(isAdmin),
+    });
+
     return json({ ok: true });
   }
 
@@ -596,7 +615,6 @@ export async function handleTelegramWebhook(req, env) {
       return json({ ok: true });
     }
   }
-
   /* ───── Codex main ───── */
   if ((await getCodexMode(env, userId)) && (textRaw || pickPhoto(msg))) {
     await safe(async () => {
@@ -669,4 +687,3 @@ export async function handleTelegramWebhook(req, env) {
   });
   return json({ ok: true });
 }
-
