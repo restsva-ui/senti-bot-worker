@@ -1,12 +1,9 @@
-// src/lib/codexGeneration.js
+// src/codexGeneration.js
 // Ядро генерації Codex: Architect + робота з медіа
 
 import { askAnyModel, askVision } from "./modelRouter.js";
-import {
-  codexUploadAssetFromUrl,
-  codexExportSnapshot,
-  codexSyncSection,
-} from "./codexDrive.js";
+import { codexUploadAssetFromUrl } from "./codexDrive.js";
+
 import {
   pickKV,
   nowIso,
@@ -215,8 +212,12 @@ export async function handleCodexGeneration(env, ctx, helpers) {
       return true;
     }
 
-    const answer = textRaw.trim().toLowerCase();
-    if (/^(\+|ок|добре|так|зберегти|save|ok)\b/.test(answer)) {
+    const rawAnswer = textRaw.trim();
+    const isConfirm =
+      rawAnswer === "+" ||
+      /^(\+|ок|добре|так|зберегти|save|ok)\s*$/i.test(rawAnswer);
+
+    if (isConfirm) {
       const finalText = String(draftObj.ideaDraft || "").trim();
       if (!finalText) {
         await sendPlain(env, chatId, "Чернетка порожня, нічого зберігати.");
@@ -438,7 +439,7 @@ export async function handleCodexGeneration(env, ctx, helpers) {
     "",
     "Коли немає чіткого запиту на конкретний код — спершу дай дуже коротку архітектуру й список наступних кроків (до 10–15 речень загалом).",
     "Коли бачиш фрагменти коду — спочатку короткий огляд, потім пропонуй зміни (diff/рефакторинг), і лише після цього приклади коду.",
-    "Для зображень та assets пояснюй, як саме їх краще використати в проєкті (логотип, банер, UI, іконки, контент).",
+    "Для зображень та assets пояснюй, як саме їх краще використати в проєкті (логотип, банер, UI-макет, іконки, контент).",
     "Не вигадуй вміст зовнішніх посилань: якщо ти його не бачиш у тексті — стався до нього як до невідомого ресурсу й кажи про це прямо.",
     "",
     "Відповідь має бути стислою: до 1200–1600 символів, не більше 15–20 речень.",
