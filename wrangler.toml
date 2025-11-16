@@ -1,3 +1,96 @@
+name = "senti-bot-worker"
+main = "src/index.js"
+compatibility_date = "2024-09-25"
+account_id = "2cf6e316af8623546c95c0354bc3aa00"
+
+# якщо тобі треба nodejs-compat – розкоментуй
+# compatibility_flags = ["nodejs_compat"]
+
+# --- CRON-и ---
+[triggers]
+crons = [
+  "*/15 * * * *",  # heartbeat
+  "0 * * * *",     # hourly evolve / nightly agent check
+  "10 2 * * *"     # додатковий нічний тригер
+]
+
+[vars]
+# базові
+SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
+DRIVE_FOLDER_ID = "root"
+TELEGRAM_ADMIN_ID = "784869835"
+DEPLOY_ID = "local-dev"
+
+# увімкнення Learn (щоб адмін-сторінка й черга мали сенс)
+LEARN_ENABLED = "on"
+
+# Cloudflare Workers AI акаунт (публічний ID можна)
+CF_ACCOUNT_ID = "2cf6e316af8623546c95c0354bc3aa00"
+
+# дозволи на публічні адмін-вьюхи (ти їх у коді перевіряєш)
+ALLOW_PUBLIC_REPO = "on"
+ALLOW_PUBLIC_STATUT = "on"
+ALLOW_PUBLIC_CHECKLIST = "on"
+
+# сек'юрні токени ДЛЯ ВЕБХУКА й адмін-ендпойнтів
+WEBHOOK_SECRET = "senti1984"
+TG_WEBHOOK_SECRET = "senti1984"
+TELEGRAM_SECRET_TOKEN = "senti1984"
+
+# локаль
+TIMEZONE = "Europe/Kyiv"
+
+# діагностика (щоб у відповідях показувало via …)
+DIAG_TAGS = "on"
+
+# як малювати мап-лінки з vision / landmark
+MAP_LINK_STYLE = "arrow"
+# щоб телега коректно відображала <a href="...">
+TELEGRAM_PARSE_MODE = "HTML"
+
+# ─────────────────────────────────────────
+#            ПОРЯДКИ МОДЕЛЕЙ
+# ─────────────────────────────────────────
+
+# головний (текстовий) порядок
+# 1) Gemini 2.5 (Google API)
+# 2) Qwen 1.5 chat (Cloudflare, безкоштовний)
+# 3) Llama 3.2 instruct (Cloudflare)
+# 4) Qwen 2.5 instruct (OpenRouter)
+MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen1.5-7b-chat, cf:@cf/meta/llama-3.2-11b-instruct, openrouter:qwen/qwen2.5-7b-instruct"
+
+# явний текстовий (якщо десь у коді береться саме TEXT)
+MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/qwen/qwen1.5-7b-chat, cf:@cf/meta/llama-3.2-11b-instruct, openrouter:qwen/qwen2.5-7b-instruct"
+
+# кодовий порядок
+# 1) Qwen 2.5 instruct (OpenRouter)
+# 2) Gemini 2.5
+# 3) Llama 3.2 instruct (Cloudflare)
+MODEL_ORDER_CODE = "openrouter:qwen/qwen2.5-7b-instruct, gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct"
+
+# ВАЖЛИВО: vision — спершу Gemini, потім CF-vision
+MODEL_ORDER_VISION = "gemini:gemini-1.5-flash, gemini:gemini-2.0-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct"
+
+# дефолтні назви моделей (для читабельності в адмінці)
+GEMINI_MODEL = "gemini-2.5-flash"
+CF_MODEL = "@cf/meta/llama-3.2-11b-instruct"
+CF_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
+
+# ─────────────────────────────────────────
+#    OpenRouter / fallback
+# ─────────────────────────────────────────
+FREE_API_BASE_URL = "https://openrouter.ai/api"
+FREE_API_PATH     = "/v1/chat/completions"
+
+# БЕЗ суфікса :free — саме це і ламало
+FREE_LLM_BASE_URL = "https://openrouter.ai/api"
+FREE_LLM_MODEL    = "qwen/qwen2.5-7b-instruct"
+FREE_API_MODEL    = "qwen/qwen2.5-7b-instruct"
+
+# щоб у хедерах OpenRouter було хто ти
+OPENROUTER_SITE_URL = "https://senti.restsva.app"
+OPENROUTER_APP_NAME = "Senti Bot Worker"
+
 # ─────────────────────────────────────────
 #     Нічні авто-поліпшення / self-reg
 # ─────────────────────────────────────────
@@ -41,7 +134,7 @@ id = "470d4f5c164a4a828c569eb9a52a5133"
 
 [[kv_namespaces]]
 binding = "CHECKLIST_KV"
-id = "497eac980691495ea2a0bc8611892d65"  # (залишив як було; якщо це не навмисно, дай окремі ID)
+id = "497eac980691495ea2a0bc8611892d65"
 
 # лайки / нічні імпруви
 [[kv_namespaces]]
