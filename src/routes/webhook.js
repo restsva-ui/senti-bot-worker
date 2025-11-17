@@ -201,6 +201,18 @@ function detectAttachment(msg) {
   return pickPhoto(msg);
 }
 
+/* ───────────────── Codex safe helper ───────────────── */
+async function isCodexEnabledSafe(env, userId) {
+  try {
+    if (!userId) return false;
+    return await getCodexMode(env, userId);
+  } catch {
+    // Якщо KV/режим Codex впав — вважаємо, що Codex вимкнений,
+    // щоб Senti продовжував працювати.
+    return false;
+  }
+}
+
 /* ───────────────── admin links ───────────────── */
 function buildAdminLinks(env, userId) {
   const base = (path) => abs(env, path);
@@ -222,7 +234,6 @@ function buildAdminLinks(env, userId) {
 
   return { checklist, energy, learn };
 }
-
 /* ───────────────── drive-mode media ───────────────── */
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
@@ -354,15 +365,27 @@ export async function handleTelegramWebhook(req, env) {
     const chatId = cq?.message?.chat?.id;
     const userId = cq?.from?.id;
 
-    // ВАЖЛИВО: пробуємо обробити UI Codex БЕЗ перевірки режиму.
-    // Якщо callback не для Codex — handleCodexUi поверне false.
-    const handled = await handleCodexUi(
-      env,
-      chatId,
-      userId,
-      { cbData: cq.data },
-      { sendPlain, tgFileUrl, driveSaveFromUrl, getUserTokens }
-    );
+    let handled = false;
+    try {
+      // ВАЖЛИВО: пробуємо обробити UI Codex БЕЗ перевірки режиму.
+      // Якщо callback не для Codex — handleCodexUi поверне false.
+      handled = await handleCodexUi(
+        env,
+        chatId,
+        userId,
+        { cbData: cq.data },
+        { sendPlain, tgFileUrl, driveSaveFromUrl, getUserTokens }
+      );
+    } catch (e) {
+      const isAdmin = ADMIN(env, userId, cq?.from?.username);
+      if (isAdmin && chatId) {
+        await sendPlain(
+          env,
+          chatId,
+          `❌ Codex UI error: ${String(e?.message || e).slice(0, 200)}`
+        );
+      }
+    }
 
     if (token) {
       await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
@@ -442,9 +465,14 @@ export async function handleTelegramWebhook(req, env) {
   /* ───── drive on/off ───── */
   if (textRaw === BTN_DRIVE) {
     await setDriveMode(env, userId, true);
-    await sendPlain(env, chatId, "☁️ Drive-режим: усе, що надішлеш, зберігатиму на Google Drive.", {
-      reply_markup: mainKeyboard(isAdmin),
-    });
+    await sendPlain(
+      env,
+      chatId,
+      "☁️ Drive-режим: усе, що надішлеш, зберігатиму на Google Drive.",
+      {
+        reply_markup: mainKeyboard(isAdmin),
+      }
+    );
     return json({ ok: true });
   }
 
@@ -493,8 +521,7 @@ export async function handleTelegramWebhook(req, env) {
     );
     return json({ ok: true });
   }
-
-  if (textRaw === "/codex_off") {
+if (textRaw === "/codex_off") {
     await setCodexMode(env, userId, false);
     await clearCodexMem(env, userId);
     await sendPlain(env, chatId, "Codex вимкнено.", {
@@ -507,13 +534,14 @@ export async function handleTelegramWebhook(req, env) {
   try {
     const driveOn = await getDriveMode(env, userId);
     const hasMedia = !!detectAttachment(msg) || !!pickPhoto(msg);
+    const codexOn = await isCodexEnabledSafe(env, userId);
 
-    if (driveOn && hasMedia && !(await getCodexMode(env, userId))) {
+    if (driveOn && hasMedia && !codexOn) {
       if (await handleIncomingMedia(env, chatId, userId, msg, lang))
         return json({ ok: true });
     }
 
-    if (!driveOn && hasMedia && !(await getCodexMode(env, userId))) {
+    if (!driveOn && hasMedia && !codexOn) {
       const ok = await handleVisionMedia(
         env,
         {
@@ -544,8 +572,14 @@ export async function handleTelegramWebhook(req, env) {
   }
 
   /* ───── codex extra cmds (/project …) ───── */
-  if (await getCodexMode(env, userId)) {
-    if (await handleCodexCommand(env, { chatId, userId, msg, textRaw, lang }, { sendPlain })) {
+  if (await isCodexEnabledSafe(env, userId)) {
+    if (
+      await handleCodexCommand(
+        env,
+        { chatId, userId, msg, textRaw, lang },
+        { sendPlain }
+      )
+    ) {
       return json({ ok: true });
     }
   }
@@ -610,7 +644,7 @@ export async function handleTelegramWebhook(req, env) {
   }
 
   /* ───── Codex main ───── */
-  if ((await getCodexMode(env, userId)) && (textRaw || pickPhoto(msg))) {
+  if ((await isCodexEnabledSafe(env, userId)) && (textRaw || pickPhoto(msg))) {
     await safe(async () => {
       await handleCodexGeneration(
         env,
