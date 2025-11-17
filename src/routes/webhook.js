@@ -99,23 +99,6 @@ async function editMessageText(env, chatId, messageId, newText) {
   });
 }
 
-/* ───────────────── Codex inline helpers ───────────────── */
-/**
- * Використовується Codex UI для надсилання повідомлення з inline-клавіатурою.
- * Просто обгортаємо TG.sendPlain, щоб не дублювати логіку.
- */
-async function sendInline(env, chatId, text, reply_markup) {
-  await sendPlain(env, chatId, text, { reply_markup });
-}
-
-/**
- * На майбутнє: редагування повідомлення Codex з inline-клавіатурою.
- * Зараз Codex не викликає editInline, але тримаємо сумісність API.
- */
-async function editInline(env, chatId, messageId, text, reply_markup) {
-  await editMessageText(env, chatId, messageId, text);
-}
-
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
 async function startPuzzleAnimation(env, chatId, messageId, signal) {
@@ -371,19 +354,14 @@ export async function handleTelegramWebhook(req, env) {
     const chatId = cq?.message?.chat?.id;
     const userId = cq?.from?.id;
 
+    // ВАЖЛИВО: пробуємо обробити UI Codex БЕЗ перевірки режиму.
+    // Якщо callback не для Codex — handleCodexUi поверне false.
     const handled = await handleCodexUi(
       env,
       chatId,
       userId,
       { cbData: cq.data },
-      {
-        sendPlain,
-        sendInline,
-        editInline,
-        tgFileUrl,
-        driveSaveFromUrl,
-        getUserTokens,
-      }
+      { sendPlain, tgFileUrl, driveSaveFromUrl, getUserTokens }
     );
 
     if (token) {
@@ -540,16 +518,9 @@ export async function handleTelegramWebhook(req, env) {
         return json({ ok: true });
     }
 
-    if (!driveOn && hasMedia && !(await getCodexMode(env, userId))) {
-      // Тимчасово без окремого vision-flow:
-      await sendPlain(
-        env,
-        chatId,
-        "Я отримав медіа/файл. Режим роботи з зображеннями зараз оновлюється. " +
-          "Поки що напиши текстом, що саме тебе цікавить, і я допоможу."
-      );
-      return json({ ok: true });
-    }
+    // Якщо Codex вимкнено і Drive теж вимкнено — медіа поки що
+    // НЕ обробляємо через vision-флоу (handleVisionMedia тимчасово відключено),
+    // просто йдемо далі до текстової логіки.
   } catch (e) {
     if (isAdmin) {
       await sendPlain(env, chatId, `❌ Media error: ${String(e).slice(0, 180)}`);
