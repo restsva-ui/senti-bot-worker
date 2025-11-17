@@ -27,6 +27,7 @@ import {
 } from "../apis/weather.js";
 import { saveLastPlace, loadLastPlace } from "../apis/userPrefs.js";
 import { setUserLocation, getUserLocation } from "../lib/geo.js";
+import { handleVisionMedia } from "../flows/visionDescribe.js";
 
 // Codex handler
 import {
@@ -97,6 +98,23 @@ async function editMessageText(env, chatId, messageId, newText) {
       text: newText,
     }),
   });
+}
+
+/* ───────────────── Codex inline helpers ───────────────── */
+/**
+ * Використовується Codex UI для надсилання повідомлення з inline-клавіатурою.
+ * Просто обгортаємо TG.sendPlain, щоб не дублювати логіку.
+ */
+async function sendInline(env, chatId, text, reply_markup) {
+  await sendPlain(env, chatId, text, { reply_markup });
+}
+
+/**
+ * На майбутнє: редагування повідомлення Codex з inline-клавіатурою.
+ * Зараз Codex не викликає editInline, але тримаємо сумісність API.
+ */
+async function editInline(env, chatId, messageId, text, reply_markup) {
+  await editMessageText(env, chatId, messageId, text);
 }
 
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
@@ -201,18 +219,6 @@ function detectAttachment(msg) {
   return pickPhoto(msg);
 }
 
-/* ───────────────── Codex safe helper ───────────────── */
-async function isCodexEnabledSafe(env, userId) {
-  try {
-    if (!userId) return false;
-    return await getCodexMode(env, userId);
-  } catch {
-    // Якщо KV/режим Codex впав — вважаємо, що Codex вимкнений,
-    // щоб Senti продовжував працювати.
-    return false;
-  }
-}
-
 /* ───────────────── admin links ───────────────── */
 function buildAdminLinks(env, userId) {
   const base = (path) => abs(env, path);
@@ -234,6 +240,7 @@ function buildAdminLinks(env, userId) {
 
   return { checklist, energy, learn };
 }
+
 /* ───────────────── drive-mode media ───────────────── */
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
@@ -336,8 +343,7 @@ function asText(res) {
   if (Array.isArray(res.choices) && res.choices[0]?.message?.content)
     return res.choices[0].message.content;
   return JSON.stringify(res);
-}
-/* ───────────────── webhook ───────────────── */
+}/* ───────────────── webhook ───────────────── */
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "GET") {
     return json({ ok: true, worker: "senti", ts: Date.now() });
@@ -365,27 +371,20 @@ export async function handleTelegramWebhook(req, env) {
     const chatId = cq?.message?.chat?.id;
     const userId = cq?.from?.id;
 
-    let handled = false;
-    try {
-      // ВАЖЛИВО: пробуємо обробити UI Codex БЕЗ перевірки режиму.
-      // Якщо callback не для Codex — handleCodexUi поверне false.
-      handled = await handleCodexUi(
-        env,
-        chatId,
-        userId,
-        { cbData: cq.data },
-        { sendPlain, tgFileUrl, driveSaveFromUrl, getUserTokens }
-      );
-    } catch (e) {
-      const isAdmin = ADMIN(env, userId, cq?.from?.username);
-      if (isAdmin && chatId) {
-        await sendPlain(
-          env,
-          chatId,
-          `❌ Codex UI error: ${String(e?.message || e).slice(0, 200)}`
-        );
+    const handled = await handleCodexUi(
+      env,
+      chatId,
+      userId,
+      { cbData: cq.data },
+      {
+        sendPlain,
+        sendInline,
+        editInline,
+        tgFileUrl,
+        driveSaveFromUrl,
+        getUserTokens,
       }
-    }
+    );
 
     if (token) {
       await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
@@ -521,7 +520,8 @@ export async function handleTelegramWebhook(req, env) {
     );
     return json({ ok: true });
   }
-if (textRaw === "/codex_off") {
+
+  if (textRaw === "/codex_off") {
     await setCodexMode(env, userId, false);
     await clearCodexMem(env, userId);
     await sendPlain(env, chatId, "Codex вимкнено.", {
@@ -534,14 +534,13 @@ if (textRaw === "/codex_off") {
   try {
     const driveOn = await getDriveMode(env, userId);
     const hasMedia = !!detectAttachment(msg) || !!pickPhoto(msg);
-    const codexOn = await isCodexEnabledSafe(env, userId);
 
-    if (driveOn && hasMedia && !codexOn) {
+    if (driveOn && hasMedia && !(await getCodexMode(env, userId))) {
       if (await handleIncomingMedia(env, chatId, userId, msg, lang))
         return json({ ok: true });
     }
 
-    if (!driveOn && hasMedia && !codexOn) {
+    if (!driveOn && hasMedia && !(await getCodexMode(env, userId))) {
       const ok = await handleVisionMedia(
         env,
         {
@@ -572,7 +571,7 @@ if (textRaw === "/codex_off") {
   }
 
   /* ───── codex extra cmds (/project …) ───── */
-  if (await isCodexEnabledSafe(env, userId)) {
+  if (await getCodexMode(env, userId)) {
     if (
       await handleCodexCommand(
         env,
@@ -644,7 +643,7 @@ if (textRaw === "/codex_off") {
   }
 
   /* ───── Codex main ───── */
-  if ((await isCodexEnabledSafe(env, userId)) && (textRaw || pickPhoto(msg))) {
+  if ((await getCodexMode(env, userId)) && (textRaw || pickPhoto(msg))) {
     await safe(async () => {
       await handleCodexGeneration(
         env,
