@@ -27,7 +27,6 @@ import {
 } from "../apis/weather.js";
 import { saveLastPlace, loadLastPlace } from "../apis/userPrefs.js";
 import { setUserLocation, getUserLocation } from "../lib/geo.js";
-import { handleVisionMedia } from "../flows/visionDescribe.js";
 
 // Codex handler
 import {
@@ -343,7 +342,8 @@ function asText(res) {
   if (Array.isArray(res.choices) && res.choices[0]?.message?.content)
     return res.choices[0].message.content;
   return JSON.stringify(res);
-}/* ───────────────── webhook ───────────────── */
+}
+/* ───────────────── webhook ───────────────── */
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "GET") {
     return json({ ok: true, worker: "senti", ts: Date.now() });
@@ -541,25 +541,14 @@ export async function handleTelegramWebhook(req, env) {
     }
 
     if (!driveOn && hasMedia && !(await getCodexMode(env, userId))) {
-      const ok = await handleVisionMedia(
+      // Тимчасово без окремого vision-flow:
+      await sendPlain(
         env,
-        {
-          chatId,
-          userId,
-          msg,
-          lang,
-          caption: msg?.caption,
-        },
-        {
-          getEnergy,
-          spendEnergy,
-          energyLinks,
-          sendPlain,
-          tgFileUrl,
-          urlToBase64,
-        }
+        chatId,
+        "Я отримав медіа/файл. Режим роботи з зображеннями зараз оновлюється. " +
+          "Поки що напиши текстом, що саме тебе цікавить, і я допоможу."
       );
-      if (ok) return json({ ok: true });
+      return json({ ok: true });
     }
   } catch (e) {
     if (isAdmin) {
