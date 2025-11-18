@@ -39,6 +39,9 @@ import {
   handleCodexUi,
 } from "../lib/codexHandler.js";
 
+// Vision handler (для обробки фото / медіа в Senti-режимі)
+import { handleVisionMedia } from "../lib/visionHandler.js";
+
 const {
   BTN_DRIVE,
   BTN_SENTI,
@@ -518,12 +521,34 @@ export async function handleTelegramWebhook(req, env) {
         return json({ ok: true });
     }
 
-    // Якщо Codex вимкнено і Drive теж вимкнено — медіа поки що
-    // НЕ обробляємо через vision-флоу (handleVisionMedia тимчасово відключено),
-    // просто йдемо далі до текстової логіки.
+    if (!driveOn && hasMedia && !(await getCodexMode(env, userId))) {
+      const ok = await handleVisionMedia(
+        env,
+        {
+          chatId,
+          userId,
+          msg,
+          lang,
+          caption: msg?.caption,
+        },
+        {
+          getEnergy,
+          spendEnergy,
+          energyLinks,
+          sendPlain,
+          tgFileUrl,
+          urlToBase64,
+        }
+      );
+      if (ok) return json({ ok: true });
+    }
   } catch (e) {
     if (isAdmin) {
-      await sendPlain(env, chatId, `❌ Media error: ${String(e).slice(0, 180)}`);
+      await sendPlain(
+        env,
+        chatId,
+        `❌ Media error: ${String(e).slice(0, 180)}`
+      );
     } else {
       await sendPlain(env, chatId, "Не вдалося обробити медіа.");
     }
@@ -673,4 +698,4 @@ export async function handleTelegramWebhook(req, env) {
     reply_markup: mainKeyboard(isAdmin),
   });
   return json({ ok: true });
-} 
+}
