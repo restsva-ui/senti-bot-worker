@@ -1,11 +1,20 @@
 // src/lib/codexHandler.js
-// Головний обробник текстових повідомлень Codex
+// Головний фасад Codex — тут об'єднано текст, медіа, UI та генерацію
 
+// ===============================
+// ІМПОРТИ
+// ===============================
 import {
   UI_AWAIT_KEY,
   normalizeProjectName,
   createProject,
   setCurrentProject,
+  getCurrentProject,
+
+  CODEX_MEM_KEY,
+  setCodexMode,
+  getCodexMode,
+  clearCodexMem,
 } from "./codexState.js";
 
 import {
@@ -14,8 +23,19 @@ import {
   writeSection,
 } from "./codexState.js";
 
-import { buildCodexKeyboard } from "./codexUi.js";
+import {
+  CB,
+  buildCodexKeyboard,
+  handleCodexUi,
+  handleCodexCommand,
+} from "./codexUi.js";
 
+import { handleCodexGeneration } from "./codexGeneration.js";
+
+
+// ===============================
+// ОБРОБКА ТЕКСТУ Codex
+// ===============================
 export async function handleCodexText(env, ctx, helpers = {}) {
   const { userId, chatId, textRaw } = ctx;
   const { sendPlain, sendInline } = helpers;
@@ -26,22 +46,21 @@ export async function handleCodexText(env, ctx, helpers = {}) {
   const kv = env.__KV || env.KV;
 
   // --------------------------------------------
-  // 1. Чи очікуємо введення назви проєкту?
+  // 1. Очікуємо назву нового проєкту?
   // --------------------------------------------
   const awaiting = await kv.get(UI_AWAIT_KEY(userId));
   if (awaiting === "proj_name") {
-    // Перехоплюємо повністю
     const name = normalizeProjectName(text);
+
     if (!name) {
       await sendPlain(
         env,
         chatId,
         "Введи коректну назву (1–3 слова). Спробуй ще раз."
       );
-      return true;
+      return true; // Senti не відповідає
     }
 
-    // Створити новий Codex-проєкт
     await createProject(env, userId, name);
     await setCurrentProject(env, userId, name);
     await kv.delete(UI_AWAIT_KEY(userId));
@@ -49,15 +68,15 @@ export async function handleCodexText(env, ctx, helpers = {}) {
     await sendInline(
       env,
       chatId,
-      `✅ Проєкт **"${name}"** створено й активовано.`,
+      `🧠 *Проєкт створено!*\nАктивний проєкт: **${name}**`,
       buildCodexKeyboard(true)
     );
 
-    return true; // Senti не відповідає
+    return true;
   }
 
   // --------------------------------------------
-  // 2. Чи очікуємо введення контенту для idea/tasks?
+  // 2. Очікуємо текст для idea.md ?
   // --------------------------------------------
   if (awaiting === "idea_append") {
     const cur = await getCurrentProject(env, userId);
@@ -67,12 +86,15 @@ export async function handleCodexText(env, ctx, helpers = {}) {
     }
 
     await appendSection(env, userId, cur, "idea.md", `\n${text}`);
-    await sendPlain(env, chatId, "Додав до ідеї.");
+    await sendPlain(env, chatId, "📝 Додав до секції *Ідея*.");
 
     await kv.delete(UI_AWAIT_KEY(userId));
     return true;
   }
 
+  // --------------------------------------------
+  // 3. Очікуємо текст для tasks.md ?
+  // --------------------------------------------
   if (awaiting === "task_append") {
     const cur = await getCurrentProject(env, userId);
     if (!cur) {
@@ -81,40 +103,59 @@ export async function handleCodexText(env, ctx, helpers = {}) {
     }
 
     await appendSection(env, userId, cur, "tasks.md", `\n- ${text}`);
-    await sendPlain(env, chatId, "Задачу додано.");
+    await sendPlain(env, chatId, "📌 Задачу додано.");
 
     await kv.delete(UI_AWAIT_KEY(userId));
     return true;
   }
 
-  // --------------------------------------------
-  // 3. Якщо Codex не очікує даних → пропускаємо
-  // --------------------------------------------
-  return false;
+  return false; // Нічого не перехопили → Senti відповідає
 }
-// Продовження codexHandler
 
-import { getCurrentProject } from "./codexState.js";
 
+
+// ===============================
+// ОБРОБКА МЕДІА Codex
+// ===============================
 export async function handleCodexMedia(env, ctx, helpers = {}) {
   const { userId, chatId, fileUrl, fileName } = ctx;
   const { sendPlain } = helpers;
 
   const cur = await getCurrentProject(env, userId);
   if (!cur) {
-    // Якщо проект не вибраний → Codex НЕ приймає медіа
-    return false;
+    return false; // медіа ігнорується → Senti працює
   }
 
-  // Зберегти файл у проєкт
-  const progressLine = `- Додано файл: ${fileName}`;
-  await appendSection(env, userId, cur, "progress.md", `\n${progressLine}`);
+  const line = `- Додано файл: ${fileName}`;
+  await appendSection(env, userId, cur, "progress.md", `\n${line}`);
 
   await sendPlain(
     env,
     chatId,
-    `📁 Файл **${fileName}** додано до проєкту **"${cur}"**.`
+    `📁 Файл **${fileName}** збережено в проєкт **${cur}**.`
   );
 
   return true;
 }
+
+
+
+// ===============================
+// ЕКСПОРТИ для webhook.js
+// ===============================
+export {
+  // Стан Codex
+  CODEX_MEM_KEY,
+  setCodexMode,
+  getCodexMode,
+  clearCodexMem,
+
+  // UI Codex
+  CB,
+  buildCodexKeyboard,
+  handleCodexUi,
+  handleCodexCommand,
+
+  // Генератор Codex
+  handleCodexGeneration,
+};
