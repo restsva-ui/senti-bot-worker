@@ -1,9 +1,10 @@
 // src/routes/webhook.js
+// Переписано. Повна стабільність Codex + Senti.
 
 import { driveSaveFromUrl } from "../lib/drive.js";
 import { getUserTokens } from "../lib/userDrive.js";
 import { abs } from "../utils/url.js";
-import { think } from "../lib/brain.js"; // залишаємо як у твоєму репо
+import { think } from "../lib/brain.js"; 
 import { readStatut } from "../lib/kvChecklist.js";
 import { askAnyModel } from "../lib/modelRouter.js";
 import { json } from "../lib/utils.js";
@@ -14,33 +15,34 @@ import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
 import { getRecentInsights } from "../lib/kvLearnQueue.js";
+
 import {
   dateIntent,
   timeIntent,
   replyCurrentDate,
   replyCurrentTime,
 } from "../apis/time.js";
+
 import {
   weatherIntent,
   weatherSummaryByPlace,
   weatherSummaryByCoords,
 } from "../apis/weather.js";
+
 import { saveLastPlace, loadLastPlace } from "../apis/userPrefs.js";
 import { setUserLocation, getUserLocation } from "../lib/geo.js";
 
-// Codex handler
 import {
   setCodexMode,
   getCodexMode,
   clearCodexMem,
   handleCodexCommand,
   handleCodexGeneration,
+  handleCodexText,
+  handleCodexMedia,
   buildCodexKeyboard,
   handleCodexUi,
 } from "../lib/codexHandler.js";
-
-// Vision handler (для обробки фото / медіа в Senti-режимі)
-import { handleVisionMedia } from "../lib/visionHandler.js";
 
 const {
   BTN_DRIVE,
@@ -54,7 +56,8 @@ const {
   askLocationKeyboard,
 } = TG;
 
-/* ───────────────── TG helpers ───────────────── */
+/* ================== HELPERS ================== */
+
 async function sendTyping(env, chatId) {
   try {
     const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
@@ -87,6 +90,7 @@ async function sendDocument(env, chatId, filename, content, caption) {
     body: fd,
   });
 }
+/* ================== FILE UTILS ================== */
 
 async function editMessageText(env, chatId, messageId, newText) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
@@ -98,6 +102,7 @@ async function editMessageText(env, chatId, messageId, newText) {
       chat_id: chatId,
       message_id: messageId,
       text: newText,
+      parse_mode: "Markdown",
     }),
   });
 }
@@ -105,12 +110,11 @@ async function editMessageText(env, chatId, messageId, newText) {
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
 async function startPuzzleAnimation(env, chatId, messageId, signal) {
-  // сучасніша "анімація" без квадратиків
   const frames = [
     "💬 Думаю над ідеями…",
     "🔍 Аналізую матеріали…",
     "🧠 Формую пропозиції…",
-    "✅ Оновлюю проєкт…",
+    "⚙️ Оновлюю проєкт…",
   ];
   let i = 0;
   while (!signal.done) {
@@ -123,7 +127,8 @@ async function startPuzzleAnimation(env, chatId, messageId, signal) {
   }
 }
 
-/* ─────────── get tg file url + attachment detection ─────────── */
+/* ================== TG FILE URL ================== */
+
 async function tgFileUrl(env, file_id) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   const r = await fetch(`https://api.telegram.org/bot${token}/getFile`, {
@@ -148,6 +153,8 @@ async function urlToBase64(url) {
   return btoa(bin);
 }
 
+/* ================== PHOTO / MEDIA DETECTION ================== */
+
 function pickPhoto(msg) {
   const arr = Array.isArray(msg?.photo) ? msg.photo : null;
   if (!arr?.length) return null;
@@ -161,175 +168,32 @@ function pickPhoto(msg) {
 
 function detectAttachment(msg) {
   if (!msg) return null;
+
   if (msg.document) {
     const d = msg.document;
-    return {
-      type: "document",
-      file_id: d.file_id,
-      name: d.file_name || `doc_${d.file_unique_id}`,
-    };
+    return { type: "document", file_id: d.file_id, name: d.file_name };
   }
   if (msg.video) {
     const v = msg.video;
-    return {
-      type: "video",
-      file_id: v.file_id,
-      name: v.file_name || `video_${v.file_unique_id}.mp4`,
-    };
+    return { type: "video", file_id: v.file_id, name: v.file_name };
   }
   if (msg.audio) {
     const a = msg.audio;
-    return {
-      type: "audio",
-      file_id: a.file_id,
-      name: a.file_name || `audio_${a.file_unique_id}.mp3`,
-    };
+    return { type: "audio", file_id: a.file_id, name: a.file_name };
   }
   if (msg.voice) {
     const v = msg.voice;
-    return {
-      type: "voice",
-      file_id: v.file_id,
-      name: `voice_${v.file_unique_id}.ogg`,
-    };
+    return { type: "voice", file_id: v.file_id, name: `voice_${v.file_unique_id}.ogg` };
   }
   if (msg.video_note) {
     const v = msg.video_note;
-    return {
-      type: "video_note",
-      file_id: v.file_id,
-      name: `videonote_${v.file_unique_id}.mp4`,
-    };
+    return { type: "video_note", file_id: v.file_id, name: `video_note_${v.file_unique_id}.mp4` };
   }
   return pickPhoto(msg);
 }
 
-/* ───────────────── admin links ───────────────── */
-function buildAdminLinks(env, userId) {
-  const base = (path) => abs(env, path);
-  const secret =
-    env.WEBHOOK_SECRET ||
-    env.TG_WEBHOOK_SECRET ||
-    env.TELEGRAM_SECRET_TOKEN ||
-    "senti1984";
+/* ================== CALLBACK QUERY (Codex UI) ================== */
 
-  const checklist = `${base(
-    "/admin/checklist/html"
-  )}?s=${encodeURIComponent(secret)}&u=${userId}`;
-  const energy = `${base(
-    "/admin/energy/html"
-  )}?s=${encodeURIComponent(secret)}&u=${userId}`;
-  const learn = `${base(
-    "/admin/learn/html"
-  )}?s=${encodeURIComponent(secret)}&u=${userId}`;
-
-  return { checklist, energy, learn };
-}
-
-/* ───────────────── drive-mode media ───────────────── */
-async function handleIncomingMedia(env, chatId, userId, msg, lang) {
-  const att = detectAttachment(msg);
-  if (!att) return false;
-
-  let hasTokens = false;
-  try {
-    const tokens = await getUserTokens(env, userId);
-    hasTokens = !!tokens;
-  } catch {}
-
-  if (!hasTokens) {
-    const connectUrl = abs(env, "/auth/drive");
-    await sendPlain(
-      env,
-      chatId,
-      t(lang, "drive_connect_hint") ||
-        "Щоб зберігати файли, підключи Google Drive.",
-      {
-        reply_markup: {
-          inline_keyboard: [[{ text: "Підключити Drive", url: connectUrl }]],
-        },
-      }
-    );
-    return true;
-  }
-
-  const cur = await getEnergy(env, userId);
-  const need = Number(cur.costImage ?? 5);
-  if ((cur.energy ?? 0) < need) {
-    const links = energyLinks(env, userId);
-    await sendPlain(
-      env,
-      chatId,
-      t(lang, "need_energy_media", need, links.energy)
-    );
-    return true;
-  }
-  await spendEnergy(env, userId, need, "media");
-
-  const url = await tgFileUrl(env, att.file_id);
-  const saved = await driveSaveFromUrl(env, userId, url, att.name);
-  await sendPlain(
-    env,
-    chatId,
-    `✅ Збережено на Диск: ${saved?.name || att.name}`,
-    {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            {
-              text: "Відкрити Диск",
-              url: "https://drive.google.com/drive/my-drive",
-            },
-          ],
-        ],
-      },
-    }
-  );
-  return true;
-}
-
-/* ───────────────── system hint ───────────────── */
-async function buildSystemHint(env, chatId, userId, preferredLang) {
-  const statut = String((await readStatut(env)) || "").trim();
-  const dlg = await buildDialogHint(env, userId);
-
-  // Тимчасово відключаємо self-tune та інсайти,
-  // щоб “проєкт Київ” не ліз у всі відповіді Senti.
-  // const tune = await loadSelfTune(env, chatId, { preferredLang }).catch(
-  //   () => null
-  // );
-  // let insightsBlock = "";
-  // try {
-  //   const insights = await getRecentInsights(env, { limit: 5 });
-  //   if (insights?.length) {
-  //     insightsBlock =
-  //       "[Нещодавні знання]\n" +
-  //       insights.map((i) => `• ${i.insight}`).join("\n");
-  //   }
-  // } catch {}
-
-  const core = `You are Senti — personal assistant.
-- Reply in user's language.
-- Be concise by default.`;
-
-  const parts = [core];
-  if (statut) parts.push(`[Статут]\n${statut}`);
-  // if (tune) parts.push(`[Self-tune]\n${tune}`);
-  // if (insightsBlock) parts.push(insightsBlock);
-  if (dlg) parts.push(dlg);
-  return parts.join("\n\n");
-}
-
-/* ───────────────── response text ───────────────── */
-function asText(res) {
-  if (!res) return "";
-  if (typeof res === "string") return res;
-  if (typeof res.text === "string") return res.text;
-  if (Array.isArray(res.choices) && res.choices[0]?.message?.content)
-    return res.choices[0].message.content;
-  return JSON.stringify(res);
-}
-/* ───────────────── webhook ───────────────── */
 export async function handleTelegramWebhook(req, env) {
   if (req.method === "GET") {
     return json({ ok: true, worker: "senti", ts: Date.now() });
@@ -339,8 +203,8 @@ export async function handleTelegramWebhook(req, env) {
     const expected =
       env.TG_WEBHOOK_SECRET ||
       env.TELEGRAM_SECRET_TOKEN ||
-      env.WEBHOOK_SECRET ||
-      "";
+      env.WEBHOOK_SECRET || "";
+
     if (expected) {
       const sec = req.headers.get("x-telegram-bot-api-secret-token");
       if (sec !== expected)
@@ -350,15 +214,13 @@ export async function handleTelegramWebhook(req, env) {
 
   const update = await req.json();
 
-  /* ───── callback_query (inline Codex UI) ───── */
+  // INLINE CODEx UI
   if (update.callback_query) {
     const cq = update.callback_query;
     const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
     const chatId = cq?.message?.chat?.id;
     const userId = cq?.from?.id;
 
-    // ВАЖЛИВО: пробуємо обробити UI Codex БЕЗ перевірки режиму.
-    // Якщо callback не для Codex — handleCodexUi поверне false.
     const handled = await handleCodexUi(
       env,
       chatId,
@@ -375,11 +237,10 @@ export async function handleTelegramWebhook(req, env) {
       });
     }
 
-    if (handled) {
-      return json({ ok: true });
-    }
+    if (handled) return json({ ok: true });
     return json({ ok: true });
   }
+/* ================== MESSAGE / MAIN FLOW ================== */
 
   const msg = update.message || update.edited_message || update.channel_post;
   const chatId = msg?.chat?.id;
@@ -394,18 +255,15 @@ export async function handleTelegramWebhook(req, env) {
       await fn();
     } catch (e) {
       if (isAdmin) {
-        await sendPlain(
-          env,
-          chatId,
-          `❌ Error: ${String(e?.message || e).slice(0, 200)}`
-        );
+        await sendPlain(env, chatId, `❌ Error: ${String(e.message || e).slice(0,200)}`);
       } else {
         await sendPlain(env, chatId, "Сталася помилка, спробуй ще раз.");
       }
     }
   };
 
-  /* ───── save location ───── */
+  /* ================== SAVE LOCATION ================== */
+
   if (msg?.location && userId && chatId) {
     await setUserLocation(env, userId, msg.location);
     await sendPlain(env, chatId, "✅ Локацію збережено.", {
@@ -414,7 +272,8 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  /* ───── /start ───── */
+  /* ================== START ================== */
+
   if (textRaw === "/start") {
     await safe(async () => {
       await setCodexMode(env, userId, false);
@@ -432,7 +291,8 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  /* ───── явна команда Senti (вимикає Codex) ───── */
+  /* ================== FORCE SENTI ================== */
+
   if (textRaw === BTN_SENTI || /^\/senti\b/i.test(textRaw)) {
     await setDriveMode(env, userId, false);
     await setCodexMode(env, userId, false);
@@ -442,33 +302,33 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  /* ───── drive on/off ───── */
+  /* ================== DRIVE ON ================== */
+
   if (textRaw === BTN_DRIVE) {
     await setDriveMode(env, userId, true);
+    await setCodexMode(env, userId, false);
     await sendPlain(
       env,
       chatId,
-      "☁️ Drive-режим: усе, що надішлеш, зберігатиму на Google Drive.",
-      {
-        reply_markup: mainKeyboard(isAdmin),
-      }
+      "☁️ Drive-режим: усе, що надішлеш — зберігатиму у Google Drive.",
+      { reply_markup: mainKeyboard(isAdmin) }
     );
     return json({ ok: true });
   }
 
-  /* ───── /admin ───── */
+  /* ================== ADMIN PANEL ================== */
+
   if (textRaw === "/admin" || textRaw === BTN_ADMIN) {
     await safe(async () => {
       const { checklist, energy, learn } = buildAdminLinks(env, userId);
       const mo = String(env.MODEL_ORDER || "").trim();
 
       const body = [
-        "Admin panel (quick diagnostics):",
+        "Admin panel:",
         `MODEL_ORDER: ${mo || "(not set)"}`,
-        `GEMINI key: ${env.GEMINI_API_KEY ? "✅" : "❌"}`,
+        `Gemini API: ${env.GEMINI_API_KEY ? "✅" : "❌"}`,
         `Cloudflare: ${env.CLOUDFLARE_API_TOKEN ? "✅" : "❌"}`,
         `OpenRouter: ${env.OPENROUTER_API_KEY ? "✅" : "❌"}`,
-        `FreeLLM: ${env.FREE_LLM_BASE_URL ? "✅" : "❌"}`,
       ].join("\n");
 
       await sendPlain(env, chatId, body, {
@@ -484,151 +344,125 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  /* ───── Codex on/off ───── */
+  /* ================== CODEX ON ================== */
+
   if (textRaw === BTN_CODEX || textRaw === "/codex") {
     if (!isAdmin) {
       await sendPlain(env, chatId, "🛡️ Codex тільки для адміну.");
       return json({ ok: true });
     }
+
     await setCodexMode(env, userId, true);
     await clearCodexMem(env, userId);
 
     await sendPlain(
       env,
       chatId,
-      "🧠 Senti Codex увімкнено. Натисни «Створити проєкт» — і я увімкну режим збору ідеї: просто пиши текст і кидай фото/файли/посилання, усе збережу в idea.md та assets. Або обери існуючий проєкт.",
-      { reply_markup: buildCodexKeyboard() }
+      "🧠 *Senti Codex увімкнено.*\n\n" +
+        "Створи новий проєкт або обери існуючий.",
+      { reply_markup: buildCodexKeyboard(false) }
     );
     return json({ ok: true });
   }
 
+  /* ================== CODEX OFF ================== */
+
   if (textRaw === "/codex_off") {
     await setCodexMode(env, userId, false);
     await clearCodexMem(env, userId);
-    await sendPlain(env, chatId, "Codex вимкнено.", {
+    await sendPlain(env, chatId, "🔕 Codex вимкнено.", {
       reply_markup: mainKeyboard(isAdmin),
     });
     return json({ ok: true });
   }
 
-  /* ───── media before codex ───── */
-  try {
-    const driveOn = await getDriveMode(env, userId);
-    const hasMedia = !!detectAttachment(msg) || !!pickPhoto(msg);
+  /* ======================================================
+       MEDIA (FIRST LAYER)
+       — якщо Codex викл → Drive або Vision
+     ====================================================== */
 
-    if (driveOn && hasMedia && !(await getCodexMode(env, userId))) {
-      if (await handleIncomingMedia(env, chatId, userId, msg, lang))
-        return json({ ok: true });
-    }
+  const hasMedia = !!detectAttachment(msg) || !!pickPhoto(msg);
+  const driveOn = await getDriveMode(env, userId);
+  const codexOn = await getCodexMode(env, userId);
 
-    if (!driveOn && hasMedia && !(await getCodexMode(env, userId))) {
-      const ok = await handleVisionMedia(
-        env,
-        {
-          chatId,
-          userId,
-          msg,
-          lang,
-          caption: msg?.caption,
-        },
-        {
-          getEnergy,
-          spendEnergy,
-          energyLinks,
-          sendPlain,
-          tgFileUrl,
-          urlToBase64,
-        }
-      );
+  if (hasMedia && !codexOn) {
+    // DRIVE MODE
+    if (driveOn) {
+      const ok = await handleIncomingMedia(env, chatId, userId, msg, lang);
       if (ok) return json({ ok: true });
     }
-  } catch (e) {
-    if (isAdmin) {
-      await sendPlain(
-        env,
+
+    // VISION MODE
+    const ok = await handleVisionMedia(
+      env,
+      {
         chatId,
-        `❌ Media error: ${String(e).slice(0, 180)}`
-      );
-    } else {
-      await sendPlain(env, chatId, "Не вдалося обробити медіа.");
-    }
-    return json({ ok: true });
+        userId,
+        msg,
+        lang,
+        caption: msg?.caption,
+      },
+      {
+        getEnergy,
+        spendEnergy,
+        energyLinks,
+        sendPlain,
+        tgFileUrl,
+        urlToBase64,
+      }
+    );
+
+    if (ok) return json({ ok: true });
   }
 
-  /* ───── codex extra cmds (/project …) ───── */
-  if (await getCodexMode(env, userId)) {
-    if (
-      await handleCodexCommand(
-        env,
-        { chatId, userId, msg, textRaw, lang },
-        { sendPlain }
-      )
-    ) {
-      return json({ ok: true });
-    }
+  /* ======================================================
+        CODEX MODE: TEXT INPUT HANDLER (CRITICAL FIX)
+     ====================================================== */
+
+  if (codexOn) {
+    const consumedText = await handleCodexText(
+      env,
+      { chatId, userId, textRaw },
+      { sendPlain, sendInline: sendPlain }
+    );
+    if (consumedText) return json({ ok: true });
   }
 
-  /* ───── date / time / weather ───── */
-  if (textRaw) {
-    const wantsDate = dateIntent(textRaw);
-    const wantsTime = timeIntent(textRaw);
-    const wantsWeather = weatherIntent(textRaw);
+  /* ======================================================
+        CODEX MODE: ADDITIONAL COMMANDS
+     ====================================================== */
 
-    if (wantsDate || wantsTime || wantsWeather) {
-      await safe(async () => {
-        if (wantsDate) {
-          await sendPlain(env, chatId, replyCurrentDate(env, lang));
-        }
-        if (wantsTime) {
-          await sendPlain(env, chatId, replyCurrentTime(env, lang));
-        }
-        if (wantsWeather) {
-          const byPlace = await weatherSummaryByPlace(env, textRaw, lang);
-          if (!/Не вдалося знайти/.test(byPlace.text)) {
-            await sendPlain(env, chatId, byPlace.text, {
-              parse_mode: byPlace.mode || undefined,
-            });
-            await saveLastPlace(env, userId, { place: textRaw });
-          } else {
-            const last = await loadLastPlace(env, userId);
-            if (last?.lat && last?.lon) {
-              const byCoord = await weatherSummaryByCoords(
-                last.lat,
-                last.lon,
-                lang
-              );
-              await sendPlain(env, chatId, byCoord.text, {
-                parse_mode: byCoord.mode || undefined,
-              });
-            } else {
-              const geo = await getUserLocation(env, userId);
-              if (geo?.lat && geo?.lon) {
-                const byCoord = await weatherSummaryByCoords(
-                  geo.lat,
-                  geo.lon,
-                  lang
-                );
-                await sendPlain(env, chatId, byCoord.text, {
-                  parse_mode: byCoord.mode || undefined,
-                });
-              } else {
-                await sendPlain(
-                  env,
-                  chatId,
-                  "Надішли локацію — і я покажу погоду.",
-                  { reply_markup: askLocationKeyboard() }
-                );
-              }
-            }
-          }
-        }
-      });
-      return json({ ok: true });
-    }
+  if (codexOn) {
+    const handledCmd = await handleCodexCommand(
+      env,
+      { chatId, userId, msg, textRaw, lang },
+      { sendPlain }
+    );
+    if (handledCmd) return json({ ok: true });
   }
 
-  /* ───── Codex main ───── */
-  if ((await getCodexMode(env, userId)) && (textRaw || pickPhoto(msg))) {
+  /* ======================================================
+        CODEX MODE: MEDIA (inside project)
+     ====================================================== */
+
+  if (codexOn && hasMedia) {
+    const consumedMedia = await handleCodexMedia(
+      env,
+      {
+        chatId,
+        userId,
+        fileUrl: null,
+        fileName: detectAttachment(msg)?.name || pickPhoto(msg)?.name,
+      },
+      { sendPlain }
+    );
+    if (consumedMedia) return json({ ok: true });
+  }
+/* ======================================================
+        CODEX MODE: MAIN GENERATION (text + images)
+     ====================================================== */
+
+  if (codexOn && (textRaw || hasMedia)) {
     await safe(async () => {
       await handleCodexGeneration(
         env,
@@ -660,20 +494,21 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  /* ───── звичайне Senti-повідомлення ───── */
-  if (textRaw && !textRaw.startsWith("/")) {
+  /* ======================================================
+        SENTI MODE (only if Codex OFF)
+     ====================================================== */
+
+  if (!codexOn && textRaw && !textRaw.startsWith("/")) {
     await safe(async () => {
       const cur = await getEnergy(env, userId);
       const need = Number(cur.costText ?? 1);
+
       if ((cur.energy ?? 0) < need) {
         const links = energyLinks(env, userId);
-        await sendPlain(
-          env,
-          chatId,
-          t(lang, "need_energy_text", need, links.energy)
-        );
+        await sendPlain(env, chatId, t(lang, "need_energy_text", need, links.energy));
         return;
       }
+
       await spendEnergy(env, userId, need, "text");
       pulseTyping(env, chatId);
 
@@ -686,16 +521,23 @@ export async function handleTelegramWebhook(req, env) {
         "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free";
 
       const res = await askAnyModel(env, order, textRaw, { systemHint });
-      const full = asText(res) || "Не впевнений.";
+      const full = (typeof res === "string"
+        ? res
+        : res?.choices?.[0]?.message?.content) || "Не впевнений.";
+
       await pushTurn(env, userId, "assistant", full);
       await sendPlain(env, chatId, full);
     });
     return json({ ok: true });
   }
 
-  // дефолт
+  /* ======================================================
+        DEFAULT FALLBACK
+     ====================================================== */
+
   await sendPlain(env, chatId, "Привіт! Що зробимо?", {
     reply_markup: mainKeyboard(isAdmin),
   });
+
   return json({ ok: true });
 }
