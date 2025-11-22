@@ -1,695 +1,580 @@
-// ---------------------------------------------
-// Senti Webhook v3.0 (A2 clean API, fully stable)
-// ---------------------------------------------
+// src/routes/webhook.js — Senti Hybrid 2.5 (Compact Edition)
 
-// Core AI modules
-import { askAnyModel } from '../lib/modelRouter.js'
-import { describeImage } from '../flows/visionDescribe.js'
+// Core imports
+import { json } from "../lib/utils.js";
+import { TG } from "../lib/tg.js";
+import { getEnergy, spendEnergy } from "../lib/energy.js";
+import { pushTurn, buildDialogHint } from "../lib/dialogMemory.js";
+import { autoUpdateSelfTune } from "../lib/selfTune.js";
+import { abs } from "../utils/url.js";
 
-// Learn system
-import { buildDialogHint, pushTurn } from '../lib/dialogMemory.js'
-import { loadSelfTune, autoUpdateSelfTune } from '../lib/selfTune.js'
-import { getRecentInsights } from '../lib/kvLearnQueue.js'
+// Providers
+import { askAnyModel } from "../lib/modelRouter.js";
+import { driveSaveFromUrl } from "../lib/drive.js";
+import { getUserTokens } from "../lib/userDrive.js";
 
-// Codex modules
-import { saveCodexMem } from '../lib/codexState.js'
-import { guessCodexFilename } from '../lib/codexUtils.js'
+// Geo & Weather
+import { setUserLocation, getUserLocation } from "../lib/geo.js";
+import { saveLastPlace, loadLastPlace } from "../apis/userPrefs.js";
+import {
+  dateIntent, timeIntent,
+  replyCurrentDate, replyCurrentTime
+} from "../apis/time.js";
+import {
+  weatherIntent,
+  weatherSummaryByPlace,
+  weatherSummaryByCoords
+} from "../apis/weather.js";
 
-// TG
-import { TG } from '../lib/tg.js'
+// Modes
+import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
+import {
+  setCodexMode, getCodexMode, clearCodexMem,
+  handleCodexCommand, handleCodexGeneration,
+  handleCodexText, handleCodexMedia, buildCodexKeyboard,
+  handleCodexUi
+} from "../lib/codexHandler.js";
 
-// Utils
-import { json } from '../lib/utils.js'
-import { abs } from '../utils/url.js'
-import { getEnergy, spendEnergy } from '../lib/energy.js'
+// Vision
+import { handleVisionMedia } from "../lib/visionHandler.js";
 
-// Geo / weather / time
-import { detectLandmarksFromText, formatLandmarkLines } from '../lib/landmarkDetect.js'
-import { weatherIntent, weatherSummaryByPlace, weatherSummaryByCoords } from '../apis/weather.js'
-import { dateIntent, timeIntent, replyCurrentDate, replyCurrentTime } from '../apis/time.js'
-import { setUserLocation, getUserLocation } from '../lib/geo.js'
+// Telegram helpers
+const {
+  BTN_DRIVE, BTN_SENTI, BTN_ADMIN, BTN_CODEX,
+  mainKeyboard, ADMIN, sendPlain, askLocationKeyboard
+} = TG;
 
-// ---------------------------------------------
-// HTTP handler for src/index.js
-// ---------------------------------------------
+/* ============== TELEGRAM UTILS ============== */
+
+async function sendTyping(env, chatId) {
+  const token = env.TELEGRAM_BOT_TOKEN;
+  if (!token) return;
+  await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, action: "typing" })
+  });
+}
+
+function detectAttachment(msg) {
+  if (!msg) return null;
+  if (msg.document) return { type: "document", file_id: msg.document.file_id, name: msg.document.file_name };
+  if (msg.photo?.length) {
+    const p = msg.photo[msg.photo.length - 1];
+    return { type: "photo", file_id: p.file_id, name: `photo_${p.file_unique_id}.jpg` };
+  }
+  return null;
+}
+
+async function tgFileUrl(env, file_id) {
+  const token = env.TELEGRAM_BOT_TOKEN;
+  const r = await fetch(`https://api.telegram.org/bot${token}/getFile`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ file_id })
+  });
+  const d = await r.json();
+  return `https://api.telegram.org/file/bot${token}/${d.result.file_path}`;
+}
+
+/* ============== CALLBACK QUERY (Codex UI) ============== */
+
+async function handleCallback(env, update) {
+  const cq = update.callback_query;
+  const chatId = cq?.message?.chat?.id;
+  const userId = cq?.from?.id;
+
+  const handled = await handleCodexUi(
+    env, chatId, userId,
+    { cbData: cq.data },
+    { sendPlain, tgFileUrl, driveSaveFromUrl, getUserTokens }
+  );
+
+  const token = env.TELEGRAM_BOT_TOKEN;
+  if (token) {
+    await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ callback_query_id: cq.id })
+    });
+  }
+
+  return handled;
+}
+/* ============== MAIN WEBHOOK HANDLER ============== */
 
 export async function handleTelegramWebhook(req, env) {
-  // Простий GET — щоб воркер відповідав у браузері
-  if (req.method === 'GET') {
-    const html = `
-    <html>
-      <head><title>Senti Worker</title></head>
-      <body style="font-family: Arial; padding: 40px;">
-        <h1>Senti Worker is running</h1>
-        <p>Webhook endpoint is active.</p>
-      </body>
-    </html>`
-    return new Response(html, { headers: { 'content-type': 'text/html' } })
+  if (req.method === "GET") {
+    return json({ ok: true, worker: "senti", ts: Date.now() });
   }
 
-  // Підтримуємо тільки POST від Telegram
-  if (req.method !== 'POST') {
-    return new Response('Method Not Allowed', { status: 405 })
-  }
+  // Validate Telegram secret
+  if (req.method === "POST") {
+    const expected =
+      env.TG_WEBHOOK_SECRET ||
+      env.TELEGRAM_SECRET_TOKEN ||
+      env.WEBHOOK_SECRET ||
+      "";
 
-  // Перевірка секрету Telegram
-  const expected = env.WEBHOOK_SECRET || env.TELEGRAM_SECRET_TOKEN || ''
-  if (expected) {
-    const sec = req.headers.get('x-telegram-bot-api-secret-token')
-    if (sec !== expected) {
-      return json({ ok: false, error: 'unauthorized' }, 401)
+    if (expected) {
+      const sec = req.headers.get("x-telegram-bot-api-secret-token");
+      if (sec !== expected) {
+        return json({ ok: false, error: "unauthorized" }, 401);
+      }
     }
   }
 
-  // Парсимо апдейт Telegram
-  const update = await req.json()
-  return handleTelegramUpdate(update, env)
-}
+  const update = await req.json();
 
-// ---------------------------------------------
-// Part 2/5 — Telegram helpers + update parser
-// ---------------------------------------------
-
-// -----------------------------
-// TG Token helper
-// -----------------------------
-function tgToken(env) {
-  return env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN
-}
-
-// -----------------------------
-// Send plain text
-// -----------------------------
-async function sendPlain(env, chatId, text, extra = {}) {
-  const token = tgToken(env)
-  if (!token) return null
-
-  const body = {
-    chat_id: chatId,
-    text,
-    ...extra
+  /* ========= CALLBACK QUERY ========= */
+  if (update.callback_query) {
+    const done = await handleCallback(env, update);
+    return json({ ok: true });
   }
 
-  const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body)
-  })
-
-  try {
-    return await r.json()
-  } catch {
-    return null
-  }
-}
-
-// -----------------------------
-// Send typing animation
-// -----------------------------
-async function sendTyping(env, chatId) {
-  const token = tgToken(env)
-  if (!token) return
-
-  await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      action: 'typing'
-    })
-  })
-}
-
-function pulseTyping(env, chatId, cycles = 3, interval = 3500) {
-  sendTyping(env, chatId)
-  for (let i = 1; i < cycles; i++) {
-    setTimeout(() => sendTyping(env, chatId), i * interval)
-  }
-}
-
-// -----------------------------
-// Edit message text
-// -----------------------------
-async function editMessageText(env, chatId, messageId, text) {
-  const token = tgToken(env)
-  if (!token) return
-
-  await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      message_id: messageId,
-      text
-    })
-  })
-}
-
-// -----------------------------
-// Send file/document
-// -----------------------------
-async function sendDocument(env, chatId, filename, content, caption) {
-  const token = tgToken(env)
-  if (!token) return
-
-  const fd = new FormData()
-  fd.append('chat_id', String(chatId))
-
-  const file = new File([content], filename, { type: 'text/plain' })
-  fd.append('document', file)
-  if (caption) fd.append('caption', caption)
-
-  await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
-    method: 'POST',
-    body: fd
-  })
-}
-
-// -----------------------------
-// getFile → real URL
-// -----------------------------
-async function tgFileUrl(env, file_id) {
-  const token = tgToken(env)
-  const r = await fetch(`https://api.telegram.org/bot${token}/getFile`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ file_id })
-  })
-
-  const data = await r.json().catch(() => null)
-  if (!data?.ok) throw new Error('getFile failed')
-
-  const path = data.result?.file_path
-  if (!path) throw new Error('file_path missing')
-
-  return `https://api.telegram.org/file/bot${token}/${path}`
-}
-
-// -----------------------------
-// Download as base64
-// -----------------------------
-async function urlToBase64(url) {
-  const r = await fetch(url)
-  if (!r.ok) throw new Error('download failed')
-
-  const buf = await r.arrayBuffer()
-  const bytes = new Uint8Array(buf)
-  let binary = ''
-
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i])
-  }
-  return btoa(binary)
-}
-
-// -----------------------------
-// Parse media from Telegram msg
-// -----------------------------
-function detectPhoto(msg) {
-  const photos = msg?.photo
-  if (!photos || photos.length === 0) return null
-
-  const sorted = [...photos].sort((a, b) => (a.file_size || 0) - (b.file_size || 0))
-  const ph = sorted[sorted.length - 1]
-
-  return {
-    type: 'photo',
-    file_id: ph.file_id,
-    name: `photo_${ph.file_unique_id}.jpg`
-  }
-}
-
-function detectDocument(msg) {
-  if (!msg?.document) return null
-  return {
-    type: 'document',
-    file_id: msg.document.file_id,
-    name: msg.document.file_name || `doc_${msg.document.file_unique_id}`
-  }
-}
-
-function detectVideo(msg) {
-  if (!msg?.video) return null
-  return {
-    type: 'video',
-    file_id: msg.video.file_id,
-    name: `video_${msg.video.file_unique_id}.mp4`
-  }
-}
-
-function detectAnyMedia(msg) {
-  return detectDocument(msg) || detectPhoto(msg) || detectVideo(msg) || null
-}
-
-// -----------------------------
-// Normalize Telegram update
-// -----------------------------
-async function handleTelegramUpdate(update, env) {
-  const msg = update.message || update.edited_message || update.channel_post
-  if (!msg) return json({ ok: true })
-
-  const chatId = msg.chat?.id
-  const userId = msg.from?.id
-  const textRaw = String(msg.text || msg.caption || '').trim()
-  const lang = msg.from?.language_code || 'uk'
-
-  return handleSentiMessage({ msg, chatId, userId, textRaw, lang }, env)
-}
-
-// ---------------------------------------------
-// Part 3/5 — VISION HANDLER (describe, OCR, map)
-// ---------------------------------------------
-
-async function handleVision(env, ctx) {
-  const { msg, chatId, userId, textRaw, lang } = ctx
-
-  // Якщо немає фото — не Vision
-  const photo = detectPhoto(msg)
-  if (!photo) return false
-
-  // Vision працює тільки якщо Codex вимкнений
-  if (await getCodexMode(env, userId)) return false
-
-  const energy = await getEnergy(env, userId)
-  const need = Number(energy.costText ?? 1)
-
-  if ((energy.energy ?? 0) < need) {
-    await sendPlain(env, chatId, '⚠️ Недостатньо енергії для аналізу фото.')
-    return true
-  }
-  await spendEnergy(env, userId, need, 'vision')
-
-  // Завантажуємо фото
-  const url = await tgFileUrl(env, photo.file_id)
-  const base64 = await urlToBase64(url)
-
-  // Тип запиту
-  const lower = textRaw.toLowerCase()
-
-  const wantsOCR =
-    lower.includes('перепиши') ||
-    lower.includes('скопіювати') ||
-    lower.includes('копі') ||
-    lower.includes('ocr') ||
-    lower.includes('витягни текст')
-
-  const wantsMap =
-    lower.includes('покажи на карті') ||
-    lower.includes('де це') ||
-    lower.includes('що це за місце')
-
-  const isPrompt = !!textRaw && !wantsOCR && !wantsMap
-
-  // Промпт Vision
-  let visionPrompt = ''
-
-  if (wantsOCR) {
-    visionPrompt = lang.startsWith('uk')
-      ? 'Випиши чистий текст з цього зображення. Без пояснень. Лише текст.'
-      : 'Transcribe the text from this image. No explanation. Only raw text.'
-  } else if (isPrompt) {
-    visionPrompt = textRaw
-  } else {
-    visionPrompt = lang.startsWith('uk')
-      ? 'Опиши, що зображено, коротко і точно.'
-      : 'Describe this image briefly and precisely.'
-  }
-
-  // Thinking animation
-  pulseTyping(env, chatId)
-
-  // Виклик Vision моделей
-  const { text } = await describeImage(env, {
-    chatId,
-    tgLang: lang,
-    imageBase64: base64,
-    question: visionPrompt,
-    modelOrder: 'gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct'
-  })
-
-  let result = String(text || '').trim()
-
-  // OCR — повертаємо тільки текст
-  if (wantsOCR) {
-    await sendPlain(env, chatId, result)
-    return true
-  }
-
-  // Vision опис
-  await sendPlain(env, chatId, result)
-
-  // Можливо знайти лендмарки
-  const landmarks = detectLandmarksFromText(result, lang)
-
-  if (landmarks?.length) {
-    const lines = formatLandmarkLines(landmarks, lang)
-    await sendPlain(env, chatId, lines.join('\n'), {
-      parse_mode: 'HTML',
-      disable_web_page_preview: true
-    })
-  }
-
-  // "Покажи на карті"
-  if (wantsMap && landmarks?.length) {
-    const first = landmarks[0]
-    const q = encodeURIComponent(first.name)
-    const gm = `https://www.google.com/maps/search/?api=1&query=${q}`
-
-    await sendPlain(env, chatId, `🗺️ Місце на карті:\n${gm}`, {
-      disable_web_page_preview: false
-    })
-  }
-
-  return true
-}
-// ---------------------------------------------
-// Part 4/5 — CODEX HANDLER (clean & stable)
-// ---------------------------------------------
-
-// KV flags
-async function getCodexMode(env, uid) {
-  const kv = env.STATE_KV || env.CHECKLIST_KV
-  if (!kv) return false
-  return (await kv.get(`codex:mode:${uid}`, 'text')) === 'on'
-}
-
-async function setCodexMode(env, uid, on) {
-  const kv = env.STATE_KV || env.CHECKLIST_KV
-  if (!kv) return
-  await kv.put(`codex:mode:${uid}`, on ? 'on' : 'off')
-}
-
-// Clean animation (text frames)
-async function codexAnimation(env, chatId, messageId, signal) {
-  const frames = [
-    '🧩 Codex: аналізую задачу…',
-    '🧩 Codex: проектую рішення…',
-    '🧩 Codex: генерую код…',
-    '🧩 Codex: фіналізую файл…'
-  ]
-
-  let i = 0
-  while (!signal.done) {
-    await new Promise(r => setTimeout(r, 1500))
-    if (signal.done) break
-    await editMessageText(env, chatId, messageId, frames[i % frames.length])
-    i++
-  }
-}
-
-// Clean plain-text extraction from model
-function extractText(res) {
-  if (!res) return ''
-  if (typeof res === 'string') return res.trim()
-
-  if (res.output_text) return String(res.output_text).trim()
-  if (res.text) return String(res.text).trim()
-
-  const msg = res.choices?.[0]?.message?.content
-  if (typeof msg === 'string') return msg.trim()
-
-  if (Array.isArray(msg)) {
-    return msg
-      .filter(p => p.type === 'text')
-      .map(p => p.text)
-      .join('\n')
-      .trim()
-  }
-
-  return ''
-}
-
-// ---------------------------------------------
-// handleCodex(env, ctx)
-// ---------------------------------------------
-async function handleCodex(env, ctx) {
-  const { msg, chatId, userId, textRaw, lang } = ctx
-
-  // Codex mode must be ON
-  if (!(await getCodexMode(env, userId))) return false
-
-  // Codex does NOT process photos (Vision handles this)
-  if (detectPhoto(msg)) {
-    await sendPlain(env, chatId, '📸 Надішли текстове завдання для Codex.')
-    return true
-  }
-
-  if (!textRaw) return true
-
-  // Special commands (optional)
-  if (textRaw === '/codex_off') {
-    await setCodexMode(env, userId, false)
-    await sendPlain(env, chatId, '🧩 Codex вимкнено.')
-    return true
-  }
-
-  // Codex task
-  const systemHint =
-    'You are Senti Codex — an AI software architect. ' +
-    'Your job is to generate clean, ready-to-run code. ' +
-    'Output ONLY code without commentary unless explicitly asked.'
-
-  const status = await sendPlain(env, chatId, '🧩 Codex працює…')
-  const messageId = status?.result?.message_id
-  const signal = { done: false }
-
-  if (messageId) codexAnimation(env, chatId, messageId, signal)
-
-  // AI model call
-  const order =
-    env.CODEX_MODEL_ORDER ||
-    env.MODEL_ORDER ||
-    'gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct'
-
-  const res = await askAnyModel(env, order, textRaw, { systemHint })
-  let raw = extractText(res)
-  raw = raw.trim()
-
-  signal.done = true
-
-  // Decide filename
-  let filename = guessCodexFilename('txt')
-
-  const isHTML = /<!DOCTYPE\s+html/i.test(raw) || /<html[^>]*>/i.test(raw)
-
-  if (isHTML) filename = guessCodexFilename('html')
-
-  // Save to Codex memory (for history browsing)
-  await saveCodexMem(env, userId, { filename, content: raw })
-
-  await sendPlain(
-    env,
-    chatId,
-    isHTML ? 'Готово! Надсилаю HTML файл.' : 'Готово! Надсилаю файл.'
-  )
-
-  await sendDocument(env, chatId, filename, raw)
-
-  return true
-}
-
-// ---------------------------------------------
-// Part 5/5 — LEARN MODE + MAIN AI handler + ROUTING
-// ---------------------------------------------
-
-// -----------------------------
-// Learn flags
-// -----------------------------
-async function getLearnMode(env, uid) {
-  const kv = env.STATE_KV || env.CHECKLIST_KV
-  if (!kv) return false
-  return (await kv.get(`learn:mode:${uid}`, 'text')) === 'on'
-}
-
-async function setLearnMode(env, uid, on) {
-  const kv = env.STATE_KV || env.CHECKLIST_KV
-  if (!kv) return
-  await kv.put(`learn:mode:${uid}`, on ? 'on' : 'off')
-}
-
-// -----------------------------
-// MAIN AI RESPONSE (Senti dialog)
-// -----------------------------
-async function handleAiDialog(env, ctx) {
-  const { chatId, userId, textRaw, lang } = ctx
-
-  const systemCore =
-    'You are Senti — a personal AI assistant. ' +
-    'Reply clearly, thoughtfully, without emojis unless needed. ' +
-    'Be concise but meaningful.'
-
-  const dialogHint = await buildDialogHint(env, userId)
-  const selfTune = await loadSelfTune(env, chatId, { preferredLang: lang }).catch(
-    () => ''
-  )
-  const insightsArr = await getRecentInsights(env, userId, 5).catch(() => [])
-
-  let insightsBlock = ''
-  if (insightsArr?.length) {
-    insightsBlock =
-      '[Learned Knowledge]\n' +
-      insightsArr.map(i => `• ${i.insight}`).join('\n')
-  }
-
-  const system = [systemCore, dialogHint, selfTune, insightsBlock]
-    .filter(Boolean)
-    .join('\n\n')
-
-  // energy check
-  const energy = await getEnergy(env, userId)
-  const need = Number(energy.costText ?? 1)
-
-  if ((energy.energy ?? 0) < need) {
-    await sendPlain(env, chatId, '⚠️ Недостатньо енергії.')
-    return true
-  }
-  await spendEnergy(env, userId, need, 'dialog')
-
-  pulseTyping(env, chatId)
-
-  // AI model call
-  const order =
-    env.MODEL_ORDER || 'gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct'
-
-  const { aiRespond } = await import('../flows/aiRespond.js')
-  let out = await aiRespond(env, {
-    text: textRaw,
-    lang,
-    name: 'friend',
-    systemHint: system,
-    expand: false
-  })
-
-  // Normalize out
-  if (typeof out === 'object' && out !== null) {
-    out = out.full || out.short || JSON.stringify(out)
-  }
-  out = String(out || '').trim()
-
-  await pushTurn(env, userId, textRaw, out)
-
-  // auto-learn
-  if (await getLearnMode(env, userId)) {
+  /* ========== MESSAGE ========== */
+  const msg = update.message || update.edited_message || update.channel_post;
+  const chatId = msg?.chat?.id;
+  const userId = msg?.from?.id;
+
+  const isAdmin = ADMIN(env, userId, msg?.from?.username);
+  const textRaw = String(msg?.text || msg?.caption || "").trim();
+  const lang = msg?.from?.language_code || "uk";
+
+  const safe = async (fn) => {
     try {
-      await autoUpdateSelfTune(env, userId)
-    } catch {}
+      await fn();
+    } catch (e) {
+      if (isAdmin) {
+        await sendPlain(env, chatId, `❌ Error: ${String(e).slice(0, 200)}`);
+      } else {
+        await sendPlain(env, chatId, "Сталася помилка, спробуй ще раз.");
+      }
+    }
+  };
+
+  /* ========== LOCATION SAVE ========== */
+  if (msg?.location) {
+    await setUserLocation(env, userId, msg.location);
+    await sendPlain(env, chatId, "📍 Локацію збережено.", {
+      reply_markup: mainKeyboard(isAdmin),
+    });
+    return json({ ok: true });
   }
 
-  await sendPlain(env, chatId, out)
-  return true
-}
+  /* ========== /start ========== */
+  if (textRaw === "/start") {
+    await setCodexMode(env, userId, false);
+    const name = msg?.from?.first_name || "друже";
 
-// ---------------------------------------------
-// MAIN MESSAGE ROUTING
-// ---------------------------------------------
-async function handleSentiMessage(ctx, env) {
-  const { msg, chatId, userId, textRaw, lang } = ctx
-
-  // ----- /start -----
-  if (textRaw === '/start') {
-    await setCodexMode(env, userId, false)
-    await setLearnMode(env, userId, true)
-
-    await sendPlain(env, chatId, 'Привіт! Я Senti. Готовий допомагати.', {
-      reply_markup: TG.mainKeyboard(true)
-    })
-    return json({ ok: true })
+    await sendPlain(
+      env,
+      chatId,
+      `Привіт, ${name}! Як я можу допомогти?`,
+      { reply_markup: mainKeyboard(isAdmin) }
+    );
+    return json({ ok: true });
   }
 
-  // ----- Buttons -----
-  if (textRaw === TG.BTN_CODEX) {
-    await setCodexMode(env, userId, true)
-    await sendPlain(env, chatId, '🧩 Codex увімкнено. Надішли задачу.')
-    return json({ ok: true })
+  /* ========== Senti on ========== */
+  if (textRaw === BTN_SENTI || /^\/senti\b/i.test(textRaw)) {
+    await setDriveMode(env, userId, false);
+    await setCodexMode(env, userId, false);
+
+    await sendPlain(env, chatId, "🟣 Режим Senti активовано.", {
+      reply_markup: mainKeyboard(isAdmin),
+    });
+    return json({ ok: true });
   }
 
-  if (textRaw === '/codex_off') {
-    await setCodexMode(env, userId, false)
-    await sendPlain(env, chatId, '🧩 Codex вимкнено.')
-    return json({ ok: true })
+  /* ========== Drive-mode toggle ========== */
+  if (textRaw === BTN_DRIVE) {
+    await setDriveMode(env, userId, true);
+    await setCodexMode(env, userId, false);
+
+    await sendPlain(
+      env,
+      chatId,
+      "☁️ Усе, що надішлеш — зберігатиму у Google Drive.",
+      { reply_markup: mainKeyboard(isAdmin) }
+    );
+    return json({ ok: true });
   }
 
-  if (textRaw === TG.BTN_ADMIN) {
-    const checklist = abs(env, '/admin/checklist')
-    const learn = abs(env, '/admin/learn')
+  /* ========== Admin panel ========== */
+  if (textRaw === "/admin" || textRaw === BTN_ADMIN) {
+    const checklist = abs(env, "/admin/checklist/html");
+    const energy = abs(env, "/admin/energy/html");
+    const learn = abs(env, "/admin/learn/html");
 
-    await sendPlain(env, chatId, 'Admin panel:', {
+    const mo = String(env.MODEL_ORDER || "").trim();
+
+    const body = [
+      "Admin panel:",
+      `MODEL_ORDER: ${mo || "(not set)"}`,
+      `Gemini: ${env.GEMINI_API_KEY ? "✅" : "❌"}`,
+      `Cloudflare: ${env.CLOUDFLARE_API_TOKEN ? "✅" : "❌"}`,
+      `OpenRouter: ${env.OPENROUTER_API_KEY ? "✅" : "❌"}`,
+    ].join("\n");
+
+    await sendPlain(env, chatId, body, {
       reply_markup: {
         inline_keyboard: [
-          [{ text: '📋 Checklist', url: checklist }],
-          [{ text: '🧠 Learn', url: learn }]
-        ]
+          [{ text: "📋 Checklist", url: checklist }],
+          [{ text: "⚡ Energy", url: energy }],
+          [{ text: "🧠 Learn", url: learn }],
+        ],
+      },
+    });
+
+    return json({ ok: true });
+  }
+
+  /* ========== Codex ON ========== */
+  if (textRaw === BTN_CODEX || textRaw === "/codex") {
+    if (!isAdmin) {
+      await sendPlain(env, chatId, "🛡️ Codex тільки для адміну.");
+      return json({ ok: true });
+    }
+
+    await clearCodexMem(env, userId);
+    await setCodexMode(env, userId, true);
+
+    await sendPlain(
+      env,
+      chatId,
+      "🧠 *Senti Codex увімкнено.* Обери або створи проєкт.",
+      { reply_markup: buildCodexKeyboard(false), parse_mode: "Markdown" }
+    );
+    return json({ ok: true });
+  }
+
+  /* ========== Codex OFF ========== */
+  if (textRaw === "/codex_off") {
+    await setCodexMode(env, userId, false);
+    await clearCodexMem(env, userId);
+
+    await sendPlain(env, chatId, "🔕 Codex вимкнено.", {
+      reply_markup: mainKeyboard(isAdmin),
+    });
+    return json({ ok: true });
+  }
+/* ======================================================
+      MEDIA LAYER (Drive / Vision before Codex)
+   ====================================================== */
+
+const hasMedia = (msg) => {
+  return !!(detectAttachment(msg) || (msg.photo?.length));
+};
+
+async function handleIncomingMedia(env, chatId, userId, msg, lang) {
+  const att = detectAttachment(msg);
+  if (!att) return false;
+
+  let tokensOK = false;
+  try {
+    tokensOK = !!(await getUserTokens(env, userId));
+  } catch {}
+
+  if (!tokensOK) {
+    const url = abs(env, "/auth/drive");
+    await sendPlain(env, chatId, "Підключи Google Drive:", {
+      reply_markup: {
+        inline_keyboard: [[{ text: "Підключити Drive", url }]],
+      },
+    });
+    return true;
+  }
+
+  const energy = await getEnergy(env, userId);
+  const need = Number(energy.costImage ?? 5);
+
+  if ((energy.energy ?? 0) < need) {
+    const links = TG.energyLinks(env, userId);
+    await sendPlain(env, chatId, `⚡ Потрібно ${need} енергії.\n${links.energy}`);
+    return true;
+  }
+
+  await spendEnergy(env, userId, need, "media");
+
+  const url = await tgFileUrl(env, att.file_id);
+  const saved = await driveSaveFromUrl(env, userId, url, att.name);
+
+  await sendPlain(env, chatId, `📁 Збережено у Drive: ${saved?.name || att.name}`, {
+    reply_markup: {
+      inline_keyboard: [[{ text: "Відкрити Drive", url: "https://drive.google.com/drive/my-drive" }]],
+    },
+  });
+
+  return true;
+}
+
+/* ======================================================
+      CODEX MODE: TEXT HANDLER (proj_name, idea, tasks)
+   ====================================================== */
+
+async function codexConsumeText(env, chatId, userId, textRaw) {
+  const consumed = await handleCodexText(
+    env,
+    { chatId, userId, textRaw },
+    {
+      sendPlain,
+      sendInline: sendPlain,
+    }
+  );
+
+  return consumed;
+}
+
+/* ======================================================
+      CODEX MODE: MEDIA INSIDE PROJECT
+   ====================================================== */
+
+async function codexConsumeMedia(env, msg, chatId, userId) {
+  const att = detectAttachment(msg);
+  if (!att) return false;
+
+  const consumed = await handleCodexMedia(
+    env,
+    {
+      chatId,
+      userId,
+      fileUrl: null,
+      fileName: att.name,
+    },
+    { sendPlain }
+  );
+
+  return consumed;
+}
+
+/* ======================================================
+      MEDIA BEFORE CODEX (Vision)
+   ====================================================== */
+
+async function processMediaLayer(env, msg, chatId, userId, lang) {
+  const media = detectAttachment(msg);
+  if (!media && !msg.photo?.length) return false;
+
+  const driveOn = await getDriveMode(env, userId);
+  const codexOn = await getCodexMode(env, userId);
+
+  // === DRIVE MODE ===
+  if (driveOn && !codexOn) {
+    return await handleIncomingMedia(env, chatId, userId, msg, lang);
+  }
+
+  // === VISION MODE (Senti Vision) ===
+  if (!driveOn && !codexOn) {
+    const ok = await handleVisionMedia(
+      env,
+      {
+        chatId,
+        userId,
+        msg,
+        lang,
+        caption: msg?.caption,
+      },
+      {
+        getEnergy,
+        spendEnergy,
+        tgFileUrl,
+        urlToBase64,
+        sendPlain,
+        energyLinks: TG.energyLinks,
       }
-    })
-    return json({ ok: true })
+    );
+    if (ok) return true;
   }
 
-  if (textRaw === '/learn_on') {
-    await setLearnMode(env, userId, true)
-    await sendPlain(env, chatId, '🧠 Learn увімкнено.')
-    return json({ ok: true })
+  return false;
+}
+/* ======================================================
+      WEATHER / DATE / TIME
+   ====================================================== */
+
+async function processDateTimeWeather(env, chatId, userId, textRaw, lang) {
+  const wantsDate = dateIntent(textRaw);
+  const wantsTime = timeIntent(textRaw);
+  const wantsWeather = weatherIntent(textRaw);
+
+  if (!wantsDate && !wantsTime && !wantsWeather) return false;
+
+  // DATE
+  if (wantsDate) {
+    await sendPlain(env, chatId, replyCurrentDate(env, lang));
   }
 
-  if (textRaw === '/learn_off') {
-    await setLearnMode(env, userId, false)
-    await sendPlain(env, chatId, '🧠 Learn вимкнено.')
-    return json({ ok: true })
+  // TIME
+  if (wantsTime) {
+    await sendPlain(env, chatId, replyCurrentTime(env, lang));
   }
 
-  // ----- Vision (photo or text follow-up) -----
-  if (detectPhoto(msg) || textRaw.toLowerCase().includes('на фото')) {
-    const done = await handleVision(env, ctx)
-    if (done) return json({ ok: true })
-  }
+  // WEATHER
+  if (wantsWeather) {
+    const byPlace = await weatherSummaryByPlace(env, textRaw, lang);
 
-  // ----- Codex -----
-  if (await getCodexMode(env, userId)) {
-    const done = await handleCodex(env, ctx)
-    if (done) return json({ ok: true })
-  }
+    if (!/Не вдалося/.test(byPlace.text)) {
+      await sendPlain(env, chatId, byPlace.text, {
+        parse_mode: byPlace.mode || undefined,
+      });
 
-  // ----- Weather, date, time -----
-  const lower = textRaw.toLowerCase()
-
-  if (dateIntent(textRaw)) {
-    await sendPlain(env, chatId, replyCurrentDate(env, lang))
-    return json({ ok: true })
-  }
-
-  if (timeIntent(textRaw)) {
-    await sendPlain(env, chatId, replyCurrentTime(env, lang))
-    return json({ ok: true })
-  }
-
-  if (weatherIntent(textRaw)) {
-    const match = textRaw.match(/в\s+(.+)/i)
-    if (match && match[1]) {
-      const place = match[1].trim()
-      const { text } = await weatherSummaryByPlace(env, place, lang)
-      await sendPlain(env, chatId, text)
+      await saveLastPlace(env, userId, { place: textRaw });
     } else {
-      const loc = await getUserLocation(env, userId)
-      if (loc) {
-        const { text } = await weatherSummaryByCoords(env, loc, lang)
-        await sendPlain(env, chatId, text)
+      const saved = await loadLastPlace(env, userId);
+      if (saved?.lat && saved?.lon) {
+        const byCoord = await weatherSummaryByCoords(saved.lat, saved.lon, lang);
+        await sendPlain(env, chatId, byCoord.text, {
+          parse_mode: byCoord.mode || undefined,
+        });
       } else {
-        await sendPlain(env, chatId, 'Надішли локацію, будь ласка.')
+        const geo = await getUserLocation(env, userId);
+        if (geo?.lat && geo?.lon) {
+          const byCoord = await weatherSummaryByCoords(geo.lat, geo.lon, lang);
+          await sendPlain(env, chatId, byCoord.text, {
+            parse_mode: byCoord.mode || undefined,
+          });
+        } else {
+          await sendPlain(env, chatId, "Надішли локацію — і я покажу погоду.", {
+            reply_markup: askLocationKeyboard(),
+          });
+        }
       }
     }
-    return json({ ok: true })
   }
 
-  // ----- GPS -----
-  if (msg.location) {
-    await setUserLocation(env, userId, msg.location)
-    const { text } = await weatherSummaryByCoords(env, msg.location, lang)
-    await sendPlain(env, chatId, text)
-    return json({ ok: true })
+  return true;
+}
+
+/* ======================================================
+      CODEX MAIN GENERATION
+   ====================================================== */
+
+async function runCodexGeneration(env, chatId, userId, msg, textRaw, lang, isAdmin) {
+  await handleCodexGeneration(
+    env,
+    {
+      chatId,
+      userId,
+      msg,
+      textRaw,
+      lang,
+      isAdmin,
+    },
+    {
+      getEnergy,
+      spendEnergy,
+      energyLinks: TG.energyLinks,
+      sendPlain,
+      pickPhoto: (m) =>
+        m.photo?.length
+          ? {
+              type: "photo",
+              file_id: m.photo[m.photo.length - 1].file_id,
+              name: `photo_${m.photo[m.photo.length - 1].file_unique_id}.jpg`,
+            }
+          : null,
+      tgFileUrl,
+      urlToBase64,
+      describeImage: null,
+      sendDocument,
+      startPuzzleAnimation: async () => {},
+      editMessageText: async () => {},
+      driveSaveFromUrl,
+      getUserTokens,
+    }
+  );
+}
+
+/* ======================================================
+      SENTI — MAIN LLM PIPELINE
+   ====================================================== */
+
+async function runSentiLLM(env, chatId, userId, textRaw, lang) {
+  const energy = await getEnergy(env, userId);
+  const need = Number(energy.costText ?? 1);
+
+  if ((energy.energy ?? 0) < need) {
+    const links = TG.energyLinks(env, userId);
+    await sendPlain(env, chatId, `⚡ Потрібно ${need} енергії.\n${links.energy}`);
+    return;
   }
 
-  // ----- Normal AI dialog -----
-  const done = await handleAiDialog(env, ctx)
-  if (done) return json({ ok: true })
+  await spendEnergy(env, userId, need, "text");
+  await sendTyping(env, chatId);
 
-  return json({ ok: true })
+  await pushTurn(env, userId, "user", textRaw);
+  await autoUpdateSelfTune(env, userId, lang).catch(() => {});
+
+  const systemHint = await buildDialogHint(env, userId);
+
+  const order =
+    String(env.MODEL_ORDER || "").trim() ||
+    "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct";
+
+  const res = await askAnyModel(env, order, textRaw, { systemHint });
+
+  const full =
+    typeof res === "string"
+      ? res
+      : res?.choices?.[0]?.message?.content || "Не впевнений.";
+
+  await pushTurn(env, userId, "assistant", full);
+  await sendPlain(env, chatId, full);
+}
+
+/* ======================================================
+      FALLBACK + FINAL ROUTING
+   ====================================================== */
+
+  // === MEDIA BEFORE CODEX ===
+  const processedMedia = await processMediaLayer(env, msg, chatId, userId, lang);
+  if (processedMedia) return json({ ok: true });
+
+  // === CODEX MODE TEXT (proj_name / idea / task) ===
+  const codexOn = await getCodexMode(env, userId);
+  if (codexOn) {
+    const consumedText = await codexConsumeText(env, chatId, userId, textRaw);
+    if (consumedText) return json({ ok: true });
+  }
+
+  // === EXTRA CODEX COMMANDS ===
+  if (codexOn) {
+    const ok = await handleCodexCommand(
+      env,
+      { chatId, userId, msg, textRaw, lang },
+      { sendPlain }
+    );
+    if (ok) return json({ ok: true });
+  }
+
+  // === CODEX MEDIA ===
+  if (codexOn && hasMedia(msg)) {
+    const ok = await codexConsumeMedia(env, msg, chatId, userId);
+    if (ok) return json({ ok: true });
+  }
+
+  // === CODEX MAIN GENERATION ===
+  if (codexOn && (textRaw || hasMedia(msg))) {
+    await runCodexGeneration(env, chatId, userId, msg, textRaw, lang, isAdmin);
+    return json({ ok: true });
+  }
+
+  // === WEATHER / DATE / TIME ===
+  if (await processDateTimeWeather(env, chatId, userId, textRaw, lang)) {
+    return json({ ok: true });
+  }
+
+  // === SENTI (LLM) ===
+  if (textRaw && !textRaw.startsWith("/")) {
+    await runSentiLLM(env, chatId, userId, textRaw, lang);
+    return json({ ok: true });
+  }
+
+  // === DEFAULT ANSWER ===
+  await sendPlain(env, chatId, "Привіт! Що зробимо?", {
+    reply_markup: mainKeyboard(isAdmin),
+  });
+
+  return json({ ok: true });
 }
