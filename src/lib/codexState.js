@@ -1,48 +1,50 @@
 // src/lib/codexState.js
-// Стан Codex у KV: простий сторедж проєктів користувача
+// Спрощений стан Codex: зберігаємо останні файли користувача в KV
 
-import { nowIso } from "./state.js";
+const CODEX_HISTORY_LIMIT = 50
 
-// Ключ у KV для пам'яті Codex
-export const CODEX_MEM_KEY = (uid) => `codex:mem:${uid}`;
-
-// Завантажити пам'ять Codex для користувача
-export async function loadCodexMem(env, userId) {
-  const raw = await env.STATE_KV.get(CODEX_MEM_KEY(userId));
-
-  if (!raw) {
-    return {
-      projects: {},
-      lastUsed: null,
-      lastUpdated: nowIso(),
-    };
-  }
-
-  try {
-    const data = JSON.parse(raw);
-    if (!data.projects) data.projects = {};
-    if (!data.lastUpdated) data.lastUpdated = nowIso();
-    return data;
-  } catch (err) {
-    console.error("Bad Codex mem, resetting", err);
-    return {
-      projects: {},
-      lastUsed: null,
-      lastUpdated: nowIso(),
-    };
-  }
+function pickKV(env) {
+  return env.STATE_KV || env.CHECKLIST_KV || null
 }
 
-// Зберегти пам'ять Codex для користувача
-export async function saveCodexMem(env, userId, mem) {
-  const safeMem = {
-    projects: mem?.projects || {},
-    lastUsed: mem?.lastUsed || null,
-    lastUpdated: mem?.lastUpdated || nowIso(),
-  };
+export const CODEX_MEM_KEY = uid => `codex:mem:${uid}`
 
-  await env.STATE_KV.put(CODEX_MEM_KEY(userId), JSON.stringify(safeMem), {
-    // тиждень TTL — Codex не буде жити вічно, але й не пропаде відразу
-    expirationTtl: 60 * 60 * 24 * 7,
-  });
+/**
+ * Зберігає черговий файл Codex у KV-історії користувача.
+ * @param {any} env - середовище Worker (з біндінгами KV)
+ * @param {string|number} uid - Telegram user id
+ * @param {{filename:string, content:string}} item
+ */
+export async function saveCodexMem(env, uid, item) {
+  const kv = pickKV(env)
+  if (!kv) return
+
+  const key = CODEX_MEM_KEY(uid)
+
+  let history = []
+  try {
+    const raw = await kv.get(key, 'text')
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed)) history = parsed
+    }
+  } catch {
+    history = []
+  }
+
+  const entry = {
+    filename: item.filename,
+    content: item.content,
+    ts: new Date().toISOString()
+  }
+
+  // додаємо новий зверху
+  history.unshift(entry)
+
+  // обрізаємо список
+  if (history.length > CODEX_HISTORY_LIMIT) {
+    history = history.slice(0, CODEX_HISTORY_LIMIT)
+  }
+
+  await kv.put(key, JSON.stringify(history))
 }
