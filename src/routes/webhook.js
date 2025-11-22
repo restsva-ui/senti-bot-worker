@@ -14,11 +14,6 @@ import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
 import { t, pickReplyLanguage } from "../lib/i18n.js";
 import { TG } from "../lib/tg.js";
 import {
-  enqueueLearn,
-  listQueued,
-  getRecentInsights,
-} from "../lib/kvLearnQueue.js";
-import {
   dateIntent,
   timeIntent,
   replyCurrentDate,
@@ -26,8 +21,8 @@ import {
 } from "../apis/time.js";
 import {
   weatherIntent,
-  weatherSummaryByPlace,
-  weatherSummaryByCoords,
+  weatherSummaryByLocation,
+  buildWeatherHint,
 } from "../apis/weather.js";
 import { setUserLocation, getUserLocation } from "../lib/geo.js";
 import { describeImage } from "../flows/visionDescribe.js";
@@ -44,19 +39,17 @@ const {
   mainKeyboard,
   ADMIN,
   energyLinks,
-  sendPlain,
   askLocationKeyboard,
 } = TG;
 
 const KV = {
-  learnMode: (uid) => `learn:mode:${uid}`,
+  driveMode: (uid) => `drive:mode:${uid}`,
   codexMode: (uid) => `codex:mode:${uid}`,
 };
 
 const VISION_MEM_KEY = (uid) => `vision:mem:${uid}`;
 const CODEX_MEM_KEY = (uid) => `codex:mem:${uid}`;
 
-// ---- vision short-memory
 async function loadVisionMem(env, userId) {
   try {
     const raw = await (env.STATE_KV || env.CHECKLIST_KV)?.get(
@@ -114,25 +107,40 @@ async function saveCodexMem(env, userId, entry) {
   } catch {}
 }
 async function clearCodexMem(env, userId) {
+  const kv = env.STATE_KV || env.CHECKLIST_KV;
+  if (!kv) return;
   try {
-    const kv = env.STATE_KV || env.CHECKLIST_KV;
-    if (kv) await kv.delete(CODEX_MEM_KEY(userId));
+    await kv.delete(CODEX_MEM_KEY(userId));
   } catch {}
 }
 
-// ---- TG helpers
-async function sendTyping(env, chatId) {
-  try {
-    const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
-    if (!token) return;
-    await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, action: "typing" }),
-    });
-  } catch {}
+async function sendPlain(env, chatId, text, extra = {}) {
+  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+  if (!token) return;
+  const body = {
+    chat_id: chatId,
+    text,
+    ...extra,
+  };
+  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
-function pulseTyping(env, chatId, times = 4, intervalMs = 4000) {
+async function sendTyping(env, chatId) {
+  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+  if (!token) return;
+  await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      action: "typing",
+    }),
+  });
+}
+function pulseTyping(env, chatId, times = 3, intervalMs = 4000) {
   sendTyping(env, chatId);
   for (let i = 1; i < times; i++) {
     setTimeout(() => sendTyping(env, chatId), i * intervalMs);
@@ -164,25 +172,6 @@ async function editMessageText(env, chatId, messageId, newText) {
     }),
   });
 }
-const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
-async function startPuzzleAnimation(env, chatId, messageId, signal) {
-  const frames = [
-    "🧩 Працюю над кодом…",
-    "🧩🟦 Працюю над кодом…",
-    "🧩🟦🟩 Працюю над кодом…",
-  ];
-  let i = 0;
-  while (!signal.done) {
-    await sleep(1300);
-    if (signal.done) break;
-    try {
-      await editMessageText(env, chatId, messageId, frames[i % frames.length]);
-    } catch {}
-    i++;
-  }
-}
-
-// ---- get tg file url + attachment detection
 async function tgFileUrl(env, file_id) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   const r = await fetch(`https://api.telegram.org/bot${token}/getFile`, {
@@ -199,15 +188,19 @@ async function tgFileUrl(env, file_id) {
 async function urlToBase64(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`fetch image ${r.status}`);
-  const ab = await r.arrayBuffer();
-  const bytes = new Uint8Array(ab);
-  let bin = "";
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  return btoa(bin);
+  const buf = await r.arrayBuffer();
+  let binary = "";
+  const bytes = new Uint8Array(buf);
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
 }
+
 function pickPhoto(msg) {
-  const arr = Array.isArray(msg?.photo) ? msg.photo : null;
-  if (!arr?.length) return null;
+  const photos = msg?.photo;
+  if (!photos || !photos.length) return null;
+  const arr = [...photos].sort(
+    (a, b) => (a.file_size || 0) - (b.file_size || 0)
+  );
   const ph = arr[arr.length - 1];
   return {
     type: "photo",
@@ -225,62 +218,19 @@ function detectAttachment(msg) {
       name: d.file_name || `doc_${d.file_unique_id}`,
     };
   }
+  if (msg.photo) {
+    return pickPhoto(msg);
+  }
   if (msg.video) {
     const v = msg.video;
     return {
       type: "video",
       file_id: v.file_id,
-      name: v.file_name || `video_${v.file_unique_id}.mp4`,
+      name: `video_${v.file_unique_id}.mp4`,
     };
   }
-  if (msg.audio) {
-    const a = msg.audio;
-    return {
-      type: "audio",
-      file_id: a.file_id,
-      name: a.file_name || `audio_${a.file_unique_id}.mp3`,
-    };
-  }
-  if (msg.voice) {
-    const v = msg.voice;
-    return {
-      type: "voice",
-      file_id: v.file_id,
-      name: `voice_${v.file_unique_id}.ogg`,
-    };
-  }
-  if (msg.video_note) {
-    const v = msg.video_note;
-    return {
-      type: "video_note",
-      file_id: v.file_id,
-      name: `videonote_${v.file_unique_id}.mp4`,
-    };
-  }
-  return pickPhoto(msg);
+  return null;
 }
-// admin links
-function buildAdminLinks(env, userId) {
-  const base = (path) => abs(env, path);
-  const secret =
-    env.WEBHOOK_SECRET ||
-    env.TG_WEBHOOK_SECRET ||
-    env.TELEGRAM_SECRET_TOKEN ||
-    "senti1984";
-
-  const checklist = `${base(
-    "/admin/checklist/html"
-  )}?s=${encodeURIComponent(secret)}&u=${userId}`;
-  const energy = `${base(
-    "/admin/energy/html"
-  )}?s=${encodeURIComponent(secret)}&u=${userId}`;
-  const learn = `${base(
-    "/admin/learn/html"
-  )}?s=${encodeURIComponent(secret)}&u=${userId}`;
-
-  return { checklist, energy, learn };
-}
-
 // drive-mode media
 async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   const att = detectAttachment(msg);
@@ -296,12 +246,11 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
     await sendPlain(
       env,
       chatId,
-      t(lang, "drive_connect_hint") ||
-        "Щоб зберігати файли, підключи Google Drive.",
+      "Щоб зберігати файли, підключи Google Drive.",
       {
         reply_markup: {
           inline_keyboard: [
-            [{ text: "Підключити Drive", url: connectUrl }],
+            [{ text: "🔗 Підключити Drive", url: connectUrl }],
           ],
         },
       }
@@ -310,7 +259,7 @@ async function handleIncomingMedia(env, chatId, userId, msg, lang) {
   }
 
   const cur = await getEnergy(env, userId);
-  const need = Number(cur.costImage ?? 5);
+  const need = Number(cur.costMedia ?? 2);
   if ((cur.energy ?? 0) < need) {
     const links = energyLinks(env, userId);
     await sendPlain(
@@ -413,19 +362,129 @@ async function handleVisionMedia(env, chatId, userId, msg, lang, caption) {
   }
   return true;
 }
+
+// vision follow-up: текстові питання про останнє фото
+async function handleVisionFollowup(env, chatId, userId, textRaw, lang) {
+  const q = String(textRaw || "").trim();
+  if (!q) return false;
+
+  // швидка перевірка: чи є в пам'яті останнє фото
+  const mem = await loadVisionMem(env, userId);
+  if (!mem || !mem.length) return false;
+  const last = mem[0] || {};
+
+  // орієнтуємось на "свіжість" фото та явні згадки про картинку
+  const now = Date.now();
+  const recentEnough = last.ts && now - last.ts < 3 * 60 * 1000; // ~3 хвилини
+
+  const lower = q.toLowerCase();
+  const refersToImage =
+    lower.includes("на фото") ||
+    lower.includes("на зображенні") ||
+    lower.includes("на картинці") ||
+    lower.includes("на скріншоті") ||
+    lower.includes("на скрині") ||
+    lower.includes("на цьому фото") ||
+    lower.startsWith("це ") ||
+    lower.startsWith("це?") ||
+    lower.includes("це де") ||
+    lower.includes("де це");
+
+  if (!recentEnough && !refersToImage) return false;
+
+  const cur = await getEnergy(env, userId);
+  const need = Number(cur.costText ?? 1);
+  if ((cur.energy ?? 0) < need) {
+    const links = energyLinks(env, userId);
+    await sendPlain(
+      env,
+      chatId,
+      t(lang, "need_energy_text", need, links.energy)
+    );
+    return true;
+  }
+  await spendEnergy(env, userId, need, "vision_followup");
+  pulseTyping(env, chatId);
+
+  if (!last.url) return false;
+
+  let imageBase64;
+  try {
+    imageBase64 = await urlToBase64(last.url);
+  } catch (e) {
+    if (ADMIN(env, userId)) {
+      await sendPlain(
+        env,
+        chatId,
+        `❌ Vision follow-up error: ${String(e.message || e).slice(0, 180)}`
+      );
+    }
+    return false;
+  }
+
+  const visionOrder =
+    "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct";
+
+  try {
+    const { text } = await describeImage(env, {
+      chatId,
+      tgLang: lang,
+      imageBase64,
+      question: q,
+      modelOrder: visionOrder,
+    });
+
+    await saveVisionMem(env, userId, {
+      id: last.id,
+      url: last.url,
+      caption: last.caption,
+      desc: text,
+    });
+
+    await sendPlain(env, chatId, `🖼️ ${text}`);
+
+    const landmarks = detectLandmarksFromText(text, lang);
+    if (landmarks?.length) {
+      const lines = formatLandmarkLines(landmarks, lang);
+      await sendPlain(env, chatId, lines.join("\n"), {
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+      });
+    }
+    return true;
+  } catch (e) {
+    if (ADMIN(env, userId)) {
+      await sendPlain(
+        env,
+        chatId,
+        `❌ Vision follow-up error: ${String(e.message || e).slice(0, 180)}`
+      );
+    } else {
+      await sendPlain(
+        env,
+        chatId,
+        "Поки що не можу проаналізувати фото ще раз."
+      );
+    }
+    return true;
+  }
+}
+
 // system hint
 async function buildSystemHint(env, chatId, userId, preferredLang) {
   const statut = String((await readStatut(env)) || "").trim();
   const dlg = await buildDialogHint(env, userId);
   const tune = await loadSelfTune(env, chatId, { preferredLang }).catch(
-    () => null
+    () => ""
   );
+
   let insightsBlock = "";
   try {
-    const insights = await getRecentInsights(env, { limit: 5 });
+    const { getRecentInsights } = await import("../lib/kvLearnQueue.js");
+    const insights = await getRecentInsights(env, userId, 5);
     if (insights?.length) {
       insightsBlock =
-        "[Нещодавні знання]\n" +
+        "[Insights]\n" +
         insights.map((i) => `• ${i.insight}`).join("\n");
     }
   } catch {}
@@ -442,59 +501,20 @@ async function buildSystemHint(env, chatId, userId, preferredLang) {
   return parts.join("\n\n");
 }
 
-// codex mode state
-async function setCodexMode(env, userId, on) {
-  const kv = env.STATE_KV || env.CHECKLIST_KV;
-  if (!kv) return;
-  await kv.put(KV.codexMode(userId), on ? "on" : "off", {
-    expirationTtl: 60 * 60 * 24 * 180,
-  });
-}
-async function getCodexMode(env, userId) {
-  const kv = env.STATE_KV || env.CHECKLIST_KV;
-  if (!kv) return false;
-  const val = await kv.get(KV.codexMode(userId), "text");
-  return val === "on";
-}
-
-// response text
-function asText(res) {
-  if (!res) return "";
-  if (typeof res === "string") return res;
-  if (typeof res.text === "string") return res.text;
-  if (Array.isArray(res.choices) && res.choices[0]?.message?.content)
-    return res.choices[0].message.content;
-  return JSON.stringify(res);
-}
-
-// call model for code
-async function runCodex(env, userText) {
-  const order =
-    String(env.CODEX_MODEL_ORDER || "").trim() ||
-    "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free";
-  const sys = `You are Senti Codex.
-Return ONLY code (full file) with no explanations.`;
-  const res = await askAnyModel(env, order, userText, { systemHint: sys });
-  return asText(res);
-}
-function extractCodeAndLang(answer) {
-  if (!answer) return { lang: "txt", code: "" };
-  const m = answer.match(/```(\w+)?\s*([\s\S]*?)```/m);
-  if (m) {
-    return { lang: m[1] || "txt", code: m[2].trim() };
-  }
-  return { lang: "txt", code: answer.trim() };
-}
-function pickFilenameByLang(lang) {
+// codex filename by language
+function guessCodexFilename(lang) {
   const l = (lang || "").toLowerCase();
+  if (l.startsWith("uk")) return "codex-uk.txt";
+  if (l.startsWith("en")) return "codex-en.txt";
+  if (l.startsWith("de")) return "codex-de.txt";
+  if (l === "js" || l === "javascript") return "codex.js";
+  if (l === "ts" || l === "typescript") return "codex.ts";
   if (l === "html") return "codex.html";
   if (l === "css") return "codex.css";
-  if (l === "js" || l === "javascript") return "codex.js";
   if (l === "json") return "codex.json";
   if (l === "py" || l === "python") return "codex.py";
   return "codex.txt";
 }
-
 // готовий мобільний тетріс, якщо юзер просить конкретно тетріс
 function buildTetrisHtml() {
   return `<!DOCTYPE html>
@@ -504,7 +524,7 @@ function buildTetrisHtml() {
 <meta name="viewport" content="width=device-width,initial-scale=1.0" />
 <title>Тетріс</title>
 <style>
-body{background:#111;margin:0;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;min-height:100vh;color:#fff}
+body{background:#111;margin:0;font-family:sans-serif;display:flex;align-items:center;justify-content:flex-start;min-height:100vh;color:#fff}
 #game-container{margin-top:10px;background:#222;padding:10px;border-radius:10px;box-shadow:0 0 20px rgba(0,0,0,0.4)}
 #hud{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 canvas{background:#000;border:2px solid #444;border-radius:6px}
@@ -525,41 +545,157 @@ canvas{background:#000;border:2px solid #444;border-radius:6px}
   </div>
   <canvas id="board" width="240" height="400"></canvas>
   <div id="controls">
-    <button class="btn" id="left">◀</button>
-    <button class="btn" id="rotate">⟳</button>
-    <button class="btn" id="right">▶</button>
-    <button class="btn" id="down">▼</button>
-    <button class="btn" id="drop">⬇</button>
+    <button class="btn" id="left">⬅️</button>
+    <button class="btn" id="rotate">🔄</button>
+    <button class="btn" id="right">➡️</button>
+    <button class="btn" id="down">⬇️</button>
   </div>
 </div>
 <script>
-const canvas = document.getElementById('board');
-const ctx = canvas.getContext('2d');
-const COLS=10, ROWS=20, BLOCK=20;
-const COLORS=['#000','#0ff','#00f','#f0f','#f90','#0f0','#f00','#ff0'];
-const SHAPES=[[],[[1,1,1,1]],[[2,0,0],[2,2,2]],[[0,0,3],[3,3,3]],[[4,4],[4,4]],[[0,5,5],[5,5,0]],[[0,6,0],[6,6,6]],[[7,7,0],[0,7,7]]];
-let board=[], current, score=0;
-function resetBoard(){board=[];for(let r=0;r<ROWS;r++){board[r]=[];for(let c=0;c<COLS;c++)board[r][c]=0;}}
-function randomPiece(){const t=1+Math.floor(Math.random()*(SHAPES.length-1));const shape=SHAPES[t];return{x:Math.floor((COLS-shape[0].length)/2),y:0,shape:shape,type:t};}
-function collide(b,p){for(let r=0;r<p.shape.length;r++){for(let c=0;c<p.shape[r].length;c++){if(p.shape[r][c]!==0){const nr=p.y+r,nc=p.x+c;if(nr<0||nr>=ROWS||nc<0||nc>=COLS||b[nr][nc]!==0){return true;}}}}return false;}
-function merge(b,p){for(let r=0;r<p.shape.length;r++){for(let c=0;c<p.shape[r].length;c++){if(p.shape[r][c]!==0){b[p.y+r][p.x+c]=p.type;}}}}
-function clearLines(){let lines=0;for(let r=ROWS-1;r>=0;r--){if(board[r].every(v=>v!==0)){board.splice(r,1);board.unshift(new Array(COLS).fill(0));lines++;r++;}}if(lines>0){score+=lines*100;document.getElementById('score').textContent=score;}}
-function rotate(p){const m=p.shape;const rotated=[];for(let c=0;c<m[0].length;c++){const row=[];for(let r=m.length-1;r>=0;r--){row.push(m[r][c]);}rotated.push(row);}return rotated;}
-function drop(){current.y++;if(collide(board,current)){current.y--;merge(board,current);clearLines();current=randomPiece();if(collide(board,current)){resetBoard();score=0;document.getElementById('score').textContent=0;}}}
-function drawCell(x,y,v){if(v===0)return;ctx.fillStyle=COLORS[v];ctx.fillRect(x*BLOCK,y*BLOCK,BLOCK,BLOCK);ctx.strokeStyle="#111";ctx.strokeRect(x*BLOCK,y*BLOCK,BLOCK,BLOCK);}
-function drawBoard(){ctx.clearRect(0,0,canvas.width,canvas.height);for(let r=0;r<ROWS;r++){for(let c=0;c<COLS;c++){drawCell(c,r,board[r][c]);}}for(let r=0;r<current.shape.length;r++){for(let c=0;c<current.shape[r].length;c++){if(current.shape[r][c]!==0){drawCell(current.x+c,current.y+r,current.type);}}}}
-function update(time=0){drawBoard();requestAnimationFrame(update);}
-resetBoard();current=randomPiece();update();
-document.getElementById('left').onclick=function(){current.x--;if(collide(board,current))current.x++;};
-document.getElementById('right').onclick=function(){current.x++;if(collide(board,current))current.x--;};
-document.getElementById('rotate').onclick=function(){const old=current.shape;current.shape=rotate(current);if(collide(board,current))current.shape=old;};
-document.getElementById('down').onclick=function(){drop();};
-document.getElementById('drop').onclick=function(){while(!collide(board,current)){current.y++;}current.y--;merge(board,current);clearLines();current=randomPiece();};
+const COLS=10,ROWS=20,BS=20;
+const COLORS=["#000","#0ff","#00f","#f0f","#f80","#0f0","#f00","#ff0"];
+const SHAPES=[
+  [[1,1,1,1]],
+  [[2,2],[2,2]],
+  [[0,3,0],[3,3,3]],
+  [[4,0,0],[4,4,4]],
+  [[0,0,5],[5,5,5]],
+  [[6,6,0],[0,6,6]],
+  [[0,7,7],[7,7,0]]
+];
+const canvas=document.getElementById("board");
+const ctx=canvas.getContext("2d");
+let grid=Array.from({length:ROWS},()=>Array(COLS).fill(0));
+let cur,score=0,level=1,dropInterval=800,dropCounter=0,lastTime=0,gameOver=false;
+function rndPiece(){
+  const idx=Math.floor(Math.random()*SHAPES.length);
+  return {shape:SHAPES[idx].map(r=>[...r]),x:3,y:0,color:idx+1};
+}
+function drawCell(x,y,v){
+  ctx.fillStyle=COLORS[v];
+  ctx.fillRect(x*BS,y*BS,BS,BS);
+  ctx.strokeStyle="#333";
+  ctx.strokeRect(x*BS,y*BS,BS,BS);
+}
+function drawBoard(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  for(let y=0;y<ROWS;y++){
+    for(let x=0;x<COLS;x++){
+      drawCell(x,y,grid[y][x]);
+    }
+  }
+  if(cur){
+    for(let y=0;y<cur.shape.length;y++){
+      for(let x=0;x<cur.shape[y].length;x++){
+        if(cur.shape[y][x]) drawCell(cur.x+x,cur.y+y,cur.color);
+      }
+    }
+  }
+}
+function collide(nx,ny,shape){
+  for(let y=0;y<shape.length;y++){
+    for(let x=0;x<shape[y].length;x++){
+      if(shape[y][x]){
+        const px=nx+x,py=ny+y;
+        if(px<0||px>=COLS||py>=ROWS||(py>=0&&grid[py][px])) return true;
+      }
+    }
+  }
+  return false;
+}
+function merge(){
+  for(let y=0;y<cur.shape.length;y++){
+    for(let x=0;x<cur.shape[y].length;x++){
+      if(cur.shape[y][x]){
+        const py=cur.y+y,px=cur.x+x;
+        if(py>=0) grid[py][px]=cur.color;
+      }
+    }
+  }
+}
+function clearLines(){
+  let lines=0;
+  outer:for(let y=ROWS-1;y>=0;y--){
+    for(let x=0;x<COLS;x++){
+      if(!grid[y][x]) continue outer;
+    }
+    const row=grid.splice(y,1)[0].fill(0);
+    grid.unshift(row);
+    lines++;y++;
+  }
+  if(lines>0){
+    score+=lines*100;
+    level=Math.floor(score/500)+1;
+    dropInterval=Math.max(200,800-(level-1)*60);
+    document.getElementById("score").textContent=score;
+    document.getElementById("level").textContent=level;
+  }
+}
+function softDrop(){
+  if(!collide(cur.x,cur.y+1,cur.shape)){
+    cur.y++;
+  }else{
+    merge();
+    clearLines();
+    spawn();
+  }
+}
+function rotate(){
+  const s=cur.shape;
+  const r=s[0].map((_,i)=>s.map(row=>row[i]).reverse());
+  if(!collide(cur.x,cur.y,r)) cur.shape=r;
+}
+function move(dir){
+  const nx=cur.x+dir;
+  if(!collide(nx,cur.y,cur.shape)) cur.x=nx;
+}
+function spawn(){
+  cur=rndPiece();
+  if(collide(cur.x,cur.y,cur.shape)){
+    gameOver=true;
+    alert("Game Over! Score: "+score);
+  }
+}
+function update(time=0){
+  const dt=time-lastTime;
+  lastTime=time;
+  if(!gameOver){
+    dropCounter+=dt;
+    if(dropCounter>dropInterval){
+      softDrop();
+      dropCounter=0;
+    }
+    drawBoard();
+    requestAnimationFrame(update);
+  }
+}
+document.getElementById("left").onclick=()=>move(-1);
+document.getElementById("right").onclick=()=>move(1);
+document.getElementById("down").onclick=()=>softDrop();
+document.getElementById("rotate").onclick=()=>rotate();
+spawn();
+update();
 </script>
 </body>
 </html>`;
 }
-export async function handleTelegramWebhook(req, env) {
+
+// codex mode state
+async function setCodexMode(env, userId, on) {
+  const kv = env.STATE_KV || env.CHECKLIST_KV;
+  if (!kv) return;
+  await kv.put(KV.codexMode(userId), on ? "on" : "off", {
+    expirationTtl: 60 * 60 * 24 * 180,
+  });
+}
+async function getCodexMode(env, userId) {
+  const kv = env.STATE_KV || env.CHECKLIST_KV;
+  if (!kv) return false;
+  const val = await kv.get(KV.codexMode(userId), "text");
+  return val === "on";
+}
+
+async function handleTelegramWebhook(req, env) {
   if (req.method === "GET") {
     return json({ ok: true, worker: "senti", ts: Date.now() });
   }
@@ -615,15 +751,6 @@ export async function handleTelegramWebhook(req, env) {
     }
   };
 
-  // save location
-  if (msg?.location && userId && chatId) {
-    await setUserLocation(env, userId, msg.location);
-    await sendPlain(env, chatId, "✅ Локацію збережено.", {
-      reply_markup: mainKeyboard(isAdmin),
-    });
-    return json({ ok: true });
-  }
-
   // /start
   if (textRaw === "/start") {
     await safe(async () => {
@@ -653,34 +780,43 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // /admin
-  if (textRaw === "/admin" || textRaw === BTN_ADMIN) {
+  // admin panel
+  if (textRaw === BTN_ADMIN || textRaw === "/admin") {
+    if (!isAdmin) {
+      await sendPlain(env, chatId, "🛡️ Admin тільки для власника бота.");
+      return json({ ok: true });
+    }
     await safe(async () => {
-      const { checklist, energy, learn } = buildAdminLinks(env, userId);
-      const mo = String(env.MODEL_ORDER || "").trim();
-
-      const body = [
-        "Admin panel (quick diagnostics):",
-        `MODEL_ORDER: ${mo || "(not set)"}`,
-        `GEMINI key: ${env.GEMINI_API_KEY ? "✅" : "❌"}`,
-        `Cloudflare: ${env.CLOUDFLARE_API_TOKEN ? "✅" : "❌"}`,
-        `OpenRouter: ${env.OPENROUTER_API_KEY ? "✅" : "❌"}`,
-        `FreeLLM: ${env.FREE_LLM_BASE_URL ? "✅" : "❌"}`,
-      ].join("\n");
-
+      const checklist = abs(env, "/admin/checklist");
+      const energy = abs(env, "/admin/energy");
+      const learn = abs(env, "/admin/learn");
+      const brain = abs(env, "/admin/brain");
+      const usage = abs(env, "/admin/usage");
+      const body =
+        "Admin panel (quick diagnostics):\n" +
+        `MODEL_ORDER: ${env.MODEL_ORDER || "(default)"}\n` +
+        `GEMINI key: ${env.GEMINI_API_KEY || env.GOOGLE_API_KEY ? "✅" : "❌"}\n` +
+        `Cloudflare: ${env.CF_ACCOUNT_ID && env.CF_API_TOKEN ? "✅" : "❌"}\n` +
+        `OpenRouter: ${env.OPENROUTER_API_KEY ? "✅" : "❌"}\n` +
+        `FreeLLM: ${
+          env.FREE_API_BASE_URL && env.FREE_API_KEY ? "✅" : "❌"
+        }`;
       await sendPlain(env, chatId, body, {
         reply_markup: {
           inline_keyboard: [
+            [{ text: "🧠 Brain", url: brain }],
             [{ text: "📋 Checklist", url: checklist }],
             [{ text: "⚡ Energy", url: energy }],
             [{ text: "🧠 Learn", url: learn }],
+            [{ text: "💾 Usage", url: usage }],
           ],
         },
       });
     });
     return json({ ok: true });
   }
-// Codex on/off
+
+  // Codex on/off
   if (textRaw === BTN_CODEX || textRaw === "/codex") {
     if (!isAdmin) {
       await sendPlain(env, chatId, "🛡️ Codex тільки для адміну.");
@@ -692,7 +828,13 @@ export async function handleTelegramWebhook(req, env) {
       env,
       chatId,
       "🧠 Senti Codex увімкнено. Надішли задачу (наприклад: «зроби html тетріс»).",
-      { reply_markup: mainKeyboard(isAdmin) }
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🔧 Вимкнути Codex", callback_data: "codex_off" }],
+          ],
+        },
+      }
     );
     return json({ ok: true });
   }
@@ -729,7 +871,20 @@ export async function handleTelegramWebhook(req, env) {
     return json({ ok: true });
   }
 
-  // codex extra cmds
+  // vision follow-up: текстове запитання про останнє фото
+  if (textRaw && !(await getCodexMode(env, userId))) {
+    const handledFollowup = await handleVisionFollowup(
+      env,
+      chatId,
+      userId,
+      textRaw,
+      lang
+    );
+    if (handledFollowup) {
+      return json({ ok: true });
+    }
+  }
+// codex extra cmds
   if (await getCodexMode(env, userId)) {
     if (textRaw === "/clear_last") {
       await safe(async () => {
@@ -739,8 +894,11 @@ export async function handleTelegramWebhook(req, env) {
         } else {
           arr.pop();
           const kv = env.STATE_KV || env.CHECKLIST_KV;
-          if (kv) await kv.put(CODEX_MEM_KEY(userId), JSON.stringify(arr));
-          await sendPlain(env, chatId, "Останній файл прибрано.");
+          if (kv)
+            await kv.put(CODEX_MEM_KEY(userId), JSON.stringify(arr.slice(-50)), {
+              expirationTtl: 60 * 60 * 24 * 180,
+            });
+          await sendPlain(env, chatId, "Останній файл видалено.");
         }
       });
       return json({ ok: true });
@@ -755,17 +913,31 @@ export async function handleTelegramWebhook(req, env) {
     if (textRaw === "/summary") {
       await safe(async () => {
         const arr = await loadCodexMem(env, userId);
-        if (!arr.length) {
-          await sendPlain(env, chatId, "У проєкті поки що порожньо.");
-        } else {
-          const lines = arr.map((f) => `- ${f.filename}`).join("\n");
-          await sendPlain(env, chatId, `Файли:\n${lines}`);
+        if (
+          !arr.length ||
+          arr.every((x) => !x.content || String(x.content).trim() === "")
+        ) {
+          await sendPlain(env, chatId, "Поки немає контенту для підсумку.");
+          return;
         }
+        const filesText = arr
+          .map(
+            (x, i) =>
+              `# File ${i + 1}: ${x.filename || "unnamed"}\n${x.content || ""}`
+          )
+          .join("\n\n");
+        const systemHint =
+          "You are Senti Codex Architect. Summarize the project structure and progress.";
+        const out = await think(env, filesText, systemHint, {
+          chatId,
+        });
+        await sendPlain(env, chatId, out);
       });
       return json({ ok: true });
     }
   }
-// date / time / weather
+
+  // date / time / weather
   if (textRaw) {
     const wantsDate = dateIntent(textRaw);
     const wantsTime = timeIntent(textRaw);
@@ -775,30 +947,17 @@ export async function handleTelegramWebhook(req, env) {
         if (wantsDate) await sendPlain(env, chatId, replyCurrentDate(env, lang));
         if (wantsTime) await sendPlain(env, chatId, replyCurrentTime(env, lang));
         if (wantsWeather) {
-          const byPlace = await weatherSummaryByPlace(env, textRaw, lang);
-          if (!/Не вдалося знайти/.test(byPlace.text)) {
-            await sendPlain(env, chatId, byPlace.text, {
-              parse_mode: byPlace.mode || undefined,
-            });
+          const loc = await getUserLocation(env, userId);
+          if (loc) {
+            const { text } = await weatherSummaryByLocation(env, loc, lang);
+            await sendPlain(env, chatId, text);
           } else {
-            const geo = await getUserLocation(env, userId);
-            if (geo?.lat && geo?.lon) {
-              const byCoord = await weatherSummaryByCoords(
-                geo.lat,
-                geo.lon,
-                lang
-              );
-              await sendPlain(env, chatId, byCoord.text, {
-                parse_mode: byCoord.mode || undefined,
-              });
-            } else {
-              await sendPlain(
-                env,
-                chatId,
-                "Надішли локацію — і я покажу погоду.",
-                { reply_markup: askLocationKeyboard() }
-              );
-            }
+            await sendPlain(
+              env,
+              chatId,
+              "Надішли локацію — і я покажу погоду.",
+              { reply_markup: askLocationKeyboard() }
+            );
           }
         }
       });
@@ -806,124 +965,83 @@ export async function handleTelegramWebhook(req, env) {
     }
   }
 
-  // Codex main: generate file (тут і анімація, і фото → в код)
-  if ((await getCodexMode(env, userId)) && (textRaw || pickPhoto(msg))) {
+  // Codex main: якщо режим увімкнений — замінюємо стандартну відповідь
+  if (await getCodexMode(env, userId)) {
+    if (!textRaw) return json({ ok: true });
+
+    // спец-команда: тетріс
+    if (
+      /тетріс/i.test(textRaw) ||
+      /tetris/i.test(textRaw) ||
+      /html\s+tetris/i.test(textRaw)
+    ) {
+      const html = buildTetrisHtml();
+      await saveCodexMem(env, userId, {
+        filename: "tetris.html",
+        content: html,
+      });
+      await sendPlain(
+        env,
+        chatId,
+        "Готово! Відправляю тобі простою html-файлом тетріс.",
+      );
+      await sendDocument(env, chatId, "tetris.html", html, "Тетріс");
+      return json({ ok: true });
+    }
+
     await safe(async () => {
-      const cur = await getEnergy(env, userId);
-      const need = Number(cur.costText ?? 2);
-      if ((cur.energy ?? 0) < need) {
-        const links = energyLinks(env, userId);
-        await sendPlain(
-          env,
-          chatId,
-          t(lang, "need_energy_text", need, links.energy)
-        );
-        return;
-      }
-
-      const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
-      let indicatorId = null;
-      if (token) {
-        const r = await fetch(
-          `https://api.telegram.org/bot${token}/sendMessage`,
-          {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              chat_id: chatId,
-              text: "🧩 Працюю над кодом…",
-            }),
-          }
-        );
-        const d = await r.json().catch(() => null);
-        indicatorId = d?.result?.message_id || null;
-      }
-
-      await spendEnergy(env, userId, need, "codex");
-      pulseTyping(env, chatId);
-
-      let userPrompt = textRaw || "";
-      const photoInCodex = pickPhoto(msg);
-      if (photoInCodex) {
-        try {
-          const imgUrl = await tgFileUrl(env, photoInCodex.file_id);
-          const imgBase64 = await urlToBase64(imgUrl);
-          const vRes = await describeImage(env, {
-            chatId,
-            tgLang: msg.from?.language_code,
-            imageBase64: imgBase64,
-            question:
-              "Опиши це зображення так, щоб за описом можна було написати HTML/JS/CSS проєкт.",
-            modelOrder:
-              "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct",
-          });
-          const imgDesc = vRes?.text || "";
-          userPrompt =
-            (userPrompt ? userPrompt + "\n\n" : "") +
-            "Ось опис зображення користувача, використай його в коді:\n" +
-            imgDesc;
-        } catch {}
-      }
-
-      const animSignal = { done: false };
-      if (indicatorId) {
-        startPuzzleAnimation(env, chatId, indicatorId, animSignal);
-      }
-
-      let codeText;
-      if (/тетріс|tetris/i.test(userPrompt)) {
-        codeText = buildTetrisHtml();
-      } else {
-        const ans = await runCodex(env, userPrompt);
-        const { code } = extractCodeAndLang(ans);
-        codeText = code;
-      }
-
-      const filename = "codex.html";
-      await saveCodexMem(env, userId, { filename, content: codeText });
-      await sendDocument(env, chatId, filename, codeText, "Ось готовий файл 👇");
-
-      if (indicatorId) {
-        animSignal.done = true;
-        await editMessageText(env, chatId, indicatorId, "✅ Готово");
-      }
+      const sys = await buildSystemHint(env, chatId, userId, lang);
+      const out = await askAnyModel(
+        env,
+        env.MODEL_ORDER ||
+          "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct",
+        textRaw,
+        { systemHint: sys }
+      );
+      await saveCodexMem(env, userId, {
+        filename: guessCodexFilename(lang),
+        content: textRaw + "\n\n" + out,
+      });
+      await sendPlain(env, chatId, out);
     });
     return json({ ok: true });
   }
-// звичайне повідомлення
-  if (textRaw && !textRaw.startsWith("/")) {
+
+  // GPS location
+  if (msg?.location) {
     await safe(async () => {
-      const cur = await getEnergy(env, userId);
-      const need = Number(cur.costText ?? 1);
-      if ((cur.energy ?? 0) < need) {
-        const links = energyLinks(env, userId);
-        await sendPlain(
-          env,
-          chatId,
-          t(lang, "need_energy_text", need, links.energy)
-        );
-        return;
-      }
-      await spendEnergy(env, userId, need, "text");
-      pulseTyping(env, chatId);
-
-      await pushTurn(env, userId, "user", textRaw);
-      await autoUpdateSelfTune(env, userId, lang).catch(() => {});
-      const systemHint = await buildSystemHint(env, chatId, userId, lang);
-      const order =
-        String(env.MODEL_ORDER || "").trim() ||
-        "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-4-scout:free";
-
-      const res = await askAnyModel(env, order, textRaw, { systemHint });
-      const full = asText(res) || "Не впевнений.";
-      await pushTurn(env, userId, "assistant", full);
-      await sendPlain(env, chatId, full);
+      await setUserLocation(env, userId, msg.location);
+      const { text } = await weatherSummaryByLocation(env, msg.location, lang);
+      await sendPlain(env, chatId, text);
     });
     return json({ ok: true });
   }
-// дефолт
-  await sendPlain(env, chatId, "Привіт! Що зробимо?", {
-    reply_markup: mainKeyboard(isAdmin),
-  });
+
+  // common ai respond
+  if (textRaw) {
+    await safe(async () => {
+      const sys = await buildSystemHint(env, chatId, userId, lang);
+      const modelOrder = String(env.MODEL_ORDER || "").trim();
+
+      const { aiRespond } = await import("../flows/aiRespond.js");
+      const out = await aiRespond(env, {
+        text: textRaw,
+        lang,
+        name: msg?.from?.first_name || "friend",
+        systemHint: sys,
+        expand: false,
+      });
+
+      await sendPlain(env, chatId, out);
+
+      try {
+        await pushTurn(env, userId, textRaw, out);
+        await autoUpdateSelfTune(env, userId);
+      } catch {}
+    });
+  }
+
   return json({ ok: true });
 }
+
+export { handleTelegramWebhook };
