@@ -2,8 +2,6 @@
 // Senti Webhook v3.0 (A2 clean API, fully stable)
 // ---------------------------------------------
 
-import { Router } from 'itty-router'
-
 // Core AI modules
 import { askAnyModel } from '../lib/modelRouter.js'
 import { describeImage } from '../flows/visionDescribe.js'
