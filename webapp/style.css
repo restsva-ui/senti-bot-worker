@@ -70,3 +70,33 @@ body {
   color: var(--tg-hint);
   font-size: 15px;
 }
+.card {
+  padding: 15px;
+  background: var(--tg-bg);
+  border-radius: var(--radius);
+  margin-bottom: 20px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+
+.card-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.card-text {
+  font-size: 14px;
+  color: var(--tg-text);
+}
+
+.upload-btn {
+  margin-top: 12px;
+  width: 100%;
+  padding: 14px;
+  background: var(--tg-btn-bg);
+  color: var(--tg-btn-text);
+  border-radius: var(--radius);
+  border: none;
+  font-size: 15px;
+}
+
