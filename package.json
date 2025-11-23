@@ -1,12 +1,6 @@
 {
   "name": "senti-bot-worker",
-  "version": "1.0.0",
-  "private": true,
+  "version": "3.0.0",
   "type": "module",
-  "scripts": {
-    "deploy": "wrangler deploy"
-  },
-  "devDependencies": {
-    "wrangler": "^3.80.0"
-  }
+  "dependencies": {}
 }
