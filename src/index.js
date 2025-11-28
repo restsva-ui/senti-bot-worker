@@ -376,3 +376,19 @@ export default {
 
       if (String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" && (runByCron || runByHour)) {
         const res = await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
+if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
+          await runSelfRegulation(env, res?.insights || null).catch(() => {});
+        }
+      }
+    } catch (e) {
+      await appendChecklist(env, `[${new Date().toISOString()}] auto_improve:error ${String(e)}`);
+    }
+
+    // 🎓 Нічний прогін черги Learn
+    try {
+      await runLearnOnce(env, {});
+    } catch (e) {
+      await appendChecklist(env, `[${new Date().toISOString()}] learn_queue:error ${String(e)}`);
+    }
+  },
+};
