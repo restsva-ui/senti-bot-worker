@@ -59,11 +59,6 @@ export async function handleMessage(update, tgContext) {
   const userLang = msg?.from?.language_code || "uk";
   let lang = pickReplyLanguage(msg, textRaw);
 
-  // Тут далі логіка по твоїх if, switch/case
-  // ...
-}
-// ... (початок у попередній частині)
-
   // /start
   if (textRaw === "/start") {
     await setDriveMode(env, userId, false);
