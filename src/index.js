@@ -11,7 +11,7 @@ import { handleAdminRepo } from "./routes/adminRepo.js";
 import { handleAdminChecklist } from "./routes/adminChecklist.js";
 import { handleAdminStatut } from "./routes/adminStatut.js";
 import { handleAdminBrain } from "./routes/adminBrain.js";
-import { handleTelegramWebhook } from "./routes/webhook.js";
+import webhook from "./routes/webhook.js"; // <--- Єдина правка тут!
 import { handleHealth } from "./routes/health.js";
 import { handleBrainState } from "./routes/brainState.js";
 import { handleCiDeploy } from "./routes/ciDeploy.js";
@@ -268,7 +268,7 @@ export default {
           if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
             return json({ ok: false, error: "unauthorized" }, 401, CORS);
           }
-          const r = await handleTelegramWebhook?.(req, env, url);
+          const r = await webhook?.(req, env, url); // <--- ОНОВЛЕНО
           if (r) return r;
         } catch {}
         return json({ ok: true, note: "fallback webhook POST" }, 200, CORS);
