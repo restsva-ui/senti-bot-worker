@@ -1,4 +1,3 @@
-// src/index.js
 import { TG } from "./lib/tg.js";
 import { putUserTokens } from "./lib/userDrive.js";
 import { checklistHtml, statutHtml, appendChecklist } from "./lib/kvChecklist.js";
@@ -56,7 +55,6 @@ export default {
     if (p === "/_version") {
       return json({ ok: true, version: VERSION, entry: "src/index.js" }, 200, CORS);
     }
-
     try {
       if (p === "/") return html(home(env));
 
@@ -157,7 +155,6 @@ export default {
         const res = await runSelfRegulation(env, null);
         return json({ ok: true, ...res }, 200, CORS);
       }
-
       /* ──────────────────────────────────────────────────────────────
          Learn RUN: сумісні ендпойнти /admin/learn/run та /admin/brain/run
          - GET: HTML з підсумком
@@ -372,23 +369,26 @@ export default {
       const hour = new Date().getUTCHours();
       const targetHour = Number(env.NIGHTLY_UTC_HOUR ?? 2);
       const runByCron = event && event.cron === "10 2 * * *";
-      const runByHour = hour === targetHour;
-
-      if (String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" && (runByCron || runByHour)) {
-        const res = await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
-if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
-          await runSelfRegulation(env, res?.insights || null).catch(() => {});
-        }
-      }
-    } catch (e) {
-      await appendChecklist(env, `[${new Date().toISOString()}] auto_improve:error ${String(e)}`);
+      const runByHour =
+  if (String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" && (runByCron || runByHour)) {
+    const res = await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
+    if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
+      await runSelfRegulation(env, res?.insights || null).catch(() => {});
     }
+  }
+} catch (e) {
+  await appendChecklist(env, `[${new Date().toISOString()}] auto_improve:error ${String(e)}`);
+}
 
-    // 🎓 Нічний прогін черги Learn
-    try {
-      await runLearnOnce(env, {});
-    } catch (e) {
-      await appendChecklist(env, `[${new Date().toISOString()}] learn_queue:error ${String(e)}`);
-    }
-  },
-};
+// 🎓 Нічний прогін черги Learn
+try {
+  await runLearnOnce(env, {});
+} catch (e) {
+  await appendChecklist(env, `[${new Date().toISOString()}] learn_queue:error ${String(e)}`);
+}
+
+---
+
+## **Далі — src/routes/webhook.js**  
+Починаю аналізувати і готувати наступними частинами.  
+Підтверджуй — і продовжую наступні модулі (webhook.js, lib/*, routes/*), або пиши якщо треба одразу весь комплект (буду віддавати частинами по файлах).
