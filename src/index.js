@@ -11,7 +11,7 @@ import { handleAdminRepo } from "./routes/adminRepo.js";
 import { handleAdminChecklist } from "./routes/adminChecklist.js";
 import { handleAdminStatut } from "./routes/adminStatut.js";
 import { handleAdminBrain } from "./routes/adminBrain.js";
-import webhook from "./routes/webhook.js"; // <--- Єдина правка тут!
+import webhook from "./routes/webhook.js"; // <--- ОНОВЛЕНО: дефолтний імпорт
 import { handleHealth } from "./routes/health.js";
 import { handleBrainState } from "./routes/brainState.js";
 import { handleCiDeploy } from "./routes/ciDeploy.js";
@@ -80,8 +80,7 @@ export default {
       if (p === "/webhook" && method === "GET") {
         return json({ ok: true, method: "GET", message: "webhook alive" }, 200, CORS);
       }
-
-      // ===== Brain/API =====
+// ===== Brain/API =====
       if (p === "/brain/state") {
         try {
           const r = await handleBrainState?.(req, env, url);
@@ -157,12 +156,7 @@ export default {
         const res = await runSelfRegulation(env, null);
         return json({ ok: true, ...res }, 200, CORS);
       }
-
-      /* ──────────────────────────────────────────────────────────────
-         Learn RUN: сумісні ендпойнти /admin/learn/run та /admin/brain/run
-         - GET: HTML з підсумком
-         - POST: JSON
-      ─────────────────────────────────────────────────────────────── */
+// Learn RUN endpoint
       if ((p === "/admin/learn/run" || p === "/admin/brain/run") && (method === "GET" || method === "POST")) {
         if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
           return json({ ok: false, error: "unauthorized" }, 401, CORS);
@@ -261,7 +255,7 @@ export default {
         return json({ ok: true, note: "admin energy fallback" }, 200, CORS);
       }
 
-      // webhook
+      // webhook POST — головна зміна!
       if (p === "/webhook" && req.method === "POST") {
         try {
           const sec = req.headers.get("x-telegram-bot-api-secret-token");
@@ -376,19 +370,4 @@ export default {
 
       if (String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" && (runByCron || runByHour)) {
         const res = await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
-        if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
-          await runSelfRegulation(env, res?.insights || null).catch(() => {});
-        }
-      }
-    } catch (e) {
-      await appendChecklist(env, `[${new Date().toISOString()}] auto_improve:error ${String(e)}`);
-    }
-
-    // 🎓 Нічний прогін черги Learn
-    try {
-      await runLearnOnce(env, {});
-    } catch (e) {
-      await appendChecklist(env, `[${new Date().toISOString()}] learn_queue:error ${String(e)}`);
-    }
-  },
-};
+        if (String(env.SELF_REGULATE || "on").to
