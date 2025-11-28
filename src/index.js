@@ -366,5 +366,3 @@ export default {
     } catch (e) {
       await appendChecklist(env, `[${new Date().toISOString()}] auto_improve:error ${String(e)}`);
     }
-
-    //
