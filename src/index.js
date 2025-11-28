@@ -11,7 +11,7 @@ import { handleAdminRepo } from "./routes/adminRepo.js";
 import { handleAdminChecklist } from "./routes/adminChecklist.js";
 import { handleAdminStatut } from "./routes/adminStatut.js";
 import { handleAdminBrain } from "./routes/adminBrain.js";
-import webhook from "./routes/webhook.js"; // <-- Виправлено
+import webhook from "./routes/webhook.js";
 import { handleHealth } from "./routes/health.js";
 import { handleBrainState } from "./routes/brainState.js";
 import { handleCiDeploy } from "./routes/ciDeploy.js";
@@ -21,19 +21,24 @@ import { handleAiEvolve } from "./routes/aiEvolve.js";
 import { handleBrainPromote } from "./routes/brainPromote.js";
 import { handleAdminEnergy } from "./routes/adminEnergy.js";
 import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
+
+// ✅ Learn (admin only) + queue
 import { handleAdminLearn } from "./routes/adminLearn.js";
 import { runLearnOnce } from "./lib/kvLearnQueue.js";
+
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
 import { fallbackBrainCurrent, fallbackBrainList, fallbackBrainGet } from "./routes/brainFallbacks.js";
 import { home } from "./ui/home.js";
 import { nightlyAutoImprove } from "./lib/autoImprove.js";
 import { runSelfRegulation } from "./lib/selfRegulate.js";
 import { handleAiImprove } from "./routes/aiImprove.js";
+
+// ✅ Storage usage (R2 + KV)
 import { handleAdminUsage } from "./routes/adminUsage.js";
 
 const VERSION = "senti-worker-2025-10-20-learn-admin-only";
 
-// Локальний esc для безпечного виводу в HTML (використовується у /admin/*/run)
+// локальний esc для безпечного виводу в HTML (викор. у /admin/*/run)
 function esc(s = "") {
   return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
@@ -47,23 +52,29 @@ export default {
 
     if (req.method === "OPTIONS") return preflight();
 
+    // version
     if (p === "/_version") {
       return json({ ok: true, version: VERSION, entry: "src/index.js" }, 200, CORS);
     }
 
     try {
       if (p === "/") return html(home(env));
+
       if (p === "/health") {
         try {
           const r = await handleHealth?.(req, env, url);
           if (r && r.status !== 404) return r;
         } catch {}
-        return json({
-          ok: true,
-          name: "senti-bot-worker",
-          service: env.SERVICE_HOST || "senti-bot-worker.restsva.workers.dev",
-          ts: new Date().toISOString(),
-        }, 200, CORS);
+        return json(
+          {
+            ok: true,
+            name: "senti-bot-worker",
+            service: env.SERVICE_HOST || "senti-bot-worker.restsva.workers.dev",
+            ts: new Date().toISOString(),
+          },
+          200,
+          CORS
+        );
       }
 
       if (p === "/webhook" && method === "GET") {
@@ -109,8 +120,7 @@ export default {
 
       // cron evolve manual trigger
       if (p === "/cron/evolve") {
-        if (!["GET", "POST"].includes(req.method))
-          return json({ ok: false, error: "method not allowed" }, 405, CORS);
+        if (!["GET", "POST"].includes(req.method)) return json({ ok: false, error: "method not allowed" }, 405, CORS);
         if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET)
           return json({ ok: false, error: "unauthorized" }, 401, CORS);
         const u = new URL(abs(env, "/ai/evolve/auto"));
@@ -123,8 +133,7 @@ export default {
 
       // nightly auto-improve manual
       if (p === "/cron/auto-improve") {
-        if (!["GET", "POST"].includes(req.method))
-          return json({ ok: false, error: "method not allowed" }, 405, CORS);
+        if (!["GET", "POST"].includes(req.method)) return json({ ok: false, error: "method not allowed" }, 405, CORS);
         if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET)
           return json({ ok: false, error: "unauthorized" }, 401, CORS);
         const res = await nightlyAutoImprove(env, { now: new Date(), reason: "manual" });
@@ -149,10 +158,15 @@ export default {
         return json({ ok: true, ...res }, 200, CORS);
       }
 
-      // Learn RUN: /admin/learn/run та /admin/brain/run
+      /* ──────────────────────────────────────────────────────────────
+         Learn RUN: сумісні ендпойнти /admin/learn/run та /admin/brain/run
+         - GET: HTML з підсумком
+         - POST: JSON
+      ─────────────────────────────────────────────────────────────── */
       if ((p === "/admin/learn/run" || p === "/admin/brain/run") && (method === "GET" || method === "POST")) {
-        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET)
+        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
           return json({ ok: false, error: "unauthorized" }, 401, CORS);
+        }
         try {
           const maxItems = Number(url.searchParams.get("n") || 10);
           const out = await runLearnOnce(env, { maxItems });
@@ -186,16 +200,19 @@ export default {
         }
       }
 
+      // ===== Learn (admin only) =====
       if (p.startsWith("/admin/learn")) {
         const r = await handleAdminLearn?.(req, env, url);
         if (r) return r;
       }
 
+      // ===== Storage usage (admin only) =====
       if (p.startsWith("/admin/usage")) {
         const r = await handleAdminUsage?.(req, env, url);
         if (r) return r;
       }
 
+      // ===== ADMIN pages =====
       if (p.startsWith("/admin/checklist/with-energy")) {
         try {
           const r = await handleAdminChecklistWithEnergy?.(req, env, url);
@@ -251,7 +268,7 @@ export default {
           if (env.TG_WEBHOOK_SECRET && sec !== env.TG_WEBHOOK_SECRET) {
             return json({ ok: false, error: "unauthorized" }, 401, CORS);
           }
-          const r = await webhook?.(req, env, url); // <-- ОНОВЛЕНО
+          const r = await webhook?.(req, env, url);
           if (r) return r;
         } catch {}
         return json({ ok: true, note: "fallback webhook POST" }, 200, CORS);
@@ -326,7 +343,7 @@ export default {
         return html(`<h3>✅ Готово</h3><p>Тепер повернись у Telegram і натисни <b>Google Drive</b> ще раз.</p>`);
       }
 
-      // 404 fallback
+      // 404
       try {
         await appendChecklist(env, `[miss] ${new Date().toISOString()} ${req.method} ${p}${url.search}`);
       } catch {}
@@ -350,7 +367,7 @@ export default {
       await appendChecklist(env, `[${new Date().toISOString()}] evolve_auto:error ${String(e)}`);
     }
 
-        // Нічні авто-поліпшення + саморегуляція
+    // Нічні авто-поліпшення + саморегуляція
     try {
       const hour = new Date().getUTCHours();
       const targetHour = Number(env.NIGHTLY_UTC_HOUR ?? 2);
@@ -359,19 +376,3 @@ export default {
 
       if (String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" && (runByCron || runByHour)) {
         const res = await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
-        if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
-          await runSelfRegulation(env, res?.insights || null).catch(() => {});
-        }
-      }
-    } catch (e) {
-      await appendChecklist(env, `[${new Date().toISOString()}] auto_improve:error ${String(e)}`);
-    }
-
-    // 🎓 Нічний прогін черги Learn
-    try {
-      await runLearnOnce(env, {});
-    } catch (e) {
-      await appendChecklist(env, `[${new Date().toISOString()}] learn_queue:error ${String(e)}`);
-    }
-  },
-};
