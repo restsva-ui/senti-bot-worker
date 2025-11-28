@@ -1,13 +1,14 @@
 // src/lib/brain.js
+// Основний "мозок" Senti: памʼять, навчання, автотюн, підтримка всіх LLM, діалогова історія
 
-import { getShortContext, pushContext } from "./memory.js";
+import { getShortContext } from "./memory.js";
 import { pushTurn } from "./dialogMemory.js";
 import { enqueueLearn } from "./kvLearnQueue.js";
 import { autoUpdateSelfTune } from "./selfTune.js";
 
-// ---- Константи та утиліти ----
+// --- Провайдери LLM ---
 const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
-const GEMINI_VERSIONS = ["v1", "v1beta"]; // порядок спроб
+const GEMINI_VERSIONS = ["v1", "v1beta"];
 
 function normGemini(model) {
   return String(model || DEFAULT_GEMINI_MODEL).replace(/-latest$/i, "");
@@ -48,7 +49,7 @@ async function fetchJSON(url, init = {}, timeoutMs = 20000) {
   }
 }
 
-// --- Формування короткого контексту з пам'яті для підмішування в system ---
+// --- Формування короткого контексту для system prompt ---
 async function buildMemoryPrefix(env, chatId, limit = 6) {
   try {
     if (!chatId) return "";
@@ -60,12 +61,10 @@ async function buildMemoryPrefix(env, chatId, limit = 6) {
       return `• ${who}: ${txt}`;
     });
     return lines.length ? `Останній контекст чату:\n${lines.join("\n")}\n\n` : "";
-  } catch {
-    return "";
-  }
+  } catch { return ""; }
 }
 
-// ---- Провайдери ----
+// ---- LLM Провайдери ----
 async function callGemini({ apiKey, model, userText, systemHint, showTag }) {
   const mdl = normGemini(model);
   const body = {
@@ -94,10 +93,7 @@ async function callGemini({ apiKey, model, userText, systemHint, showTag }) {
     }
     const status = res.status;
     const st = res.json?.error?.status || "";
-    if (status === 404 || st === "NOT_FOUND") {
-      lastErr = `404 on ${ver}`;
-      continue;
-    }
+    if (status === 404 || st === "NOT_FOUND") { lastErr = `404 on ${ver}`; continue; }
     lastErr = `${status} on ${ver}`;
   }
   throw new Error(`Gemini fail: ${lastErr || "unknown"}`);
@@ -181,24 +177,24 @@ async function callOpenAICompat({ baseUrl, apiKey, model = "gpt-3.5-turbo", user
   if (!out) throw new Error("OpenAI-compat empty");
   return `${out}${tag("FreeLLM", model, Date.now() - started, showTag)}`;
 }
+
 // ---- Головна think ----
 export async function think(env, userText, systemHint = "", extra = {}) {
   const text = String(userText || "").trim();
   if (!text) return "🤖 Дай мені текст або запитання — і я відповім.";
 
-  // Витягуємо chatId/userId/lang (сумісність з твоїм API)
+  // Діалогова памʼять + learn
   const chatId = extra?.chatId || env.__CHAT_ID;
   const userId = extra?.userId || env.TELEGRAM_ADMIN_ID || "0";
   const userLang = extra?.lang || "uk";
   const showTag = String(env.DIAG_TAGS || "").toLowerCase() !== "off";
 
-  // 1. Діалогова пам’ять та навчання: додати репліку юзера
   if (chatId) {
     await pushTurn(env, chatId, "user", text);
     await enqueueLearn?.(env, chatId, text);
   }
 
-  // --- MEMORY SYSTEM PROMPT ---
+  // Контекст-памʼять
   let memoryPrefix = "";
   try {
     const limit = Math.max(0, Number(env.SHORT_CONTEXT_LIMIT || 6)) || 6;
@@ -206,11 +202,11 @@ export async function think(env, userText, systemHint = "", extra = {}) {
   } catch {}
   const mergedSystem = (memoryPrefix ? memoryPrefix : "") + (systemHint || "");
 
-  // ---- Вибір AI-провайдера ----
+  // AI каскад
+  let aiReply = "";
 
   // 1) Gemini
   const GEMINI_KEY = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
-  let aiReply = "";
   if (GEMINI_KEY) {
     try {
       const geminiModel = env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
@@ -256,7 +252,7 @@ export async function think(env, userText, systemHint = "", extra = {}) {
       console.log("OpenRouter error:", e?.message || e);
     }
   }
-  // 4) OpenAI-compatible (free/community)
+  // 4) OpenAI-compatible
   if (!aiReply && env.FREE_API_BASE_URL && env.FREE_API_KEY) {
     try {
       const freeModel = env.FREE_API_MODEL || "gpt-3.5-turbo";
@@ -275,7 +271,7 @@ export async function think(env, userText, systemHint = "", extra = {}) {
     }
   }
 
-  // 5) Софт-фолбек
+  // Софт-фолбек
   if (!aiReply) {
     aiReply =
       "🧠 Поки що я працюю у легкому режимі без зовнішніх моделей.\n" +
@@ -283,11 +279,11 @@ export async function think(env, userText, systemHint = "", extra = {}) {
       "або OPENROUTER_API_KEY, або FREE_API_BASE_URL + FREE_API_KEY — і відповіді стануть «розумнішими».";
   }
 
-  // 6. Додаємо відповідь асистента у пам'ять та в learn, підлаштовуємо стиль
+  // Відповідь асистента у памʼять, learn, autotune
   if (chatId) {
     await pushTurn(env, chatId, "assistant", aiReply);
     await enqueueLearn?.(env, chatId, aiReply);
-    await autoUpdateSelfTune?.(env, chatId, userLang); // не ламає потік навіть якщо не налаштовано
+    await autoUpdateSelfTune?.(env, chatId, userLang);
   }
 
   return aiReply;
