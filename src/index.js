@@ -350,7 +350,7 @@ export default {
       await appendChecklist(env, `[${new Date().toISOString()}] evolve_auto:error ${String(e)}`);
     }
 
-    // Нічні авто-поліпшення + саморегуляція
+        // Нічні авто-поліпшення + саморегуляція
     try {
       const hour = new Date().getUTCHours();
       const targetHour = Number(env.NIGHTLY_UTC_HOUR ?? 2);
@@ -366,3 +366,12 @@ export default {
     } catch (e) {
       await appendChecklist(env, `[${new Date().toISOString()}] auto_improve:error ${String(e)}`);
     }
+
+    // 🎓 Нічний прогін черги Learn
+    try {
+      await runLearnOnce(env, {});
+    } catch (e) {
+      await appendChecklist(env, `[${new Date().toISOString()}] learn_queue:error ${String(e)}`);
+    }
+  },
+};
