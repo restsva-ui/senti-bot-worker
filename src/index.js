@@ -57,7 +57,6 @@ export default {
     }
     try {
       if (p === "/") return html(home(env));
-
       if (p === "/health") {
         try {
           const r = await handleHealth?.(req, env, url);
@@ -87,7 +86,6 @@ export default {
         } catch {}
         return json({ ok: true, state: "available" }, 200, CORS);
       }
-
       if (p.startsWith("/api/brain/promote")) {
         try {
           const r = await handleBrainPromote?.(req, env, url);
@@ -95,7 +93,6 @@ export default {
         } catch {}
         return json({ ok: true, promoted: false, note: "promote handler missing" }, 200, CORS);
       }
-
       if (p.startsWith("/api/brain")) {
         try {
           const r = await handleBrainApi?.(req, env, url);
@@ -109,7 +106,6 @@ export default {
         }
         return json({ ok: false, error: "unknown endpoint" }, 404, CORS);
       }
-
       // selftest
       if (p.startsWith("/selftest")) {
         const res = await runSelfTestLocalDirect(env);
@@ -155,11 +151,8 @@ export default {
         const res = await runSelfRegulation(env, null);
         return json({ ok: true, ...res }, 200, CORS);
       }
-      /* ──────────────────────────────────────────────────────────────
-         Learn RUN: сумісні ендпойнти /admin/learn/run та /admin/brain/run
-         - GET: HTML з підсумком
-         - POST: JSON
-      ─────────────────────────────────────────────────────────────── */
+
+      // --- Learn RUN: /admin/learn/run, /admin/brain/run
       if ((p === "/admin/learn/run" || p === "/admin/brain/run") && (method === "GET" || method === "POST")) {
         if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
           return json({ ok: false, error: "unauthorized" }, 401, CORS);
@@ -217,7 +210,6 @@ export default {
         } catch {}
         return html("<h3>Checklist + Energy</h3><p>Fallback UI.</p>");
       }
-
       if (p.startsWith("/admin/checklist")) {
         try {
           const r = await handleAdminChecklist?.(req, env, url);
@@ -225,7 +217,6 @@ export default {
         } catch {}
         return html(await checklistHtml?.(env).catch(() => "<h3>Checklist</h3>"));
       }
-
       if (p.startsWith("/admin/repo") || p.startsWith("/admin/archive")) {
         try {
           const r = await handleAdminRepo?.(req, env, url);
@@ -233,7 +224,6 @@ export default {
         } catch {}
         return html(`<h3>Repo / Архів</h3><p>Fallback UI.</p>`);
       }
-
       if (p.startsWith("/admin/statut")) {
         try {
           const r = await handleAdminStatut?.(req, env, url);
@@ -241,7 +231,6 @@ export default {
         } catch {}
         return html(await statutHtml?.(env).catch(() => "<h3>Statut</h3>"));
       }
-
       if (p.startsWith("/admin/brain")) {
         try {
           const r = await handleAdminBrain?.(req, env, url);
@@ -249,7 +238,6 @@ export default {
         } catch {}
         return json({ ok: true, note: "admin brain fallback" }, 200, CORS);
       }
-
       if (p.startsWith("/admin/energy")) {
         try {
           const r = await handleAdminEnergy?.(req, env, url);
@@ -340,7 +328,7 @@ export default {
         return html(`<h3>✅ Готово</h3><p>Тепер повернись у Telegram і натисни <b>Google Drive</b> ще раз.</p>`);
       }
 
-      // 404
+      // 404 fallback
       try {
         await appendChecklist(env, `[miss] ${new Date().toISOString()} ${req.method} ${p}${url.search}`);
       } catch {}
@@ -354,6 +342,7 @@ export default {
     await logHeartbeat(env);
 
     try {
+      // Запуск auto-evolve щогодини
       if (event && event.cron === "0 * * * *") {
         const u = new URL(abs(env, "/ai/evolve/auto"));
         if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
@@ -369,26 +358,22 @@ export default {
       const hour = new Date().getUTCHours();
       const targetHour = Number(env.NIGHTLY_UTC_HOUR ?? 2);
       const runByCron = event && event.cron === "10 2 * * *";
-      const runByHour =
-  if (String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" && (runByCron || runByHour)) {
-    const res = await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
-    if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
-      await runSelfRegulation(env, res?.insights || null).catch(() => {});
+      const runByHour = hour === targetHour;
+      if (String(env.AUTO_IMPROVE || "on").toLowerCase() !== "off" && (runByCron || runByHour)) {
+        const res = await nightlyAutoImprove(env, { now: new Date(), reason: event?.cron || `utc@${hour}` });
+        if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
+          await runSelfRegulation(env, res?.insights || null).catch(() => {});
+        }
+      }
+    } catch (e) {
+      await appendChecklist(env, `[${new Date().toISOString()}] auto_improve:error ${String(e)}`);
+    }
+
+    // 🎓 Нічний прогін черги Learn
+    try {
+      await runLearnOnce(env, {});
+    } catch (e) {
+      await appendChecklist(env, `[${new Date().toISOString()}] learn_queue:error ${String(e)}`);
     }
   }
-} catch (e) {
-  await appendChecklist(env, `[${new Date().toISOString()}] auto_improve:error ${String(e)}`);
-}
-
-// 🎓 Нічний прогін черги Learn
-try {
-  await runLearnOnce(env, {});
-} catch (e) {
-  await appendChecklist(env, `[${new Date().toISOString()}] learn_queue:error ${String(e)}`);
-}
-
----
-
-## **Далі — src/routes/webhook.js**  
-Починаю аналізувати і готувати наступними частинами.  
-Підтверджуй — і продовжую наступні модулі (webhook.js, lib/*, routes/*), або пиши якщо треба одразу весь комплект (буду віддавати частинами по файлах).
+};
