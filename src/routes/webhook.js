@@ -1,158 +1,95 @@
-import { TG } from "./lib/tg.js";
-import { putUserTokens } from "./lib/userDrive.js";
-import { checklistHtml, statutHtml, appendChecklist } from "./lib/kvChecklist.js";
-import { logHeartbeat } from "./lib/audit.js";
-import { abs } from "./utils/url.js";
-import { html, json, CORS, preflight } from "./utils/http.js";
+import { TG } from "../lib/tg.js";
+import { t, pickReplyLanguage } from "../lib/i18n.js";
+import { getUserTokens } from "../lib/userDrive.js";
+import { getEnergy, spendEnergy } from "../lib/energy.js";
+import { think } from "../lib/brain.js";
+import { buildDialogHint, pushTurn } from "../lib/dialogMemory.js";
+import { askAnyModel } from "../lib/modelRouter.js";
+import { json } from "../utils/http.js";
+import { getRecentInsights } from "../lib/kvLearnQueue.js";
+import { setDriveMode, getDriveMode } from "../lib/driveMode.js";
+import { replyCurrentDate, replyCurrentTime } from "../apis/time.js";
 
-// Routers
-import { handleAdminRepo } from "./routes/adminRepo.js";
-import { handleAdminChecklist } from "./routes/adminChecklist.js";
-import { handleAdminStatut } from "./routes/adminStatut.js";
-import { handleAdminBrain } from "./routes/adminBrain.js";
-import webhook from "./routes/webhook.js";
-import { handleHealth } from "./routes/health.js";
-import { handleBrainState } from "./routes/brainState.js";
-import { handleCiDeploy } from "./routes/ciDeploy.js";
-import { handleBrainApi } from "./routes/brainApi.js";
-import { handleAiTrain } from "./routes/aiTrain.js";
-import { handleAiEvolve } from "./routes/aiEvolve.js";
-import { handleBrainPromote } from "./routes/brainPromote.js";
-import { handleAdminEnergy } from "./routes/adminEnergy.js";
-import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
-
-// ✅ Learn (admin only) + queue
-import { handleAdminLearn } from "./routes/adminLearn.js";
-import { runLearnOnce } from "./lib/kvLearnQueue.js";
-
-import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
-import { fallbackBrainCurrent, fallbackBrainList, fallbackBrainGet } from "./routes/brainFallbacks.js";
-import { home } from "./ui/home.js";
-import { nightlyAutoImprove } from "./lib/autoImprove.js";
-import { runSelfRegulation } from "./lib/selfRegulate.js";
-import { handleAiImprove } from "./routes/aiImprove.js";
-
-// ✅ Storage usage (R2 + KV)
-import { handleAdminUsage } from "./routes/adminUsage.js";
-
-const VERSION = "senti-worker-2025-10-20-learn-admin-only";
-
-// локальний esc для безпечного виводу в HTML (викор. у /admin/*/run)
-function esc(s = "") {
-  return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+// — Додаємо підтримку мультимовності для привітання та автодетекту
+function pickLang(msg, text = "") {
+  // 1. Пробуємо по тексту (якщо юзер одразу нею пише)
+  const lang = pickReplyLanguage(msg, text);
+  // 2. Якщо в профілі є мова — беремо її (Telegram language_code)
+  if (!lang || lang === "uk") {
+    const code = (msg?.from?.language_code || "").slice(0, 2).toLowerCase();
+    if (["uk", "en", "ru", "de", "fr"].includes(code)) return code;
+  }
+  // 3. Default — українська
+  return lang || "uk";
 }
 
-export default {
-  async fetch(req, env) {
-    const url = new URL(req.url);
-    const p = (url.pathname || "/").replace(/\/+$/, "") || "/";
-    url.pathname = p;
-    const method = req.method === "HEAD" ? "GET" : req.method;
+// — Головний webhook handler
+export default async function webhook(req, env, url) {
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ ok: false, error: "invalid json" }, 400);
+  }
 
-    if (req.method === "OPTIONS") return preflight();
-
-    // version
-    if (p === "/_version") {
-      return json({ ok: true, version: VERSION, entry: "src/index.js" }, 200, CORS);
+  // Безпеки: перевіряємо секрет (якщо потрібен)
+  if (env.TG_WEBHOOK_SECRET) {
+    const sec = req.headers.get("x-telegram-bot-api-secret-token");
+    if (sec !== env.TG_WEBHOOK_SECRET) {
+      return json({ ok: false, error: "unauthorized" }, 401);
     }
+  }
 
-    try {
-      if (p === "/") return html(home(env));
+  const msg = body.message || body.edited_message || body.callback_query?.message;
+  const userText = msg?.text || body.message?.text || "";
 
-      if (p === "/health") {
-        try {
-          const r = await handleHealth?.(req, env, url);
-          if (r && r.status !== 404) return r;
-        } catch {}
-        return json(
-          {
-            ok: true,
-            name: "senti-bot-worker",
-            service: env.SERVICE_HOST || "senti-bot-worker.restsva.workers.dev",
-            ts: new Date().toISOString(),
-          },
-          200,
-          CORS
-        );
-      }
+  // Мультимовна логіка: беремо мову юзера або autodetect
+  const lang = pickLang(msg, userText);
 
-      if (p === "/webhook" && method === "GET") {
-        return json({ ok: true, method: "GET", message: "webhook alive" }, 200, CORS);
-      }
+  // Проста обробка команд/привітань
+  if (userText === "/start" || /прив/i.test(userText) || /hello|hi|bonjour|salut|guten/i.test(userText)) {
+    await TG.sendMessage(
+      msg.chat.id,
+      t(lang, "hello_name", msg.from?.first_name || "Senti") + "\n" + t(lang, "how_help"),
+      { reply_markup: { keyboard: [[t(lang, "senti_tip")]], resize_keyboard: true } },
+      env
+    );
+    return json({ ok: true });
+  }
 
-      // ===== Brain/API =====
-      if (p === "/brain/state") {
-        try {
-          const r = await handleBrainState?.(req, env, url);
-          if (r && r.status !== 404) return r;
-        } catch {}
-        return json({ ok: true, state: "available" }, 200, CORS);
-      }
+  // Далі — обробка запитів (моделі, brain, енергія, date, time)
+  // ...
+  // Обробка швидких команд (дата/час)
+  if (/дата|date/i.test(userText)) {
+    await TG.sendMessage(msg.chat.id, await replyCurrentDate(lang), {}, env);
+    return json({ ok: true });
+  }
+  if (/час|время|time/i.test(userText)) {
+    await TG.sendMessage(msg.chat.id, await replyCurrentTime(lang), {}, env);
+    return json({ ok: true });
+  }
 
-      if (p.startsWith("/api/brain/promote")) {
-        try {
-          const r = await handleBrainPromote?.(req, env, url);
-          if (r) return r;
-        } catch {}
-        return json({ ok: true, promoted: false, note: "promote handler missing" }, 200, CORS);
-      }
+  // Приклад роботи із Brain — можна розширювати:
+  if (/інсайт|insight/i.test(userText)) {
+    const rec = await getRecentInsights(env, { max: 1 });
+    if (rec?.length) {
+      await TG.sendMessage(msg.chat.id, rec[0], {}, env);
+    } else {
+      await TG.sendMessage(msg.chat.id, t(lang, "default_reply"), {}, env);
+    }
+    return json({ ok: true });
+  }
 
-      if (p.startsWith("/api/brain")) {
-        try {
-          const r = await handleBrainApi?.(req, env, url);
-          if (r) return r;
-        } catch {}
-        if (p === "/api/brain/current" && method === "GET") return await fallbackBrainCurrent(env);
-        if (p === "/api/brain/list" && method === "GET") return await fallbackBrainList(env);
-        if (p === "/api/brain/get" && method === "GET") {
-          const key = url.searchParams.get("key");
-          return await fallbackBrainGet(env, key);
-        }
-        return json({ ok: false, error: "unknown endpoint" }, 404, CORS);
-      }
-
-      // selftest
-      if (p.startsWith("/selftest")) {
-        const res = await runSelfTestLocalDirect(env);
-        return json(res, 200, CORS);
-      }
-
-      // cron evolve manual trigger
-      if (p === "/cron/evolve") {
-        if (!["GET", "POST"].includes(req.method)) return json({ ok: false, error: "method not allowed" }, 405, CORS);
-        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET)
-          return json({ ok: false, error: "unauthorized" }, 401, CORS);
-        const u = new URL(abs(env, "/ai/evolve/auto"));
-        if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
-        const innerReq = new Request(u.toString(), { method: "GET" });
-        const r = await handleAiEvolve?.(innerReq, env, u);
-        if (r) return r;
-        return json({ ok: true, note: "evolve triggered" }, 200, CORS);
-      }
-
-      // nightly auto-improve manual
-      if (p === "/cron/auto-improve") {
-        if (!["GET", "POST"].includes(req.method)) return json({ ok: false, error: "method not allowed" }, 405, CORS);
-        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET)
-          return json({ ok: false, error: "unauthorized" }, 401, CORS);
-        const res = await nightlyAutoImprove(env, { now: new Date(), reason: "manual" });
-        if (String(env.SELF_REGULATE || "on").toLowerCase() !== "off") {
-          await runSelfRegulation(env, res?.insights || null).catch(() => {});
-        }
-        return json({ ok: true, ...res }, 200, CORS);
-      }
-
-      // ai/improve + debug
-      if (p.startsWith("/ai/improve") || p.startsWith("/debug/")) {
-        const r = await handleAiImprove?.(req, env, url);
-        if (r) return r;
-        return json({ ok: false, error: "aiImprove router missing" }, 500, CORS);
-      }
-
-      // self-regulate on demand
-      if (p === "/ai/self-regulate") {
-        if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET)
-          return json({ ok: false, error: "unauthorized" }, 401, CORS);
-        const res = await runSelfRegulation(env, null);
-        return json({ ok: true, ...res }, 200, CORS);
-      }
+  // Всі інші — коротка відповідь (модель/brain)
+  try {
+    const dialogHint = buildDialogHint(msg, userText, lang);
+    const result = await askAnyModel(userText, { env, lang, dialogHint, chat_id: msg.chat.id });
+    // Записуємо відповідь у пам'ять, якщо треба
+    await pushTurn(msg.chat.id, { user: userText, bot: result });
+    await TG.sendMessage(msg.chat.id, result, {}, env);
+    return json({ ok: true });
+  } catch (e) {
+    await TG.sendMessage(msg.chat.id, t(lang, "default_reply"), {}, env);
+    return json({ ok: false, error: String(e) });
+  }
+}
