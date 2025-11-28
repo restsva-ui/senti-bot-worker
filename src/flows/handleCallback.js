@@ -35,6 +35,7 @@ export async function handleCallback(update, tgContext) {
 
   // ... інші callback-команди тут (додавай власні варіанти)
 
+  
   // Дефолт: повідомлення, що кнопка оброблена
   await sendPlain(env, chatId, t("uk", "Готово!"));
   return new Response("OK");
