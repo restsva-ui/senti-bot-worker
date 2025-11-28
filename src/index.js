@@ -20,24 +20,19 @@ import { handleAiEvolve } from "./routes/aiEvolve.js";
 import { handleBrainPromote } from "./routes/brainPromote.js";
 import { handleAdminEnergy } from "./routes/adminEnergy.js";
 import { handleAdminChecklistWithEnergy } from "./routes/adminChecklistWrap.js";
-
-// ✅ Learn (admin only) + queue
 import { handleAdminLearn } from "./routes/adminLearn.js";
 import { runLearnOnce } from "./lib/kvLearnQueue.js";
-
 import { runSelfTestLocalDirect } from "./routes/selfTestLocal.js";
 import { fallbackBrainCurrent, fallbackBrainList, fallbackBrainGet } from "./routes/brainFallbacks.js";
 import { home } from "./ui/home.js";
 import { nightlyAutoImprove } from "./lib/autoImprove.js";
 import { runSelfRegulation } from "./lib/selfRegulate.js";
 import { handleAiImprove } from "./routes/aiImprove.js";
-
-// ✅ Storage usage (R2 + KV)
 import { handleAdminUsage } from "./routes/adminUsage.js";
 
 const VERSION = "senti-worker-2025-10-20-learn-admin-only";
 
-// локальний esc для безпечного виводу в HTML (викор. у /admin/*/run)
+// локальний esc для безпечного виводу в HTML
 function esc(s = "") {
   return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
@@ -55,8 +50,10 @@ export default {
     if (p === "/_version") {
       return json({ ok: true, version: VERSION, entry: "src/index.js" }, 200, CORS);
     }
+
     try {
       if (p === "/") return html(home(env));
+
       if (p === "/health") {
         try {
           const r = await handleHealth?.(req, env, url);
@@ -86,6 +83,7 @@ export default {
         } catch {}
         return json({ ok: true, state: "available" }, 200, CORS);
       }
+
       if (p.startsWith("/api/brain/promote")) {
         try {
           const r = await handleBrainPromote?.(req, env, url);
@@ -93,6 +91,7 @@ export default {
         } catch {}
         return json({ ok: true, promoted: false, note: "promote handler missing" }, 200, CORS);
       }
+
       if (p.startsWith("/api/brain")) {
         try {
           const r = await handleBrainApi?.(req, env, url);
@@ -106,6 +105,7 @@ export default {
         }
         return json({ ok: false, error: "unknown endpoint" }, 404, CORS);
       }
+
       // selftest
       if (p.startsWith("/selftest")) {
         const res = await runSelfTestLocalDirect(env);
@@ -124,7 +124,6 @@ export default {
         if (r) return r;
         return json({ ok: true, note: "evolve triggered" }, 200, CORS);
       }
-
       // nightly auto-improve manual
       if (p === "/cron/auto-improve") {
         if (!["GET", "POST"].includes(req.method)) return json({ ok: false, error: "method not allowed" }, 405, CORS);
@@ -152,7 +151,7 @@ export default {
         return json({ ok: true, ...res }, 200, CORS);
       }
 
-      // --- Learn RUN: /admin/learn/run, /admin/brain/run
+      // --- Learn RUN: /admin/learn/run та /admin/brain/run ---
       if ((p === "/admin/learn/run" || p === "/admin/brain/run") && (method === "GET" || method === "POST")) {
         if (env.WEBHOOK_SECRET && url.searchParams.get("s") !== env.WEBHOOK_SECRET) {
           return json({ ok: false, error: "unauthorized" }, 401, CORS);
@@ -210,6 +209,7 @@ export default {
         } catch {}
         return html("<h3>Checklist + Energy</h3><p>Fallback UI.</p>");
       }
+
       if (p.startsWith("/admin/checklist")) {
         try {
           const r = await handleAdminChecklist?.(req, env, url);
@@ -217,6 +217,7 @@ export default {
         } catch {}
         return html(await checklistHtml?.(env).catch(() => "<h3>Checklist</h3>"));
       }
+
       if (p.startsWith("/admin/repo") || p.startsWith("/admin/archive")) {
         try {
           const r = await handleAdminRepo?.(req, env, url);
@@ -224,6 +225,7 @@ export default {
         } catch {}
         return html(`<h3>Repo / Архів</h3><p>Fallback UI.</p>`);
       }
+
       if (p.startsWith("/admin/statut")) {
         try {
           const r = await handleAdminStatut?.(req, env, url);
@@ -231,6 +233,7 @@ export default {
         } catch {}
         return html(await statutHtml?.(env).catch(() => "<h3>Statut</h3>"));
       }
+
       if (p.startsWith("/admin/brain")) {
         try {
           const r = await handleAdminBrain?.(req, env, url);
@@ -238,6 +241,7 @@ export default {
         } catch {}
         return json({ ok: true, note: "admin brain fallback" }, 200, CORS);
       }
+
       if (p.startsWith("/admin/energy")) {
         try {
           const r = await handleAdminEnergy?.(req, env, url);
@@ -328,7 +332,7 @@ export default {
         return html(`<h3>✅ Готово</h3><p>Тепер повернись у Telegram і натисни <b>Google Drive</b> ще раз.</p>`);
       }
 
-      // 404 fallback
+      // 404
       try {
         await appendChecklist(env, `[miss] ${new Date().toISOString()} ${req.method} ${p}${url.search}`);
       } catch {}
@@ -342,7 +346,6 @@ export default {
     await logHeartbeat(env);
 
     try {
-      // Запуск auto-evolve щогодини
       if (event && event.cron === "0 * * * *") {
         const u = new URL(abs(env, "/ai/evolve/auto"));
         if (env.WEBHOOK_SECRET) u.searchParams.set("s", env.WEBHOOK_SECRET);
