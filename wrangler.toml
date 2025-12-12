@@ -63,8 +63,7 @@ MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct,
 # кодовий
 MODEL_ORDER_CODE = "cf:@cf/meta/llama-3.2-11b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
 
-# ВАЖЛИВО: vision — спершу Gemini, потім CF-vision (бо CF може відвалюватись)
-MODEL_ORDER_VISION = "gemini:gemini-1.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct"
+MODEL_ORDER_VISION = "gemini:gemini-1.5-flash" 
 
 # дефолтні назви моделей (для читабельності в адмінці)
 GEMINI_MODEL = "gemini-2.5-flash"
