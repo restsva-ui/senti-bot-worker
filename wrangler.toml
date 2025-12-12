@@ -2,6 +2,7 @@ name = "senti-bot-worker"
 main = "src/index.js"
 compatibility_date = "2024-09-25"
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
+workers_dev = true
 
 # якщо тобі треба nodejs-compat – розкоментуй
 # compatibility_flags = ["nodejs_compat"]
@@ -16,7 +17,7 @@ crons = [
 
 [vars]
 # базові
-SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
+SERVICE_HOST = "https://senti-bot-worker.restsva.workers.dev"
 DRIVE_FOLDER_ID = "root"
 TELEGRAM_ADMIN_ID = "784869835"
 DEPLOY_ID = "local-dev"
@@ -33,6 +34,7 @@ ALLOW_PUBLIC_STATUT = "on"
 ALLOW_PUBLIC_CHECKLIST = "on"
 
 # сек'юрні токени ДЛЯ ВЕБХУКА й адмін-ендпойнтів
+# Рекомендація: винести в secrets (wrangler secret put ...), але залишаю як у тебе.
 WEBHOOK_SECRET = "senti1984"
 TG_WEBHOOK_SECRET = "senti1984"
 TELEGRAM_SECRET_TOKEN = "senti1984"
@@ -111,6 +113,7 @@ ENERGY_LOW_THRESHOLD = "10"
 binding = "DEDUP_KV"
 id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
 
+# legacy/extra (залишаю, бо може використовуватись у старих модулях)
 [[kv_namespaces]]
 binding = "OAUTH_KV"
 id = "e2a8d3941b4e41728318781e739a4d47"
@@ -127,6 +130,8 @@ id = "497eac980691495ea2a0bc8611892d65"
 binding = "USER_OAUTH_KV"
 id = "470d4f5c164a4a828c569eb9a52a5133"
 
+# УВАГА: зараз CHECKLIST_KV має той самий ID, що й TODO_KV.
+# Якщо це НЕ задумано — створи окремий KV namespace і підстав інший id.
 [[kv_namespaces]]
 binding = "CHECKLIST_KV"
 id = "497eac980691495ea2a0bc8611892d65"
@@ -156,4 +161,9 @@ id = "86a54c59ce674a558780c58bf1a47dfd"
 # ─────────────────────────────────────────
 [[r2_buckets]]
 binding = "LEARN_BUCKET"
-bucket_name = "senti-learn" 
+bucket_name = "senti-learn"
+
+# ДОДАНО: використовується модулями repo/snapshot/adminRepo (за твоєю структурою)
+[[r2_buckets]]
+binding = "REPO_BUCKET"
+bucket_name = "senti-repo"
