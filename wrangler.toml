@@ -4,6 +4,9 @@ compatibility_date = "2024-09-25"
 account_id = "2cf6e316af8623546c95c0354bc3aa00"
 workers_dev = true
 
+[ai]
+binding = "AI"
+
 # якщо тобі треба nodejs-compat – розкоментуй
 # compatibility_flags = ["nodejs_compat"]
 
@@ -34,6 +37,7 @@ ALLOW_PUBLIC_STATUT = "on"
 ALLOW_PUBLIC_CHECKLIST = "on"
 
 # сек'юрні токени ДЛЯ ВЕБХУКА й адмін-ендпойнтів
+# Рекомендація: винести в secrets (wrangler secret put ...), але залишаю як у тебе.
 WEBHOOK_SECRET = "senti1984"
 TG_WEBHOOK_SECRET = "senti1984"
 TELEGRAM_SECRET_TOKEN = "senti1984"
@@ -46,6 +50,7 @@ DIAG_TAGS = "on"
 
 # як малювати мап-лінки з vision / landmark
 MAP_LINK_STYLE = "arrow"
+# щоб телега коректно відображала <a href="...">
 TELEGRAM_PARSE_MODE = "HTML"
 
 # ─────────────────────────────────────────
@@ -53,18 +58,16 @@ TELEGRAM_PARSE_MODE = "HTML"
 # ─────────────────────────────────────────
 
 # головний (текстовий) порядок
-# ВАЖЛИВО: прибрано free:... щоб не ловити "No endpoints found"
-MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct"
+MODEL_ORDER = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-3.3-70b-instruct:free"
 
 # явний текстовий (якщо десь у коді береться саме TEXT)
-MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct"
+MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, free:meta-llama/llama-3.3-70b-instruct:free"
 
 # кодовий
-# openrouter:* залишаю, але він працюватиме ТІЛЬКИ якщо є OPENROUTER_API_KEY (secret)
-MODEL_ORDER_CODE = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct, openrouter:qwen/qwen3-coder:free"
+MODEL_ORDER_CODE = "cf:@cf/meta/llama-3.2-11b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-3.3-70b-instruct:free"
 
-# VISION: ставимо flash (не lite) як найстабільніший мультимодальний варіант
-MODEL_ORDER_VISION = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-vision-instruct"
+# VISION: ставимо актуальну vision-сумісну модель.
+MODEL_ORDER_VISION = "gemini:gemini-2.5-flash-lite, cf:@cf/meta/llama-3.2-11b-vision-instruct"
 
 # дефолтні назви моделей (для читабельності в адмінці)
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -72,15 +75,19 @@ CF_MODEL = "@cf/meta/llama-3.2-11b-instruct"
 CF_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
 
 # ─────────────────────────────────────────
-#    OpenRouter / fallback
+#    OpenRouter / безкоштовний fallback
 # ─────────────────────────────────────────
+# тут тільки URL-и та імена — сам ключ клади як secret:
+#   wrangler secret put OPENROUTER_API_KEY
 FREE_API_BASE_URL = "https://openrouter.ai/api"
 FREE_API_PATH     = "/v1/chat/completions"
 
+# старий/новий неймінг — код у тебе дивиться на обидва
 FREE_LLM_BASE_URL = "https://openrouter.ai/api"
-FREE_LLM_MODEL    = "meta-llama/llama-4-scout:free"
-FREE_API_MODEL    = "meta-llama/llama-4-scout:free"
+FREE_LLM_MODEL    = "meta-llama/llama-3.3-70b-instruct:free"
+FREE_API_MODEL    = "meta-llama/llama-3.3-70b-instruct:free"
 
+# щоб у хедерах OpenRouter було хто ти
 OPENROUTER_SITE_URL = "https://senti.restsva.app"
 OPENROUTER_APP_NAME = "Senti Bot Worker"
 
