@@ -2,7 +2,7 @@
 // Router для LLM/Vision провайдерів: Gemini / Cloudflare Workers AI / OpenRouter
 // - єдине місце, де визначається пріоритет моделей (черга)
 // - акуратний фолбек при помилках
-// - детальна diag-інфа в err.errors + (опційно) через diagWrap
+// - "diag" режим у відповіді (через env.DIAG_TAGS)
 
 import { diagWrap } from "./diag.js";
 
@@ -55,122 +55,50 @@ function toTextFromAny(x) {
   return String(x);
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function cleanModelNameForGemini(model) {
-  const raw = String(model || "").trim();
-  if (!raw) return "";
-  return raw.startsWith("models/") ? raw.slice("models/".length) : raw;
-}
-
-function extractSystemAndChat(messages) {
-  const sys = [];
-  const chat = [];
-  for (const m of Array.isArray(messages) ? messages : []) {
-    if (m?.role === "system") sys.push(String(m?.content || ""));
-    else chat.push({ role: m?.role || "user", content: String(m?.content || "") });
-  }
-  return { systemText: sys.join("\n").trim(), chat };
-}
-
-function guessMimeFromHeaders(ct) {
-  const s = String(ct || "").toLowerCase();
-  if (s.includes("image/png")) return "image/png";
-  if (s.includes("image/webp")) return "image/webp";
-  if (s.includes("image/gif")) return "image/gif";
-  if (s.includes("image/jpg") || s.includes("image/jpeg")) return "image/jpeg";
-  return "image/jpeg";
-}
-
-async function fetchImageAsInlineData(imageUrl) {
-  if (!imageUrl) return null;
-  const url = String(imageUrl);
-  if (!/^https?:\/\//i.test(url)) return null;
-
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`Image fetch failed HTTP ${resp.status}`);
-
-  const mimeType = guessMimeFromHeaders(resp.headers.get("content-type"));
-  const buf = await resp.arrayBuffer();
-
-  // base64 (без Buffer, щоб не залежати від nodejs_compat)
-  const bytes = new Uint8Array(buf);
-  let bin = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  const b64 = btoa(bin);
-
-  return { mimeType, data: b64 };
-}
-
 // ------------------------------
-// Gemini (Text + Vision)
+// Gemini
 // ------------------------------
 
-async function callGemini({ env, messages, model, temperature = 0.5, imageUrl = null }) {
+async function callGemini({ env, messages, model, temperature = 0.5 }) {
   const apiKey = env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("Missing GEMINI_API_KEY");
 
-  const { systemText, chat } = extractSystemAndChat(messages);
-
+  // Normalize model (accept "models/..." too)
   const raw = String(model || env.GEMINI_MODEL || "gemini-1.5-flash").trim();
-  const baseModel = cleanModelNameForGemini(raw) || "gemini-1.5-flash";
+  const baseModel = raw.startsWith("models/") ? raw.slice("models/".length) : raw;
 
+  // Try a small set of likely-valid variants to avoid hard failures when Google changes model aliases.
   const candidates = [];
-  const push = (m) => {
-    if (m && !candidates.includes(m)) candidates.push(m);
-  };
+  const push = (m) => { if (m && !candidates.includes(m)) candidates.push(m); };
 
   push(baseModel);
+  // Common alias pattern
   if (!/-(\d{3}|latest)$/.test(baseModel)) push(`${baseModel}-latest`);
+
+  // Додаткові “безпечні” фолбеки
+  push("gemini-2.0-flash");
+  push("gemini-2.0-flash-exp");
   push("gemini-1.5-flash-latest");
   push("gemini-1.5-pro-latest");
 
-  // Build Gemini contents
-  // For vision: we attach inlineData image in the first user message.
-  let inline = null;
-  if (imageUrl) {
-    inline = await fetchImageAsInlineData(imageUrl);
-  }
-
-  const contents = (chat.length ? chat : [{ role: "user", content: "" }]).map((m, idx) => {
-    const role = m.role === "assistant" ? "model" : "user";
-    const parts = [];
-
-    // first user message gets the image (if present)
-    if (inline && idx === 0 && role === "user") {
-      parts.push({ inlineData: { mimeType: inline.mimeType, data: inline.data } });
-    }
-
-    parts.push({ text: m.content || "" });
-    return { role, parts };
-  });
+  // Convert chat messages to Gemini "contents"
+  const contents = messages.map((m) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content || "" }],
+  }));
 
   const body = {
     contents,
     generationConfig: { temperature },
   };
 
-  // systemInstruction supported in v1 (and in many v1beta builds)
-  if (systemText) {
-    body.systemInstruction = { parts: [{ text: systemText }] };
-  }
-
   const tryOne = async (apiVersion, m) => {
-    const url =
-      `https://generativelanguage.googleapis.com/${apiVersion}/models/` +
-      `${encodeURIComponent(m)}:generateContent?key=${encodeURIComponent(apiKey)}`;
-
+    const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${encodeURIComponent(m)}:generateContent?key=${encodeURIComponent(apiKey)}`;
     const resp = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
       const msg = data?.error?.message || `Gemini HTTP ${resp.status}`;
@@ -178,107 +106,52 @@ async function callGemini({ env, messages, model, temperature = 0.5, imageUrl = 
       err.status = resp.status;
       err.apiVersion = apiVersion;
       err.model = m;
-      err.data = data;
       throw err;
     }
-
-    const text =
-      data?.candidates?.[0]?.content?.parts
-        ?.map((p) => p.text || "")
-        .join("") || "";
-
+    const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
     return text.trim();
   };
 
   let lastErr;
-
+  // Prefer v1; fall back to v1beta for older accounts/regions.
   for (const apiVersion of ["v1", "v1beta"]) {
     for (const m of candidates) {
       try {
         return await tryOne(apiVersion, m);
       } catch (e) {
         lastErr = e;
-
+        // Only keep trying if it's plausibly a "model alias" issue or transient.
+        // For auth/quota errors, fail fast.
         const s = Number(e?.status || 0);
         const msg = String(e?.message || "");
         const aliasish = s === 404 || /not found|is not found|model/i.test(msg);
         const transient = s === 429 || s === 500 || s === 503;
-
-        // Fail fast for auth/quota/permission
-        if (s === 401 || s === 403) throw e;
-
-        // Slight backoff on rate limits
-        if (s === 429) await sleep(250);
-
         if (!(aliasish || transient)) throw e;
       }
     }
   }
-
   throw lastErr || new Error("Gemini call failed");
 }
 
 // ------------------------------
-// Cloudflare Workers AI (REST or Binding)
+// Cloudflare Workers AI
 // ------------------------------
 
 async function callCfAi({ env, messages, model, temperature = 0.5 }) {
-  // 1) Preferred: REST via CLOUDFLARE_API_TOKEN + CF_ACCOUNT_ID
-  const apiToken = env.CLOUDFLARE_API_TOKEN;
-  const accountId = env.CF_ACCOUNT_ID || env.CLOUDFLARE_ACCOUNT_ID || env.account_id;
+  // Головний шлях: AI binding (після додавання [ai] binding="AI" у wrangler.toml)
+  if (!env?.AI) throw new Error("Missing AI binding (env.AI)");
 
-  if (apiToken && accountId) {
-    const url = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(
-      accountId
-    )}/ai/run/${encodeURIComponent(model)}`;
+  const prompt = messages
+    .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${m.content}`)
+    .join("\n");
 
-    // CF AI expects { messages:[{role,content}], temperature?... } for chat-like models
-    const body = {
-      messages: (Array.isArray(messages) ? messages : []).map((m) => ({
-        role: m.role,
-        content: m.content,
-      })),
-      temperature,
-    };
+  const res = await env.AI.run(model, {
+    prompt,
+    temperature,
+  });
 
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        Authorization: `Bearer ${apiToken}`,
-      },
-      body: JSON.stringify(body),
-    });
-
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      const msg =
-        data?.errors?.[0]?.message ||
-        data?.error?.message ||
-        `Cloudflare AI HTTP ${resp.status}`;
-      const err = new Error(msg);
-      err.status = resp.status;
-      err.data = data;
-      throw err;
-    }
-
-    // typical: { result: { response: "..." } } OR { result: "..." }
-    const out = data?.result?.response ?? data?.result ?? "";
-    return String(out || "").trim();
-  }
-
-  // 2) Fallback: binding env.AI (only if you set it in wrangler.toml bindings)
-  if (env?.AI) {
-    const prompt = (Array.isArray(messages) ? messages : [])
-      .map((m) => `${m.role === "assistant" ? "Assistant" : m.role === "system" ? "System" : "User"}: ${m.content}`)
-      .join("\n");
-
-    const res = await env.AI.run(model, { prompt, temperature });
-    return (res?.response ?? res ?? "").toString().trim();
-  }
-
-  // If neither exists, it's not configured.
-  throw new Error("Cloudflare AI not configured (need CLOUDFLARE_API_TOKEN+CF_ACCOUNT_ID or env.AI binding)");
+  // Workers AI часто повертає { response: "..."} або string
+  return (res?.response ?? res ?? "").toString().trim();
 }
 
 // ------------------------------
@@ -289,10 +162,7 @@ async function callOpenRouter({ env, messages, model, temperature = 0.5 }) {
   const apiKey = env.OPENROUTER_API_KEY || env.FREE_API_KEY || env.FREE_LLM_API_KEY;
   if (!apiKey) throw new Error("Missing OPENROUTER_API_KEY");
 
-  const baseUrl = (env.FREE_API_BASE_URL || env.FREE_LLM_BASE_URL || "https://openrouter.ai/api").replace(
-    /\/$/,
-    ""
-  );
+  const baseUrl = (env.FREE_API_BASE_URL || env.FREE_LLM_BASE_URL || "https://openrouter.ai/api").replace(/\/$/, "");
   const path = env.FREE_API_PATH || "/v1/chat/completions";
   const url = `${baseUrl}${path}`;
 
@@ -304,47 +174,84 @@ async function callOpenRouter({ env, messages, model, temperature = 0.5 }) {
   if (env.OPENROUTER_SITE_URL) headers["HTTP-Referer"] = env.OPENROUTER_SITE_URL;
   if (env.OPENROUTER_APP_NAME) headers["X-Title"] = env.OPENROUTER_APP_NAME;
 
-  const body = {
-    model,
-    temperature,
-    messages: (Array.isArray(messages) ? messages : []).map((m) => ({
-      role: m.role,
-      content: m.content,
-    })),
-  };
+  const defaultModel =
+    model ||
+    env.FREE_LLM_MODEL ||
+    env.FREE_API_MODEL ||
+    "meta-llama/llama-3.3-70b-instruct:free";
 
-  const resp = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
+  // Додаткові фолбеки (особливо якщо free-модель зникла з OpenRouter)
+  const fallbackStr = env.OPENROUTER_FALLBACK_MODELS || "";
+  const fallbackModels = splitOrder(fallbackStr);
 
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    const msg = data?.error?.message || data?.error || `OpenRouter HTTP ${resp.status}`;
-    const err = new Error(msg);
-    err.status = resp.status;
-    err.data = data;
-    throw err;
+  const candidates = [];
+  const push = (m) => { if (m && !candidates.includes(m)) candidates.push(m); };
+
+  push(defaultModel);
+  // “безпечні” безкоштовні моделі, які часто доступні
+  push("meta-llama/llama-3.3-70b-instruct:free");
+  push("google/gemini-2.0-flash-exp:free");
+  for (const m of fallbackModels) push(m);
+
+  let lastErr;
+
+  for (const m of candidates) {
+    const body = {
+      model: m,
+      temperature,
+      messages: messages.map((x) => ({ role: x.role, content: x.content })),
+    };
+
+    const resp = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const msg = data?.error?.message || data?.error || `OpenRouter HTTP ${resp.status}`;
+      const err = new Error(msg);
+      err.status = resp.status;
+      err.data = data;
+      err.model = m;
+      lastErr = err;
+
+      // Якщо “No endpoints found” / 404 — пробуємо наступну модель.
+      const s = Number(resp.status || 0);
+      const text = String(msg || "");
+      const endpointsMissing = /No endpoints found/i.test(text);
+      const notFound = s === 404 || /not found/i.test(text);
+      if (endpointsMissing || notFound) continue;
+
+      // Для auth/quota — немає сенсу продовжувати.
+      if (s === 401 || s === 403 || s === 402) throw err;
+
+      continue;
+    }
+
+    const text =
+      data?.choices?.[0]?.message?.content ||
+      data?.choices?.[0]?.text ||
+      "";
+    return String(text).trim();
   }
 
-  const text = data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || "";
-  return String(text).trim();
+  throw lastErr || new Error("OpenRouter call failed");
 }
-
 // ------------------------------
 // Public API
 // ------------------------------
 
 export async function askAnyModel(env, messages, opts = {}) {
   const kind = opts.kind || "text";
-  const temperature = typeof opts.temperature === "number" ? opts.temperature : 0.5;
+  const temperature =
+    typeof opts.temperature === "number" ? opts.temperature : 0.5;
 
   const order = pickOrder(env, kind);
   if (!order.length) throw new Error("MODEL_ORDER is empty");
 
   const errors = [];
-
   for (const entry of order) {
     const { provider, model } = normalizeProviderEntry(entry);
 
@@ -369,7 +276,6 @@ export async function askAnyModel(env, messages, opts = {}) {
       errors.push({
         provider,
         model,
-        status: Number(e?.status || 0) || undefined,
         message: String(e?.message || e),
       });
       continue;
@@ -384,15 +290,21 @@ export async function askAnyModel(env, messages, opts = {}) {
 }
 
 export async function askVision(env, prompt, imageUrl, opts = {}) {
-  const temperature = typeof opts.temperature === "number" ? opts.temperature : 0.2;
+  const temperature =
+    typeof opts.temperature === "number" ? opts.temperature : 0.2;
 
   const order = pickOrder(env, "vision");
   if (!order.length) throw new Error("MODEL_ORDER_VISION is empty");
 
-  const messages = [{ role: "user", content: prompt || "Describe the image." }];
+  // У цьому репо vision йде як “текст+URL картинки”.
+  const withImage = [
+    {
+      role: "user",
+      content: `${prompt || "Describe the image."}\nImage URL: ${imageUrl}`,
+    },
+  ];
 
   const errors = [];
-
   for (const entry of order) {
     const { provider, model } = normalizeProviderEntry(entry);
 
@@ -400,25 +312,17 @@ export async function askVision(env, prompt, imageUrl, opts = {}) {
       if (provider === "gemini") {
         const out = await callGemini({
           env,
-          messages,
+          messages: withImage,
           model,
           temperature,
-          imageUrl,
         });
         return out;
       }
 
       if (provider === "cf") {
-        // CF vision через REST: imageUrl має бути доступний з CF (публічний або тимчасовий TG URL)
-        // Якщо imageUrl приватний — краще Gemini inlineData (вище) або зробити проксі-ендпойнт.
         const out = await callCfAi({
           env,
-          messages: [
-            {
-              role: "user",
-              content: `${prompt || "Describe the image."}\nImage URL: ${imageUrl}`,
-            },
-          ],
+          messages: withImage,
           model,
           temperature,
         });
@@ -428,12 +332,7 @@ export async function askVision(env, prompt, imageUrl, opts = {}) {
       if (provider === "openrouter" || provider === "free") {
         const out = await callOpenRouter({
           env,
-          messages: [
-            {
-              role: "user",
-              content: `${prompt || "Describe the image."}\nImage URL: ${imageUrl}`,
-            },
-          ],
+          messages: withImage,
           model,
           temperature,
         });
@@ -445,7 +344,6 @@ export async function askVision(env, prompt, imageUrl, opts = {}) {
       errors.push({
         provider,
         model,
-        status: Number(e?.status || 0) || undefined,
         message: String(e?.message || e),
       });
       continue;
