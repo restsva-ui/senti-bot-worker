@@ -2,46 +2,60 @@
 
 import { getUserTokens } from "../lib/userDrive.js";
 import { abs } from "../utils/url.js";
-import { getEnergy, spendEnergy } from "../lib/energy.js";
-import { t } from "../lib/i18n.js";
+import { visionDescribe } from "./visionDescribe.js";
+import { getVisionFlags, buildVisionPrompt } from "./visionPolicy.js";
 import { TG } from "../lib/tg.js";
-import { driveSaveFromUrl } from "../lib/drive.js";
-import { describeImage } from "./visionDescribe.js";
-import { pickReplyLanguage } from "../lib/i18n.js";
 
 const {
-  energyLinks,
-  sendPlain,
+  ADMIN,
   mainKeyboard,
 } = TG;
 
-// Допоміжна функція для вибору фото з повідомлення (замість імпорту)
-function pickPhoto(msg) {
-  const arr = Array.isArray(msg?.photo) ? msg.photo : null;
-  if (!arr?.length) return null;
-  const ph = arr[arr.length - 1];
-  return {
-    type: "photo",
-    file_id: ph.file_id,
-    name: `photo_${ph.file_unique_id}.jpg`,
-  };
+// Допоміжна функція для вибору найбільшого фото
+function pickLargestPhoto(photo = []) {
+  if (!Array.isArray(photo) || !photo.length) return null;
+  return photo.slice().sort((a, b) => (b.file_size || 0) - (a.file_size || 0))[0];
 }
 
-export async function handlePhoto(update, tgContext) {
-  const env = tgContext.env;
-  const msg = update.message;
+export async function handlePhoto(env, msg, lang) {
   const chatId = msg?.chat?.id;
-  const userId = msg?.from?.id;
-  const userLang = msg?.from?.language_code || "uk";
-  let lang = pickReplyLanguage(msg);
+  if (!chatId) return;
 
-  const driveOn = await TG.getDriveMode(env, userId);
-  const photo = pickPhoto(msg);
-  if (!photo) {
-    await sendPlain(env, chatId, "Не вдалося знайти фото у повідомленні.");
-    return new Response("OK");
+  const isAdmin = ADMIN(env, msg?.from?.id, msg?.from?.username);
+
+  const ph = pickLargestPhoto(msg.photo);
+  if (!ph?.file_id) {
+    await TG.sendMessage(chatId, "Фото не знайдено в повідомленні.", { reply_markup: mainKeyboard(isAdmin) }, env);
+    return;
   }
 
-  // ... решта без змін ...
-  // (додавай код як було раніше, але без використання pickFilenameByLang)
+  // Забираємо файл через Telegram
+  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+  const file = await fetch(`https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(ph.file_id)}`).then(r => r.json());
+  const filePath = file?.result?.file_path;
+  if (!filePath) {
+    await TG.sendMessage(chatId, "Не зміг отримати файл з Telegram.", { reply_markup: mainKeyboard(isAdmin) }, env);
+    return;
+  }
+
+  const fileUrl = `https://api.telegram.org/file/bot${token}/${filePath}`;
+  const bin = await fetch(fileUrl).then(r => r.arrayBuffer());
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(bin)));
+  const mime = "image/jpeg";
+
+  const { wantOcr, wantLandmarks } = getVisionFlags(env);
+  const systemHint = buildVisionPrompt(lang, { wantLandmarks, wantOcr });
+
+  const caption = String(msg.caption || "");
+  const location = msg.location || null;
+
+  const out = await visionDescribe(env, lang, {
+    imageBase64: b64,
+    imageMime: mime,
+    caption,
+    location,
+    systemHint,
+  });
+
+  await TG.sendMessage(chatId, out, { reply_markup: mainKeyboard(isAdmin) }, env);
 }
