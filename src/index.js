@@ -39,6 +39,7 @@ function esc(s = "") {
 
 export default {
   async fetch(req, env) {
+    const BOT_TOKEN = env.BOT_TOKEN || env.TELEGRAM_BOT_TOKEN || "";
     const url = new URL(req.url);
     const p = (url.pathname || "/").replace(/\/+$/, "") || "/";
     url.pathname = p;
@@ -124,6 +125,7 @@ export default {
         if (r) return r;
         return json({ ok: true, note: "evolve triggered" }, 200, CORS);
       }
+
       // nightly auto-improve manual
       if (p === "/cron/auto-improve") {
         if (!["GET", "POST"].includes(req.method)) return json({ ok: false, error: "method not allowed" }, 405, CORS);
@@ -265,18 +267,21 @@ export default {
 
       // tg helpers
       if (p === "/tg/get-webhook") {
-        const r = await TG.getWebhook(env.BOT_TOKEN);
+        if (!BOT_TOKEN) return json({ ok: false, error: "BOT_TOKEN missing" }, 500, CORS);
+        const r = await TG.getWebhook(BOT_TOKEN);
         return new Response(await r.text(), { headers: { "content-type": "application/json" } });
       }
       if (p === "/tg/set-webhook") {
+        if (!BOT_TOKEN) return json({ ok: false, error: "BOT_TOKEN missing" }, 500, CORS);
         const target = abs(env, "/webhook");
-        const r = await TG.setWebhook(env.BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
+        const r = await TG.setWebhook(BOT_TOKEN, target, env.TG_WEBHOOK_SECRET);
         return new Response(await r.text(), { headers: { "content-type": "application/json" } });
       }
       if (p === "/tg/del-webhook") {
+        if (!BOT_TOKEN) return json({ ok: false, error: "BOT_TOKEN missing" }, 500, CORS);
         const r =
-          (await TG.deleteWebhook?.(env.BOT_TOKEN)) ||
-          (await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteWebhook`));
+          (await TG.deleteWebhook?.(BOT_TOKEN)) ||
+          (await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/deleteWebhook`));
         return new Response(await r.text(), { headers: { "content-type": "application/json" } });
       }
 
@@ -379,4 +384,4 @@ export default {
       await appendChecklist(env, `[${new Date().toISOString()}] learn_queue:error ${String(e)}`);
     }
   }
-}; 
+};
