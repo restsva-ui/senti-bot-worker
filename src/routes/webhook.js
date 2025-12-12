@@ -1,6 +1,7 @@
 // src/routes/webhook.js
 import { TG } from "../lib/tg.js";
 import { json } from "../utils/http.js";
+import { handlePhoto } from "../flows/handlePhoto.js";
 
 function nowKyiv() {
   // Europe/Kyiv без зовнішніх залежностей
@@ -52,7 +53,6 @@ async function callOpenRouter(env, lang, userText) {
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${key}`,
-        // не критично, але корисно
         "HTTP-Referer": env.OPENROUTER_SITE_URL || "https://senti.restsva.app",
         "X-Title": env.OPENROUTER_APP_NAME || "Senti Bot Worker",
       },
@@ -124,10 +124,10 @@ async function answerWithAI(env, lang, userText) {
   // Пріоритет як у твоєму wrangler: Gemini → OpenRouter
   const preferGemini = String(env.MODEL_ORDER || "").includes("gemini:");
   const preferFree = String(env.MODEL_ORDER || "").includes("free:");
-
   const tryGeminiFirst = preferGemini || !preferFree;
 
   const errors = [];
+
   if (tryGeminiFirst) {
     try {
       if (env.GOOGLE_API_KEY) return await callGemini(env, lang, userText);
@@ -152,7 +152,6 @@ async function answerWithAI(env, lang, userText) {
     }
   }
 
-  // Фолбек без падіння
   const diag = String(env.DIAG_TAGS || "off").toLowerCase() === "on" ? `\n\n(diag: ${errors.join(" | ")})` : "";
   if (lang === "ru") return `Сейчас у меня проблемы с AI-провайдерами. Попробуй позже.${diag}`;
   if (lang === "en") return `I have issues reaching AI providers right now. Please try again later.${diag}`;
@@ -160,9 +159,9 @@ async function answerWithAI(env, lang, userText) {
 }
 
 function startText(lang, firstName) {
-  if (lang === "ru") return `Привет, ${firstName || "друг"}! Я Senti.\nНапиши вопрос или отправь фото (восстановление vision — в процессе).`;
-  if (lang === "en") return `Hi, ${firstName || "friend"}! I'm Senti.\nAsk a question or send a photo (vision restore is in progress).`;
-  return `Привіт, ${firstName || "друже"}! Я Senti.\nНапиши питання або надішли фото (відновлення vision — в процесі).`;
+  if (lang === "ru") return `Привет, ${firstName || "друг"}! Я Senti.\nНапиши вопрос или отправь фото — я опишу его.`;
+  if (lang === "en") return `Hi, ${firstName || "friend"}! I'm Senti.\nAsk a question or send a photo — I'll describe it.`;
+  return `Привіт, ${firstName || "друже"}! Я Senti.\nНапиши питання або надішли фото — я опишу його.`;
 }
 
 export default async function webhook(req, env) {
@@ -189,7 +188,6 @@ export default async function webhook(req, env) {
     const chatId = cq?.message?.chat?.id;
     const data = String(cq?.data || "");
 
-    // якщо є метод у твоєму TG — добре; якщо нема — тихо ігноруємо
     try {
       await TG.answerCallbackQuery?.(cq.id, { text: "OK" }, env);
     } catch {}
@@ -199,7 +197,6 @@ export default async function webhook(req, env) {
         await TG.sendMessage(chatId, `✅ OK\n${nowKyiv()}`, {}, env);
         return json({ ok: true });
       }
-      // універсальний фолбек
       await TG.sendMessage(chatId, `🔘 ${data}`, {}, env);
     }
     return json({ ok: true });
@@ -218,9 +215,7 @@ export default async function webhook(req, env) {
       startText(lang, msg?.from?.first_name),
       {
         reply_markup: {
-          inline_keyboard: [
-            [{ text: "✅ Ping", callback_data: "ping" }],
-          ],
+          inline_keyboard: [[{ text: "✅ Ping", callback_data: "ping" }]],
         },
       },
       env
@@ -238,25 +233,49 @@ export default async function webhook(req, env) {
     return json({ ok: true });
   }
 
-  // Фото/медіа: зараз не валимо воркер, відповідаємо стабільно
-  if (msg.photo || msg.document || msg.video || msg.voice || msg.sticker) {
+  // ✅ Фото: запускаємо реальний vision pipeline з /flows/handlePhoto.js
+  // (він сам дістане файл з Telegram, сконвертує в base64 і викличе askVision)
+  if (msg.photo) {
+    try {
+      await handlePhoto(env, msg, lang);
+      return json({ ok: true });
+    } catch (e) {
+      const diag = String(env.DIAG_TAGS || "off").toLowerCase() === "on" ? `\n(diag: ${String(e?.message || e)})` : "";
+      const m =
+        lang === "ru"
+          ? `Не получилось обработать фото. Попробуй еще раз позже.${diag}`
+          : lang === "en"
+          ? `I couldn't process the photo. Please try again later.${diag}`
+          : `Не вдалося обробити фото. Спробуй пізніше.${diag}`;
+      await TG.sendMessage(chatId, m, {}, env);
+      return json({ ok: true });
+    }
+  }
+
+  // Інше медіа — стабільний фолбек без падінь
+  if (msg.document || msg.video || msg.voice || msg.sticker) {
     const m =
       lang === "ru"
-        ? "Медиа получено. Vision сейчас восстанавливаю — скоро снова будет описание фото."
+        ? "Медиа получено. Пока я обрабатываю только фото. Пришли фото как изображение."
         : lang === "en"
-        ? "Media received. I'm restoring vision support—photo descriptions will be back soon."
-        : "Медіа отримано. Відновлюю vision — скоро знову буде опис фото.";
+        ? "Media received. For now I process photos only. Please send an image."
+        : "Медіа отримано. Поки що я обробляю лише фото. Надішли фото як зображення.";
     await TG.sendMessage(chatId, m, {}, env);
     return json({ ok: true });
   }
 
   // Порожній текст
   if (!text) {
-    await TG.sendMessage(chatId, lang === "ru" ? "Напиши текстовый запрос." : lang === "en" ? "Send a text query." : "Напиши текстовий запит.", {}, env);
+    await TG.sendMessage(
+      chatId,
+      lang === "ru" ? "Напиши текстовый запрос." : lang === "en" ? "Send a text query." : "Напиши текстовий запит.",
+      {},
+      env
+    );
     return json({ ok: true });
   }
 
-  // Основна відповідь через AI напряму (Gemini/OpenRouter)
+  // Основна відповідь через AI (Gemini/OpenRouter)
   const reply = await answerWithAI(env, lang, text);
   await TG.sendMessage(chatId, reply, {}, env);
 
