@@ -20,27 +20,69 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: "npm"
 
-      - name: ⚙️ Install Wrangler
-        run: npm install -g wrangler@3
+      - name: 📦 Install deps
+        run: npm ci
+
+      - name: ⚙️ Install Wrangler v4 (dev dependency)
+        run: npm i -D wrangler@^4
+
+      # Діагностика: хто саме у CF, який акаунт, і чи бачить токен R2 buckets
+      - name: 🔎 Cloudflare diag (whoami + r2 list)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          echo "Wrangler:"
+          npx wrangler --version
+          echo ""
+          echo "whoami:"
+          npx wrangler whoami
+          echo ""
+          echo "Account ID from secrets: $CLOUDFLARE_ACCOUNT_ID"
+          echo ""
+          echo "R2 buckets visible to token:"
+          npx wrangler r2 bucket list
+          echo ""
 
       - name: 🚀 Deploy to Cloudflare
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: wrangler deploy
+        run: npx wrangler deploy --config wrangler.toml
 
       # ⬇️ автолог у чеклист після деплою
       - name: ✍️ Note deploy to Checklist
         if: always()
         env:
-          WORKER_HOST: ${{ secrets.WORKER_HOST }}          # напр. senti-bot-worker.restsva.workers.dev
+          WORKER_HOST: ${{ secrets.WORKER_HOST }}          # опціонально
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}    # має збігатися з env.WEBHOOK_SECRET у Worker
           COMMIT_SHA: ${{ github.sha }}
           ACTOR: ${{ github.actor }}
           RUN_ID: ${{ github.run_id }}
           STATUS: ${{ job.status }}
         run: |
+          set -e
+
+          # 1) Визначимо WORKER_HOST
+          # - якщо секрет є → беремо його
+          # - інакше пробуємо дістати SERVICE_HOST з wrangler.toml (vars.SERVICE_HOST)
+          # - інакше fallback
+          if [ -z "${WORKER_HOST}" ]; then
+            SERVICE_HOST=$(node -e "const fs=require('fs'); const t=fs.readFileSync('wrangler.toml','utf8'); const m=t.match(/SERVICE_HOST\\s*=\\s*\"([^\"]+)\"/); console.log(m?m[1]:'');" || true)
+            if [ -n "${SERVICE_HOST}" ]; then
+              WORKER_HOST=$(node -e "try{const u=new URL(process.env.SERVICE_HOST); console.log(u.host);}catch(e){console.log('');}" )
+            fi
+          fi
+
+          if [ -z "${WORKER_HOST}" ]; then
+            WORKER_HOST="senti-bot-worker.restsva.workers.dev"
+          fi
+
+          echo "Using WORKER_HOST=${WORKER_HOST}"
+
+          # 2) Надсилаємо нотатку
           curl -sS --get "https://${WORKER_HOST}/ci/deploy-note" \
             --data-urlencode "s=${WEBHOOK_SECRET}" \
             --data-urlencode "commit=${COMMIT_SHA}" \
@@ -48,4 +90,3 @@ jobs:
             --data-urlencode "deploy=${RUN_ID}" \
             --data-urlencode "status=${STATUS}" \
             --data-urlencode "from=github-actions" || true
- 
