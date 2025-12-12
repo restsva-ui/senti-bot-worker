@@ -63,7 +63,9 @@ MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct,
 # кодовий
 MODEL_ORDER_CODE = "cf:@cf/meta/llama-3.2-11b-instruct, openrouter:qwen/qwen3-coder:free, free:meta-llama/llama-4-scout:free"
 
-MODEL_ORDER_VISION = "gemini:gemini-1.5-pro, cf:@cf/meta/llama-3.2-11b-vision-instruct"
+# VISION: прибрано gemini-1.5-* (у тебе 404 на v1beta generateContent),
+# ставимо актуальну vision-сумісну модель.
+MODEL_ORDER_VISION = "gemini:gemini-2.5-flash-lite, cf:@cf/meta/llama-3.2-11b-vision-instruct"
 
 # дефолтні назви моделей (для читабельності в адмінці)
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -112,7 +114,6 @@ ENERGY_LOW_THRESHOLD = "10"
 binding = "DEDUP_KV"
 id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
 
-# legacy/extra (залишаю, бо може використовуватись у старих модулях)
 [[kv_namespaces]]
 binding = "OAUTH_KV"
 id = "e2a8d3941b4e41728318781e739a4d47"
@@ -135,22 +136,18 @@ id = "470d4f5c164a4a828c569eb9a52a5133"
 binding = "CHECKLIST_KV"
 id = "497eac980691495ea2a0bc8611892d65"
 
-# лайки / нічні імпруви
 [[kv_namespaces]]
 binding = "LIKES_KV"
 id = "f7d480c281ad47d2bdf270fadf4de021"
 
-# журнал енергії
 [[kv_namespaces]]
 binding = "ENERGY_LOG_KV"
 id = "9e6f0ed5bf2544a9a63d57455900a844"
 
-# коротка пам'ять між сесіями
 [[kv_namespaces]]
 binding = "DIALOG_KV"
 id = "63c0d1e0962a419ca54082893410b28e"
 
-# черга навчання
 [[kv_namespaces]]
 binding = "LEARN_QUEUE_KV"
 id = "86a54c59ce674a558780c58bf1a47dfd"
@@ -162,7 +159,6 @@ id = "86a54c59ce674a558780c58bf1a47dfd"
 binding = "LEARN_BUCKET"
 bucket_name = "senti-learn"
 
-# ДОДАНО: використовується модулями repo/snapshot/adminRepo (за твоєю структурою)
 [[r2_buckets]]
 binding = "REPO_BUCKET"
 bucket_name = "senti-repo"
