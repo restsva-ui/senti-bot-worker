@@ -17,10 +17,7 @@ export const mainKeyboard = (isAdmin = false) => {
   const rows = [];
 
   // базовий рядок для всіх
-  const baseRow = [
-    { text: BTN_DRIVE },
-    { text: BTN_SENTI },
-  ];
+  const baseRow = [{ text: BTN_DRIVE }, { text: BTN_SENTI }];
   rows.push(baseRow);
 
   // Codex тільки адмінам
@@ -42,7 +39,6 @@ export const mainKeyboard = (isAdmin = false) => {
 export const ADMIN = (env, userId, username) => {
   const idStr = String(userId || "");
 
-  // IDs з багатьох полів, включно з тим, що у тебе реально стоїть у воркері
   const idCandidates = [
     env.TELEGRAM_ADMIN_ID,
     env.TELEGRAM_OWNER_ID,
@@ -58,15 +54,11 @@ export const ADMIN = (env, userId, username) => {
 
   const idMatch = idCandidates.some((v) => v === idStr);
 
-  // usernames
   const uname = String(username || "")
     .replace("@", "")
     .toLowerCase();
 
-  const unameCandidates = [
-    env.ADMIN_USERNAME,
-    env.ADMIN_USERNAMES,
-  ]
+  const unameCandidates = [env.ADMIN_USERNAME, env.ADMIN_USERNAMES]
     .filter(Boolean)
     .join(",")
     .split(",")
@@ -88,38 +80,142 @@ export const energyLinks = (env, userId) => {
   };
 };
 
+/* ───────────────── ВНУТРІШНІ УТИЛІТИ ─────────────── */
+function pickToken(env) {
+  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+  if (!token) throw new Error("Telegram token missing (set TELEGRAM_BOT_TOKEN or BOT_TOKEN)");
+  return token;
+}
+
+function apiBase(env) {
+  return `https://api.telegram.org/bot${pickToken(env)}`;
+}
+
+async function safeFetchJson(url, init) {
+  const r = await fetch(url, init);
+  const txt = await r.text();
+  let data = null;
+  try {
+    data = JSON.parse(txt);
+  } catch {
+    data = { ok: false, error: "non-json response", raw: txt };
+  }
+  if (!r.ok) {
+    const msg = data?.description || data?.error || `HTTP ${r.status}`;
+    const e = new Error(msg);
+    e.status = r.status;
+    e.data = data;
+    throw e;
+  }
+  return data;
+}
+
 /* ───────────────── РОЗБИВКА ПОВІДОМЛЕНЬ ─────────── */
 function splitForTelegram(text, chunk = 3900) {
   const s = String(text ?? "");
   if (s.length <= chunk) return [s];
   const out = [];
-  for (let i = 0; i < s.length; i += chunk) {
-    out.push(s.slice(i, i + chunk));
-  }
+  for (let i = 0; i < s.length; i += chunk) out.push(s.slice(i, i + chunk));
   return out;
 }
 
 /* ───────────────── ВІДПРАВКА ТЕКСТУ ─────────────── */
-export async function sendPlain(env, chatId, text, extra = {}) {
-  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
-  const url = `https://api.telegram.org/bot${token}/sendMessage`;
-
+/**
+ * sendMessage — основний метод (сумісний з webhook/index.js)
+ * opts:
+ *  - parse_mode
+ *  - reply_markup
+ *  - disable_web_page_preview
+ *  - reply_to_message_id
+ */
+export async function sendMessage(chatId, text, opts = {}, env) {
+  const base = apiBase(env);
   const chunks = splitForTelegram(text);
+
+  let last = null;
   for (const part of chunks) {
     const body = {
       chat_id: chatId,
       text: part,
-      disable_web_page_preview: true,
+      disable_web_page_preview: opts.disable_web_page_preview ?? true,
     };
-    if (extra.parse_mode) body.parse_mode = extra.parse_mode;
-    if (extra.reply_markup) body.reply_markup = extra.reply_markup;
+    if (opts.parse_mode) body.parse_mode = opts.parse_mode;
+    if (opts.reply_markup) body.reply_markup = opts.reply_markup;
+    if (opts.reply_to_message_id) body.reply_to_message_id = opts.reply_to_message_id;
 
-    await fetch(url, {
+    last = await safeFetchJson(`${base}/sendMessage`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
   }
+  return last;
+}
+
+/**
+ * sendPlain — залишаю як у тебе (просто обгортка над sendMessage)
+ */
+export async function sendPlain(env, chatId, text, extra = {}) {
+  return await sendMessage(chatId, text, extra, env);
+}
+
+/* ───────────────── CALLBACK QUERY ─────────────── */
+/**
+ * Безпечно підтверджує натискання кнопки
+ */
+export async function answerCallbackQuery(callbackQueryId, opts = {}, env) {
+  const base = apiBase(env);
+  const body = { callback_query_id: callbackQueryId };
+  if (opts.text) body.text = opts.text;
+  if (typeof opts.show_alert === "boolean") body.show_alert = opts.show_alert;
+
+  return await safeFetchJson(`${base}/answerCallbackQuery`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/* ───────────────── WEBHOOK HELPERS ─────────────── */
+export async function getWebhook(tokenOrEnv) {
+  // підтримка: TG.getWebhook(env.BOT_TOKEN) як у твоєму index.js
+  const token =
+    typeof tokenOrEnv === "string"
+      ? tokenOrEnv
+      : tokenOrEnv?.TELEGRAM_BOT_TOKEN || tokenOrEnv?.BOT_TOKEN;
+
+  if (!token) throw new Error("getWebhook: token missing");
+  const r = await fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`);
+  return r;
+}
+
+export async function setWebhook(tokenOrEnv, url, secretToken) {
+  const token =
+    typeof tokenOrEnv === "string"
+      ? tokenOrEnv
+      : tokenOrEnv?.TELEGRAM_BOT_TOKEN || tokenOrEnv?.BOT_TOKEN;
+
+  if (!token) throw new Error("setWebhook: token missing");
+  const body = { url };
+  if (secretToken) body.secret_token = secretToken;
+
+  const r = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return r;
+}
+
+export async function deleteWebhook(tokenOrEnv) {
+  const token =
+    typeof tokenOrEnv === "string"
+      ? tokenOrEnv
+      : tokenOrEnv?.TELEGRAM_BOT_TOKEN || tokenOrEnv?.BOT_TOKEN;
+
+  if (!token) throw new Error("deleteWebhook: token missing");
+  const r = await fetch(`https://api.telegram.org/bot${token}/deleteWebhook`);
+  return r;
 }
 
 /* ───────────────── ЗАПИТ ЛОКАЦІЇ ─────────────── */
@@ -131,12 +227,12 @@ export const askLocationKeyboard = () => ({
 
 /* ───────────────── ДІЇ ЧАТУ ─────────────── */
 export async function sendChatAction(env, chatId, action = "typing") {
-  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
-  await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
+  const base = apiBase(env);
+  await safeFetchJson(`${base}/sendChatAction`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, action }),
-  });
+  }).catch(() => {});
 }
 
 export async function withTyping(env, chatId, fn) {
@@ -150,23 +246,22 @@ export async function withUploading(env, chatId, fn) {
 
 /* ───────────────── Спінер ─────────────── */
 export async function startSpinner(env, chatId, base = "Думаю над відповіддю") {
-  const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
+  const api = apiBase(env);
   let alive = true;
   let dot = 0;
 
-  const msg = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+  const msg = await safeFetchJson(`${api}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text: base }),
-  })
-    .then((r) => r.json())
-    .catch(() => null);
+  }).catch(() => null);
 
   const timer = setInterval(async () => {
     if (!alive || !msg?.result?.message_id) return;
     dot = (dot + 1) % 4;
     const text = base + ".".repeat(dot);
-    await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
+
+    await fetch(`${api}/editMessageText`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -196,9 +291,14 @@ export const TG = {
   ADMIN,
   energyLinks,
   sendPlain,
+  sendMessage,
+  answerCallbackQuery,
   askLocationKeyboard,
   sendChatAction,
   withTyping,
   withUploading,
   startSpinner,
+  getWebhook,
+  setWebhook,
+  deleteWebhook,
 };
