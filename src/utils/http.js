@@ -1,24 +1,48 @@
 // src/utils/http.js
+// Сумісний з викликами у src/index.js: json(data, status, CORS), html(content, status, CORS)
 
-// Загальні CORS-заголовки для читальних/публічних ендпойнтів
 export const CORS = {
-  "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET,HEAD,POST,OPTIONS",
-  "access-control-allow-headers": "Content-Type,Authorization,x-telegram-bot-api-secret-token",
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, x-telegram-bot-api-secret-token",
 };
 
-// JSON-відповідь з можливістю додати/перекрити заголовки
-export const json = (obj, status = 200, headers = {}) =>
-  new Response(JSON.stringify(obj, null, 2), {
+export function preflight(extraHeaders = {}) {
+  return new Response(null, {
+    status: 204,
+    headers: { ...CORS, ...extraHeaders },
+  });
+}
+
+export function json(data, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(data, null, 2), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8", ...headers },
+    headers: {
+      ...CORS,
+      ...extraHeaders,
+      "Content-Type": "application/json; charset=utf-8",
+    },
   });
+}
 
-// HTML-відповідь (без автоматичного додавання CORS, як і було раніше)
-export const html = (markup, headers = {}) =>
-  new Response(markup, {
-    headers: { "content-type": "text/html; charset=utf-8", ...headers },
+export function html(content, status = 200, extraHeaders = {}) {
+  return new Response(content, {
+    status,
+    headers: {
+      ...CORS,
+      ...extraHeaders,
+      "Content-Type": "text/html; charset=utf-8",
+    },
   });
+}
 
-// Префлайт для OPTIONS
-export const preflight = () => new Response(null, { status: 204, headers: CORS });
+export function text(content, status = 200, extraHeaders = {}) {
+  return new Response(String(content ?? ""), {
+    status,
+    headers: {
+      ...CORS,
+      ...extraHeaders,
+      "Content-Type": "text/plain; charset=utf-8",
+    },
+  });
+}
