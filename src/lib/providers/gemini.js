@@ -1,72 +1,62 @@
 // src/lib/providers/gemini.js
-// Уніфікований виклик Gemini 2.x (текст/код/візн).
-// Працює через REST (generateContent). Передаємо ключ і модель іззовні,
-// щоб не залежати від способу зберігання секретів у Worker.
+import { sleep } from "../utils/sleep.js";
+import { diagWrap } from "../diag.js";
 
-const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta";
-
-function asGeminiParts(messages = []) {
-  // Очікуємо масив {role, content} (роль ігноруємо; все як user)
-  // content може бути string або масив частин {type,text|inline_data}
-  const parts = [];
-  for (const m of messages) {
-    if (!m) continue;
-    if (Array.isArray(m.content)) {
-      for (const p of m.content) {
-        if (!p) continue;
-        if (p.type === "text" || typeof p.text === "string") {
-          parts.push({ text: p.text ?? p });
-        } else if (p.type === "inline_data" && p.mime_type && p.data) {
-          parts.push({ inline_data: { mime_type: p.mime_type, data: p.data } });
-        }
-      }
-    } else if (typeof m.content === "string") {
-      parts.push({ text: m.content });
-    }
-  }
-  return parts;
+function geminiEndpoint(env) {
+  const v = String(env?.GEMINI_API_VERSION || "v1").trim();
+  return `https://generativelanguage.googleapis.com/${v}`;
 }
 
-export async function callGemini({ apiKey, model, messages = [], imageBase64, temperature = 0.2 }) {
-  if (!apiKey) throw new Error("Gemini: missing apiKey");
-  if (!model) throw new Error("Gemini: missing model");
-  const url = `${GEMINI_ENDPOINT}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+export const callGemini = diagWrap("gemini", async ({ env, model, messages, safety }) => {
+  const key = env.GEMINI_API_KEY;
+  if (!key) throw new Error("GEMINI_API_KEY missing");
 
-  const parts = asGeminiParts(messages);
+  const url = `${geminiEndpoint(env)}/models/${model}:generateContent?key=${key}`;
 
-  // Додаємо зображення (якщо є)
-  if (imageBase64) {
-    parts.push({
-      inline_data: { mime_type: "image/png", data: imageBase64 }
+  const contents = [];
+  // messages: [{role:'user'|'assistant', content:[{type:'text',text}]}]
+  for (const m of messages || []) {
+    const parts = [];
+    for (const c of m.content || []) {
+      if (c.type === "text") parts.push({ text: c.text || "" });
+      else if (c.type === "image_url") {
+        // Gemini expects inline_data or file_data; у нас image_url зазвичай обробляється вище.
+        // Лишаємо як текстове посилання (стабільно).
+        parts.push({ text: c.image_url?.url ? `Image: ${c.image_url.url}` : "Image: (missing url)" });
+      }
+    }
+    contents.push({
+      role: m.role === "assistant" ? "model" : "user",
+      parts,
     });
   }
 
   const body = {
-    contents: [{ role: "user", parts }],
-    generationConfig: {
-      temperature,
-      // можна додати: topK, topP, maxOutputTokens
-    }
+    contents,
   };
 
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
+  if (safety) body.safetySettings = safety;
 
-  if (!r.ok) {
-    const txt = await r.text().catch(() => "");
-    throw new Error(`Gemini HTTP ${r.status}: ${txt}`);
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg = data?.error?.message || `${res.status} ${res.statusText}`;
+        throw new Error(`gemini ${res.status} ${msg}`);
+      }
+      return data;
+    } catch (e) {
+      lastErr = e;
+      await sleep(250 * attempt);
+    }
   }
 
-  const j = await r.json();
-
-  // Витягуємо текст з candidates
-  const text =
-    j?.candidates?.[0]?.content?.parts
-      ?.map(p => (typeof p.text === "string" ? p.text : ""))
-      .join("") ?? "";
-
-  return { text, raw: j };
-}
+  throw lastErr || new Error("gemini failed");
+});
