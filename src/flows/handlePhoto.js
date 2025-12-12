@@ -1,59 +1,34 @@
 // src/flows/handlePhoto.js
 import { TG } from "../lib/tg.js";
-import { askVision } from "../lib/modelRouter.js";
+import { visionDescribe } from "./visionDescribe.js";
+import { diagWrap } from "../lib/diag.js";
 
-export async function handlePhoto(env, msg, lang = "uk") {
-  const chatId = msg.chat.id;
+export const handlePhoto = diagWrap("handlePhoto", async ({ env, chat_id, message_id, photos, caption, userLang }) => {
+  const photo = photos?.[photos.length - 1];
+  if (!photo?.file_id) throw new Error("No photo file_id");
 
-  // беремо найбільше фото
-  const photo = msg.photo?.[msg.photo.length - 1];
-  if (!photo?.file_id) {
-    await TG.sendMessage(chatId, t(lang), {}, env);
-    return;
-  }
+  // Було: TG.getFile(...) -> інколи падає як "is not a function"
+  // Стабільно: напряму через TG.callApi("getFile")
+  const file = await TG.callApi(env, "getFile", { file_id: photo.file_id });
+  const file_path = file?.result?.file_path;
+  if (!file_path) throw new Error("TG.getFile: missing file_path");
+  const file_url = `https://api.telegram.org/file/bot${env.TELEGRAM_TOKEN}/${file_path}`;
 
-  // 1. отримуємо файл з Telegram
-  const file = await TG.getFile(env, photo.file_id);
-  if (!file?.file_path) {
-    throw new Error("TG file_path missing");
-  }
-
-  // 2. завантажуємо байти
-  const url = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
-  const imgRes = await fetch(url);
-  const buffer = await imgRes.arrayBuffer();
-
-  // 3. base64
-  const base64 = btoa(
-    String.fromCharCode(...new Uint8Array(buffer))
-  );
-
-  // 4. ❗ VISION — ТІЛЬКИ GEMINI
-  const visionModelOrder = "gemini:gemini-1.5-flash";
-
-  const prompt =
-    lang === "ru"
-      ? "Опиши изображение кратко и точно. Если не уверен — скажи."
-      : lang === "en"
-      ? "Describe the image briefly and accurately. If unsure, say so."
-      : "Опиши зображення коротко і точно. Якщо не впевнений — скажи.";
-
-  const text = await askVision(
+  const prompt = caption || "";
+  const vision = await visionDescribe({
     env,
-    visionModelOrder,
+    imageUrl: file_url,
     prompt,
-    {
-      imageBase64: base64,
-      imageMime: "image/jpeg",
-      systemHint: "You are a vision assistant."
-    }
-  );
+    userLang,
+  });
 
-  await TG.sendMessage(chatId, text, {}, env);
-}
+  const text = (vision?.text || vision?.answer || vision?.content || "").trim() || (userLang === "ru"
+    ? "Не удалось описать фото."
+    : "Не вдалося описати фото.");
 
-function t(lang) {
-  if (lang === "ru") return "Не вдалося отримати фото.";
-  if (lang === "en") return "Could not read the photo.";
-  return "Не вдалося отримати фото.";
-}
+  await TG.sendMessage(env, chat_id, text, {
+    reply_to_message_id: message_id,
+  });
+
+  return { ok: true };
+});
