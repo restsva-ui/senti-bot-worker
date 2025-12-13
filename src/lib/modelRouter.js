@@ -55,33 +55,38 @@ function toTextFromAny(x) {
   return String(x);
 }
 
+function abToB64(ab) {
+  // Cloudflare Workers має btoa, але є ліміт на аргументи, тому робимо чанками
+  const bytes = new Uint8Array(ab);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
 // ------------------------------
-// Gemini
+// Gemini (text + vision)
 // ------------------------------
 
-async function callGemini({ env, messages, model, temperature = 0.5 }) {
+async function callGeminiText({ env, messages, model, temperature = 0.5 }) {
   const apiKey = env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("Missing GEMINI_API_KEY");
 
-  // Normalize model (accept "models/..." too)
   const raw = String(model || env.GEMINI_MODEL || "gemini-1.5-flash").trim();
   const baseModel = raw.startsWith("models/") ? raw.slice("models/".length) : raw;
 
-  // Try a small set of likely-valid variants to avoid hard failures when Google changes model aliases.
   const candidates = [];
-  const push = (m) => { if (m && !candidates.includes(m)) candidates.push(m); };
+  const push = (m) => {
+    if (m && !candidates.includes(m)) candidates.push(m);
+  };
 
   push(baseModel);
-  // Common alias pattern
   if (!/-(\d{3}|latest)$/.test(baseModel)) push(`${baseModel}-latest`);
-
-  // Додаткові “безпечні” фолбеки
-  push("gemini-2.0-flash");
-  push("gemini-2.0-flash-exp");
   push("gemini-1.5-flash-latest");
   push("gemini-1.5-pro-latest");
 
-  // Convert chat messages to Gemini "contents"
   const contents = messages.map((m) => ({
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content || "" }],
@@ -108,20 +113,18 @@ async function callGemini({ env, messages, model, temperature = 0.5 }) {
       err.model = m;
       throw err;
     }
-    const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
-    return text.trim();
+    const text =
+      data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
+    return String(text).trim();
   };
 
   let lastErr;
-  // Prefer v1; fall back to v1beta for older accounts/regions.
   for (const apiVersion of ["v1", "v1beta"]) {
     for (const m of candidates) {
       try {
         return await tryOne(apiVersion, m);
       } catch (e) {
         lastErr = e;
-        // Only keep trying if it's plausibly a "model alias" issue or transient.
-        // For auth/quota errors, fail fast.
         const s = Number(e?.status || 0);
         const msg = String(e?.message || "");
         const aliasish = s === 404 || /not found|is not found|model/i.test(msg);
@@ -133,12 +136,88 @@ async function callGemini({ env, messages, model, temperature = 0.5 }) {
   throw lastErr || new Error("Gemini call failed");
 }
 
+async function callGeminiVision({
+  env,
+  prompt,
+  imageArrayBuffer,
+  mimeType,
+  model,
+  temperature = 0.2,
+}) {
+  const apiKey = env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("Missing GEMINI_API_KEY");
+
+  const raw = String(model || env.GEMINI_VISION_MODEL || env.GEMINI_MODEL || "gemini-1.5-flash").trim();
+  const baseModel = raw.startsWith("models/") ? raw.slice("models/".length) : raw;
+
+  const candidates = [];
+  const push = (m) => {
+    if (m && !candidates.includes(m)) candidates.push(m);
+  };
+
+  push(baseModel);
+  if (!/-(\d{3}|latest)$/.test(baseModel)) push(`${baseModel}-latest`);
+  push("gemini-1.5-flash-latest");
+  push("gemini-1.5-pro-latest");
+
+  const imgB64 = abToB64(imageArrayBuffer);
+
+  const body = {
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { text: prompt || "Опиши зображення коротко і точно." },
+          { inline_data: { mime_type: mimeType || "image/jpeg", data: imgB64 } },
+        ],
+      },
+    ],
+    generationConfig: { temperature },
+  };
+
+  const tryOne = async (apiVersion, m) => {
+    const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${encodeURIComponent(m)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const msg = data?.error?.message || `Gemini HTTP ${resp.status}`;
+      const err = new Error(msg);
+      err.status = resp.status;
+      err.apiVersion = apiVersion;
+      err.model = m;
+      throw err;
+    }
+    const text =
+      data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
+    return String(text).trim();
+  };
+
+  let lastErr;
+  for (const apiVersion of ["v1", "v1beta"]) {
+    for (const m of candidates) {
+      try {
+        return await tryOne(apiVersion, m);
+      } catch (e) {
+        lastErr = e;
+        const s = Number(e?.status || 0);
+        const msg = String(e?.message || "");
+        const aliasish = s === 404 || /not found|is not found|model/i.test(msg);
+        const transient = s === 429 || s === 500 || s === 503;
+        if (!(aliasish || transient)) throw e;
+      }
+    }
+  }
+  throw lastErr || new Error("Gemini vision call failed");
+}
 // ------------------------------
 // Cloudflare Workers AI
 // ------------------------------
 
-async function callCfAi({ env, messages, model, temperature = 0.5 }) {
-  // Головний шлях: AI binding (після додавання [ai] binding="AI" у wrangler.toml)
+async function callCfAiText({ env, messages, model, temperature = 0.5 }) {
   if (!env?.AI) throw new Error("Missing AI binding (env.AI)");
 
   const prompt = messages
@@ -150,7 +229,19 @@ async function callCfAi({ env, messages, model, temperature = 0.5 }) {
     temperature,
   });
 
-  // Workers AI часто повертає { response: "..."} або string
+  return (res?.response ?? res ?? "").toString().trim();
+}
+
+async function callCfAiVision({ env, prompt, imageArrayBuffer, model, temperature = 0.2 }) {
+  if (!env?.AI) throw new Error("Missing AI binding (env.AI)");
+
+  const image = Array.from(new Uint8Array(imageArrayBuffer));
+  const res = await env.AI.run(model, {
+    prompt: prompt || "Опиши зображення коротко і точно.",
+    image,
+    temperature,
+  });
+
   return (res?.response ?? res ?? "").toString().trim();
 }
 
@@ -174,79 +265,33 @@ async function callOpenRouter({ env, messages, model, temperature = 0.5 }) {
   if (env.OPENROUTER_SITE_URL) headers["HTTP-Referer"] = env.OPENROUTER_SITE_URL;
   if (env.OPENROUTER_APP_NAME) headers["X-Title"] = env.OPENROUTER_APP_NAME;
 
-  const defaultModel =
-    model ||
-    env.FREE_LLM_MODEL ||
-    env.FREE_API_MODEL ||
-    "meta-llama/llama-3.3-70b-instruct:free";
+  const body = {
+    model,
+    temperature,
+    messages: messages.map((m) => ({ role: m.role, content: m.content })),
+  };
 
-  // Додаткові фолбеки (особливо якщо free-модель зникла з OpenRouter)
-  const fallbackStr = env.OPENROUTER_FALLBACK_MODELS || "";
-  const fallbackModels = splitOrder(fallbackStr);
-
-  const candidates = [];
-  const push = (m) => { if (m && !candidates.includes(m)) candidates.push(m); };
-
-  push(defaultModel);
-  // “безпечні” безкоштовні моделі, які часто доступні
-  push("meta-llama/llama-3.3-70b-instruct:free");
-  push("google/gemini-2.0-flash-exp:free");
-  for (const m of fallbackModels) push(m);
-
-  let lastErr;
-
-  for (const m of candidates) {
-    const body = {
-      model: m,
-      temperature,
-      messages: messages.map((x) => ({ role: x.role, content: x.content })),
-    };
-
-    const resp = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
-
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      const msg = data?.error?.message || data?.error || `OpenRouter HTTP ${resp.status}`;
-      const err = new Error(msg);
-      err.status = resp.status;
-      err.data = data;
-      err.model = m;
-      lastErr = err;
-
-      // Якщо “No endpoints found” / 404 — пробуємо наступну модель.
-      const s = Number(resp.status || 0);
-      const text = String(msg || "");
-      const endpointsMissing = /No endpoints found/i.test(text);
-      const notFound = s === 404 || /not found/i.test(text);
-      if (endpointsMissing || notFound) continue;
-
-      // Для auth/quota — немає сенсу продовжувати.
-      if (s === 401 || s === 403 || s === 402) throw err;
-
-      continue;
-    }
-
-    const text =
-      data?.choices?.[0]?.message?.content ||
-      data?.choices?.[0]?.text ||
-      "";
-    return String(text).trim();
+  const resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    const msg = data?.error?.message || data?.error || `OpenRouter HTTP ${resp.status}`;
+    const err = new Error(msg);
+    err.status = resp.status;
+    err.data = data;
+    throw err;
   }
 
-  throw lastErr || new Error("OpenRouter call failed");
+  const text = data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || "";
+  return String(text).trim();
 }
+
 // ------------------------------
 // Public API
 // ------------------------------
 
 export async function askAnyModel(env, messages, opts = {}) {
   const kind = opts.kind || "text";
-  const temperature =
-    typeof opts.temperature === "number" ? opts.temperature : 0.5;
+  const temperature = typeof opts.temperature === "number" ? opts.temperature : 0.5;
 
   const order = pickOrder(env, kind);
   if (!order.length) throw new Error("MODEL_ORDER is empty");
@@ -256,53 +301,34 @@ export async function askAnyModel(env, messages, opts = {}) {
     const { provider, model } = normalizeProviderEntry(entry);
 
     try {
-      if (provider === "gemini") {
-        const out = await callGemini({ env, messages, model, temperature });
-        return out;
-      }
-
-      if (provider === "cf") {
-        const out = await callCfAi({ env, messages, model, temperature });
-        return out;
-      }
-
-      if (provider === "openrouter" || provider === "free") {
-        const out = await callOpenRouter({ env, messages, model, temperature });
-        return out;
-      }
+      if (provider === "gemini") return await callGeminiText({ env, messages, model, temperature });
+      if (provider === "cf") return await callCfAiText({ env, messages, model, temperature });
+      if (provider === "openrouter" || provider === "free") return await callOpenRouter({ env, messages, model, temperature });
 
       throw new Error(`Unknown provider: ${provider}`);
     } catch (e) {
-      errors.push({
-        provider,
-        model,
-        message: String(e?.message || e),
-      });
+      errors.push({ provider, model, message: String(e?.message || e) });
       continue;
     }
   }
 
   const last = errors[errors.length - 1];
-  const msg = last?.message || "No providers succeeded";
-  const err = new Error(msg);
+  const err = new Error(last?.message || "No providers succeeded");
   err.errors = errors;
   throw err;
 }
 
 export async function askVision(env, prompt, imageUrl, opts = {}) {
-  const temperature =
-    typeof opts.temperature === "number" ? opts.temperature : 0.2;
+  const temperature = typeof opts.temperature === "number" ? opts.temperature : 0.2;
 
   const order = pickOrder(env, "vision");
   if (!order.length) throw new Error("MODEL_ORDER_VISION is empty");
 
-  // У цьому репо vision йде як “текст+URL картинки”.
-  const withImage = [
-    {
-      role: "user",
-      content: `${prompt || "Describe the image."}\nImage URL: ${imageUrl}`,
-    },
-  ];
+  // 1) Завантажуємо байти картинки (Telegram file URL або будь-який https URL)
+  const imgResp = await fetch(imageUrl);
+  if (!imgResp.ok) throw new Error(`Image download failed HTTP ${imgResp.status}`);
+  const mimeType = imgResp.headers.get("content-type") || "image/jpeg";
+  const imageArrayBuffer = await imgResp.arrayBuffer();
 
   const errors = [];
   for (const entry of order) {
@@ -310,49 +336,27 @@ export async function askVision(env, prompt, imageUrl, opts = {}) {
 
     try {
       if (provider === "gemini") {
-        const out = await callGemini({
-          env,
-          messages: withImage,
-          model,
-          temperature,
-        });
-        return out;
+        return await callGeminiVision({ env, prompt, imageArrayBuffer, mimeType, model, temperature });
       }
 
       if (provider === "cf") {
-        const out = await callCfAi({
-          env,
-          messages: withImage,
-          model,
-          temperature,
-        });
-        return out;
+        return await callCfAiVision({ env, prompt, imageArrayBuffer, model, temperature });
       }
 
+      // OpenRouter vision не гарантуємо (залежить від моделі). Пропускаємо.
       if (provider === "openrouter" || provider === "free") {
-        const out = await callOpenRouter({
-          env,
-          messages: withImage,
-          model,
-          temperature,
-        });
-        return out;
+        throw new Error("OpenRouter vision disabled in this build");
       }
 
       throw new Error(`Unknown provider: ${provider}`);
     } catch (e) {
-      errors.push({
-        provider,
-        model,
-        message: String(e?.message || e),
-      });
+      errors.push({ provider, model, message: String(e?.message || e) });
       continue;
     }
   }
 
   const last = errors[errors.length - 1];
-  const msg = last?.message || "No vision providers succeeded";
-  const err = new Error(msg);
+  const err = new Error(last?.message || "No vision providers succeeded");
   err.errors = errors;
   throw err;
 }
@@ -361,19 +365,14 @@ export async function askVision(env, prompt, imageUrl, opts = {}) {
 // Optional: diagnostic wrapper
 // ------------------------------
 
-export function askAnyModelDiag(env, messages, opts = {}) {
-  return diagWrap(env, async () => {
-    const out = await askAnyModel(env, messages, opts);
-    return out;
-  });
-}
+// У repo diagWrap повертає функцію-обгортку, яка ловить помилки і додає "diag:" у відповідь.
+export const askAnyModelDiag = diagWrap("askAnyModel", async (env, messages, opts = {}) => {
+  return await askAnyModel(env, messages, opts);
+});
 
-export function askVisionDiag(env, prompt, imageUrl, opts = {}) {
-  return diagWrap(env, async () => {
-    const out = await askVision(env, prompt, imageUrl, opts);
-    return out;
-  });
-}
+export const askVisionDiag = diagWrap("askVision", async (env, prompt, imageUrl, opts = {}) => {
+  return await askVision(env, prompt, imageUrl, opts);
+});
 
 // ------------------------------
 // Convenience helpers used around the repo
