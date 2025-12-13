@@ -30,6 +30,9 @@ import { runSelfRegulation } from "./lib/selfRegulate.js";
 import { handleAiImprove } from "./routes/aiImprove.js";
 import { handleAdminUsage } from "./routes/adminUsage.js";
 
+// ✅ Mini App Voice Visual
+import { handleVoiceApp } from "./routes/appVoice.js";
+
 const VERSION = "senti-worker-2025-10-20-learn-admin-only";
 
 // локальний esc для безпечного виводу в HTML
@@ -54,6 +57,11 @@ export default {
 
     try {
       if (p === "/") return html(home(env));
+
+      // ✅ Mini App: Voice visualizer
+      if (p === "/app/voice") {
+        return handleVoiceApp(req);
+      }
 
       if (p === "/health") {
         try {
@@ -219,8 +227,7 @@ export default {
         } catch {}
         return html(await checklistHtml?.(env).catch(() => "<h3>Checklist</h3>"));
       }
-
-      if (p.startsWith("/admin/repo") || p.startsWith("/admin/archive")) {
+if (p.startsWith("/admin/repo") || p.startsWith("/admin/archive")) {
         try {
           const r = await handleAdminRepo?.(req, env, url);
           if (r && r.status !== 404) return r;
@@ -346,8 +353,7 @@ export default {
       return json({ ok: false, error: String(e) }, 500, CORS);
     }
   },
-
-  async scheduled(event, env) {
+async scheduled(event, env) {
     await logHeartbeat(env);
 
     try {
