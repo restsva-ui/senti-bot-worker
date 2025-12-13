@@ -2,6 +2,7 @@
 import { TG } from "../lib/tg.js";
 import { json } from "../utils/http.js";
 import { handlePhoto } from "../flows/handlePhoto.js";
+import { abs } from "../utils/url.js";
 
 function nowKyiv() {
   // Europe/Kyiv без зовнішніх залежностей
@@ -164,6 +165,12 @@ function startText(lang, firstName) {
   return `Привіт, ${firstName || "друже"}! Я Senti.\nНапиши питання або надішли фото — я опишу його.`;
 }
 
+function voiceIntroText(lang) {
+  if (lang === "ru") return "🎙 Senti Voice: открой Mini App и проверь визуализацию голоса.";
+  if (lang === "en") return "🎙 Senti Voice: open the Mini App to see the voice visualization.";
+  return "🎙 Senti Voice: відкрий Mini App і перевір візуалізацію голосу.";
+}
+
 export default async function webhook(req, env) {
   let update;
   try {
@@ -208,14 +215,47 @@ export default async function webhook(req, env) {
   const chatId = msg.chat.id;
   const text = String(msg.text || "").trim();
 
-  // /start
+  const userId = msg?.from?.id;
+  const username = msg?.from?.username;
+  const isAdmin = TG.ADMIN?.(env, userId, username) || false;
+
+  // /start -> віддаємо і inline, і ГОЛОВНУ клавіатуру (щоб кнопки НЕ зникали)
   if (text === "/start") {
     await TG.sendMessage(
       chatId,
       startText(lang, msg?.from?.first_name),
       {
         reply_markup: {
+          ...TG.mainKeyboard(isAdmin),
+          // Додатково inline ping як швидка перевірка
           inline_keyboard: [[{ text: "✅ Ping", callback_data: "ping" }]],
+        },
+      },
+      env
+    );
+    return json({ ok: true });
+  }
+
+  // /menu -> примусово повертаємо кнопки, якщо користувач їх сховав
+  if (text === "/menu") {
+    await TG.sendMessage(
+      chatId,
+      lang === "ru" ? "Клавиатура восстановлена." : lang === "en" ? "Keyboard restored." : "Клавіатуру відновлено.",
+      { reply_markup: TG.mainKeyboard(isAdmin) },
+      env
+    );
+    return json({ ok: true });
+  }
+
+  // /voice -> кнопка web_app на твій Mini App /app/voice
+  if (text === "/voice") {
+    const appUrl = abs(env, "/app/voice");
+    await TG.sendMessage(
+      chatId,
+      voiceIntroText(lang),
+      {
+        reply_markup: {
+          inline_keyboard: [[{ text: "🎙 Senti Voice", web_app: { url: appUrl } }]],
         },
       },
       env
@@ -232,15 +272,15 @@ export default async function webhook(req, env) {
     await TG.sendMessage(chatId, `🕒 ${nowKyiv()}`, {}, env);
     return json({ ok: true });
   }
-
-  // ✅ Фото: запускаємо реальний vision pipeline з /flows/handlePhoto.js
+// ✅ Фото: запускаємо реальний vision pipeline з /flows/handlePhoto.js
   // (він сам дістане файл з Telegram, сконвертує в base64 і викличе askVision)
   if (msg.photo) {
     try {
       await handlePhoto(env, msg, lang);
       return json({ ok: true });
     } catch (e) {
-      const diag = String(env.DIAG_TAGS || "off").toLowerCase() === "on" ? `\n(diag: ${String(e?.message || e)})` : "";
+      const diag =
+        String(env.DIAG_TAGS || "off").toLowerCase() === "on" ? `\n(diag: ${String(e?.message || e)})` : "";
       const m =
         lang === "ru"
           ? `Не получилось обработать фото. Попробуй еще раз позже.${diag}`
