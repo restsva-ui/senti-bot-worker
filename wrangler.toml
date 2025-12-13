@@ -57,17 +57,16 @@ TELEGRAM_PARSE_MODE = "HTML"
 # ─────────────────────────────────────────
 #            ПОРЯДКИ МОДЕЛЕЙ
 # ─────────────────────────────────────────
-# ВАЖЛИВО: прибрано free:* бо воно і дає "No endpoints found…"
 # Залишаємо 3 провайдери: gemini -> cf -> openrouter
 
 # головний (текстовий) порядок
-MODEL_ORDER = "gemini:gemini-2.5-flash, gemini:gemini-1.5-flash-latest, cf:@cf/meta/llama-3.2-11b-instruct, openrouter:google/gemini-2.0-flash-exp"
+MODEL_ORDER = "gemini:gemini-2.5-flashash, gemini:gemini-1.5-flash-latest, cf:@cf/meta/llama-3.2-11b-instruct, openrouter:google/gemini-2.0-flash-exp"
 
 # явний текстовий (якщо десь у коді береться саме TEXT)
 MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, gemini:gemini-1.5-flash-latest, cf:@cf/meta/llama-3.2-11b-instruct, openrouter:google/gemini-2.0-flash-exp"
 
-# кодовий
-MODEL_ORDER_CODE = "cf:@cf/meta/llama-3.2-11b-instruct, openrouter:qwen/qwen3-coder:free, gemini:gemini-1.5-flash-latest"
+# кодовий (❗ прибрав :free щоб не було random fail)
+MODEL_ORDER_CODE = "cf:@cf/meta/llama-3.2-11b-instruct, gemini:gemini-1.5-flash-latest, openrouter:google/gemini-2.0-flash-exp"
 
 # VISION (gemini vision inline bytes -> cf vision)
 MODEL_ORDER_VISION = "gemini:gemini-2.5-flash-lite, gemini:gemini-1.5-flash-latest, cf:@cf/meta/llama-3.2-11b-vision-instruct"
@@ -82,6 +81,9 @@ CF_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
 # ─────────────────────────────────────────
 FREE_API_BASE_URL = "https://openrouter.ai/api"
 FREE_API_PATH     = "/v1/chat/completions"
+
+# ✅ ВАЖЛИВО: щоб webhook.js НЕ падав на дефолт "meta-llama/llama-4-scout:free"
+FREE_API_MODEL = "google/gemma-3n-e4b-it:free"
 
 # щоб у хедерах OpenRouter було хто ти
 OPENROUTER_SITE_URL = "https://senti.restsva.app"
@@ -104,7 +106,6 @@ ENERGY_RECOVER_PER_MIN = "1"
 ENERGY_COST_TEXT = "1"
 ENERGY_COST_IMAGE = "5"
 ENERGY_LOW_THRESHOLD = "10"
-
 # ─────────────────────────────────────────
 #                 KV bindings
 # ─────────────────────────────────────────
