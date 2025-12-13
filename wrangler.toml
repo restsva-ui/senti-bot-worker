@@ -20,7 +20,10 @@ crons = [
 
 [vars]
 # базові
-SERVICE_HOST = "https://senti-bot-worker.restsva.workers.dev"
+# ВАЖЛИВО: SERVICE_HOST має бути БЕЗ https://
+# бо твоя функція abs() сама додає https://
+SERVICE_HOST = "senti-bot-worker.restsva.workers.dev"
+
 DRIVE_FOLDER_ID = "root"
 TELEGRAM_ADMIN_ID = "784869835"
 DEPLOY_ID = "local-dev"
@@ -118,13 +121,17 @@ id = "497eac980691495ea2a0bc8611892d65"
 binding = "LIKES_KV"
 id = "f7d480c281ad47d2bdf270fadf4de021"
 
+# ПОВЕРНУТО: у коді використовується
 [[kv_namespaces]]
 binding = "ENERGY_LOG_KV"
 id = "9e6f0ed5bf2544a9a63d57455900a844"
 
+# ЗАЛИШЕНО: для Learn-черги
 [[kv_namespaces]]
 binding = "LEARN_QUEUE_KV"
 id = "86a54c59ce674a558780c58bf1a47dfd"
+
+# ВАЖЛИВО: DIALOG_KV ПРИБРАНО — саме його ID ("63c0d1…") у тебе не існує і валить deploy (code 10041)
 
 # ─────────────────────────────────────────
 #                 R2 buckets
