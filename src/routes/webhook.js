@@ -5,7 +5,6 @@ import { handlePhoto } from "../flows/handlePhoto.js";
 import { abs } from "../utils/url.js";
 
 function nowKyiv() {
-  // Europe/Kyiv без зовнішніх залежностей
   return new Intl.DateTimeFormat("uk-UA", {
     timeZone: "Europe/Kyiv",
     year: "numeric",
@@ -122,7 +121,6 @@ async function callGemini(env, lang, userText) {
 }
 
 async function answerWithAI(env, lang, userText) {
-  // Пріоритет як у твоєму wrangler: Gemini → OpenRouter
   const preferGemini = String(env.MODEL_ORDER || "").includes("gemini:");
   const preferFree = String(env.MODEL_ORDER || "").includes("free:");
   const tryGeminiFirst = preferGemini || !preferFree;
@@ -166,9 +164,16 @@ function startText(lang, firstName) {
 }
 
 function voiceIntroText(lang) {
-  if (lang === "ru") return "🎙 Senti Voice: открой Mini App и проверь визуализацию голоса.";
-  if (lang === "en") return "🎙 Senti Voice: open the Mini App to see the voice visualization.";
-  return "🎙 Senti Voice: відкрий Mini App і перевір візуалізацію голосу.";
+  if (lang === "ru") return "🎙 Senti Voice: открой Mini App.";
+  if (lang === "en") return "🎙 Senti Voice: open the Mini App.";
+  return "🎙 Senti Voice: відкрий Mini App.";
+}
+
+function parseCommand(text) {
+  // /voice або /voice@BotName або "/voice   "
+  const first = String(text || "").trim().split(/\s+/)[0];
+  if (!first.startsWith("/")) return "";
+  return first.split("@")[0].toLowerCase();
 }
 
 export default async function webhook(req, env) {
@@ -179,7 +184,6 @@ export default async function webhook(req, env) {
     return json({ ok: false, error: "invalid json" }, 400);
   }
 
-  // Додаткова безпека (у тебе ще є перевірка в index.js — дубль безпечний)
   if (env.TG_WEBHOOK_SECRET) {
     const sec = req.headers.get("x-telegram-bot-api-secret-token");
     if (sec !== env.TG_WEBHOOK_SECRET) return json({ ok: false, error: "unauthorized" }, 401);
@@ -190,7 +194,6 @@ export default async function webhook(req, env) {
   const msg = update?.message || update?.edited_message;
   const cq = update?.callback_query;
 
-  // Callback (кнопки)
   if (cq?.id) {
     const chatId = cq?.message?.chat?.id;
     const data = String(cq?.data || "");
@@ -209,25 +212,24 @@ export default async function webhook(req, env) {
     return json({ ok: true });
   }
 
-  // Немає повідомлення — не падаємо
   if (!msg?.chat?.id) return json({ ok: true, note: "no message" });
 
   const chatId = msg.chat.id;
   const text = String(msg.text || "").trim();
+  const cmd = parseCommand(text);
 
   const userId = msg?.from?.id;
   const username = msg?.from?.username;
   const isAdmin = TG.ADMIN?.(env, userId, username) || false;
 
-  // /start -> віддаємо і inline, і ГОЛОВНУ клавіатуру (щоб кнопки НЕ зникали)
-  if (text === "/start") {
+  // /start
+  if (cmd === "/start") {
     await TG.sendMessage(
       chatId,
       startText(lang, msg?.from?.first_name),
       {
         reply_markup: {
           ...TG.mainKeyboard(isAdmin),
-          // Додатково inline ping як швидка перевірка
           inline_keyboard: [[{ text: "✅ Ping", callback_data: "ping" }]],
         },
       },
@@ -236,8 +238,8 @@ export default async function webhook(req, env) {
     return json({ ok: true });
   }
 
-  // /menu -> примусово повертаємо кнопки, якщо користувач їх сховав
-  if (text === "/menu") {
+  // /menu — повернути клавіатуру
+  if (cmd === "/menu") {
     await TG.sendMessage(
       chatId,
       lang === "ru" ? "Клавиатура восстановлена." : lang === "en" ? "Keyboard restored." : "Клавіатуру відновлено.",
@@ -247,15 +249,36 @@ export default async function webhook(req, env) {
     return json({ ok: true });
   }
 
-  // /voice -> кнопка web_app на твій Mini App /app/voice
-  if (text === "/voice") {
+  // /voice — Mini App кнопка
+  if (cmd === "/voice" || text === TG.BTN_VOICE) {
     const appUrl = abs(env, "/app/voice");
     await TG.sendMessage(
       chatId,
       voiceIntroText(lang),
+      { reply_markup: { inline_keyboard: [[{ text: "🎙 Senti Voice", web_app: { url: appUrl } }]] } },
+      env
+    );
+    return json({ ok: true });
+  }
+// ====== ОБРОБКА КНОПОК (щоб НЕ йшли в AI) ======
+  if (text === TG.BTN_DRIVE) {
+    const uid = String(userId || chatId);
+    const u = new URL(abs(env, "/auth/start"));
+    u.searchParams.set("u", uid);
+
+    await TG.sendMessage(
+      chatId,
+      lang === "ru"
+        ? "Google Drive: подключение."
+        : lang === "en"
+        ? "Google Drive: connect."
+        : "Google Drive: підключення.",
       {
         reply_markup: {
-          inline_keyboard: [[{ text: "🎙 Senti Voice", web_app: { url: appUrl } }]],
+          inline_keyboard: [
+            [{ text: "🔐 Connect Drive", url: u.toString() }],
+            [{ text: "↩️ Menu", callback_data: "ping" }],
+          ],
         },
       },
       env
@@ -263,7 +286,80 @@ export default async function webhook(req, env) {
     return json({ ok: true });
   }
 
-  // дата/час (без залежності від apis/time.js)
+  if (text === TG.BTN_ADMIN) {
+    await TG.sendMessage(
+      chatId,
+      lang === "ru"
+        ? "Admin панель."
+        : lang === "en"
+        ? "Admin panel."
+        : "Адмін-панель.",
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🧠 Brain", url: abs(env, "/admin/brain") }],
+            [{ text: "📋 Checklist", url: abs(env, "/admin/checklist") }],
+            [{ text: "🎓 Learn", url: abs(env, "/admin/learn/html") }],
+            [{ text: "📦 Repo/Archive", url: abs(env, "/admin/repo") }],
+          ],
+        },
+      },
+      env
+    );
+    return json({ ok: true });
+  }
+
+  if (text === TG.BTN_CODEX) {
+    await TG.sendMessage(
+      chatId,
+      lang === "ru"
+        ? "Codex сейчас отключён/в ремонте. Используй /voice или обычный чат."
+        : lang === "en"
+        ? "Codex is currently under maintenance. Use /voice or normal chat."
+        : "Codex зараз у ремонті. Використовуй /voice або звичайний чат.",
+      {},
+      env
+    );
+    return json({ ok: true });
+  }
+
+  if (text === TG.BTN_SENTI) {
+    await TG.sendMessage(
+      chatId,
+      lang === "ru"
+        ? "Я тут. Напиши запит або надішли фото."
+        : lang === "en"
+        ? "I’m here. Send a prompt or a photo."
+        : "Я тут. Напиши запит або надішли фото.",
+      {},
+      env
+    );
+    return json({ ok: true });
+  }
+
+  if (text === TG.BTN_LEARN) {
+    await TG.sendMessage(
+      chatId,
+      isAdmin
+        ? (lang === "ru"
+            ? "Learn (admin): открой панель."
+            : lang === "en"
+            ? "Learn (admin): open the panel."
+            : "Learn (admin): відкрий панель.")
+        : (lang === "ru"
+            ? "Learn доступен только админу."
+            : lang === "en"
+            ? "Learn is admin-only."
+            : "Learn доступний лише адміну."),
+      isAdmin
+        ? { reply_markup: { inline_keyboard: [[{ text: "🎓 Learn panel", url: abs(env, "/admin/learn/html") }]] } }
+        : {},
+      env
+    );
+    return json({ ok: true });
+  }
+
+  // дата/час
   if (/^(дата|date)$/i.test(text)) {
     await TG.sendMessage(chatId, `📅 ${nowKyiv().split(",")[0]}`, {}, env);
     return json({ ok: true });
@@ -272,8 +368,8 @@ export default async function webhook(req, env) {
     await TG.sendMessage(chatId, `🕒 ${nowKyiv()}`, {}, env);
     return json({ ok: true });
   }
-// ✅ Фото: запускаємо реальний vision pipeline з /flows/handlePhoto.js
-  // (він сам дістане файл з Telegram, сконвертує в base64 і викличе askVision)
+
+  // Фото
   if (msg.photo) {
     try {
       await handlePhoto(env, msg, lang);
@@ -292,19 +388,18 @@ export default async function webhook(req, env) {
     }
   }
 
-  // Інше медіа — стабільний фолбек без падінь
+  // Інше медіа
   if (msg.document || msg.video || msg.voice || msg.sticker) {
     const m =
       lang === "ru"
-        ? "Медиа получено. Пока я обрабатываю только фото. Пришли фото как изображение."
+        ? "Медиа получено. Пока я обрабатываю только фото."
         : lang === "en"
-        ? "Media received. For now I process photos only. Please send an image."
-        : "Медіа отримано. Поки що я обробляю лише фото. Надішли фото як зображення.";
+        ? "Media received. For now I process photos only."
+        : "Медіа отримано. Поки що я обробляю лише фото.";
     await TG.sendMessage(chatId, m, {}, env);
     return json({ ok: true });
   }
 
-  // Порожній текст
   if (!text) {
     await TG.sendMessage(
       chatId,
@@ -315,7 +410,7 @@ export default async function webhook(req, env) {
     return json({ ok: true });
   }
 
-  // Основна відповідь через AI (Gemini/OpenRouter)
+  // Лише тут — AI
   const reply = await answerWithAI(env, lang, text);
   await TG.sendMessage(chatId, reply, {}, env);
 
