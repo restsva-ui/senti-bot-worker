@@ -1,7 +1,6 @@
 // src/routes/webhook.js
 import { TG } from "../lib/tg.js";
 import { json } from "../utils/http.js";
-import { abs } from "../utils/url.js";
 import { handlePhoto } from "../flows/handlePhoto.js";
 
 function nowKyiv() {
@@ -40,107 +39,50 @@ function diagOn(env) {
   return String(env.DIAG_TAGS || "off").toLowerCase() === "on";
 }
 
-function parseCsvModels(s) {
+function parseCsv(s) {
   return String(s || "")
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean);
 }
 
-function isNoEndpointsError(msg) {
-  const m = String(msg || "").toLowerCase();
-  return m.includes("no endpoints found");
+/**
+ * Можеш задати явний порядок текстових моделей у змінній:
+ * MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, cf:@cf/meta/llama-3.2-11b-instruct"
+ */
+function parseModelOrder(s) {
+  return parseCsv(s)
+    .map((tok) => {
+      const i = tok.indexOf(":");
+      if (i === -1) return null;
+      const provider = tok.slice(0, i).trim().toLowerCase();
+      const model = tok.slice(i + 1).trim();
+      if (!provider || !model) return null;
+      return { provider, model };
+    })
+    .filter(Boolean);
 }
 
-async function callOpenRouterSingle(env, lang, userText, model) {
-  const base = env.FREE_API_BASE_URL || env.FREE_LLM_BASE_URL || "https://openrouter.ai/api";
-  const path = env.FREE_API_PATH || "/v1/chat/completions";
-  const key = env.OPENROUTER_API_KEY;
-  if (!key) throw new Error("OPENROUTER_API_KEY missing");
+function getTextChain(env) {
+  const chain =
+    parseModelOrder(env.MODEL_ORDER_TEXT) ||
+    parseModelOrder(env.MODEL_ORDER) ||
+    [];
 
-  const ctrl = new AbortController();
-  const to = setTimeout(() => ctrl.abort("timeout"), 25000);
-
-  try {
-    const r = await fetch(base + path, {
-      method: "POST",
-      signal: ctrl.signal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${key}`,
-        "HTTP-Referer": env.OPENROUTER_SITE_URL || "https://senti.restsva.app",
-        "X-Title": env.OPENROUTER_APP_NAME || "Senti Bot Worker",
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: sysPrompt(lang) },
-          { role: "user", content: userText },
-        ],
-        temperature: 0.6,
-      }),
-    });
-
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      const msg = data?.error?.message || data?.message || `OpenRouter HTTP ${r.status}`;
-      throw new Error(msg);
-    }
-
-    const out = data?.choices?.[0]?.message?.content;
-    if (!out) throw new Error("OpenRouter empty response");
-    return String(out).trim();
-  } finally {
-    clearTimeout(to);
-  }
-}
-
-async function callOpenRouter(env, lang, userText) {
-  // 1) якщо задано FREE_API_MODEL — він перший
-  // 2) якщо задано FREE_API_MODELS — це фолбеки
-  // 3) якщо нічого — беремо безпечні дефолти (НЕ llama-4-scout)
-  const primary =
-    env.FREE_API_MODEL ||
-    env.FREE_LLM_MODEL ||
-    env.OPENROUTER_MODEL ||
-    "google/gemma-3n-e4b-it:free";
-
-  const fallbacks = parseCsvModels(env.FREE_API_MODELS);
-  const candidates = [primary, ...fallbacks].filter(Boolean);
-
-  const tried = [];
-  let lastErr = null;
-
-  for (const model of candidates) {
-    tried.push(model);
-    try {
-      const text = await callOpenRouterSingle(env, lang, userText, model);
-      if (diagOn(env)) return `${text}\n\n(diag: openrouter:${model})`;
-      return text;
-    } catch (e) {
-      const msg = String(e?.message || e);
-      lastErr = msg;
-
-      // Якщо "No endpoints found" — пробуємо наступну модель
-      if (isNoEndpointsError(msg)) continue;
-
-      // Інші помилки теж пробуємо, але збережемо останню
-      continue;
-    }
+  if (chain.length) {
+    // гарантія: OpenRouter не використовуємо, навіть якщо хтось його випадково вписав
+    return chain.filter((x) => x.provider !== "openrouter");
   }
 
-  const diag = diagOn(env)
-    ? `\n\n(diag: openrouter failed; tried: ${tried.join(", ")}; last: ${String(lastErr || "unknown")})`
-    : "";
-
-  if (lang === "ru") return `Сейчас у меня проблемы с OpenRouter. Попробуй позже.${diag}`;
-  if (lang === "en") return `I have issues reaching OpenRouter right now. Please try again later.${diag}`;
-  return `Зараз є проблеми з OpenRouter. Спробуй трохи пізніше.${diag}`;
+  // дефолт
+  return [
+    { provider: "gemini", model: env.GEMINI_MODEL || "gemini-2.5-flash" },
+    { provider: "cf", model: env.CF_MODEL || "@cf/meta/llama-3.2-11b-instruct" },
+  ];
 }
 
-async function callGemini(env, lang, userText) {
+async function callGemini(env, lang, userText, model) {
   const key = env.GOOGLE_API_KEY;
-  const model = env.GEMINI_MODEL || "gemini-2.5-flash";
   if (!key) throw new Error("GOOGLE_API_KEY missing");
 
   const ctrl = new AbortController();
@@ -159,7 +101,11 @@ async function callGemini(env, lang, userText) {
         contents: [
           {
             role: "user",
-            parts: [{ text: `${sysPrompt(lang)}\n\nЗапит користувача:\n${userText}` }],
+            parts: [
+              {
+                text: `${sysPrompt(lang)}\n\nЗапит користувача:\n${userText}`,
+              },
+            ],
           },
         ],
         generationConfig: { temperature: 0.6 },
@@ -171,7 +117,12 @@ async function callGemini(env, lang, userText) {
       const msg = data?.error?.message || `Gemini HTTP ${r.status}`;
       throw new Error(msg);
     }
-    const out = data?.candidates?.[0]?.content?.parts?.map((p) => p?.text).filter(Boolean).join("\n");
+
+    const out = data?.candidates?.[0]?.content?.parts
+      ?.map((p) => p?.text)
+      .filter(Boolean)
+      .join("\n");
+
     if (!out) throw new Error("Gemini empty response");
 
     const text = String(out).trim();
@@ -182,32 +133,83 @@ async function callGemini(env, lang, userText) {
   }
 }
 
-async function answerWithAI(env, lang, userText) {
-  // пріоритет: Gemini (якщо є ключ) → OpenRouter
-  const errors = [];
+async function callCloudflareAI(env, lang, userText, model) {
+  if (!env.AI) throw new Error("AI binding missing (Workers AI)");
 
-  if (env.GOOGLE_API_KEY) {
+  // для instruct-моделей Workers AI очікує messages
+  const payload = {
+    messages: [
+      { role: "system", content: sysPrompt(lang) },
+      { role: "user", content: userText },
+    ],
+  };
+
+  const r = await env.AI.run(model, payload).catch((e) => {
+    throw new Error(String(e?.message || e));
+  });
+
+  const text =
+    r?.response ||
+    r?.result ||
+    (typeof r === "string" ? r : null) ||
+    r?.choices?.[0]?.message?.content ||
+    null;
+
+  if (!text) throw new Error("Cloudflare AI empty response");
+
+  const out = String(text).trim();
+  if (diagOn(env)) return `${out}\n\n(diag: cf:${model})`;
+  return out;
+}
+
+async function answerWithAI(env, lang, userText) {
+  const chain = getTextChain(env);
+
+  const tried = [];
+  let lastErr = null;
+
+  for (const item of chain) {
+    const provider = item.provider;
+    const model = item.model;
+
+    tried.push(`${provider}:${model}`);
+
     try {
-      return await callGemini(env, lang, userText);
+      if (provider === "gemini") {
+        if (!env.GOOGLE_API_KEY) throw new Error("GOOGLE_API_KEY missing");
+        return await callGemini(env, lang, userText, model);
+      }
+
+      if (provider === "cf") {
+        return await callCloudflareAI(env, lang, userText, model);
+      }
+
+      lastErr = `Unknown provider: ${provider}`;
+      continue;
     } catch (e) {
-      errors.push(String(e?.message || e));
+      lastErr = String(e?.message || e);
+      continue;
     }
   }
 
-  if (env.OPENROUTER_API_KEY) {
-    const out = await callOpenRouter(env, lang, userText);
-    return out;
-  }
+  const diag = diagOn(env)
+    ? `\n\n(diag: providers failed; tried: ${tried.join(
+        ", "
+      )}; last: ${String(lastErr || "unknown")})`
+    : "";
 
-  const diag = diagOn(env) ? `\n\n(diag: ${errors.join(" | ") || "no providers"})` : "";
-  if (lang === "ru") return `Сейчас у меня проблемы с AI-провайдерами. Попробуй позже.${diag}`;
-  if (lang === "en") return `I have issues reaching AI providers right now. Please try again later.${diag}`;
+  if (lang === "ru")
+    return `Сейчас у меня проблемы с AI-провайдерами. Попробуй позже.${diag}`;
+  if (lang === "en")
+    return `I have issues reaching AI providers right now. Please try again later.${diag}`;
   return `Зараз є проблеми з AI-провайдерами. Спробуй трохи пізніше.${diag}`;
 }
 
 function startText(lang, firstName) {
-  if (lang === "ru") return `Привет, ${firstName || "друг"}! Я Senti.\nНапиши вопрос или отправь фото — я опишу его.`;
-  if (lang === "en") return `Hi, ${firstName || "friend"}! I'm Senti.\nAsk a question or send a photo — I'll describe it.`;
+  if (lang === "ru")
+    return `Привет, ${firstName || "друг"}! Я Senti.\nНапиши вопрос или отправь фото — я опишу его.`;
+  if (lang === "en")
+    return `Hi, ${firstName || "friend"}! I'm Senti.\nAsk a question or send a photo — I'll describe it.`;
   return `Привіт, ${firstName || "друже"}! Я Senti.\nНапиши питання або надішли фото — я опишу його.`;
 }
 
@@ -218,27 +220,30 @@ function helloText(lang) {
 }
 
 function codexText(lang) {
-  if (lang === "ru") return "Codex сейчас в ремонте. Используй /voice или обычный чат.";
+  if (lang === "ru")
+    return "Codex сейчас в ремонте. Используй /voice или обычный чат.";
   if (lang === "en") return "Codex is under maintenance. Use /voice or normal chat.";
   return "Codex зараз у ремонті. Використовуй /voice або звичайний чат.";
 }
 
 function voiceText(lang) {
-  if (lang === "ru") return "Голосовой режим: пришли голосовое сообщение (voice) или напиши текстом.";
+  if (lang === "ru")
+    return "Голосовой режим: пришли голосовое сообщение (voice) или напиши текстом.";
   if (lang === "en") return "Voice mode: send a voice message or type text.";
   return "Voice-режим: надішли голосове повідомлення або напиши текстом.";
 }
 
-function adminText(env, lang) {
-  const u = abs(env, "/admin/brain");
+function adminText(origin, lang) {
+  const u = `${origin}/admin/brain`;
   if (lang === "ru") return `Админ: ${u}`;
   if (lang === "en") return `Admin: ${u}`;
   return `Адмін: ${u}`;
 }
 
-function driveText(env, lang, userId) {
-  const link = abs(env, `/auth/start?u=${encodeURIComponent(String(userId || ""))}`);
-  if (lang === "ru") return `Підключення Google Drive: <a href="${link}">Authorize</a>`;
+function driveText(origin, lang, userId) {
+  const link = `${origin}/auth/start?u=${encodeURIComponent(String(userId || ""))}`;
+  if (lang === "ru")
+    return `Підключення Google Drive: <a href="${link}">Authorize</a>`;
   if (lang === "en") return `Connect Google Drive: <a href="${link}">Authorize</a>`;
   return `Підключення Google Drive: <a href="${link}">Authorize</a>`;
 }
@@ -254,8 +259,11 @@ export default async function webhook(req, env) {
   // додаткова безпека
   if (env.TG_WEBHOOK_SECRET) {
     const sec = req.headers.get("x-telegram-bot-api-secret-token");
-    if (sec !== env.TG_WEBHOOK_SECRET) return json({ ok: false, error: "unauthorized" }, 401);
+    if (sec !== env.TG_WEBHOOK_SECRET)
+      return json({ ok: false, error: "unauthorized" }, 401);
   }
+
+  const origin = new URL(req.url).origin;
 
   const lang = pickLang(update);
   const msg = update?.message || update?.edited_message;
@@ -317,7 +325,7 @@ export default async function webhook(req, env) {
     return json({ ok: true });
   }
 
-  // ✅ РОУТИНГ ПО КНОПКАХ (ГОЛОВНЕ ВИПРАВЛЕННЯ)
+  // ✅ РОУТИНГ ПО КНОПКАХ
   if (text === TG.BTN_SENTI) {
     await TG.sendMessage(chatId, helloText(lang), { reply_markup: TG.mainKeyboard?.(isAdmin) }, env);
     return json({ ok: true });
@@ -331,8 +339,11 @@ export default async function webhook(req, env) {
   if (text === TG.BTN_ADMIN) {
     await TG.sendMessage(
       chatId,
-      adminText(env, lang),
-      { reply_markup: TG.mainKeyboard?.(isAdmin), parse_mode: env.TELEGRAM_PARSE_MODE || undefined },
+      adminText(origin, lang),
+      {
+        reply_markup: TG.mainKeyboard?.(isAdmin),
+        parse_mode: env.TELEGRAM_PARSE_MODE || undefined,
+      },
       env
     );
     return json({ ok: true });
@@ -341,7 +352,7 @@ export default async function webhook(req, env) {
   if (text === TG.BTN_DRIVE) {
     await TG.sendMessage(
       chatId,
-      driveText(env, lang, msg?.from?.id),
+      driveText(origin, lang, msg?.from?.id),
       { reply_markup: TG.mainKeyboard?.(isAdmin), parse_mode: env.TELEGRAM_PARSE_MODE || "HTML" },
       env
     );
