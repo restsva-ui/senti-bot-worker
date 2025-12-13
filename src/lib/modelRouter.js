@@ -71,3 +71,18 @@ export async function askVision(env, prompt, imageUrl) {
     { kind: "vision", temperature: 0.2 }
   );
 }
+// ------------------------------
+// Backward compatibility helpers
+// ------------------------------
+
+export function safeTrimAnswer(text, max = 3500) {
+  if (!text) return "";
+  const s = String(text);
+  if (s.length <= max) return s;
+  return s.slice(0, max - 20).trim() + "\n…";
+}
+export async function askVisionDiag(env, prompt, imageUrl, opts = {}) {
+  return diagWrap(env, async () => {
+    return await askVision(env, prompt, imageUrl, opts);
+  });
+}
