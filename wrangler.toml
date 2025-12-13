@@ -10,44 +10,60 @@ binding = "AI"
 # якщо тобі треба nodejs-compat – розкоментуй
 # compatibility_flags = ["nodejs_compat"]
 
+# --- CRON-и ---
 [triggers]
 crons = [
-  "*/15 * * * *",
-  "0 * * * *",
-  "10 2 * * *"
+  "*/15 * * * *",  # heartbeat
+  "0 * * * *",     # hourly evolve / nightly agent check
+  "10 2 * * *"     # додатковий нічний тригер
 ]
 
 [vars]
+# базові
 SERVICE_HOST = "https://senti-bot-worker.restsva.workers.dev"
 DRIVE_FOLDER_ID = "root"
 TELEGRAM_ADMIN_ID = "784869835"
 DEPLOY_ID = "local-dev"
 
+# увімкнення Learn (щоб адмін-сторінка й черга мали сенс)
 LEARN_ENABLED = "on"
+
+# Cloudflare Workers AI акаунт (публічний ID можна)
 CF_ACCOUNT_ID = "2cf6e316af8623546c95c0354bc3aa00"
 
+# дозволи на публічні адмін-вьюхи (ти їх у коді перевіряєш)
 ALLOW_PUBLIC_REPO = "on"
 ALLOW_PUBLIC_STATUT = "on"
 ALLOW_PUBLIC_CHECKLIST = "on"
 
+# сек'юрні токени ДЛЯ ВЕБХУКА й адмін-ендпойнтів
+# Рекомендація: винести в secrets (але залишаю як у тебе).
 WEBHOOK_SECRET = "senti1984"
 TG_WEBHOOK_SECRET = "senti1984"
 TELEGRAM_SECRET_TOKEN = "senti1984"
 
+# локаль
 TIMEZONE = "Europe/Kyiv"
+
+# діагностика (щоб у відповідях показувало via …)
 DIAG_TAGS = "on"
+
+# як малювати мап-лінки з vision / landmark
 MAP_LINK_STYLE = "arrow"
+
+# щоб телега коректно відображала <a href="...">
 TELEGRAM_PARSE_MODE = "HTML"
 
 # ─────────────────────────────────────────
-#   ПОРЯДКИ МОДЕЛЕЙ (БЕЗ OpenRouter FREE)
+#            ПОРЯДКИ МОДЕЛЕЙ
 # ─────────────────────────────────────────
-# Якщо GEMINI_API_KEY не заданий у secrets — gemini буде пропущено і піде в cf.
-MODEL_ORDER = "gemini:gemini-2.5-flash, gemini:gemini-1.5-flash-latest, cf:@cf/meta/llama-3.2-11b-instruct"
-MODEL_ORDER_TEXT = "gemini:gemini-2.5-flash, gemini:gemini-1.5-flash-latest, cf:@cf/meta/llama-3.2-11b-instruct"
-MODEL_ORDER_CODE = "cf:@cf/meta/llama-3.2-11b-instruct"
+# ТІЛЬКИ 2 провайдери: gemini -> cf
+MODEL_ORDER        = "gemini:gemini-2.5-flash, gemini:gemini-1.5-flash-latest, cf:@cf/meta/llama-3.2-11b-instruct"
+MODEL_ORDER_TEXT   = "gemini:gemini-2.5-flash, gemini:gemini-1.5-flash-latest, cf:@cf/meta/llama-3.2-11b-instruct"
+MODEL_ORDER_CODE   = "cf:@cf/meta/llama-3.2-11b-instruct, gemini:gemini-1.5-flash-latest"
 MODEL_ORDER_VISION = "gemini:gemini-2.5-flash-lite, gemini:gemini-1.5-flash-latest, cf:@cf/meta/llama-3.2-11b-vision-instruct"
 
+# дефолтні назви моделей (для читабельності в адмінці)
 GEMINI_MODEL = "gemini-2.5-flash"
 CF_MODEL = "@cf/meta/llama-3.2-11b-instruct"
 CF_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
@@ -57,6 +73,7 @@ CF_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
 # ─────────────────────────────────────────
 AUTO_IMPROVE     = "on"
 NIGHTLY_UTC_HOUR = "23"
+
 SELF_REGULATE      = "on"
 SELF_TUNING_FACTOR = "0.3"
 
@@ -69,6 +86,9 @@ ENERGY_COST_TEXT = "1"
 ENERGY_COST_IMAGE = "5"
 ENERGY_LOW_THRESHOLD = "10"
 
+# ─────────────────────────────────────────
+#                 KV bindings
+# ─────────────────────────────────────────
 [[kv_namespaces]]
 binding = "DEDUP_KV"
 id = "20d81d7b68fa4ac6b9913e2fbd3465d5"
@@ -89,6 +109,7 @@ id = "497eac980691495ea2a0bc8611892d65"
 binding = "USER_OAUTH_KV"
 id = "470d4f5c164a4a828c569eb9a52a5133"
 
+# УВАГА: зараз CHECKLIST_KV має той самий ID, що й TODO_KV.
 [[kv_namespaces]]
 binding = "CHECKLIST_KV"
 id = "497eac980691495ea2a0bc8611892d65"
@@ -101,15 +122,13 @@ id = "f7d480c281ad47d2bdf270fadf4de021"
 binding = "ENERGY_LOG_KV"
 id = "9e6f0ed5bf2544a9a63d57455900a844"
 
-# ✅ правильний існуючий ID (саме ...e0..., не ...c0...)
-[[kv_namespaces]]
-binding = "DIALOG_KV"
-id = "63c0d1e0962a419ca54082893410b28e"
-
 [[kv_namespaces]]
 binding = "LEARN_QUEUE_KV"
 id = "86a54c59ce674a558780c58bf1a47dfd"
 
+# ─────────────────────────────────────────
+#                 R2 buckets
+# ─────────────────────────────────────────
 [[r2_buckets]]
 binding = "LEARN_BUCKET"
 bucket_name = "senti-learn"
