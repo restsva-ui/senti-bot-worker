@@ -170,10 +170,16 @@ function voiceIntroText(lang) {
 }
 
 function parseCommand(text) {
-  // /voice або /voice@BotName або "/voice   "
   const first = String(text || "").trim().split(/\s+/)[0];
   if (!first.startsWith("/")) return "";
   return first.split("@")[0].toLowerCase();
+}
+
+// ✅ надійно визначає “Voice” навіть якщо emoji/шрифти відрізняються
+function isVoiceText(text) {
+  const t = String(text || "").toLowerCase();
+  const stripped = t.replace(/[^a-z0-9/]+/g, ""); // "🎙 voice" -> "voice"
+  return stripped === "voice" || stripped === "/voice";
 }
 
 export default async function webhook(req, env) {
@@ -222,7 +228,6 @@ export default async function webhook(req, env) {
   const username = msg?.from?.username;
   const isAdmin = TG.ADMIN?.(env, userId, username) || false;
 
-  // /start
   if (cmd === "/start") {
     await TG.sendMessage(
       chatId,
@@ -238,7 +243,6 @@ export default async function webhook(req, env) {
     return json({ ok: true });
   }
 
-  // /menu — повернути клавіатуру
   if (cmd === "/menu") {
     await TG.sendMessage(
       chatId,
@@ -249,8 +253,8 @@ export default async function webhook(req, env) {
     return json({ ok: true });
   }
 
-  // /voice — Mini App кнопка
-  if (cmd === "/voice" || text === TG.BTN_VOICE) {
+  // ✅ /voice АБО натискання кнопки Voice (reply keyboard)
+  if (cmd === "/voice" || isVoiceText(text) || text === TG.BTN_VOICE) {
     const appUrl = abs(env, "/app/voice");
     await TG.sendMessage(
       chatId,
@@ -268,19 +272,8 @@ export default async function webhook(req, env) {
 
     await TG.sendMessage(
       chatId,
-      lang === "ru"
-        ? "Google Drive: подключение."
-        : lang === "en"
-        ? "Google Drive: connect."
-        : "Google Drive: підключення.",
-      {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "🔐 Connect Drive", url: u.toString() }],
-            [{ text: "↩️ Menu", callback_data: "ping" }],
-          ],
-        },
-      },
+      lang === "ru" ? "Google Drive: подключение." : lang === "en" ? "Google Drive: connect." : "Google Drive: підключення.",
+      { reply_markup: { inline_keyboard: [[{ text: "🔐 Connect Drive", url: u.toString() }]] } },
       env
     );
     return json({ ok: true });
@@ -289,11 +282,7 @@ export default async function webhook(req, env) {
   if (text === TG.BTN_ADMIN) {
     await TG.sendMessage(
       chatId,
-      lang === "ru"
-        ? "Admin панель."
-        : lang === "en"
-        ? "Admin panel."
-        : "Адмін-панель.",
+      lang === "ru" ? "Admin панель." : lang === "en" ? "Admin panel." : "Адмін-панель.",
       {
         reply_markup: {
           inline_keyboard: [
@@ -313,9 +302,9 @@ export default async function webhook(req, env) {
     await TG.sendMessage(
       chatId,
       lang === "ru"
-        ? "Codex сейчас отключён/в ремонте. Используй /voice или обычный чат."
+        ? "Codex сейчас у ремонті. Використовуй /voice або звичайний чат."
         : lang === "en"
-        ? "Codex is currently under maintenance. Use /voice or normal chat."
+        ? "Codex is under maintenance. Use /voice or normal chat."
         : "Codex зараз у ремонті. Використовуй /voice або звичайний чат.",
       {},
       env
@@ -326,11 +315,7 @@ export default async function webhook(req, env) {
   if (text === TG.BTN_SENTI) {
     await TG.sendMessage(
       chatId,
-      lang === "ru"
-        ? "Я тут. Напиши запит або надішли фото."
-        : lang === "en"
-        ? "I’m here. Send a prompt or a photo."
-        : "Я тут. Напиши запит або надішли фото.",
+      lang === "ru" ? "Я тут. Напиши запит або надішли фото." : lang === "en" ? "I’m here. Send a prompt or a photo." : "Я тут. Напиши запит або надішли фото.",
       {},
       env
     );
@@ -341,25 +326,14 @@ export default async function webhook(req, env) {
     await TG.sendMessage(
       chatId,
       isAdmin
-        ? (lang === "ru"
-            ? "Learn (admin): открой панель."
-            : lang === "en"
-            ? "Learn (admin): open the panel."
-            : "Learn (admin): відкрий панель.")
-        : (lang === "ru"
-            ? "Learn доступен только админу."
-            : lang === "en"
-            ? "Learn is admin-only."
-            : "Learn доступний лише адміну."),
-      isAdmin
-        ? { reply_markup: { inline_keyboard: [[{ text: "🎓 Learn panel", url: abs(env, "/admin/learn/html") }]] } }
-        : {},
+        ? (lang === "ru" ? "Learn (admin): открой панель." : lang === "en" ? "Learn (admin): open the panel." : "Learn (admin): відкрий панель.")
+        : (lang === "ru" ? "Learn доступен только админу." : lang === "en" ? "Learn is admin-only." : "Learn доступний лише адміну."),
+      isAdmin ? { reply_markup: { inline_keyboard: [[{ text: "🎓 Learn panel", url: abs(env, "/admin/learn/html") }]] } } : {},
       env
     );
     return json({ ok: true });
   }
 
-  // дата/час
   if (/^(дата|date)$/i.test(text)) {
     await TG.sendMessage(chatId, `📅 ${nowKyiv().split(",")[0]}`, {}, env);
     return json({ ok: true });
@@ -369,14 +343,12 @@ export default async function webhook(req, env) {
     return json({ ok: true });
   }
 
-  // Фото
   if (msg.photo) {
     try {
       await handlePhoto(env, msg, lang);
       return json({ ok: true });
     } catch (e) {
-      const diag =
-        String(env.DIAG_TAGS || "off").toLowerCase() === "on" ? `\n(diag: ${String(e?.message || e)})` : "";
+      const diag = String(env.DIAG_TAGS || "off").toLowerCase() === "on" ? `\n(diag: ${String(e?.message || e)})` : "";
       const m =
         lang === "ru"
           ? `Не получилось обработать фото. Попробуй еще раз позже.${diag}`
@@ -388,7 +360,6 @@ export default async function webhook(req, env) {
     }
   }
 
-  // Інше медіа
   if (msg.document || msg.video || msg.voice || msg.sticker) {
     const m =
       lang === "ru"
@@ -401,16 +372,10 @@ export default async function webhook(req, env) {
   }
 
   if (!text) {
-    await TG.sendMessage(
-      chatId,
-      lang === "ru" ? "Напиши текстовый запрос." : lang === "en" ? "Send a text query." : "Напиши текстовий запит.",
-      {},
-      env
-    );
+    await TG.sendMessage(chatId, lang === "ru" ? "Напиши текстовый запрос." : lang === "en" ? "Send a text query." : "Напиши текстовий запит.", {}, env);
     return json({ ok: true });
   }
 
-  // Лише тут — AI
   const reply = await answerWithAI(env, lang, text);
   await TG.sendMessage(chatId, reply, {}, env);
 
