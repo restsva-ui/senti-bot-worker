@@ -7,11 +7,12 @@ export const BTN_SENTI = "Senti";
 export const BTN_CODEX = "Codex";
 export const BTN_LEARN = "Learn";
 export const BTN_ADMIN = "Admin";
+export const BTN_VOICE = "🎙 Voice";
 
 /* ───────────────── ГОЛОВНА КЛАВІАТУРА ───────────── */
 export const mainKeyboard = (isAdmin = false) => {
   const rows = [];
-  rows.push([{ text: BTN_DRIVE }, { text: BTN_SENTI }]);
+  rows.push([{ text: BTN_DRIVE }, { text: BTN_SENTI }, { text: BTN_VOICE }]);
 
   if (isAdmin) {
     rows[0].push({ text: BTN_CODEX });
@@ -40,10 +41,7 @@ export const ADMIN = (env, userId, username) => {
   if (idCandidates.includes(idStr)) return true;
 
   const uname = String(username || "").replace("@", "").toLowerCase();
-  const unameCandidates = [
-    env.ADMIN_USERNAME,
-    env.ADMIN_USERNAMES,
-  ]
+  const unameCandidates = [env.ADMIN_USERNAME, env.ADMIN_USERNAMES]
     .filter(Boolean)
     .join(",")
     .split(",")
@@ -51,6 +49,7 @@ export const ADMIN = (env, userId, username) => {
 
   return uname && unameCandidates.includes(uname);
 };
+
 /* ───────────────── TELEGRAM API ───────────────── */
 
 function tgBase(env) {
@@ -90,6 +89,7 @@ export const TG = {
   BTN_CODEX,
   BTN_LEARN,
   BTN_ADMIN,
+  BTN_VOICE,
   mainKeyboard,
   ADMIN,
   sendMessage,
