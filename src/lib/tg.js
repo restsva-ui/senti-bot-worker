@@ -19,19 +19,12 @@ export const mainKeyboard = (isAdmin = false) => {
 
 export const ADMIN = (env, userId, username) => {
   const id = String(userId || "");
-  const ids = [
-    env.TELEGRAM_ADMIN_ID,
-    env.TELEGRAM_OWNER_ID,
-    env.ADMIN_USER_ID,
-    env.ADMIN_ID,
-    env.ADMINS,
-  ]
+  const ids = [env.TELEGRAM_ADMIN_ID, env.TELEGRAM_OWNER_ID, env.ADMIN_USER_ID, env.ADMIN_ID, env.ADMINS]
     .filter(Boolean)
     .join(",")
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
-
   if (ids.includes(id)) return true;
 
   const normalizedUsername = String(username || "").replace(/^@/, "").toLowerCase();
@@ -41,27 +34,29 @@ export const ADMIN = (env, userId, username) => {
     .split(",")
     .map((value) => value.replace(/^@/, "").trim().toLowerCase())
     .filter(Boolean);
-
   return Boolean(normalizedUsername && usernames.includes(normalizedUsername));
 };
 
-function tokenFromEnv(env) {
+function normalizeEnv(tokenOrEnv) {
+  if (typeof tokenOrEnv === "string") return { BOT_TOKEN: tokenOrEnv };
+  return tokenOrEnv || {};
+}
+
+function tokenFromEnv(tokenOrEnv) {
+  const env = normalizeEnv(tokenOrEnv);
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
   if (!token) throw new Error("TELEGRAM_BOT_TOKEN or BOT_TOKEN missing");
   return token;
 }
 
-function apiUrl(env, method) {
-  return `https://api.telegram.org/bot${tokenFromEnv(env)}/${method}`;
+function apiUrl(tokenOrEnv, method) {
+  return `https://api.telegram.org/bot${tokenFromEnv(tokenOrEnv)}/${method}`;
 }
 
-async function telegramRequest(env, method, payload, init = {}) {
-  const response = await fetch(apiUrl(env, method), {
+async function telegramRequest(tokenOrEnv, method, payload, init = {}) {
+  const response = await fetch(apiUrl(tokenOrEnv, method), {
     method: init.method || "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(init.headers || {}),
-    },
+    headers: { "content-type": "application/json", ...(init.headers || {}) },
     body: payload === undefined ? undefined : JSON.stringify(payload),
   });
 
@@ -74,13 +69,11 @@ async function telegramRequest(env, method, payload, init = {}) {
   }
 
   if (!response.ok || data?.ok === false) {
-    const description = data?.description || `Telegram HTTP ${response.status}`;
-    const error = new Error(`${method}: ${description}`);
+    const error = new Error(`${method}: ${data?.description || `Telegram HTTP ${response.status}`}`);
     error.status = response.status;
     error.response = data;
     throw error;
   }
-
   return data;
 }
 
@@ -88,7 +81,6 @@ export async function sendMessage(chatId, text, extra = {}, env) {
   if (chatId === undefined || chatId === null) throw new Error("chatId missing");
   const normalizedText = String(text ?? "").trim();
   if (!normalizedText) throw new Error("Telegram message text is empty");
-
   return telegramRequest(env, "sendMessage", {
     chat_id: chatId,
     text: normalizedText.slice(0, 4096),
@@ -99,35 +91,26 @@ export async function sendMessage(chatId, text, extra = {}, env) {
 
 export async function getFile(env, fileId) {
   if (!fileId) throw new Error("fileId missing");
-  const data = await telegramRequest(
-    env,
-    "getFile",
-    undefined,
-    { method: "GET" }
-  ).catch(async () => {
-    const response = await fetch(`${apiUrl(env, "getFile")}?file_id=${encodeURIComponent(fileId)}`);
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok || body?.ok === false) {
-      throw new Error(body?.description || "Telegram getFile failed");
-    }
-    return body;
-  });
+  const response = await fetch(`${apiUrl(env, "getFile")}?file_id=${encodeURIComponent(fileId)}`);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data?.ok === false) throw new Error(data?.description || "Telegram getFile failed");
   return data.result;
 }
 
-export async function getWebhook(env) {
-  return telegramRequest(env, "getWebhookInfo", {});
+export async function getWebhook(tokenOrEnv) {
+  return telegramRequest(tokenOrEnv, "getWebhookInfo", {});
 }
 
-export async function setWebhook(env, targetUrl, secretToken) {
+export async function setWebhook(tokenOrEnv, targetUrl, secretToken) {
+  const env = normalizeEnv(tokenOrEnv);
   const url = targetUrl || abs(env, "/webhook");
   const payload = { url, drop_pending_updates: false };
   if (secretToken) payload.secret_token = secretToken;
-  return telegramRequest(env, "setWebhook", payload);
+  return telegramRequest(tokenOrEnv, "setWebhook", payload);
 }
 
-export async function deleteWebhook(env, dropPendingUpdates = false) {
-  return telegramRequest(env, "deleteWebhook", {
+export async function deleteWebhook(tokenOrEnv, dropPendingUpdates = false) {
+  return telegramRequest(tokenOrEnv, "deleteWebhook", {
     drop_pending_updates: Boolean(dropPendingUpdates),
   });
 }
