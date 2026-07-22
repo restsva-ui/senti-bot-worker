@@ -1,9 +1,11 @@
 {
   "name": "senti-bot-worker",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "scripts": {
+    "check": "node --check src/index.js && node --check src/routes/webhook.js && node --check src/apis/weather.js && node --check src/lib/tg.js && node --check src/routes/adminChecklist.js && node --check src/routes/adminStatut.js && node --check src/routes/selfTestLocal.js && node tests/static-check.mjs",
+    "test": "npm run check",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {
