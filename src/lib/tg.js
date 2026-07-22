@@ -1,7 +1,6 @@
 // src/lib/tg.js
 import { abs } from "../utils/url.js";
 
-/* ───────────────────── КНОПКИ ───────────────────── */
 export const BTN_DRIVE = "Google Drive";
 export const BTN_SENTI = "Senti";
 export const BTN_CODEX = "Codex";
@@ -9,24 +8,18 @@ export const BTN_LEARN = "Learn";
 export const BTN_ADMIN = "Admin";
 export const BTN_VOICE = "🎙 Voice";
 
-/* ───────────────── ГОЛОВНА КЛАВІАТУРА ───────────── */
 export const mainKeyboard = (isAdmin = false) => {
-  const rows = [];
-  rows.push([{ text: BTN_DRIVE }, { text: BTN_SENTI }, { text: BTN_VOICE }]);
-
+  const rows = [[{ text: BTN_DRIVE }, { text: BTN_SENTI }, { text: BTN_VOICE }]];
   if (isAdmin) {
     rows[0].push({ text: BTN_CODEX });
     rows.push([{ text: BTN_ADMIN }]);
   }
-
   return { keyboard: rows, resize_keyboard: true };
 };
 
-/* ───────────────── АДМІН ───────────────── */
 export const ADMIN = (env, userId, username) => {
-  const idStr = String(userId || "");
-
-  const idCandidates = [
+  const id = String(userId || "");
+  const ids = [
     env.TELEGRAM_ADMIN_ID,
     env.TELEGRAM_OWNER_ID,
     env.ADMIN_USER_ID,
@@ -36,53 +29,109 @@ export const ADMIN = (env, userId, username) => {
     .filter(Boolean)
     .join(",")
     .split(",")
-    .map((s) => s.trim());
+    .map((value) => value.trim())
+    .filter(Boolean);
 
-  if (idCandidates.includes(idStr)) return true;
+  if (ids.includes(id)) return true;
 
-  const uname = String(username || "").replace("@", "").toLowerCase();
-  const unameCandidates = [env.ADMIN_USERNAME, env.ADMIN_USERNAMES]
+  const normalizedUsername = String(username || "").replace(/^@/, "").toLowerCase();
+  const usernames = [env.ADMIN_USERNAME, env.ADMIN_USERNAMES]
     .filter(Boolean)
     .join(",")
     .split(",")
-    .map((s) => s.replace("@", "").toLowerCase());
+    .map((value) => value.replace(/^@/, "").trim().toLowerCase())
+    .filter(Boolean);
 
-  return uname && unameCandidates.includes(uname);
+  return Boolean(normalizedUsername && usernames.includes(normalizedUsername));
 };
 
-/* ───────────────── TELEGRAM API ───────────────── */
-
-function tgBase(env) {
+function tokenFromEnv(env) {
   const token = env.TELEGRAM_BOT_TOKEN || env.BOT_TOKEN;
-  if (!token) throw new Error("TELEGRAM_BOT_TOKEN missing");
-  return `https://api.telegram.org/bot${token}`;
+  if (!token) throw new Error("TELEGRAM_BOT_TOKEN or BOT_TOKEN missing");
+  return token;
+}
+
+function apiUrl(env, method) {
+  return `https://api.telegram.org/bot${tokenFromEnv(env)}/${method}`;
+}
+
+async function telegramRequest(env, method, payload, init = {}) {
+  const response = await fetch(apiUrl(env, method), {
+    method: init.method || "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(init.headers || {}),
+    },
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+  });
+
+  const text = await response.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { ok: false, description: text || "Invalid Telegram response" };
+  }
+
+  if (!response.ok || data?.ok === false) {
+    const description = data?.description || `Telegram HTTP ${response.status}`;
+    const error = new Error(`${method}: ${description}`);
+    error.status = response.status;
+    error.response = data;
+    throw error;
+  }
+
+  return data;
 }
 
 export async function sendMessage(chatId, text, extra = {}, env) {
-  const url = tgBase(env) + "/sendMessage";
-  await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      disable_web_page_preview: true,
-      ...extra,
-    }),
+  if (chatId === undefined || chatId === null) throw new Error("chatId missing");
+  const normalizedText = String(text ?? "").trim();
+  if (!normalizedText) throw new Error("Telegram message text is empty");
+
+  return telegramRequest(env, "sendMessage", {
+    chat_id: chatId,
+    text: normalizedText.slice(0, 4096),
+    disable_web_page_preview: true,
+    ...extra,
   });
 }
 
 export async function getFile(env, fileId) {
-  const url = tgBase(env) + `/getFile?file_id=${encodeURIComponent(fileId)}`;
-  const r = await fetch(url);
-  const data = await r.json();
-  if (!data?.ok) {
-    throw new Error("Telegram getFile failed");
-  }
+  if (!fileId) throw new Error("fileId missing");
+  const data = await telegramRequest(
+    env,
+    "getFile",
+    undefined,
+    { method: "GET" }
+  ).catch(async () => {
+    const response = await fetch(`${apiUrl(env, "getFile")}?file_id=${encodeURIComponent(fileId)}`);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || body?.ok === false) {
+      throw new Error(body?.description || "Telegram getFile failed");
+    }
+    return body;
+  });
   return data.result;
 }
 
-/* ───────────────── ЕКСПОРТ ───────────────── */
+export async function getWebhook(env) {
+  return telegramRequest(env, "getWebhookInfo", {});
+}
+
+export async function setWebhook(env, targetUrl, secretToken) {
+  const url = targetUrl || abs(env, "/webhook");
+  const payload = { url, drop_pending_updates: false };
+  if (secretToken) payload.secret_token = secretToken;
+  return telegramRequest(env, "setWebhook", payload);
+}
+
+export async function deleteWebhook(env, dropPendingUpdates = false) {
+  return telegramRequest(env, "deleteWebhook", {
+    drop_pending_updates: Boolean(dropPendingUpdates),
+  });
+}
+
 export const TG = {
   BTN_DRIVE,
   BTN_SENTI,
@@ -94,4 +143,7 @@ export const TG = {
   ADMIN,
   sendMessage,
   getFile,
+  getWebhook,
+  setWebhook,
+  deleteWebhook,
 };
