@@ -1,10 +1,5 @@
 // src/routes/webhook.js
-
-import { driveSaveFromUrl } from "../lib/drive.js";
-import { getUserTokens } from "../lib/userDrive.js";
 import { abs } from "../utils/url.js";
-import { think } from "../lib/brain.js"; // залишаємо як у твоєму репо
-import { readStatut } from "../lib/kvChecklist.js";
 import { askAnyModel } from "../lib/modelRouter.js";
 import { json } from "../lib/utils.js";
 import { getEnergy, spendEnergy } from "../lib/energy.js";
@@ -26,102 +21,127 @@ import {
   weatherSummaryByText,
 } from "../apis/weather.js";
 
-function isPrivateChat(msg) {
-  const chatType = msg?.chat?.type;
-  return chatType === "private";
-}
-
-function pickTextFromUpdate(update) {
-  const msg = update?.message || update?.edited_message;
-  if (!msg) return { msg: null, text: "" };
-  const text =
-    msg.text ||
-    msg.caption ||
-    msg?.photo?.caption ||
-    msg?.document?.caption ||
-    "";
+function pickMessage(update) {
+  const msg = update?.message || update?.edited_message || null;
+  const text = String(msg?.text || msg?.caption || "").trim();
   return { msg, text };
 }
 
 function isStart(text) {
-  return (text || "").trim().toLowerCase() === "/start";
+  return String(text || "").trim().toLowerCase() === "/start";
 }
 
-function adminText(origin, env) {
-  const base = origin || (env && env.SERVICE_HOST) || "";
-  const mk = (p) => (base ? `${base}${p}` : p);
+function background(ctx, promise) {
+  const guarded = Promise.resolve(promise).catch((error) => {
+    console.error("[webhook.background]", error?.message || error);
+  });
 
-  const text =
-    "Адмін-панель:\\n" +
-    `• Brain: ${mk("/admin/brain")}\\n` +
-    `• Energy: ${mk("/admin/energy")}\\n` +
-    `• Checklist: ${mk("/admin/checklist")}\\n` +
-    `• Statut: ${mk("/admin/statut")}\\n` +
-    `• Learn: ${mk("/admin/learn")}\\n` +
-    `• Repo: ${mk("/admin/repo")}\\n` +
-    `• Usage: ${mk("/admin/usage")}`;
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(guarded);
+    return null;
+  }
 
-  const reply_markup = {
-    inline_keyboard: [
-      [
-        { text: "Brain", url: mk("/admin/brain") },
-        { text: "Energy", url: mk("/admin/energy") },
-      ],
-      [
-        { text: "Checklist", url: mk("/admin/checklist") },
-        { text: "Statut", url: mk("/admin/statut") },
-      ],
-      [
-        { text: "Learn", url: mk("/admin/learn") },
-        { text: "Repo", url: mk("/admin/repo") },
-      ],
-      [{ text: "Usage", url: mk("/admin/usage") }],
-    ],
+  return guarded;
+}
+
+function adminSecret(env) {
+  return env.ADMIN_SECRET || env.WEBHOOK_SECRET || "";
+}
+
+function adminUrl(origin, path, env) {
+  const url = new URL(path, origin || env.SERVICE_HOST || "https://localhost");
+  const secret = adminSecret(env);
+  if (secret) url.searchParams.set("s", secret);
+  return url.toString();
+}
+
+function adminMenu(origin, env) {
+  const links = {
+    brain: adminUrl(origin, "/admin/brain", env),
+    energy: adminUrl(origin, "/admin/energy", env),
+    checklist: adminUrl(origin, "/admin/checklist", env),
+    statut: adminUrl(origin, "/admin/statut", env),
+    learn: adminUrl(origin, "/admin/learn", env),
+    repo: adminUrl(origin, "/admin/repo/html", env),
+    usage: adminUrl(origin, "/admin/usage", env),
   };
 
-  return { text, reply_markup };
+  return {
+    text: [
+      "Адмін-панель:",
+      `• Brain: ${links.brain}`,
+      `• Energy: ${links.energy}`,
+      `• Checklist: ${links.checklist}`,
+      `• Statut: ${links.statut}`,
+      `• Learn: ${links.learn}`,
+      `• Repo: ${links.repo}`,
+      `• Usage: ${links.usage}`,
+    ].join("\n"),
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "Brain", url: links.brain },
+          { text: "Energy", url: links.energy },
+        ],
+        [
+          { text: "Checklist", url: links.checklist },
+          { text: "Statut", url: links.statut },
+        ],
+        [
+          { text: "Learn", url: links.learn },
+          { text: "Repo", url: links.repo },
+        ],
+        [{ text: "Usage", url: links.usage }],
+      ],
+    },
+  };
 }
 
 async function askGeminiText(env, prompt, { model } = {}) {
   const apiKey = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEY або GOOGLE_API_KEY missing");
+  if (!apiKey) throw new Error("GEMINI_API_KEY or GOOGLE_API_KEY missing");
 
-  const m = model || env.GEMINI_MODEL || "gemini-2.0-flash";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-    m
-  )}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const selectedModel = model || env.GEMINI_MODEL || "gemini-2.5-flash";
+  const endpoint = new URL(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(selectedModel)}:generateContent`
+  );
+  endpoint.searchParams.set("key", apiKey);
 
-  const body = {
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: {
-      temperature: 0.6,
-      maxOutputTokens: 600,
-    },
-  };
-
-  const r = await fetch(url, {
+  const response = await fetch(endpoint.toString(), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.6, maxOutputTokens: 900 },
+    }),
   });
 
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) {
-    const err = j?.error?.message || JSON.stringify(j);
-    throw new Error(`Gemini error ${r.status}: ${err}`);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data?.error?.message || `Gemini HTTP ${response.status}`);
   }
 
-  const out =
-    j?.candidates?.[0]?.content?.parts
-      ?.map((p) => p?.text || "")
-      .join("")
-      .trim() || "";
+  const answer = data?.candidates?.[0]?.content?.parts
+    ?.map((part) => part?.text || "")
+    .join("")
+    .trim();
 
-  return out || "…";
+  if (!answer) throw new Error("Gemini returned an empty answer");
+  return answer;
+}
+
+function weatherMatched(intent) {
+  if (typeof intent === "boolean") return intent;
+  return Boolean(intent?.hit);
+}
+
+function weatherText(result) {
+  if (typeof result === "string") return result;
+  return String(result?.text || "").trim();
 }
 
 export default async function webhook(request, env, ctx) {
-  const origin = env?.SERVICE_HOST || abs(env, "");
+  let chatId = null;
 
   try {
     if (request.method !== "POST") {
@@ -129,223 +149,170 @@ export default async function webhook(request, env, ctx) {
     }
 
     const update = await request.json().catch(() => ({}));
-    const { msg, text } = pickTextFromUpdate(update);
-
+    const { msg, text } = pickMessage(update);
     if (!msg) return json({ ok: true, ignored: true }, 200);
 
-    const chatId = msg.chat?.id;
-    const fromId = msg.from?.id;
-
+    chatId = msg.chat?.id ?? null;
+    const fromId = msg.from?.id ?? msg.chat?.id;
     const lang = pickReplyLanguage(msg, env);
-    const isAdmin = String(fromId) === String(env.TELEGRAM_ADMIN_ID);
+    const isAdmin = TG.ADMIN(env, fromId, msg.from?.username);
+    const origin = env.SERVICE_HOST || new URL(request.url).origin || abs(env, "");
 
-    // /start
     if (isStart(text)) {
       await TG.sendMessage(
         chatId,
-        `Привіт, ${msg.from?.first_name || "друже"}! Я Senti.\n` +
-          `Напиши питання або надішли фото — я опишу його.`,
-        {
-          reply_markup: TG.mainKeyboard?.(isAdmin),
-          parse_mode: env.TELEGRAM_PARSE_MODE || undefined,
-        },
+        `Привіт, ${msg.from?.first_name || "друже"}! Я Senti.\nНапиши питання або надішли повідомлення.`,
+        { reply_markup: TG.mainKeyboard(isAdmin) },
         env
       );
       return json({ ok: true }, 200);
     }
 
-    // --- Admin button (стабільний матч + inline меню) ---
     if (
       text &&
-      [TG.BTN_ADMIN, "Admin", "АДМІН", "адмін", "/admin"].includes(
-        String(text).trim()
-      )
+      [TG.BTN_ADMIN, "Admin", "АДМІН", "адмін", "/admin"].includes(text)
     ) {
       if (!isAdmin) {
-        await TG.sendMessage(
-          chatId,
-          "Доступ до адмін-панелі дозволено лише адміну.",
-          { parse_mode: env.TELEGRAM_PARSE_MODE || undefined },
-          env
-        );
+        await TG.sendMessage(chatId, "Доступ до адмін-панелі дозволено лише адміну.", {}, env);
         return json({ ok: true }, 200);
       }
 
-      const out = adminText(origin, env);
-      await TG.sendMessage(
-        chatId,
-        out.text,
-        {
-          reply_markup: out.reply_markup,
-          parse_mode: env.TELEGRAM_PARSE_MODE || undefined,
-        },
-        env
-      );
+      const menu = adminMenu(origin, env);
+      await TG.sendMessage(chatId, menu.text, { reply_markup: menu.reply_markup }, env);
       return json({ ok: true }, 200);
     }
 
-    // --- Drive toggle ---
     if (text === TG.BTN_DRIVE) {
-      const mode = await getDriveMode(env, fromId);
-      const next = mode === "on" ? "off" : "on";
+      const current = await getDriveMode(env, fromId);
+      const next = current === "on" ? "off" : "on";
       await setDriveMode(env, fromId, next);
       await TG.sendMessage(
         chatId,
-        next === "on"
-          ? "Google Drive: увімкнено."
-          : "Google Drive: вимкнено.",
-        {
-          reply_markup: TG.mainKeyboard?.(isAdmin),
-          parse_mode: env.TELEGRAM_PARSE_MODE || undefined,
-        },
+        next === "on" ? "Google Drive: увімкнено." : "Google Drive: вимкнено.",
+        { reply_markup: TG.mainKeyboard(isAdmin) },
         env
       );
       return json({ ok: true }, 200);
     }
-// --- Voice placeholder ---
+
     if (text === TG.BTN_VOICE) {
-      await TG.sendMessage(
-        chatId,
-        "Voice режим: у розробці.",
-        {
-          reply_markup: TG.mainKeyboard?.(isAdmin),
-          parse_mode: env.TELEGRAM_PARSE_MODE || undefined,
-        },
-        env
-      );
+      await TG.sendMessage(chatId, "Voice режим: у розробці.", { reply_markup: TG.mainKeyboard(isAdmin) }, env);
       return json({ ok: true }, 200);
     }
 
-    // --- Codex button ---
     if (text === TG.BTN_CODEX) {
-      await TG.sendMessage(
-        chatId,
-        "Codex: обери дію в меню або напиши завдання.",
-        {
-          reply_markup: TG.mainKeyboard?.(isAdmin),
-          parse_mode: env.TELEGRAM_PARSE_MODE || undefined,
-        },
-        env
-      );
+      await TG.sendMessage(chatId, "Codex: напиши завдання для роботи з кодом.", { reply_markup: TG.mainKeyboard(isAdmin) }, env);
       return json({ ok: true }, 200);
     }
 
-    // ----------- фото/файли -----------
-    // (залишаю твою логіку як була: якщо є фото/док — обробляємо через think/vision)
-    // Тут нічого не ламаю — лише підсилюю стабільність гілок вище.
-
-    // ----------- intents: час/дата/погода -----------
     if (dateIntent(text, lang)) {
       await replyCurrentDate(env, chatId, lang);
       return json({ ok: true }, 200);
     }
+
     if (timeIntent(text, lang)) {
       await replyCurrentTime(env, chatId, lang);
       return json({ ok: true }, 200);
     }
-    if (weatherIntent(text, lang)) {
-      // якщо юзер написав місто
-      const out = await weatherSummaryByText(env, text, lang).catch(() => "");
-      if (out) {
-        await TG.sendMessage(
-          chatId,
-          out,
-          { parse_mode: env.TELEGRAM_PARSE_MODE || undefined },
-          env
-        );
-        return json({ ok: true }, 200);
+
+    const weather = weatherIntent(text, lang);
+    if (weatherMatched(weather)) {
+      let result = null;
+
+      if (weather?.place) {
+        result = await weatherSummaryByText(env, weather.place, lang).catch(() => null);
       }
-      const out2 = await weatherSummaryByLocation(env, msg, lang).catch(
-        () => ""
-      );
+      if (!weatherText(result) && text) {
+        result = await weatherSummaryByText(env, text, lang).catch(() => null);
+      }
+      if (!weatherText(result) && msg.location) {
+        result = await weatherSummaryByLocation(env, msg.location, lang).catch(() => null);
+      }
+
       await TG.sendMessage(
         chatId,
-        out2 || t(lang, "weather_fail") || "Не вдалося отримати погоду.",
-        { parse_mode: env.TELEGRAM_PARSE_MODE || undefined },
+        weatherText(result) || t(lang, "weather_fail") || "Не вдалося отримати погоду.",
+        {},
         env
       );
       return json({ ok: true }, 200);
     }
 
-    // ----------- основний чат (LLM) -----------
-    const selfTune = await loadSelfTune(env, fromId).catch(() => null);
-    ctx.waitUntil(autoUpdateSelfTune(env, fromId).catch(() => {}));
+    if (!text) {
+      await TG.sendMessage(chatId, "Наразі я обробляю текстові повідомлення.", {}, env);
+      return json({ ok: true, ignored: true }, 200);
+    }
+
+    await loadSelfTune(env, fromId).catch(() => null);
+    const tuningTask = background(ctx, autoUpdateSelfTune(env, fromId));
 
     const energy = await getEnergy(env, fromId).catch(() => null);
     if (energy?.blocked) {
+      if (tuningTask) await tuningTask;
       await TG.sendMessage(
         chatId,
-        energy?.message || "Зараз перепочинок. Спробуй трохи пізніше.",
-        { parse_mode: env.TELEGRAM_PARSE_MODE || undefined },
+        energy.message || "Зараз перепочинок. Спробуй трохи пізніше.",
+        {},
         env
       );
       return json({ ok: true }, 200);
     }
 
-    // підказка з діалогової памʼяті
-    const dialogHint = await buildDialogHint(env, fromId).catch(() => "");
-    const insights = await getRecentInsights(env, fromId).catch(() => []);
+    const [dialogHint, insights] = await Promise.all([
+      buildDialogHint(env, fromId).catch(() => ""),
+      getRecentInsights(env, fromId).catch(() => []),
+    ]);
 
-    const prompt =
-      (dialogHint ? dialogHint + "\n\n" : "") +
-      (insights?.length
-        ? "Recent Learn insights:\n" +
-          insights.map((x) => `- ${x}`).join("\n") +
-          "\n\n"
-        : "") +
-      `User: ${text}`;
+    const prompt = [
+      dialogHint,
+      Array.isArray(insights) && insights.length
+        ? `Recent Learn insights:\n${insights.map((item) => `- ${item}`).join("\n")}`
+        : "",
+      `User: ${text}`,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
 
-    // Важливо: твій askAnyModel може піти в CF/OpenRouter тощо.
-    // Але якщо ти хочеш гарантовано тестнути Gemini — нижче fallback на Gemini напряму.
-    let answer = "";
+    let answer;
     try {
       answer = await askAnyModel(env, prompt, { kind: "text" });
-    } catch (e) {
-      // fallback на Gemini (ключ: GEMINI_API_KEY або GOOGLE_API_KEY)
+    } catch (routerError) {
+      console.warn("[webhook.modelRouter]", routerError?.message || routerError);
       answer = await askGeminiText(env, prompt, { model: env.GEMINI_MODEL });
     }
 
-    // пишемо в діалогову памʼять
-    ctx.waitUntil(
-      pushTurn(env, fromId, { role: "user", text }).catch(() => {})
-    );
-    ctx.waitUntil(
-      pushTurn(env, fromId, { role: "assistant", text: answer }).catch(() => {})
-    );
+    answer = String(answer || "").trim();
+    if (!answer) throw new Error("Model returned an empty answer");
 
-    // списуємо енергію
-    ctx.waitUntil(spendEnergy(env, fromId, answer).catch(() => {}));
+    const tasks = [
+      pushTurn(env, fromId, { role: "user", text }),
+      pushTurn(env, fromId, { role: "assistant", text: answer }),
+      spendEnergy(env, fromId, answer),
+    ];
 
-    await TG.sendMessage(
-      chatId,
-      answer,
-      { parse_mode: env.TELEGRAM_PARSE_MODE || undefined },
-      env
-    );
+    const pending = tasks.map((task) => background(ctx, task)).filter(Boolean);
+    await TG.sendMessage(chatId, answer, {}, env);
+    if (pending.length) await Promise.allSettled(pending);
+    if (tuningTask) await tuningTask;
 
     return json({ ok: true }, 200);
-  } catch (err) {
-    // щоб не було “мовчить” — завжди віддаємо хоч щось
-    try {
-      const text =
-        "Помилка у webhook:\n" +
-        (err?.message ? String(err.message) : String(err));
-      const safe = text.slice(0, 3500);
-      // якщо є chatId — відправимо
-      // (chatId може бути недоступний якщо впало до парсингу)
-      // eslint-disable-next-line no-undef
-      if (typeof chatId !== "undefined") {
+  } catch (error) {
+    console.error("[webhook]", error?.stack || error?.message || error);
+
+    if (chatId !== null) {
+      try {
         await TG.sendMessage(
           chatId,
-          safe,
-          { parse_mode: env.TELEGRAM_PARSE_MODE || undefined },
+          "Сталася внутрішня помилка. Спробуй повторити запит трохи пізніше.",
+          {},
           env
         );
+        return json({ ok: false, error: String(error?.message || error), notified: true }, 200);
+      } catch (notifyError) {
+        console.error("[webhook.notify]", notifyError?.message || notifyError);
       }
-    } catch (_) {}
-    return json(
-      { ok: false, error: err?.message ? String(err.message) : String(err) },
-      200
-    );
+    }
+
+    return json({ ok: false, error: String(error?.message || error) }, 500);
   }
-} 
+}
