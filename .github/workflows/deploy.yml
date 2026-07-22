@@ -1,51 +1,67 @@
-name: Deploy Worker
+name: Validate and Deploy Worker
 
 on:
+  pull_request:
+    branches: ["main"]
   push:
     branches: ["main"]
   workflow_dispatch:
 
 jobs:
-  deploy:
+  validate:
     runs-on: ubuntu-latest
-
     permissions:
       contents: read
-
     steps:
-      - name: 🛠️ Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🧰 Setup Node
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: "npm"
+          cache: npm
 
-      # npm ci дуже строгий до синхронності package-lock.json ↔ package.json,
-      # тому для стабільного деплою використовуємо npm install.
-      - name: 📦 Install deps
+      - name: Install dependencies
         run: npm install --no-audit --no-fund
 
-      - name: ⚙️ Install Wrangler
-        run: npm install -g wrangler@4
+      - name: Run checks
+        run: npm test
 
-      - name: 🔎 Cloudflare diag (whoami + R2 list)
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Cloudflare diagnostics
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           npx wrangler --version
-          npx wrangler whoami || true
-          npx wrangler r2 bucket list || true
+          npx wrangler whoami
 
-      - name: 🚀 Deploy to Cloudflare
+      - name: Deploy to Cloudflare
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: wrangler deploy
+        run: npm run deploy
 
-      - name: ✍️ Note deploy to Checklist
+      - name: Note deploy to Checklist
         if: always()
         env:
           WORKER_HOST: ${{ secrets.WORKER_HOST }}
@@ -55,10 +71,14 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           STATUS: ${{ job.status }}
         run: |
-          curl -sS --get "https://${WORKER_HOST}/ci/deploy-note" \
-            --data-urlencode "s=${WEBHOOK_SECRET}" \
-            --data-urlencode "commit=${COMMIT_SHA}" \
-            --data-urlencode "actor=${ACTOR}" \
-            --data-urlencode "deploy=${RUN_ID}" \
-            --data-urlencode "status=${STATUS}" \
-            --data-urlencode "from=github-actions" || true
+          if [ -n "${WORKER_HOST}" ] && [ -n "${WEBHOOK_SECRET}" ]; then
+            curl --fail-with-body --silent --show-error --get "https://${WORKER_HOST}/ci/deploy-note" \
+              --data-urlencode "s=${WEBHOOK_SECRET}" \
+              --data-urlencode "commit=${COMMIT_SHA}" \
+              --data-urlencode "actor=${ACTOR}" \
+              --data-urlencode "deploy=${RUN_ID}" \
+              --data-urlencode "status=${STATUS}" \
+              --data-urlencode "from=github-actions"
+          else
+            echo "Deploy note skipped: WORKER_HOST or WEBHOOK_SECRET is missing."
+          fi

@@ -1,129 +1,85 @@
-🧠 Senti Bot Worker
+# 🧠 Senti Bot Worker
 
-Cloudflare Workers AI-проєкт для автономного Telegram-бота Senti, який аналізує контексти користувача, формує інсайти, веде чекліст і має нічного агента для самопокращення.
+Cloudflare Worker для Telegram-бота Senti: маршрутизація запитів до моделей, пам’ять діалогу, погода, Google Drive, checklist, архіви та нічні задачі.
 
+## Локальна перевірка
 
----
+```bash
+npm install
+npm test
+```
 
-🚀 Основні компоненти
+Команда перевіряє синтаксис критичних модулів і запускає статичні regression-checks для webhook, Telegram API, адмін-маршрутів та конфігурації секретів.
 
-🧩 1. aiImprove.js
+## Деплой
 
-Модуль нічного агента, який:
+```bash
+npm run deploy
+```
 
-аналізує пам'ять користувачів у LIKES_KV
+Push у `main` запускає GitHub Actions: спочатку перевірки, потім deploy у Cloudflare. Pull request запускає лише перевірки.
 
-формує аналітичні JSON-інсайти (STATE_KV)
+## Обов’язкові Cloudflare Secrets
 
-додає короткий звіт у чекліст (CHECKLIST_KV)
+Секрети не можна додавати у `wrangler.toml`, README, код або URL у документації.
 
-автоматично стабілізує JSON з моделі (обробляє перенос рядків, зайві коми, незакриті лапки)
+```bash
+npx wrangler secret put BOT_TOKEN
+npx wrangler secret put TG_WEBHOOK_SECRET
+npx wrangler secret put WEBHOOK_SECRET
+npx wrangler secret put ADMIN_SECRET
+npx wrangler secret put GEMINI_API_KEY
+npx wrangler secret put GOOGLE_CLIENT_ID
+npx wrangler secret put GOOGLE_CLIENT_SECRET
+```
 
+Рекомендації:
 
-✅ Фіксовано основну проблему:
+- `TG_WEBHOOK_SECRET` використовується лише для перевірки Telegram webhook.
+- `ADMIN_SECRET` захищає адмінські сторінки та операції запису.
+- `WEBHOOK_SECRET` використовується для внутрішніх cron/CI endpoint-ів.
+- Кожен секрет повинен бути окремим випадковим значенням щонайменше 32 байти.
+- Після витоку секрет потрібно негайно замінити, а не просто видалити з останнього commit.
 
-> Unterminated string in JSON
-через новий алгоритм escapeNewlinesInsideStrings()
-→ JSON тепер стабільно парситься навіть при неекранованих переносах.
+## Основні маршрути
 
+- `GET /health` — стан Worker.
+- `POST /webhook` — Telegram webhook, перевіряється заголовок `x-telegram-bot-api-secret-token`.
+- `GET /selftest` — локальна перевірка ключових модулів.
+- `/admin/checklist?s=...` — checklist, вимагає `ADMIN_SECRET`.
+- `/admin/statut?s=...` — statut, вимагає `ADMIN_SECRET`.
+- `/admin/repo/html?s=...` — керування архівами.
+- `/admin/brain?s=...` — операції brain.
 
+Адмінські секрети краще передавати заголовком:
 
+```text
+Authorization: Bearer <ADMIN_SECRET>
+```
 
----
+Query-параметр `?s=` залишений для сумісності з Telegram inline-кнопками, але не повинен потрапляти у публічні логи чи скриншоти.
 
-🌙 2. nightlyAutoImprove.js
+## Сховища
 
-Додатковий агент для довготривалих фактів і щоденного самонавчання:
+| Binding | Призначення |
+|---|---|
+| `LIKES_KV` | коротка пам’ять користувачів |
+| `STATE_KV` | інсайти та аналітика |
+| `CHECKLIST_KV` | checklist, журнал, архівні покажчики |
+| `USER_OAUTH_KV` | Google OAuth tokens |
+| `DEDUP_KV` | захист від повторної обробки |
+| `LEARN_QUEUE_KV` | черга навчання |
+| `LEARN_BUCKET` | R2 для learn-даних |
+| `REPO_BUCKET` | R2 для архівів |
 
-збирає коротку історію з пам'яті
+> `CHECKLIST_KV` і `TODO_KV` зараз використовують один namespace ID. Перед розділенням потрібно запланувати міграцію даних.
 
-формує узагальнені “facts”, “summary”, “suggestions”
+## Безпека після оновлення
 
-записує результати в CHECKLIST_KV і пам’ять користувача
+Після merge обов’язково:
 
-має внутрішній throttle (щоб не створювати пікових навантажень)
-
-
-
----
-
-⚙️ Використані KV-сховища
-
-KV	Призначення
-
-LIKES_KV	коротка пам’ять користувачів
-STATE_KV	інсайти, JSON-аналітика, TTL=14 днів
-CHECKLIST_KV	лог подій, щоденники, хроніка
-USER_OAUTH_KV	токени OAuth, майбутня інтеграція з Google/Notion
-DEDUP_KV	запобігання повторним обробкам
-
-
-
----
-
-🧩 Тестові маршрути
-
-1. Створити демо-контекст
-
-GET /debug/likes/seed?chat=784869835&s=senti1984
-
-➡️ Створює тестову пам’ять u:784869835:mem.
-
-2. Запустити аналіз вручну
-
-GET /ai/improve/test-one?key=u:784869835:mem&s=senti1984
-
-➡️ Викликає модель, зберігає JSON-аналітику у STATE_KV.
-
-3. Перевірити результат
-
-GET /debug/insight/get?chat=784869835&s=senti1984
-
-➡️ Показує збережений інсайт у STATE_KV.
-
-
----
-
-✅ Приклад результату
-
-{
-  "summary": "Користувач хоче отримувати короткі відповіді від бота.",
-  "tone": "дружелюбний, злегка критичний",
-  "pain_points": ["довгі відповіді"],
-  "ideas": ["підсумовувати питання перед відповіддю"],
-  "rules": ["відповідати коротко і по суті", "підсумовувати питання"]
-}
-
-
----
-
-🔒 Безпека
-
-Кожен debug-ендпойнт вимагає параметр:
-
-?s=senti1984
-
-(твій WEBHOOK_SECRET).
-
-
----
-
-🧩 Статус
-
-✅ JSON-парсер стабільний
-✅ KV-логіка перевірена
-✅ Cloudflare Worker деплой успішний
-✅ Інсайти створюються і читаються без помилок
-
-
----
-
-🧭 Посилання для швидкого доступу
-
-🧪 Seed demo chat
-
-🚀 Run single improve
-
-🧠 Inspect insight result
-
-
+1. Згенерувати нові `TG_WEBHOOK_SECRET`, `ADMIN_SECRET` і `WEBHOOK_SECRET`.
+2. Записати їх через `wrangler secret put`.
+3. Перевстановити Telegram webhook з новим `secret_token`.
+4. Перевірити `/health`, `/selftest` і звичайне текстове повідомлення боту.
+5. Переконатися, що анонімний запит до `/admin/checklist` повертає `401`.
