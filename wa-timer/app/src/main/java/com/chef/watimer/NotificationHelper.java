@@ -16,7 +16,7 @@ public final class NotificationHelper {
     public static void show(Context context, String title, String text) {
         NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel ch = new NotificationChannel(CHANNEL, "WA Timer", NotificationManager.IMPORTANCE_HIGH);
+            NotificationChannel ch = new NotificationChannel(CHANNEL, "4.5.0", NotificationManager.IMPORTANCE_HIGH);
             ch.setDescription("Статус запланованих повідомлень WhatsApp");
             nm.createNotificationChannel(ch);
         }
