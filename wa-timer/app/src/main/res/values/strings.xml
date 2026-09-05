@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">WA Timer</string>
+    <string name="accessibility_desc">Автоматично відкриває WhatsApp, знаходить задану групу, вводить заплановане повідомлення та натискає Надіслати. Служба активна лише коли є очікуване завдання.</string>
+    <string name="accessibility_label">WA Timer: надсилання в WhatsApp</string>
+</resources>
