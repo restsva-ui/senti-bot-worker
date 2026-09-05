@@ -13,6 +13,7 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 
 public class WhatsAppAccessibilityService extends AccessibilityService {
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -151,7 +152,7 @@ public class WhatsAppAccessibilityService extends AccessibilityService {
         String t = text.trim();
         if (t.isEmpty() || t.length() > 120) return false;
 
-        String lower = t.toLowerCase();
+        String lower = t.toLowerCase(Locale.ROOT);
         if (lower.equals("whatsapp") || lower.equals("whatsapp business") ||
                 lower.equals("пошук") || lower.equals("search") || lower.equals("поиск") ||
                 lower.equals("надіслати") || lower.equals("send") || lower.equals("отправить") ||
@@ -205,7 +206,12 @@ public class WhatsAppAccessibilityService extends AccessibilityService {
         int stage = AutomationPrefs.getStage(this);
         switch (stage) {
             case 0:
-                if (clickSearch(root, expectedPkg)) {
+                AccessibilityNodeInfo alreadyVisibleSearch = findSearchEditor(root, expectedPkg);
+                if (alreadyVisibleSearch != null) {
+                    focusOrClick(alreadyVisibleSearch);
+                    AutomationPrefs.setStage(this, 1);
+                    queue(180);
+                } else if (clickSearch(root, expectedPkg)) {
                     AutomationPrefs.setStage(this, 1);
                     queue(500);
                 } else {
@@ -214,12 +220,12 @@ public class WhatsAppAccessibilityService extends AccessibilityService {
                         performGlobalAction(GLOBAL_ACTION_BACK);
                         queue(600);
                     } else {
-                        fail(item, "Не знайдено кнопку пошуку WhatsApp");
+                        fail(item, "Не знайдено поле пошуку WhatsApp");
                     }
                 }
                 break;
             case 1:
-                if (setSearchText(root, item.groupName)) {
+                if (setSearchText(root, expectedPkg, item.groupName)) {
                     AutomationPrefs.setStage(this, 2);
                     queue(900);
                 } else {
@@ -263,20 +269,87 @@ public class WhatsAppAccessibilityService extends AccessibilityService {
     }
 
     private boolean clickSearch(AccessibilityNodeInfo root, String pkg) {
+        AccessibilityNodeInfo editor = findSearchEditor(root, pkg);
+        if (editor != null) {
+            return focusOrClick(editor);
+        }
+
         List<String> ids = Arrays.asList(
                 pkg + ":id/menuitem_search",
+                pkg + ":id/search",
+                pkg + ":id/search_input",
+                pkg + ":id/search_src_text",
+                pkg + ":id/search_edit_text",
+                pkg + ":id/search_bar"
+        );
+        for (String id : ids) {
+            AccessibilityNodeInfo n = firstByViewId(root, id);
+            if (n != null && focusOrClick(n)) return true;
+        }
+
+        List<AccessibilityNodeInfo> all = new ArrayList<>();
+        collect(root, all);
+        int maxTop = Math.round(getResources().getDisplayMetrics().heightPixels * 0.34f);
+        for (AccessibilityNodeInfo n : all) {
+            if (!n.isVisibleToUser()) continue;
+            Rect r = new Rect();
+            n.getBoundsInScreen(r);
+            if (r.top > maxTop) continue;
+            if (looksLikeSearch(n) && focusOrClick(n)) return true;
+        }
+        return false;
+    }
+
+    private AccessibilityNodeInfo findSearchEditor(AccessibilityNodeInfo root, String pkg) {
+        List<String> ids = Arrays.asList(
+                pkg + ":id/search_input",
+                pkg + ":id/search_src_text",
+                pkg + ":id/search_edit_text",
                 pkg + ":id/search"
         );
         for (String id : ids) {
             AccessibilityNodeInfo n = firstByViewId(root, id);
-            if (n != null && clickNodeOrParent(n)) return true;
+            if (n != null && n.isVisibleToUser() && n.isEditable()) return n;
         }
-        return clickByDescription(root, Arrays.asList("Пошук", "Search", "Поиск"));
+
+        List<AccessibilityNodeInfo> all = new ArrayList<>();
+        collect(root, all);
+        int screenHeight = getResources().getDisplayMetrics().heightPixels;
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int maxTop = Math.round(screenHeight * 0.34f);
+        AccessibilityNodeInfo fallback = null;
+        int bestTop = Integer.MAX_VALUE;
+
+        for (AccessibilityNodeInfo n : all) {
+            if (!n.isVisibleToUser() || !n.isEditable()) continue;
+            Rect r = new Rect();
+            n.getBoundsInScreen(r);
+            if (r.top > maxTop) continue;
+            if (looksLikeSearch(n)) return n;
+            if (r.width() >= Math.round(screenWidth * 0.55f) && r.top < bestTop) {
+                fallback = n;
+                bestTop = r.top;
+            }
+        }
+        return fallback;
     }
 
-    private boolean setSearchText(AccessibilityNodeInfo root, String text) {
-        AccessibilityNodeInfo edit = findEditable(root, true);
-        return edit != null && setText(edit, text);
+    private boolean looksLikeSearch(AccessibilityNodeInfo node) {
+        StringBuilder s = new StringBuilder();
+        if (node.getText() != null) s.append(node.getText()).append(' ');
+        if (node.getContentDescription() != null) s.append(node.getContentDescription()).append(' ');
+        if (node.getHintText() != null) s.append(node.getHintText()).append(' ');
+        if (node.getViewIdResourceName() != null) s.append(node.getViewIdResourceName());
+        String value = s.toString().toLowerCase(Locale.ROOT);
+        return value.contains("пошук") || value.contains("search") || value.contains("поиск");
+    }
+
+    private boolean setSearchText(AccessibilityNodeInfo root, String pkg, String text) {
+        AccessibilityNodeInfo edit = findSearchEditor(root, pkg);
+        if (edit == null) edit = findEditable(root, true);
+        if (edit == null) return false;
+        focusOrClick(edit);
+        return setText(edit, text);
     }
 
     private boolean clickExactGroup(AccessibilityNodeInfo root, String groupName) {
@@ -284,7 +357,7 @@ public class WhatsAppAccessibilityService extends AccessibilityService {
         collect(root, all);
         for (AccessibilityNodeInfo n : all) {
             CharSequence t = n.getText();
-            if (t == null || n.isEditable()) continue;
+            if (t == null || n.isEditable() || !n.isVisibleToUser()) continue;
             if (t.toString().trim().equalsIgnoreCase(groupName.trim())) {
                 if (clickNodeOrParent(n)) return true;
             }
@@ -354,6 +427,21 @@ public class WhatsAppAccessibilityService extends AccessibilityService {
             }
         }
         return false;
+    }
+
+    private boolean focusOrClick(AccessibilityNodeInfo node) {
+        if (node == null) return false;
+        boolean ok = false;
+        try {
+            ok = node.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+        } catch (Exception ignored) {}
+        if (node.isClickable()) {
+            try {
+                ok = node.performAction(AccessibilityNodeInfo.ACTION_CLICK) || ok;
+            } catch (Exception ignored) {}
+        }
+        if (!ok) ok = clickNodeOrParent(node);
+        return ok || node.isEditable();
     }
 
     private boolean clickNodeOrParent(AccessibilityNodeInfo node) {
