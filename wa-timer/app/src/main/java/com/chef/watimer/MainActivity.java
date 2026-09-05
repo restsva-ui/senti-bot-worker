@@ -59,8 +59,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        applyPickedTargetIfAny();
         updatePermissionButtons();
         renderSchedules();
+
         long pendingId = AutomationPrefs.getPendingId(this);
         if (pendingId != -1L && AutomationLauncher.canInteractNow(this)) {
             ScheduledMessage pending = ScheduleStore.get(this, pendingId);
@@ -78,7 +80,7 @@ public class MainActivity extends Activity {
 
         TextView title = text("WA Timer", 28, true);
         root.addView(title);
-        TextView sub = text("Планувальник повідомлень у групи WhatsApp", 15, false);
+        TextView sub = text("Планувальник повідомлень у контакти, групи та підгрупи WhatsApp", 15, false);
         sub.setTextColor(Color.DKGRAY);
         root.addView(sub, lp(-1, -2, 0, 4, 0, 16));
 
@@ -90,8 +92,17 @@ public class MainActivity extends Activity {
         exactAlarmButton.setOnClickListener(v -> requestExactAlarmPermission());
         root.addView(exactAlarmButton, lp(-1, -2, 0, 8, 0, 16));
 
-        groupInput = input("Назва групи, напр. кухарі", false);
+        groupInput = input("Контакт / група / підгрупа", false);
         root.addView(groupInput);
+
+        Button pickTarget = button("ВИБРАТИ У WHATSAPP");
+        pickTarget.setOnClickListener(v -> pickTargetFromWhatsApp());
+        root.addView(pickTarget, lp(-1, -2, 0, 6, 0, 2));
+
+        TextView pickerHint = text("Натисни кнопку — відкриється WhatsApp. Торкнись потрібного контакту, групи або підгрупи. WA Timer запам'ятає вибір і поверне тебе назад.", 13, false);
+        pickerHint.setTextColor(Color.DKGRAY);
+        root.addView(pickerHint, lp(-1, -2, 0, 0, 0, 10));
+
         messageInput = input("Текст повідомлення", true);
         root.addView(messageInput, lp(-1, dp(110), 0, 8, 0, 8));
 
@@ -146,11 +157,50 @@ public class MainActivity extends Activity {
         return scroll;
     }
 
+    private void pickTargetFromWhatsApp() {
+        if (!isAccessibilityEnabled()) {
+            toast("Спочатку увімкни спецможливості WA Timer");
+            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+            return;
+        }
+
+        boolean business = businessCheck.isChecked();
+        String pkg = business ? "com.whatsapp.w4b" : "com.whatsapp";
+        Intent launch = getPackageManager().getLaunchIntentForPackage(pkg);
+        if (launch == null) {
+            toast(business ? "WhatsApp Business не знайдено" : "WhatsApp не знайдено");
+            return;
+        }
+
+        TargetPickerPrefs.begin(this, business);
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+        startActivity(launch);
+        toast("Відкрий потрібний чат — WA Timer визначить його автоматично");
+    }
+
+    private void applyPickedTargetIfAny() {
+        if (groupInput == null || businessCheck == null) return;
+
+        if (TargetPickerPrefs.hasSelection(this)) {
+            String name = TargetPickerPrefs.getSelectedName(this);
+            boolean business = TargetPickerPrefs.getSelectedBusiness(this);
+            if (!TextUtils.isEmpty(name)) {
+                groupInput.setText(name);
+                groupInput.setSelection(name.length());
+                businessCheck.setChecked(business);
+                toast("Вибрано: " + name);
+            }
+            TargetPickerPrefs.clearSelection(this);
+        } else if (TargetPickerPrefs.isActive(this)) {
+            TargetPickerPrefs.cancel(this);
+        }
+    }
+
     private void saveSchedule() {
         String group = groupInput.getText().toString().trim();
         String message = messageInput.getText().toString();
         if (TextUtils.isEmpty(group) || TextUtils.isEmpty(message.trim())) {
-            toast("Вкажи групу та текст повідомлення");
+            toast("Вибери контакт/групу та введи текст повідомлення");
             return;
         }
         if (selected.getTimeInMillis() <= System.currentTimeMillis()) {
@@ -168,7 +218,7 @@ public class MainActivity extends Activity {
         String group = groupInput.getText().toString().trim();
         String message = messageInput.getText().toString();
         if (TextUtils.isEmpty(group) || TextUtils.isEmpty(message.trim())) {
-            toast("Вкажи групу та текст повідомлення");
+            toast("Вибери контакт/групу та введи текст повідомлення");
             return;
         }
         if (!isAccessibilityEnabled()) {
