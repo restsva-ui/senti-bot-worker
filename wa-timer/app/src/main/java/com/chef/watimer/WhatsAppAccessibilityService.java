@@ -2,6 +2,8 @@ package com.chef.watimer;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
+import android.content.Intent;
+import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -11,7 +13,6 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Locale;
 
 public class WhatsAppAccessibilityService extends AccessibilityService {
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -20,7 +21,11 @@ public class WhatsAppAccessibilityService extends AccessibilityService {
     private final Runnable processor = new Runnable() {
         @Override public void run() {
             scheduled = false;
-            processPending();
+            if (TargetPickerPrefs.isActive(WhatsAppAccessibilityService.this)) {
+                processTargetPicker();
+            } else {
+                processPending();
+            }
         }
     };
 
@@ -40,7 +45,9 @@ public class WhatsAppAccessibilityService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (AutomationPrefs.getPendingId(this) != -1L) queue(250);
+        if (AutomationPrefs.getPendingId(this) != -1L || TargetPickerPrefs.isActive(this)) {
+            queue(250);
+        }
     }
 
     @Override public void onInterrupt() {}
@@ -49,6 +56,111 @@ public class WhatsAppAccessibilityService extends AccessibilityService {
         if (scheduled) handler.removeCallbacks(processor);
         scheduled = true;
         handler.postDelayed(processor, delayMs);
+    }
+
+    private void processTargetPicker() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) {
+            queue(500);
+            return;
+        }
+
+        String expectedPkg = TargetPickerPrefs.useBusiness(this) ? "com.whatsapp.w4b" : "com.whatsapp";
+        CharSequence pkgCs = root.getPackageName();
+        if (pkgCs == null || !expectedPkg.equals(pkgCs.toString())) {
+            return;
+        }
+
+        AccessibilityNodeInfo entry = firstByViewId(root, expectedPkg + ":id/entry");
+        if (entry == null || !entry.isVisibleToUser()) {
+            return;
+        }
+
+        String title = findChatTitle(root, expectedPkg);
+        if (title == null || title.trim().isEmpty()) {
+            queue(350);
+            return;
+        }
+
+        TargetPickerPrefs.complete(this, title.trim());
+        handler.postDelayed(() -> {
+            Intent back = new Intent(WhatsAppAccessibilityService.this, MainActivity.class);
+            back.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK |
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP |
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            startActivity(back);
+        }, 250);
+    }
+
+    private String findChatTitle(AccessibilityNodeInfo root, String pkg) {
+        List<String> titleIds = Arrays.asList(
+                pkg + ":id/conversation_contact_name",
+                pkg + ":id/conversation_title",
+                pkg + ":id/contact_name",
+                pkg + ":id/toolbar_title",
+                pkg + ":id/title"
+        );
+
+        for (String id : titleIds) {
+            AccessibilityNodeInfo n = firstByViewId(root, id);
+            String text = extractFirstText(n);
+            if (isUsableTitle(text)) return text;
+        }
+
+        List<AccessibilityNodeInfo> all = new ArrayList<>();
+        collect(root, all);
+        int maxTop = Math.round(getResources().getDisplayMetrics().heightPixels * 0.28f);
+        int minTop = dp(28);
+        AccessibilityNodeInfo best = null;
+        int bestTop = Integer.MAX_VALUE;
+        int bestLeft = Integer.MAX_VALUE;
+
+        for (AccessibilityNodeInfo n : all) {
+            if (!n.isVisibleToUser() || n.isEditable()) continue;
+            String text = n.getText() == null ? "" : n.getText().toString().trim();
+            if (!isUsableTitle(text)) continue;
+
+            Rect r = new Rect();
+            n.getBoundsInScreen(r);
+            if (r.top < minTop || r.top > maxTop || r.width() < dp(45)) continue;
+
+            if (r.top < bestTop || (r.top == bestTop && r.left < bestLeft)) {
+                best = n;
+                bestTop = r.top;
+                bestLeft = r.left;
+            }
+        }
+
+        return best == null || best.getText() == null ? null : best.getText().toString().trim();
+    }
+
+    private String extractFirstText(AccessibilityNodeInfo node) {
+        if (node == null) return null;
+        CharSequence own = node.getText();
+        if (own != null && !own.toString().trim().isEmpty()) return own.toString().trim();
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            String nested = extractFirstText(child);
+            if (nested != null && !nested.trim().isEmpty()) return nested.trim();
+        }
+        return null;
+    }
+
+    private boolean isUsableTitle(String text) {
+        if (text == null) return false;
+        String t = text.trim();
+        if (t.isEmpty() || t.length() > 120) return false;
+
+        String lower = t.toLowerCase();
+        if (lower.equals("whatsapp") || lower.equals("whatsapp business") ||
+                lower.equals("пошук") || lower.equals("search") || lower.equals("поиск") ||
+                lower.equals("надіслати") || lower.equals("send") || lower.equals("отправить") ||
+                lower.equals("онлайн") || lower.equals("online") || lower.equals("в мережі") ||
+                lower.equals("друкує…") || lower.equals("typing…") || lower.equals("печатает…")) {
+            return false;
+        }
+
+        return !t.matches("^\\d{1,2}:\\d{2}$");
     }
 
     private void processPending() {
@@ -142,7 +254,7 @@ public class WhatsAppAccessibilityService extends AccessibilityService {
                 item.lastStatus = "Надіслано";
                 ScheduleStore.upsert(this, item);
                 AutomationPrefs.clear(this);
-                NotificationHelper.show(this, "WA Timer", "Надіслано в групу «" + item.groupName + "»");
+                NotificationHelper.show(this, "WA Timer", "Надіслано в «" + item.groupName + "»");
                 if (item.exitAfterSend) performGlobalAction(GLOBAL_ACTION_HOME);
                 break;
             default:
@@ -212,7 +324,7 @@ public class WhatsAppAccessibilityService extends AccessibilityService {
             if (n.isFocused()) return n;
             if (!preferTop && candidate == null) candidate = n;
             if (preferTop) {
-                android.graphics.Rect r = new android.graphics.Rect();
+                Rect r = new Rect();
                 n.getBoundsInScreen(r);
                 if (r.top < bestTop) {
                     bestTop = r.top;
@@ -260,6 +372,10 @@ public class WhatsAppAccessibilityService extends AccessibilityService {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) collect(child, out);
         }
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
     private void fail(ScheduledMessage item, String reason) {
