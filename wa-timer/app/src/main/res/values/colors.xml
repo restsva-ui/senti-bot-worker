@@ -1,0 +1,12 @@
+<resources>
+    <color name="brand_bg">#0A0A0D</color>
+    <color name="brand_surface">#16161C</color>
+    <color name="brand_surface_2">#1F1F27</color>
+    <color name="brand_gold">#F0BE26</color>
+    <color name="brand_magenta">#E2008B</color>
+    <color name="brand_text">#F7F7F9</color>
+    <color name="brand_text_secondary">#C9C9CF</color>
+    <color name="brand_hint">#8E8F99</color>
+    <color name="brand_stroke">#373743</color>
+    <color name="launcher_background">#000000</color>
+</resources>

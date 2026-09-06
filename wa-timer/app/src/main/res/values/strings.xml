@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">4.5.0</string>
+    <string name="accessibility_desc">Автоматично відкриває WhatsApp, знаходить вибраний контакт, групу або підгрупу, вводить заплановане повідомлення та натискає Надіслати. Служба активна лише коли є очікуване завдання або режим вибору чату.</string>
+    <string name="accessibility_label">4.5.0: надсилання в WhatsApp</string>
+</resources>
