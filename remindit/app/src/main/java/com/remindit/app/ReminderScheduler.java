@@ -28,9 +28,17 @@ public final class ReminderScheduler {
             return false;
         }
 
-        PendingIntent pendingIntent = pending(context, reminder.id);
-        manager.cancel(pendingIntent);
-        manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, reminder.remindAt, pendingIntent);
+        PendingIntent fireIntent = pending(context, reminder.id);
+        manager.cancel(fireIntent);
+
+        // AlarmClock is intentionally used here instead of a normal exact alarm.
+        // It is the strongest user-visible exact-alarm mode Android provides and
+        // is allowed to wake the device out of idle/doze for a real reminder.
+        AlarmManager.AlarmClockInfo alarmClockInfo = new AlarmManager.AlarmClockInfo(
+                reminder.remindAt,
+                showPending(context, reminder.id)
+        );
+        manager.setAlarmClock(alarmClockInfo, fireIntent);
         return true;
     }
 
@@ -45,6 +53,18 @@ public final class ReminderScheduler {
         intent.putExtra("reminder_id", reminderId);
         int requestCode = (int) (reminderId ^ (reminderId >>> 32));
         return PendingIntent.getBroadcast(
+                context,
+                requestCode,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+    }
+
+    private static PendingIntent showPending(Context context, long reminderId) {
+        Intent intent = new Intent(context, MainActivity.class);
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        int requestCode = 100000 + (int) (reminderId ^ (reminderId >>> 32));
+        return PendingIntent.getActivity(
                 context,
                 requestCode,
                 intent,
