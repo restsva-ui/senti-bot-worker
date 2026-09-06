@@ -16,21 +16,43 @@ public final class AutomationPrefs {
         p(context).edit()
                 .putLong(ID, id)
                 .putInt(STAGE, 0)
-                .putLong(STARTED, System.currentTimeMillis())
+                .putLong(STARTED, 0L)
                 .putInt(ATTEMPTS, 0)
                 .apply();
     }
 
-    public static long getPendingId(Context context) { return p(context).getLong(ID, -1L); }
-    public static int getStage(Context context) { return p(context).getInt(STAGE, 0); }
-    public static void setStage(Context context, int stage) { p(context).edit().putInt(STAGE, stage).apply(); }
-    public static long getStarted(Context context) { return p(context).getLong(STARTED, 0L); }
-    public static int incrementAttempts(Context context) {
-        int v = p(context).getInt(ATTEMPTS, 0) + 1;
-        p(context).edit().putInt(ATTEMPTS, v).apply();
-        return v;
+    public static long getPendingId(Context context) {
+        return p(context).getLong(ID, -1L);
     }
-    public static int getAttempts(Context context) { return p(context).getInt(ATTEMPTS, 0); }
+
+    public static int getStage(Context context) {
+        return p(context).getInt(STAGE, 0);
+    }
+
+    public static void setStage(Context context, int stage) {
+        p(context).edit().putInt(STAGE, stage).apply();
+    }
+
+    public static long getStarted(Context context) {
+        return p(context).getLong(STARTED, 0L);
+    }
+
+    public static void markStartedIfNeeded(Context context) {
+        SharedPreferences prefs = p(context);
+        if (prefs.getLong(STARTED, 0L) == 0L) {
+            prefs.edit().putLong(STARTED, System.currentTimeMillis()).apply();
+        }
+    }
+
+    public static int incrementAttempts(Context context) {
+        int value = p(context).getInt(ATTEMPTS, 0) + 1;
+        p(context).edit().putInt(ATTEMPTS, value).apply();
+        return value;
+    }
+
+    public static int getAttempts(Context context) {
+        return p(context).getInt(ATTEMPTS, 0);
+    }
 
     public static void clear(Context context) {
         p(context).edit().clear().apply();
