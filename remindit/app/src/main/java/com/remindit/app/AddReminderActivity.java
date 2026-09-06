@@ -15,6 +15,7 @@ import android.os.Parcelable;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -54,8 +55,6 @@ public class AddReminderActivity extends Activity {
     private TextView timeValue;
     private TextView sourceBadge;
     private TextView smartHint;
-    private TextView intentBadge;
-    private Button saveButton;
 
     private final Calendar selected = Calendar.getInstance();
     private String sourceType = "manual";
@@ -92,7 +91,7 @@ public class AddReminderActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         final int horizontal = dp(18);
         final int normalTop = dp(18);
-        final int normalBottom = dp(32);
+        final int normalBottom = dp(38);
         root.setPadding(horizontal, normalTop, horizontal, normalBottom);
         scroll.addView(root);
 
@@ -143,37 +142,31 @@ public class AddReminderActivity extends Activity {
 
         sourceBadge = pill(LanguageManager.pick(this, "ВРУЧНУ", "MANUAL"), BLUE);
         sourceRow.addView(sourceBadge);
-
-        TextView local = text(LanguageManager.pick(this, "  Локально • приватно", "  On-device • private"), 12, true, MUTED);
-        sourceRow.addView(local);
+        sourceRow.addView(text(
+                LanguageManager.pick(this, "  Локально • приватно", "  On-device • private"),
+                12, true, MUTED));
         sourceCard.addView(sourceRow);
 
         smartHint = text(
                 LanguageManager.pick(this,
-                        "Поділись скріншотом, фото, посиланням або текстом — RemindIt визначить дату, категорію і мету.",
-                        "Share a screenshot, photo, link or text and RemindIt will suggest the date, category and goal."),
+                        "Поділись скріншотом, фото, посиланням або текстом — RemindIt спробує сформувати коротку суть.",
+                        "Share a screenshot, photo, link or text and RemindIt will try to form a short reminder meaning."),
                 13, false, MUTED);
         sourceCard.addView(smartHint, margin(-1, -2, 0, 9, 0, 0));
         root.addView(sourceCard, margin(-1, -2, 0, 0, 0, 12));
 
-        LinearLayout smartCard = card();
-        smartCard.setBackground(rounded(SMART_BG, YELLOW, 1, 18));
-        LinearLayout smartHeader = new LinearLayout(this);
-        smartHeader.setOrientation(LinearLayout.HORIZONTAL);
-        smartHeader.setGravity(Gravity.CENTER_VERTICAL);
-        smartHeader.addView(text("✨ " + LanguageManager.pick(this, "Розуміння змісту", "Intent understanding"), 16, true, TEXT),
-                new LinearLayout.LayoutParams(0, -2, 1f));
-        intentBadge = pill(LanguageManager.pick(this, "НЕ ЗАБУТИ", "REMEMBER"), BLUE);
-        smartHeader.addView(intentBadge);
-        smartCard.addView(smartHeader);
-
-        smartCard.addView(label(LanguageManager.pick(this, "Мета нагадування", "Reminder goal")),
-                margin(-1, -2, 0, 12, 0, 0));
+        LinearLayout essenceCard = card();
+        essenceCard.setBackground(rounded(SMART_BG, YELLOW, 1, 18));
+        essenceCard.addView(text(
+                "✨ " + LanguageManager.pick(this, "Суть нагадування", "Reminder meaning"),
+                17, true, TEXT));
         goalInput = input(
-                LanguageManager.pick(this, "Що потрібно зробити або не пропустити?", "What should you do or not miss?"),
-                false);
-        smartCard.addView(goalInput, margin(-1, dp(58), 0, 6, 0, 0));
-        root.addView(smartCard, margin(-1, -2, 0, 0, 0, 12));
+                LanguageManager.pick(this, "Наприклад: відповісти, оплатити, переглянути, не пропустити…", "For example: reply, pay, review, don't miss…"),
+                true);
+        goalInput.setMinLines(2);
+        goalInput.setMaxLines(4);
+        essenceCard.addView(goalInput, margin(-1, dp(88), 0, 10, 0, 0));
+        root.addView(essenceCard, margin(-1, -2, 0, 0, 0, 12));
 
         LinearLayout details = card();
         details.addView(label(LanguageManager.pick(this, "Назва", "Title")));
@@ -182,18 +175,29 @@ public class AddReminderActivity extends Activity {
 
         details.addView(label(LanguageManager.pick(this, "Деталі", "Details")));
         bodyInput = input(
-                LanguageManager.pick(this, "Встав текст, посилання або додай примітку…", "Paste text, a link, or add a note…"),
+                LanguageManager.pick(this, "Текст, посилання або примітка…", "Text, link, or note…"),
                 true);
         details.addView(bodyInput, margin(-1, dp(132), 0, 6, 0, 10));
 
-        Button analyzeButton = secondaryButton(LanguageManager.pick(this, "✨ Зрозуміти суть нагадування", "✨ Understand this reminder"));
+        final String analyzeLabel = LanguageManager.pick(this, "✨ Сформувати суть", "✨ Generate meaning");
+        Button analyzeButton = secondaryButton(analyzeLabel);
+        analyzeButton.setClickable(true);
+        analyzeButton.setFocusable(true);
         analyzeButton.setOnClickListener(v -> {
+            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
             String source = (titleInput.getText().toString() + "\n" + bodyInput.getText().toString()).trim();
             if (source.isEmpty()) {
-                Toast.makeText(this, LanguageManager.pick(this, "Спочатку додай текст або назву", "Add some text or a title first"), Toast.LENGTH_SHORT).show();
-            } else {
-                applySmartSuggestions(source);
+                Toast.makeText(this,
+                        LanguageManager.pick(this, "Спочатку додай текст або назву", "Add some text or a title first"),
+                        Toast.LENGTH_SHORT).show();
+                return;
             }
+            applySmartSuggestions(source);
+            analyzeButton.setText(LanguageManager.pick(this, "✓ Суть оновлено", "✓ Meaning updated"));
+            analyzeButton.postDelayed(() -> analyzeButton.setText(analyzeLabel), 1200);
+            Toast.makeText(this,
+                    LanguageManager.pick(this, "Суть нагадування оновлено", "Reminder meaning updated"),
+                    Toast.LENGTH_SHORT).show();
         });
         details.addView(analyzeButton, margin(-1, dp(50), 0, 0, 0, 14));
 
@@ -227,7 +231,7 @@ public class AddReminderActivity extends Activity {
         when.addView(dateTime, margin(-1, -2, 0, 12, 0, 0));
         root.addView(when, margin(-1, -2, 0, 0, 0, 14));
 
-        saveButton = new Button(this);
+        Button saveButton = new Button(this);
         saveButton.setText(LanguageManager.pick(this, "Зберегти нагадування", "Save reminder"));
         saveButton.setAllCaps(false);
         saveButton.setTextSize(17);
@@ -250,7 +254,7 @@ public class AddReminderActivity extends Activity {
             sourceBadge.setBackground(rounded(YELLOW, YELLOW, 1, 12));
             sourceBadge.setTextColor(TEXT);
             smartHint.setText(LanguageManager.pick(this,
-                    "Читаю зображення. Для української OCR-модель завантажується один раз, після цього працює локально.",
+                    "Читаю зображення. Українська OCR-модель після першого завантаження працює локально.",
                     "Reading the image on this device…"));
 
             Uri uri = readSharedUri(intent);
@@ -275,7 +279,7 @@ public class AddReminderActivity extends Activity {
                 @Override
                 public void onError(Exception error) {
                     smartHint.setText(LanguageManager.pick(AddReminderActivity.this,
-                            "Не вдалося прочитати український текст. Перевір інтернет для першого завантаження OCR-моделі й поділись зображенням ще раз.",
+                            "Не вдалося прочитати текст. Якщо це перший запуск українського OCR — перевір інтернет і поділись зображенням ще раз.",
                             "OCR could not read this image. Add the reminder manually."));
                 }
             });
@@ -306,15 +310,14 @@ public class AddReminderActivity extends Activity {
             refreshDateTime();
         }
 
-        ReminderIntentAnalyzer.Result analysis = ReminderIntentAnalyzer.analyze(this, text);
+        ReminderIntentAnalyzer.Result analysis = ReminderIntentAnalyzer.analyze(this, text, sourceType);
         intentType = analysis.intentType;
         titleInput.setText(analysis.title);
         goalInput.setText(analysis.goal);
         setCategory(analysis.categoryKey);
-        intentBadge.setText(ReminderIntentAnalyzer.intentDisplay(this, analysis.intentType).toUpperCase(LanguageManager.displayLocale(this)));
         smartHint.setText(LanguageManager.pick(this,
-                "RemindIt зрозумів мету: «" + analysis.goal + "». Перевір дату й за потреби відредагуй.",
-                "RemindIt understood the goal: “" + analysis.goal + "”. Check the date and edit if needed."));
+                "Суть сформовано. Перевір текст і дату — їх можна відредагувати перед збереженням.",
+                "Meaning generated. Check the text and date; both can be edited before saving."));
     }
 
     private void saveReminder() {
@@ -327,7 +330,8 @@ public class AddReminderActivity extends Activity {
             return;
         }
         if (TextUtils.isEmpty(goal)) {
-            ReminderIntentAnalyzer.Result analysis = ReminderIntentAnalyzer.analyze(this, body.length() > 0 ? body : title);
+            ReminderIntentAnalyzer.Result analysis = ReminderIntentAnalyzer.analyze(
+                    this, body.length() > 0 ? body : title, sourceType);
             goal = analysis.goal;
             intentType = analysis.intentType;
         }
@@ -357,8 +361,8 @@ public class AddReminderActivity extends Activity {
         if (!exact && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             Toast.makeText(this,
                     LanguageManager.pick(this,
-                            "Збережено. Тепер дозволь точні нагадування — і RemindIt поставить таймер без затримки.",
-                            "Saved. Now allow exact reminders so RemindIt can schedule it without delay."),
+                            "Нагадування збережено. Дозволь точні нагадування — після дозволу таймер буде поставлено автоматично.",
+                            "Reminder saved. Allow exact alarms and it will be scheduled automatically."),
                     Toast.LENGTH_LONG).show();
             openExactAlarmSettings();
             finish();
@@ -366,7 +370,7 @@ public class AddReminderActivity extends Activity {
         }
 
         Toast.makeText(this,
-                LanguageManager.pick(this, "Нагадування збережено точно на обраний час", "Reminder saved for the exact selected time"),
+                LanguageManager.pick(this, "Нагадування поставлено на точний час", "Reminder scheduled for the exact time"),
                 Toast.LENGTH_SHORT).show();
         finish();
     }
