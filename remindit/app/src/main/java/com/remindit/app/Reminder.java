@@ -4,6 +4,8 @@ public class Reminder {
     public long id;
     public String title;
     public String body;
+    public String goal;
+    public String intentType;
     public String category;
     public String sourceType;
     public String imagePath;
