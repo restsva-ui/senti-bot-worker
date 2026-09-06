@@ -11,12 +11,13 @@ import android.os.Build;
 import android.text.TextUtils;
 
 public class ReminderReceiver extends BroadcastReceiver {
-    private static final String CHANNEL_ID = "remindit_reminders_v3";
+    private static final String CHANNEL_ID = "remindit_reminders_v4";
 
     @Override
     public void onReceive(Context context, Intent intent) {
         long id = intent.getLongExtra("reminder_id", -1L);
         if (id < 0) return;
+
         Reminder reminder = new ReminderDb(context).get(id);
         if (reminder == null || reminder.done) return;
 
@@ -30,10 +31,11 @@ public class ReminderReceiver extends BroadcastReceiver {
                     NotificationManager.IMPORTANCE_HIGH
             );
             channel.setDescription(LanguageManager.pick(context,
-                    "Точні нагадування RemindIt",
-                    "Exact RemindIt reminders"));
+                    "Точні нагадування з оригінальним звуком RemindIt",
+                    "Exact reminders with the original RemindIt sound"));
             channel.enableVibration(true);
             channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+            channel.setSound(null, null);
             manager.createNotificationChannel(channel);
         }
 
@@ -46,7 +48,9 @@ public class ReminderReceiver extends BroadcastReceiver {
         );
 
         String essence = !TextUtils.isEmpty(reminder.goal) ? reminder.goal : reminder.title;
-        if (TextUtils.isEmpty(essence)) essence = LanguageManager.pick(context, "Нагадування", "Reminder");
+        if (TextUtils.isEmpty(essence)) {
+            essence = LanguageManager.pick(context, "Нагадування", "Reminder");
+        }
 
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? new Notification.Builder(context, CHANNEL_ID)
@@ -62,8 +66,19 @@ public class ReminderReceiver extends BroadcastReceiver {
                 .setPriority(Notification.PRIORITY_HIGH)
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .setWhen(System.currentTimeMillis())
-                .setShowWhen(true);
+                .setShowWhen(true)
+                .setOnlyAlertOnce(true);
+
+        PendingIntent originalIntent = OriginalActions.pending(context, reminder, 17000);
+        if (originalIntent != null) {
+            builder.addAction(new Notification.Action.Builder(
+                    null,
+                    OriginalActions.actionLabel(context, reminder),
+                    originalIntent
+            ).build());
+        }
 
         manager.notify((int) (id ^ (id >>> 32)), builder.build());
+        ReminderSound.play();
     }
 }
