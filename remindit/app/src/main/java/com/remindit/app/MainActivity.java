@@ -29,6 +29,7 @@ import androidx.core.view.WindowInsetsCompat;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 
 public class MainActivity extends Activity {
     private static final int BLUE = Color.rgb(10, 132, 255);
@@ -75,7 +76,7 @@ public class MainActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         final int horizontal = dp(18);
         final int normalTop = dp(18);
-        final int normalBottom = dp(32);
+        final int normalBottom = dp(36);
         root.setPadding(horizontal, normalTop, horizontal, normalBottom);
         scrollView.addView(root);
 
@@ -130,7 +131,11 @@ public class MainActivity extends Activity {
         root.addView(hero, margin(-1, -2, 0, 0, 0, 14));
 
         exactCard = buildExactPermissionCard();
-        root.addView(exactCard, margin(-1, -2, 0, 0, 0, 18));
+        root.addView(exactCard, margin(-1, -2, 0, 0, 0, 12));
+
+        if (isXiaomiFamily()) {
+            root.addView(buildHyperOsCard(), margin(-1, -2, 0, 0, 0, 18));
+        }
 
         LinearLayout heading = new LinearLayout(this);
         heading.setOrientation(LinearLayout.HORIZONTAL);
@@ -156,12 +161,29 @@ public class MainActivity extends Activity {
                 17, true, TEXT));
         card.addView(text(
                 LanguageManager.pick(this,
-                        "Без цього дозволу Android може відкласти нагадування. RemindIt більше не ставить неточний таймер замість точного.",
-                        "Without this permission Android can defer reminders. RemindIt no longer silently substitutes an inexact timer."),
+                        "RemindIt використовує системний режим AlarmClock, щоб будити телефон у вибраний час навіть у режимі сну.",
+                        "RemindIt uses Android's AlarmClock mode so the phone can wake at the selected time even while idle."),
                 13, false, MUTED), margin(-1, -2, 0, 5, 0, 10));
         Button exactButton = secondaryButton(LanguageManager.pick(this, "Дозволити точні нагадування", "Allow exact reminders"));
         exactButton.setOnClickListener(v -> openExactAlarmSettings());
         card.addView(exactButton);
+        return card;
+    }
+
+    private View buildHyperOsCard() {
+        LinearLayout card = card();
+        card.setBackground(rounded(Color.rgb(239, 246, 255), BLUE, 1, 18));
+        card.addView(text(
+                LanguageManager.pick(this, "HyperOS: робота на заблокованому екрані", "HyperOS: locked-screen reliability"),
+                16, true, TEXT));
+        card.addView(text(
+                LanguageManager.pick(this,
+                        "На Xiaomi/Redmi/POCO HyperOS може окремо обмежувати фонову роботу. У налаштуваннях RemindIt увімкни Автозапуск, сповіщення на екрані блокування та для батареї — Без обмежень.",
+                        "On Xiaomi/Redmi/POCO, HyperOS can separately restrict background work. In RemindIt app settings enable Autostart, lock-screen notifications and No restrictions for battery."),
+                13, false, MUTED), margin(-1, -2, 0, 6, 0, 10));
+        Button settingsButton = secondaryButton(LanguageManager.pick(this, "Відкрити налаштування RemindIt", "Open RemindIt settings"));
+        settingsButton.setOnClickListener(v -> openAppSettings());
+        card.addView(settingsButton);
         return card;
     }
 
@@ -222,16 +244,11 @@ public class MainActivity extends Activity {
             top.addView(titles, new LinearLayout.LayoutParams(0, -2, 1f));
             item.addView(top);
 
-            if (!TextUtils.isEmpty(reminder.intentType)) {
-                TextView intent = text("✨ " + ReminderIntentAnalyzer.intentDisplay(this, reminder.intentType), 12, true, BLUE);
-                item.addView(intent, margin(-1, -2, dp(42), 8, 0, 4));
-            }
-
             if (!TextUtils.isEmpty(reminder.goal)) {
-                TextView goal = text(LanguageManager.pick(this, "Мета: ", "Goal: ") + reminder.goal, 14, true, TEXT);
+                TextView goal = text("✨ " + reminder.goal, 14, true, TEXT);
                 goal.setPadding(dp(12), dp(10), dp(12), dp(10));
                 goal.setBackground(rounded(Color.rgb(255, 251, 235), YELLOW, 1, 12));
-                item.addView(goal, margin(-1, -2, dp(42), 4, 0, 8));
+                item.addView(goal, margin(-1, -2, dp(42), 8, 0, 8));
             }
 
             if (!TextUtils.isEmpty(reminder.body)) {
@@ -284,7 +301,15 @@ public class MainActivity extends Activity {
         if ("Shopping".equals(category)) return "🛍️";
         if ("Bills".equals(category)) return "💳";
         if ("Work".equals(category)) return "💼";
+        if ("Other".equals(category)) return "🧠";
         return "🔔";
+    }
+
+    private boolean isXiaomiFamily() {
+        String manufacturer = Build.MANUFACTURER == null ? "" : Build.MANUFACTURER.toLowerCase(Locale.ROOT);
+        String brand = Build.BRAND == null ? "" : Build.BRAND.toLowerCase(Locale.ROOT);
+        return manufacturer.contains("xiaomi") || brand.contains("xiaomi")
+                || brand.contains("redmi") || brand.contains("poco");
     }
 
     private void openExactAlarmSettings() {
@@ -293,9 +318,13 @@ public class MainActivity extends Activity {
             startActivity(new Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
                     Uri.parse("package:" + getPackageName())));
         } catch (Exception e) {
-            startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    Uri.parse("package:" + getPackageName())));
+            openAppSettings();
         }
+    }
+
+    private void openAppSettings() {
+        startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:" + getPackageName())));
     }
 
     private void requestNotificationPermission() {
