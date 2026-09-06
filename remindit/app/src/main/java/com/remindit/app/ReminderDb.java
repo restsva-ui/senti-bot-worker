@@ -6,12 +6,13 @@ import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 
 public class ReminderDb extends SQLiteOpenHelper {
     private static final String DB_NAME = "remindit.db";
-    private static final int DB_VERSION = 2;
+    private static final int DB_VERSION = 3;
 
     public ReminderDb(Context context) {
         super(context, DB_NAME, null, DB_VERSION);
@@ -29,6 +30,7 @@ public class ReminderDb extends SQLiteOpenHelper {
                         "category TEXT," +
                         "source_type TEXT," +
                         "image_path TEXT," +
+                        "source_uri TEXT," +
                         "remind_at INTEGER NOT NULL," +
                         "created_at INTEGER NOT NULL," +
                         "done INTEGER NOT NULL DEFAULT 0" +
@@ -42,6 +44,9 @@ public class ReminderDb extends SQLiteOpenHelper {
         if (oldVersion < 2) {
             db.execSQL("ALTER TABLE reminders ADD COLUMN goal TEXT");
             db.execSQL("ALTER TABLE reminders ADD COLUMN intent_type TEXT");
+        }
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE reminders ADD COLUMN source_uri TEXT");
         }
     }
 
@@ -103,7 +108,14 @@ public class ReminderDb extends SQLiteOpenHelper {
     }
 
     public void delete(long id) {
+        Reminder reminder = get(id);
         getWritableDatabase().delete("reminders", "id=?", new String[]{String.valueOf(id)});
+        if (reminder != null && reminder.imagePath != null) {
+            try {
+                File file = new File(reminder.imagePath);
+                if (file.exists()) file.delete();
+            } catch (Exception ignored) {}
+        }
     }
 
     private ContentValues toValues(Reminder reminder) {
@@ -115,6 +127,7 @@ public class ReminderDb extends SQLiteOpenHelper {
         values.put("category", reminder.category);
         values.put("source_type", reminder.sourceType);
         values.put("image_path", reminder.imagePath);
+        values.put("source_uri", reminder.sourceUri);
         values.put("remind_at", reminder.remindAt);
         values.put("created_at", reminder.createdAt);
         values.put("done", reminder.done ? 1 : 0);
@@ -133,6 +146,8 @@ public class ReminderDb extends SQLiteOpenHelper {
         reminder.category = cursor.getString(cursor.getColumnIndexOrThrow("category"));
         reminder.sourceType = cursor.getString(cursor.getColumnIndexOrThrow("source_type"));
         reminder.imagePath = cursor.getString(cursor.getColumnIndexOrThrow("image_path"));
+        int sourceUriIndex = cursor.getColumnIndex("source_uri");
+        reminder.sourceUri = sourceUriIndex >= 0 ? cursor.getString(sourceUriIndex) : null;
         reminder.remindAt = cursor.getLong(cursor.getColumnIndexOrThrow("remind_at"));
         reminder.createdAt = cursor.getLong(cursor.getColumnIndexOrThrow("created_at"));
         reminder.done = cursor.getInt(cursor.getColumnIndexOrThrow("done")) == 1;
