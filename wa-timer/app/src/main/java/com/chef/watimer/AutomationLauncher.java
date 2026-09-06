@@ -20,9 +20,12 @@ public final class AutomationLauncher {
         PackageManager pm = context.getPackageManager();
         Intent launch = pm.getLaunchIntentForPackage(pkg);
         if (launch == null) return false;
+
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+
         try {
             context.startActivity(launch);
+            AutomationPrefs.markStartedIfNeeded(context);
             return true;
         } catch (Exception e) {
             return false;
