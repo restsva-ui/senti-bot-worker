@@ -72,13 +72,16 @@ public class ReminderReceiver extends BroadcastReceiver {
         PendingIntent originalIntent = OriginalActions.pending(context, reminder, 17000);
         if (originalIntent != null) {
             builder.addAction(new Notification.Action.Builder(
-                    null,
+                    R.drawable.ic_notification,
                     OriginalActions.actionLabel(context, reminder),
                     originalIntent
             ).build());
         }
 
         manager.notify((int) (id ^ (id >>> 32)), builder.build());
-        ReminderSound.play();
+
+        // Keep the receiver alive for the short custom chime so it also plays
+        // reliably when the phone is locked / dozing.
+        ReminderSound.playBlocking();
     }
 }
