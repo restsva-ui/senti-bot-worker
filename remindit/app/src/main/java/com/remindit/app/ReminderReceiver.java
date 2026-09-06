@@ -11,13 +11,12 @@ import android.os.Build;
 import android.text.TextUtils;
 
 public class ReminderReceiver extends BroadcastReceiver {
-    private static final String CHANNEL_ID = "remindit_exact_v4";
+    private static final String CHANNEL_ID = "remindit_reminders_v3";
 
     @Override
     public void onReceive(Context context, Intent intent) {
         long id = intent.getLongExtra("reminder_id", -1L);
         if (id < 0) return;
-
         Reminder reminder = new ReminderDb(context).get(id);
         if (reminder == null || reminder.done) return;
 
@@ -27,19 +26,18 @@ public class ReminderReceiver extends BroadcastReceiver {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    LanguageManager.pick(context, "Точні нагадування RemindIt", "Exact RemindIt reminders"),
+                    LanguageManager.pick(context, "Нагадування RemindIt", "RemindIt reminders"),
                     NotificationManager.IMPORTANCE_HIGH
             );
             channel.setDescription(LanguageManager.pick(context,
-                    "Нагадування, які мають з'являтися у вибраний час, навіть коли екран заблокований",
-                    "Reminders that should appear at the selected time even while the screen is locked"));
+                    "Точні нагадування RemindIt",
+                    "Exact RemindIt reminders"));
             channel.enableVibration(true);
             channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
             manager.createNotificationChannel(channel);
         }
 
         Intent openIntent = new Intent(context, MainActivity.class);
-        openIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         PendingIntent contentIntent = PendingIntent.getActivity(
                 context,
                 (int) (id ^ (id >>> 32)),
@@ -47,43 +45,25 @@ public class ReminderReceiver extends BroadcastReceiver {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
 
-        String content = !TextUtils.isEmpty(reminder.goal)
-                ? reminder.goal
-                : shortText(context, reminder.body);
-        String expanded = !TextUtils.isEmpty(reminder.body)
-                ? content + "\n\n" + reminder.body
-                : content;
+        String essence = !TextUtils.isEmpty(reminder.goal) ? reminder.goal : reminder.title;
+        if (TextUtils.isEmpty(essence)) essence = LanguageManager.pick(context, "Нагадування", "Reminder");
 
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? new Notification.Builder(context, CHANNEL_ID)
                 : new Notification.Builder(context);
 
         builder.setSmallIcon(R.drawable.ic_notification)
-                .setContentTitle(reminder.title)
-                .setContentText(content)
-                .setStyle(new Notification.BigTextStyle().bigText(expanded))
+                .setContentTitle("RemindIt")
+                .setContentText(essence)
+                .setStyle(new Notification.BigTextStyle().bigText(essence))
                 .setContentIntent(contentIntent)
                 .setAutoCancel(true)
-                .setCategory(Notification.CATEGORY_ALARM)
-                .setPriority(Notification.PRIORITY_MAX)
+                .setCategory(Notification.CATEGORY_REMINDER)
+                .setPriority(Notification.PRIORITY_HIGH)
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .setWhen(System.currentTimeMillis())
                 .setShowWhen(true);
 
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            builder.setDefaults(Notification.DEFAULT_ALL);
-        }
-
         manager.notify((int) (id ^ (id >>> 32)), builder.build());
-    }
-
-    private String shortText(Context context, String text) {
-        if (text == null || text.trim().isEmpty()) {
-            return LanguageManager.pick(context,
-                    "Ти попросив RemindIt нагадати про це.",
-                    "You asked RemindIt to remind you.");
-        }
-        String clean = text.replace('\n', ' ').trim();
-        return clean.length() > 90 ? clean.substring(0, 87) + "…" : clean;
     }
 }
