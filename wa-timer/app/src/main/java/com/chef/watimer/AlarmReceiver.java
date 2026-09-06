@@ -21,12 +21,12 @@ public class AlarmReceiver extends BroadcastReceiver {
                 item.lastStatus = "WhatsApp не знайдено";
                 ScheduleStore.upsert(context, item);
                 AutomationPrefs.clear(context);
-                NotificationHelper.show(context, "WA Timer", "Не вдалося відкрити WhatsApp");
+                NotificationHelper.show(context, "4.5.0", "Не вдалося відкрити WhatsApp");
             }
         } else {
             item.lastStatus = "Очікує розблокування";
             ScheduleStore.upsert(context, item);
-            NotificationHelper.show(context, "WA Timer", "Розблокуйте телефон — повідомлення готове до надсилання");
+            NotificationHelper.show(context, "4.5.0", "Розблокуйте телефон — повідомлення готове до надсилання");
         }
 
         if (ScheduledMessage.REPEAT_ONCE.equals(item.repeatMode)) {
@@ -35,7 +35,10 @@ public class AlarmReceiver extends BroadcastReceiver {
             long next = ScheduleEngine.computeNext(item, System.currentTimeMillis());
             item.triggerAtMillis = next;
         }
+
         ScheduleStore.upsert(context, item);
-        if (item.enabled) ScheduleEngine.schedule(context, item);
+        if (item.enabled) {
+            ScheduleEngine.schedule(context, item);
+        }
     }
 }
