@@ -25,18 +25,16 @@ public class ReminderActionReceiver extends BroadcastReceiver {
 
         String action = intent.getAction();
         if (ACTION_DONE.equals(action)) {
-            if (reminder.isRepeating()) {
-                long next = ReminderScheduler.nextOccurrence(reminder, Math.max(System.currentTimeMillis(), reminder.remindAt));
+            if (!reminder.isRepeating()) {
+                ReminderScheduler.cancel(context, id);
+                db.markDone(id);
+            } else if (reminder.remindAt <= System.currentTimeMillis()) {
+                long next = ReminderScheduler.nextOccurrence(reminder, System.currentTimeMillis());
                 if (next > 0) {
                     reminder.remindAt = next;
-                    reminder.done = false;
-                    reminder.completedAt = 0;
                     db.update(reminder);
                     ReminderScheduler.schedule(context, reminder);
                 }
-            } else {
-                ReminderScheduler.cancel(context, id);
-                db.markDone(id);
             }
             cancelNotification(context, id);
             return;
