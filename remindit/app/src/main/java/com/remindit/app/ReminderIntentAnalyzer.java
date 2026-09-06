@@ -10,9 +10,17 @@ import java.util.regex.Pattern;
 
 public final class ReminderIntentAnalyzer {
     private static final Pattern TIME_ONLY = Pattern.compile("^\\s*\\d{1,2}[:.]\\d{2}\\s*$");
-    private static final Pattern STATUS_NOISE = Pattern.compile(".*(\\b4g\\b|\\b5g\\b|volte|wifi|wi-fi|battery|lifecell|kyivstar|vodafone|\\d{1,3}%|мб/с|kb/s).*", Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
-    private static final Pattern UI_NOISE = Pattern.compile(".*(підписник|підписат|прикріплене повідомлення|сповіщати|сповіщення|переглядів|реакці|telegram|whatsapp|канал|написати повідомлення).*", Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
-    private static final Pattern LEADING_TIME = Pattern.compile("^\\s*\\d{1,2}[:.]\\d{2}\\s*");
+    private static final Pattern LEADING_TIME = Pattern.compile("^\\s*\\d{1,2}[:.]\\d{2}\\s+");
+    private static final Pattern DATEISH = Pattern.compile(".*\\b\\d{1,2}[./-]\\d{1,2}([./-]\\d{2,4})?\\b.*");
+    private static final Pattern URL = Pattern.compile("https?://\\S+", Pattern.CASE_INSENSITIVE);
+    private static final Pattern STATUS_NOISE = Pattern.compile(
+            ".*(\\b4g\\b|\\b5g\\b|volte|wi-?fi|battery|lifecell|kyivstar|vodafone|\\d{1,3}%|мб/с|kb/s).*",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
+    );
+    private static final Pattern UI_NOISE = Pattern.compile(
+            ".*(підписник|підписат|прикріплене повідомлення|сповіщати|перегляд(?:ів)?|надіслати|реакц|коментар|telegram|whatsapp|написати повідомлення|додати реакцію|переслано).*",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
+    );
 
     public static final class Result {
         public final String title;
@@ -20,35 +28,76 @@ public final class ReminderIntentAnalyzer {
         public final String categoryKey;
         public final String intentType;
         public final int confidence;
+
         Result(String title, String goal, String categoryKey, String intentType, int confidence) {
-            this.title = title; this.goal = goal; this.categoryKey = categoryKey; this.intentType = intentType; this.confidence = confidence;
+            this.title = title;
+            this.goal = goal;
+            this.categoryKey = categoryKey;
+            this.intentType = intentType;
+            this.confidence = confidence;
         }
     }
 
     private ReminderIntentAnalyzer() {}
-    public static Result analyze(Context context, String rawText) { return analyze(context, rawText, "manual"); }
+
+    public static Result analyze(Context context, String rawText) {
+        return analyze(context, rawText, "manual");
+    }
 
     public static Result analyze(Context context, String rawText, String sourceType) {
         boolean uk = LanguageManager.isUk(context);
-        String text = rawText == null ? "" : rawText.trim();
-        String lower = text.toLowerCase(Locale.ROOT);
+        String raw = rawText == null ? "" : rawText.trim();
+        String withoutUrls = URL.matcher(raw).replaceAll(" ");
+        List<String> lines = usefulLines(withoutUrls);
+        String subject = chooseSubject(lines, withoutUrls);
+        String lower = withoutUrls.toLowerCase(Locale.ROOT);
+
         String type = "remember";
-        String category = DateDetector.inferCategory(text);
-        int confidence = 62;
+        String category = DateDetector.inferCategory(withoutUrls);
+        int confidence = 56;
 
-        if (containsAny(lower,"оплат","сплат","рахунок","квитанц","борг","грн","₴","invoice","bill","payment","pay ","due amount")) { type="payment"; category="Bills"; confidence=94; }
-        else if (containsAny(lower,"квиток","рейс","поїзд","автобус","виліт","відправлення","посадка","ticket","flight","train","bus","departure","boarding","gate")) { type="travel"; category="Travel"; confidence=92; }
-        else if (containsAny(lower,"купити","замовити","ціна","знижк","акці","кошик","buy","order","price","discount","sale","cart")) { type="shopping"; category="Shopping"; confidence=90; }
-        else if (containsAny(lower,"зателефон","подзвон","передзвон","набрати","call ","phone ","call back")) { type="call"; category="Personal"; confidence=90; }
-        else if (containsAny(lower,"відповісти","відписати","написати у відповідь","reply","respond","text back")) { type="reply"; category="Personal"; confidence=92; }
-        else if (containsAny(lower,"зустріч","лікар","прийом","запис","бронювання","візит","meeting","appointment","doctor","reservation","booking")) { type="appointment"; category="Personal"; confidence=92; }
-        else if (containsAny(lower,"дедлайн","зробити","виконати","подати","здати","завдання","deadline","task","submit","finish","complete")) { type="task"; category="Work"; confidence=88; }
-        else if ("image".equals(sourceType) || text.length() > 120) { type="review"; category="Other"; confidence=78; }
+        boolean channelLike = containsAny(lower,
+                "підписник", "підписат", "прикріплене повідомлення", "канал", "переглядів");
+        boolean articleLike = looksLikeArticle(lines);
 
-        List<String> lines = usefulLines(text, uk);
-        String subject = chooseSubject(lines, text, uk);
-        String summary = buildSummary(uk, type, subject);
-        return new Result(summary, summary, category, type, confidence);
+        if (containsAny(lower,
+                "оплат", "сплат", "рахунок", "квитанц", "борг", "грн", "₴",
+                "invoice", "bill", "payment", "pay ", "due amount")) {
+            type = "payment"; category = "Bills"; confidence = 94;
+        } else if (containsAny(lower,
+                "квиток", "рейс", "поїзд", "автобус", "виліт", "відправлення", "посадка",
+                "ticket", "flight", "train", "bus", "departure", "boarding", "gate")) {
+            type = "travel"; category = "Travel"; confidence = 92;
+        } else if (containsAny(lower,
+                "купити", "замовити", "ціна", "знижк", "акці", "кошик",
+                "buy", "order", "price", "discount", "sale", "cart")) {
+            type = "shopping"; category = "Shopping"; confidence = 90;
+        } else if (containsAny(lower,
+                "зателефон", "подзвон", "передзвон", "набрати номер", "call ", "call back")) {
+            type = "call"; category = "Personal"; confidence = 92;
+        } else if (containsAny(lower,
+                "відповісти", "відписати", "відповідь на", "написати у відповідь", "reply", "respond", "text back")) {
+            type = "reply"; category = "Personal"; confidence = 92;
+        } else if (containsAny(lower,
+                "зустріч", "лікар", "прийом", "запис", "бронювання", "візит",
+                "meeting", "appointment", "doctor", "reservation", "booking")) {
+            type = "appointment"; category = "Personal"; confidence = 91;
+        } else if (containsAny(lower,
+                "дедлайн", "зробити", "виконати", "подати", "здати", "завдання",
+                "deadline", "task", "submit", "finish", "complete")) {
+            type = "task"; category = "Work"; confidence = 88;
+        } else if ("image".equals(sourceType) || "link".equals(sourceType) || channelLike || articleLike) {
+            type = "review"; category = "Other"; confidence = articleLike ? 84 : 76;
+        } else if (containsAny(lower,
+                "нагад", "не забуд", "remember", "remind", "don't forget", "dont forget")) {
+            type = "remember"; confidence = 78;
+        }
+
+        if (TextUtils.isEmpty(subject)) subject = fallbackSubject(uk, sourceType);
+
+        String goal = buildGoal(uk, type, subject);
+        String title = shorten(subject, 64);
+        return new Result(title, goal, category, type, confidence);
     }
 
     public static String intentDisplay(Context context, String type) {
@@ -64,71 +113,188 @@ public final class ReminderIntentAnalyzer {
         return uk ? "Не забути" : "Remember";
     }
 
-    private static String buildSummary(boolean uk, String type, String subject) {
-        String s = shorten(subject, 92);
-        if (TextUtils.isEmpty(s)) return uk ? "Не забути" : "Remember";
+    private static String buildGoal(boolean uk, String type, String subject) {
+        String clean = shorten(subject, 108);
         if (uk) {
-            if ("payment".equals(type)) return "Оплатити: " + s;
-            if ("travel".equals(type)) return "Не пропустити: " + s;
-            if ("shopping".equals(type)) return "Перевірити або купити: " + s;
-            if ("call".equals(type)) return "Зателефонувати: " + s;
-            if ("reply".equals(type)) return "Відповісти: " + s;
-            if ("appointment".equals(type)) return "Не пропустити: " + s;
-            if ("task".equals(type)) return "Виконати: " + s;
-            if ("review".equals(type)) return "Переглянути: " + s;
-            return "Не забути: " + s;
+            if ("payment".equals(type)) return "Оплатити: " + clean;
+            if ("travel".equals(type)) return "Не пропустити поїздку: " + clean;
+            if ("shopping".equals(type)) return "Перевірити або купити: " + clean;
+            if ("call".equals(type)) return "Зателефонувати: " + clean;
+            if ("reply".equals(type)) return "Відповісти: " + clean;
+            if ("appointment".equals(type)) return "Не пропустити подію: " + clean;
+            if ("task".equals(type)) return "Виконати: " + clean;
+            if ("review".equals(type)) return "Переглянути: " + clean;
+            return "Не забути: " + clean;
         }
-        if ("payment".equals(type)) return "Pay: " + s;
-        if ("travel".equals(type)) return "Don't miss: " + s;
-        if ("shopping".equals(type)) return "Check or buy: " + s;
-        if ("call".equals(type)) return "Call: " + s;
-        if ("reply".equals(type)) return "Reply: " + s;
-        if ("appointment".equals(type)) return "Don't miss: " + s;
-        if ("task".equals(type)) return "Do: " + s;
-        if ("review".equals(type)) return "Review: " + s;
-        return "Remember: " + s;
+        if ("payment".equals(type)) return "Pay: " + clean;
+        if ("travel".equals(type)) return "Don't miss the trip: " + clean;
+        if ("shopping".equals(type)) return "Check or buy: " + clean;
+        if ("call".equals(type)) return "Call: " + clean;
+        if ("reply".equals(type)) return "Reply: " + clean;
+        if ("appointment".equals(type)) return "Don't miss the event: " + clean;
+        if ("task".equals(type)) return "Do: " + clean;
+        if ("review".equals(type)) return "Review: " + clean;
+        return "Remember: " + clean;
     }
 
-    private static List<String> usefulLines(String text, boolean uk) {
+    private static List<String> usefulLines(String text) {
         ArrayList<String> result = new ArrayList<>();
         if (TextUtils.isEmpty(text)) return result;
-        for (String original : text.replace('\r','\n').split("\\n+")) {
-            String line = LEADING_TIME.matcher(original).replaceFirst("").trim().replaceAll("\\s+"," ");
-            if (line.length() < 5 || TIME_ONLY.matcher(line).matches() || STATUS_NOISE.matcher(line).matches() || UI_NOISE.matcher(line).matches() || looksMostlyNumeric(line)) continue;
-            if (uk && line.length() > 15 && cyrillicRatio(line) < 0.28) continue;
-            int letters=0; for(int i=0;i<line.length();i++) if(Character.isLetter(line.charAt(i))) letters++;
-            if(letters<4) continue;
+
+        for (String original : text.replace('\r', '\n').split("\\n+")) {
+            String line = LEADING_TIME.matcher(original.trim()).replaceFirst("");
+            line = line.replaceAll("^[•·—–|:;\\-\\s]+", "")
+                    .replaceAll("\\s+", " ").trim();
+            if (line.length() < 5) continue;
+            if (TIME_ONLY.matcher(line).matches()) continue;
+            if (STATUS_NOISE.matcher(line).matches()) continue;
+            if (UI_NOISE.matcher(line).matches()) continue;
+            if (looksMostlyNumeric(line)) continue;
+            if (looksGarbage(line)) continue;
             result.add(line);
         }
         return result;
     }
 
-    private static String chooseSubject(List<String> lines, String fallback, boolean uk) {
+    private static String chooseSubject(List<String> lines, String fallback) {
         if (!lines.isEmpty()) {
-            String best=""; int bestScore=Integer.MIN_VALUE;
-            for(int i=0;i<lines.size();i++) {
-                String candidate=lines.get(i); int score=scoreCandidate(candidate,uk); if(score>bestScore){best=candidate;bestScore=score;}
-                if(i+1<lines.size()) { String combined=candidate+" "+lines.get(i+1); if(combined.length()<=170){int cs=scoreCandidate(combined,uk)+8;if(cs>bestScore){best=combined;bestScore=cs;}} }
+            String best = "";
+            int bestScore = Integer.MIN_VALUE;
+
+            for (int i = 0; i < lines.size(); i++) {
+                String combined = "";
+                for (int width = 0; width < 3 && i + width < lines.size(); width++) {
+                    if (!combined.isEmpty()) combined += " ";
+                    combined += lines.get(i + width);
+                    if (combined.length() > 190) break;
+                    int score = scoreCandidate(combined);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        best = combined;
+                    }
+                }
             }
             return cleanSubject(best);
         }
-        if(fallback==null)return"";
-        return cleanSubject(fallback.replace('\n',' ').replaceAll("\\s+"," "));
+
+        if (fallback == null) return "";
+        String clean = fallback.replace('\n', ' ').replaceAll("\\s+", " ").trim();
+        return looksGarbage(clean) ? "" : shorten(clean, 120);
     }
 
-    private static int scoreCandidate(String value, boolean uk) {
-        String lower=value.toLowerCase(Locale.ROOT); int letters=0,words=0; boolean inWord=false;
-        for(int i=0;i<value.length();i++){char c=value.charAt(i);if(Character.isLetter(c))letters++;if(Character.isLetterOrDigit(c)){if(!inWord)words++;inWord=true;}else inWord=false;}
-        int score=Math.min(letters,100)+Math.min(words*3,36); if(uk)score+=(int)(cyrillicRatio(value)*40);
-        if(containsAny(lower,"оплат","квиток","зустріч","купити","зателефон","дедлайн","росі","американ","делегаці","президент","літак","pay","ticket","meeting","buy","call","deadline"))score+=25;
-        if(value.length()<18)score-=20; if(value.length()>150)score-=8; return score;
+    private static int scoreCandidate(String value) {
+        if (TextUtils.isEmpty(value)) return -999;
+        if (UI_NOISE.matcher(value).matches() || STATUS_NOISE.matcher(value).matches()) return -400;
+
+        int letters = 0;
+        int cyr = 0;
+        int latin = 0;
+        int digits = 0;
+        int words = 0;
+        boolean inWord = false;
+
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (Character.isLetter(c)) {
+                letters++;
+                if (isCyrillic(c)) cyr++; else latin++;
+            }
+            if (Character.isDigit(c)) digits++;
+            if (Character.isLetterOrDigit(c)) {
+                if (!inWord) words++;
+                inWord = true;
+            } else {
+                inWord = false;
+            }
+        }
+
+        if (letters < 8) return -200;
+        int score = Math.min(letters, 95) + Math.min(words * 4, 48);
+        if (cyr > 0 && latin > 0 && latin * 100 / Math.max(1, letters) > 25) score -= 45;
+        if (digits * 100 / Math.max(1, value.length()) > 20) score -= 30;
+        if (DATEISH.matcher(value).matches()) score -= 5;
+        if (words >= 6 && words <= 22) score += 28;
+        if (value.endsWith(".") || value.endsWith("!") || value.endsWith("?") || value.endsWith("»")) score += 10;
+        if (containsAny(value.toLowerCase(Locale.ROOT),
+                "президент", "делегац", "тривог", "аеропорт", "оплат", "зустріч", "квиток", "рейс")) score += 18;
+        if (value.length() > 155) score -= 18;
+        return score;
     }
 
-    private static double cyrillicRatio(String line) {
-        int letters=0,cyr=0; for(int i=0;i<line.length();i++){char c=line.charAt(i);if(!Character.isLetter(c))continue;letters++;Character.UnicodeBlock b=Character.UnicodeBlock.of(c);if(b==Character.UnicodeBlock.CYRILLIC||b==Character.UnicodeBlock.CYRILLIC_SUPPLEMENTARY)cyr++;} return letters==0?0.0:(double)cyr/letters;
+    private static boolean looksLikeArticle(List<String> lines) {
+        for (String line : lines) {
+            int words = line.trim().isEmpty() ? 0 : line.trim().split("\\s+").length;
+            if (words >= 7 && words <= 30 && !looksGarbage(line)) return true;
+        }
+        return false;
     }
-    private static boolean looksMostlyNumeric(String line){int useful=0,digits=0;for(int i=0;i<line.length();i++){char c=line.charAt(i);if(Character.isLetterOrDigit(c))useful++;if(Character.isDigit(c))digits++;}return useful>0&&digits*100/useful>55;}
-    private static String cleanSubject(String value){if(value==null)return"";String clean=LEADING_TIME.matcher(value).replaceFirst("").replaceAll("^[•·—–|:;\\-\\s]+","").replaceAll("\\s+"," ").trim();return shorten(clean,120);}
-    private static String shorten(String value,int max){if(value==null)return"";String clean=value.replaceAll("\\s+"," ").trim();return clean.length()<=max?clean:clean.substring(0,Math.max(1,max-1))+"…";}
-    private static boolean containsAny(String value,String... needles){for(String needle:needles)if(value.contains(needle))return true;return false;}
+
+    private static boolean looksGarbage(String line) {
+        if (TextUtils.isEmpty(line)) return true;
+        int letters = 0;
+        int cyr = 0;
+        int latin = 0;
+        int weird = 0;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (Character.isLetter(c)) {
+                letters++;
+                if (isCyrillic(c)) cyr++; else latin++;
+            } else if (!Character.isDigit(c) && !Character.isWhitespace(c)
+                    && ".,!?—–-:;()«»'\"/₴%".indexOf(c) < 0) {
+                weird++;
+            }
+        }
+        if (letters < 3) return true;
+        if (cyr > 4 && latin > 0 && latin * 100 / letters > 32) return true;
+        return weird > Math.max(3, line.length() / 10);
+    }
+
+    private static boolean looksMostlyNumeric(String line) {
+        int useful = 0;
+        int digits = 0;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (Character.isLetterOrDigit(c)) useful++;
+            if (Character.isDigit(c)) digits++;
+        }
+        return useful > 0 && digits * 100 / useful > 60;
+    }
+
+    private static boolean isCyrillic(char c) {
+        Character.UnicodeBlock block = Character.UnicodeBlock.of(c);
+        return block == Character.UnicodeBlock.CYRILLIC
+                || block == Character.UnicodeBlock.CYRILLIC_SUPPLEMENTARY
+                || block == Character.UnicodeBlock.CYRILLIC_EXTENDED_A
+                || block == Character.UnicodeBlock.CYRILLIC_EXTENDED_B;
+    }
+
+    private static String cleanSubject(String value) {
+        if (value == null) return "";
+        String clean = value.replaceAll("^[•·—–|:;\\-\\s]+", "")
+                .replaceAll("\\s+", " ").trim();
+        return shorten(clean, 126);
+    }
+
+    private static String fallbackSubject(boolean uk, String sourceType) {
+        if (uk) {
+            if ("image".equals(sourceType)) return "збережене зображення";
+            if ("link".equals(sourceType)) return "збережене посилання";
+            return "це нагадування";
+        }
+        if ("image".equals(sourceType)) return "the saved image";
+        if ("link".equals(sourceType)) return "the saved link";
+        return "this reminder";
+    }
+
+    private static String shorten(String value, int max) {
+        if (value == null) return "";
+        String clean = value.replaceAll("\\s+", " ").trim();
+        return clean.length() <= max ? clean : clean.substring(0, Math.max(1, max - 1)).trim() + "…";
+    }
+
+    private static boolean containsAny(String value, String... needles) {
+        for (String needle : needles) if (value.contains(needle)) return true;
+        return false;
+    }
 }
