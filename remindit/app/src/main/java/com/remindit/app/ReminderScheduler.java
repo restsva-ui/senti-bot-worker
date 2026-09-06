@@ -6,6 +6,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
 
+import java.util.Calendar;
+
 public final class ReminderScheduler {
     private static final String ACTION_FIRE = "com.remindit.app.ACTION_FIRE_REMINDER";
 
@@ -23,28 +25,48 @@ public final class ReminderScheduler {
 
         AlarmManager manager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
         if (manager == null) return false;
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !manager.canScheduleExactAlarms()) {
-            return false;
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !manager.canScheduleExactAlarms()) return false;
 
         PendingIntent fireIntent = pending(context, reminder.id);
         manager.cancel(fireIntent);
-
-        // AlarmClock is intentionally used here instead of a normal exact alarm.
-        // It is the strongest user-visible exact-alarm mode Android provides and
-        // is allowed to wake the device out of idle/doze for a real reminder.
-        AlarmManager.AlarmClockInfo alarmClockInfo = new AlarmManager.AlarmClockInfo(
+        AlarmManager.AlarmClockInfo info = new AlarmManager.AlarmClockInfo(
                 reminder.remindAt,
                 showPending(context, reminder.id)
         );
-        manager.setAlarmClock(alarmClockInfo, fireIntent);
+        manager.setAlarmClock(info, fireIntent);
         return true;
     }
 
     public static void cancel(Context context, long reminderId) {
         AlarmManager manager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
         if (manager != null) manager.cancel(pending(context, reminderId));
+    }
+
+    public static long nextOccurrence(Reminder reminder, long fromMillis) {
+        if (reminder == null || reminder.repeatMode == null || Reminder.REPEAT_ONCE.equals(reminder.repeatMode)) {
+            return -1L;
+        }
+
+        Calendar calendar = Calendar.getInstance();
+        long base = Math.max(fromMillis, reminder.remindAt);
+        calendar.setTimeInMillis(base);
+
+        if (Reminder.REPEAT_DAILY.equals(reminder.repeatMode)) {
+            calendar.add(Calendar.DAY_OF_YEAR, 1);
+            return calendar.getTimeInMillis();
+        }
+        if (Reminder.REPEAT_WEEKLY.equals(reminder.repeatMode)) {
+            calendar.add(Calendar.DAY_OF_YEAR, 7);
+            return calendar.getTimeInMillis();
+        }
+        if (Reminder.REPEAT_WEEKDAYS.equals(reminder.repeatMode)) {
+            do {
+                calendar.add(Calendar.DAY_OF_YEAR, 1);
+            } while (calendar.get(Calendar.DAY_OF_WEEK) == Calendar.SATURDAY
+                    || calendar.get(Calendar.DAY_OF_WEEK) == Calendar.SUNDAY);
+            return calendar.getTimeInMillis();
+        }
+        return -1L;
     }
 
     private static PendingIntent pending(Context context, long reminderId) {
