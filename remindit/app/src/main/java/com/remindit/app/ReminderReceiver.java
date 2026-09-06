@@ -11,7 +11,7 @@ import android.os.Build;
 import android.text.TextUtils;
 
 public class ReminderReceiver extends BroadcastReceiver {
-    private static final String CHANNEL_ID = "remindit_reminders";
+    private static final String CHANNEL_ID = "remindit_exact_v4";
 
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -27,17 +27,19 @@ public class ReminderReceiver extends BroadcastReceiver {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    LanguageManager.pick(context, "Нагадування RemindIt", "RemindIt reminders"),
+                    LanguageManager.pick(context, "Точні нагадування RemindIt", "Exact RemindIt reminders"),
                     NotificationManager.IMPORTANCE_HIGH
             );
             channel.setDescription(LanguageManager.pick(context,
-                    "Точні нагадування, створені в RemindIt",
-                    "Exact reminders created in RemindIt"));
+                    "Нагадування, які мають з'являтися у вибраний час, навіть коли екран заблокований",
+                    "Reminders that should appear at the selected time even while the screen is locked"));
             channel.enableVibration(true);
+            channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
             manager.createNotificationChannel(channel);
         }
 
         Intent openIntent = new Intent(context, MainActivity.class);
+        openIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         PendingIntent contentIntent = PendingIntent.getActivity(
                 context,
                 (int) (id ^ (id >>> 32)),
@@ -48,13 +50,9 @@ public class ReminderReceiver extends BroadcastReceiver {
         String content = !TextUtils.isEmpty(reminder.goal)
                 ? reminder.goal
                 : shortText(context, reminder.body);
-        String expanded;
-        if (!TextUtils.isEmpty(reminder.goal) && !TextUtils.isEmpty(reminder.body)) {
-            expanded = LanguageManager.pick(context, "Мета: ", "Goal: ") + reminder.goal
-                    + "\n\n" + reminder.body;
-        } else {
-            expanded = content;
-        }
+        String expanded = !TextUtils.isEmpty(reminder.body)
+                ? content + "\n\n" + reminder.body
+                : content;
 
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? new Notification.Builder(context, CHANNEL_ID)
@@ -66,10 +64,15 @@ public class ReminderReceiver extends BroadcastReceiver {
                 .setStyle(new Notification.BigTextStyle().bigText(expanded))
                 .setContentIntent(contentIntent)
                 .setAutoCancel(true)
-                .setCategory(Notification.CATEGORY_REMINDER)
-                .setPriority(Notification.PRIORITY_HIGH)
+                .setCategory(Notification.CATEGORY_ALARM)
+                .setPriority(Notification.PRIORITY_MAX)
+                .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .setWhen(System.currentTimeMillis())
                 .setShowWhen(true);
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            builder.setDefaults(Notification.DEFAULT_ALL);
+        }
 
         manager.notify((int) (id ^ (id >>> 32)), builder.build());
     }
