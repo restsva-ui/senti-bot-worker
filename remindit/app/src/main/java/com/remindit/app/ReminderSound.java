@@ -10,37 +10,39 @@ public final class ReminderSound {
     private ReminderSound() {}
 
     public static void play() {
-        new Thread(() -> {
-            AudioTrack track = null;
-            try {
-                short[] pcm = buildChime();
-                AudioAttributes attrs = new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_NOTIFICATION)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                        .build();
-                AudioFormat format = new AudioFormat.Builder()
-                        .setSampleRate(SAMPLE_RATE)
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                        .build();
+        new Thread(ReminderSound::playBlocking, "RemindIt-Chime").start();
+    }
 
-                track = new AudioTrack.Builder()
-                        .setAudioAttributes(attrs)
-                        .setAudioFormat(format)
-                        .setBufferSizeInBytes(pcm.length * 2)
-                        .setTransferMode(AudioTrack.MODE_STATIC)
-                        .build();
-                track.write(pcm, 0, pcm.length);
-                track.play();
-                Thread.sleep(1150);
-            } catch (Exception ignored) {
-            } finally {
-                if (track != null) {
-                    try { track.stop(); } catch (Exception ignored) {}
-                    try { track.release(); } catch (Exception ignored) {}
-                }
+    public static void playBlocking() {
+        AudioTrack track = null;
+        try {
+            short[] pcm = buildChime();
+            AudioAttributes attrs = new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build();
+            AudioFormat format = new AudioFormat.Builder()
+                    .setSampleRate(SAMPLE_RATE)
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .build();
+
+            track = new AudioTrack.Builder()
+                    .setAudioAttributes(attrs)
+                    .setAudioFormat(format)
+                    .setBufferSizeInBytes(pcm.length * 2)
+                    .setTransferMode(AudioTrack.MODE_STATIC)
+                    .build();
+            track.write(pcm, 0, pcm.length);
+            track.play();
+            Thread.sleep(1050);
+        } catch (Exception ignored) {
+        } finally {
+            if (track != null) {
+                try { track.stop(); } catch (Exception ignored) {}
+                try { track.release(); } catch (Exception ignored) {}
             }
-        }, "RemindIt-Chime").start();
+        }
     }
 
     private static short[] buildChime() {
@@ -48,6 +50,7 @@ public final class ReminderSound {
         int samples = (int) (SAMPLE_RATE * duration);
         short[] out = new short[samples];
 
+        // RemindIt signature: a short rising four-note "memory sparkle".
         addNote(out, 0.00, 0.30, 659.25, 0.34);   // E5
         addNote(out, 0.15, 0.36, 880.00, 0.31);   // A5
         addNote(out, 0.32, 0.42, 1174.66, 0.28);  // D6
