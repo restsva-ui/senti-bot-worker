@@ -15,6 +15,14 @@
         android:theme="@style/AppTheme">
 
         <activity
+            android:name=".OriginalViewerActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false" />
+
+        <activity
             android:name=".AddReminderActivity"
             android:exported="true">
             <intent-filter>
