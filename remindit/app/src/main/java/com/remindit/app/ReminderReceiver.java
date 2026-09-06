@@ -15,25 +15,24 @@ public class ReminderReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
         long id = intent.getLongExtra("reminder_id", -1L);
-        if (id < 0) {
-            return;
-        }
+        if (id < 0) return;
 
         Reminder reminder = new ReminderDb(context).get(id);
-        if (reminder == null || reminder.done) {
-            return;
-        }
+        if (reminder == null || reminder.done) return;
 
-        NotificationManager manager =
-                (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    "RemindIt reminders",
+                    LanguageManager.text(context, "RemindIt reminders", "Нагадування RemindIt"),
                     NotificationManager.IMPORTANCE_HIGH
             );
-            channel.setDescription("Reminders created in RemindIt");
+            channel.setDescription(LanguageManager.text(
+                    context,
+                    "Reminders created in RemindIt",
+                    "Нагадування, створені в RemindIt"
+            ));
             manager.createNotificationChannel(channel);
         }
 
@@ -49,10 +48,18 @@ public class ReminderReceiver extends BroadcastReceiver {
                 ? new Notification.Builder(context, CHANNEL_ID)
                 : new Notification.Builder(context);
 
+        String body = reminder.body;
+        String fallback = LanguageManager.text(
+                context,
+                "You asked RemindIt to remind you.",
+                "Ти просив RemindIt нагадати про це."
+        );
+        String displayBody = body == null || body.trim().isEmpty() ? fallback : body;
+
         builder.setSmallIcon(R.drawable.ic_notification)
                 .setContentTitle(reminder.title)
-                .setContentText(shortText(reminder.body))
-                .setStyle(new Notification.BigTextStyle().bigText(reminder.body))
+                .setContentText(shortText(displayBody))
+                .setStyle(new Notification.BigTextStyle().bigText(displayBody))
                 .setContentIntent(contentIntent)
                 .setAutoCancel(true)
                 .setCategory(Notification.CATEGORY_REMINDER)
@@ -62,9 +69,6 @@ public class ReminderReceiver extends BroadcastReceiver {
     }
 
     private String shortText(String text) {
-        if (text == null || text.trim().isEmpty()) {
-            return "You asked RemindIt to remind you.";
-        }
         String clean = text.replace('\n', ' ').trim();
         return clean.length() > 90 ? clean.substring(0, 87) + "…" : clean;
     }

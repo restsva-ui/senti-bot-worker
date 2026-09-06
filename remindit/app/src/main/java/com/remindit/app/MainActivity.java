@@ -16,9 +16,11 @@ import android.provider.Settings;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -26,12 +28,10 @@ import android.widget.Toast;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
-import java.util.Locale;
 
 public class MainActivity extends Activity {
     private static final int BLUE = Color.rgb(10, 132, 255);
     private static final int BLUE_DARK = Color.rgb(6, 105, 216);
-    private static final int YELLOW = Color.rgb(255, 200, 61);
     private static final int TEXT = Color.rgb(15, 23, 42);
     private static final int MUTED = Color.rgb(100, 116, 139);
     private static final int BG = Color.rgb(247, 250, 255);
@@ -47,6 +47,11 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(Color.WHITE);
+        int flags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        }
+        getWindow().getDecorView().setSystemUiVisibility(flags);
 
         setContentView(buildUi());
         requestNotificationPermission();
@@ -66,6 +71,7 @@ public class MainActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(18), dp(18), dp(18), dp(32));
+        applySystemBarInsets(root);
         scrollView.addView(root);
 
         LinearLayout header = new LinearLayout(this);
@@ -78,23 +84,30 @@ public class MainActivity extends Activity {
 
         LinearLayout titleBlock = new LinearLayout(this);
         titleBlock.setOrientation(LinearLayout.VERTICAL);
+        titleBlock.addView(text("RemindIt", 30, true, TEXT));
+        titleBlock.addView(text(tr("See it now. Remember it later.", "Побач зараз. Згадай вчасно."), 14, false, MUTED));
 
-        TextView title = text("RemindIt", 30, true, TEXT);
-        TextView subtitle = text("See it now. Remember it later.", 14, false, MUTED);
-        titleBlock.addView(title);
-        titleBlock.addView(subtitle);
-
-        LinearLayout.LayoutParams titleParams =
-                new LinearLayout.LayoutParams(0, -2, 1f);
-        titleParams.setMargins(dp(10), 0, 0, 0);
+        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, -2, 1f);
+        titleParams.setMargins(dp(10), 0, dp(8), 0);
         header.addView(titleBlock, titleParams);
+
+        Button language = languageButton();
+        header.addView(language, new LinearLayout.LayoutParams(dp(68), dp(44)));
 
         root.addView(header, margin(-1, -2, 0, 0, 0, 20));
 
         LinearLayout hero = card();
-        TextView heroTitle = text("Share anything. Remember at the right time.", 20, true, TEXT);
+        TextView heroTitle = text(
+                tr("Share anything. Remember at the right time.", "Поділись будь-чим. Згадай у потрібний момент."),
+                20,
+                true,
+                TEXT
+        );
         TextView heroBody = text(
-                "From any app choose Share → RemindIt. Text and links are analyzed instantly; images use on-device OCR.",
+                tr(
+                        "From any app choose Share → RemindIt. Text and links are analyzed instantly; images use on-device OCR.",
+                        "У будь-якому застосунку обери Поділитися → RemindIt. Текст і посилання аналізуються одразу, а зображення — локальним OCR."
+                ),
                 14,
                 false,
                 MUTED
@@ -102,29 +115,32 @@ public class MainActivity extends Activity {
         hero.addView(heroTitle);
         hero.addView(heroBody, margin(-1, -2, 0, 8, 0, 14));
 
-        Button add = primaryButton("＋  Add reminder");
-        add.setOnClickListener(v ->
-                startActivity(new Intent(this, AddReminderActivity.class))
-        );
+        Button add = primaryButton(tr("＋  Add reminder", "＋  Додати нагадування"));
+        add.setOnClickListener(v -> startActivity(new Intent(this, AddReminderActivity.class)));
         hero.addView(add);
         root.addView(hero, margin(-1, -2, 0, 0, 0, 14));
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !canExactAlarms()) {
             LinearLayout exactCard = card();
-            TextView exactTitle = text("Make reminders exact", 17, true, TEXT);
-            TextView exactBody = text(
-                    "Android requires a one-time permission for exact reminder times.",
+            exactCard.addView(text(
+                    tr("Make reminders exact", "Точні нагадування"),
+                    17,
+                    true,
+                    TEXT
+            ));
+            exactCard.addView(text(
+                    tr(
+                            "Android requires a one-time permission for exact reminder times.",
+                            "Android потребує одноразового дозволу, щоб нагадування спрацьовували точно в заданий час."
+                    ),
                     13,
                     false,
                     MUTED
-            );
-            exactCard.addView(exactTitle);
-            exactCard.addView(exactBody, margin(-1, -2, 0, 5, 0, 10));
+            ), margin(-1, -2, 0, 5, 0, 10));
 
-            Button exactButton = secondaryButton("Allow exact reminders");
+            Button exactButton = secondaryButton(tr("Allow exact reminders", "Дозволити точні нагадування"));
             exactButton.setOnClickListener(v -> openExactAlarmSettings());
             exactCard.addView(exactButton);
-
             root.addView(exactCard, margin(-1, -2, 0, 0, 0, 18));
         }
 
@@ -132,11 +148,8 @@ public class MainActivity extends Activity {
         heading.setOrientation(LinearLayout.HORIZONTAL);
         heading.setGravity(Gravity.CENTER_VERTICAL);
 
-        TextView upcoming = text("Upcoming", 23, true, TEXT);
-        heading.addView(upcoming, new LinearLayout.LayoutParams(0, -2, 1f));
-
-        TextView local = text("Offline • Local", 12, true, BLUE);
-        heading.addView(local);
+        heading.addView(text(tr("Upcoming", "Майбутні"), 23, true, TEXT), new LinearLayout.LayoutParams(0, -2, 1f));
+        heading.addView(text(tr("Offline • Local", "Офлайн • Локально"), 12, true, BLUE));
         root.addView(heading, margin(-1, -2, 0, 0, 0, 10));
 
         reminderList = new LinearLayout(this);
@@ -147,9 +160,7 @@ public class MainActivity extends Activity {
     }
 
     private void renderReminders() {
-        if (reminderList == null) {
-            return;
-        }
+        if (reminderList == null) return;
 
         reminderList.removeAllViews();
         List<Reminder> reminders = new ReminderDb(this).getUpcoming();
@@ -158,10 +169,13 @@ public class MainActivity extends Activity {
             LinearLayout empty = card();
             TextView emoji = text("🔔", 34, false, TEXT);
             emoji.setGravity(Gravity.CENTER);
-            TextView emptyTitle = text("Nothing to remember yet", 18, true, TEXT);
+            TextView emptyTitle = text(tr("Nothing to remember yet", "Поки що нагадувань немає"), 18, true, TEXT);
             emptyTitle.setGravity(Gravity.CENTER);
             TextView emptyBody = text(
-                    "Create one here or share a screenshot, photo, link or text from another app.",
+                    tr(
+                            "Create one here or share a screenshot, photo, link or text from another app.",
+                            "Створи нагадування тут або поділись скріншотом, фото, посиланням чи текстом з іншого застосунку."
+                    ),
                     13,
                     false,
                     MUTED
@@ -175,8 +189,7 @@ public class MainActivity extends Activity {
             return;
         }
 
-        SimpleDateFormat formatter =
-                new SimpleDateFormat("EEE, dd MMM • HH:mm", Locale.getDefault());
+        SimpleDateFormat formatter = new SimpleDateFormat("EEE, dd MMM • HH:mm", LanguageManager.locale(this));
 
         for (Reminder reminder : reminders) {
             LinearLayout item = card();
@@ -190,36 +203,26 @@ public class MainActivity extends Activity {
 
             LinearLayout titles = new LinearLayout(this);
             titles.setOrientation(LinearLayout.VERTICAL);
-
-            TextView itemTitle = text(reminder.title, 17, true, TEXT);
-            TextView time = text(
-                    formatter.format(new Date(reminder.remindAt)),
-                    13,
-                    true,
-                    BLUE
-            );
-            titles.addView(itemTitle);
-            titles.addView(time);
-
+            titles.addView(text(reminder.title, 17, true, TEXT));
+            titles.addView(text(formatter.format(new Date(reminder.remindAt)), 13, true, BLUE));
             top.addView(titles, new LinearLayout.LayoutParams(0, -2, 1f));
             item.addView(top);
 
             if (!TextUtils.isEmpty(reminder.body)) {
-                TextView body = text(shortBody(reminder.body), 13, false, MUTED);
-                item.addView(body, margin(-1, -2, dp(42), 10, 0, 12));
+                item.addView(text(shortBody(reminder.body), 13, false, MUTED), margin(-1, -2, dp(42), 10, 0, 12));
             }
 
             LinearLayout actions = new LinearLayout(this);
             actions.setOrientation(LinearLayout.HORIZONTAL);
 
-            Button done = smallButton("✓ Done", GREEN);
+            Button done = smallButton(tr("✓ Done", "✓ Виконано"), GREEN);
             done.setOnClickListener(v -> {
                 ReminderScheduler.cancel(this, reminder.id);
                 new ReminderDb(this).markDone(reminder.id);
                 renderReminders();
             });
 
-            Button delete = smallButton("Delete", RED);
+            Button delete = smallButton(tr("Delete", "Видалити"), RED);
             delete.setOnClickListener(v -> {
                 ReminderScheduler.cancel(this, reminder.id);
                 new ReminderDb(this).delete(reminder.id);
@@ -231,9 +234,57 @@ public class MainActivity extends Activity {
             actions.addView(spacer, new LinearLayout.LayoutParams(dp(8), 1));
             actions.addView(delete, new LinearLayout.LayoutParams(0, dp(44), 1f));
             item.addView(actions);
-
             reminderList.addView(item, margin(-1, -2, 0, 0, 0, 10));
         }
+    }
+
+    private Button languageButton() {
+        Button button = baseButton("🌐 " + (LanguageManager.isUkrainian(this) ? "UA" : "EN"));
+        button.setTextSize(12);
+        button.setTextColor(BLUE);
+        button.setMinHeight(0);
+        button.setMinWidth(0);
+        button.setPadding(dp(6), 0, dp(6), 0);
+        button.setBackground(rounded(Color.WHITE, BLUE, 1, 14));
+        button.setOnClickListener(v -> showLanguageMenu(button));
+        return button;
+    }
+
+    private void showLanguageMenu(View anchor) {
+        PopupMenu menu = new PopupMenu(this, anchor);
+        menu.getMenu().add("Українська");
+        menu.getMenu().add("English");
+        menu.setOnMenuItemClickListener(item -> {
+            String chosen = item.getTitle().toString().startsWith("Укра") ? "uk" : "en";
+            if (!chosen.equals(LanguageManager.getLanguage(this))) {
+                LanguageManager.setLanguage(this, chosen);
+                recreate();
+            }
+            return true;
+        });
+        menu.show();
+    }
+
+    private void applySystemBarInsets(View root) {
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            int top;
+            int bottom;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+                top = bars.top;
+                bottom = bars.bottom;
+            } else {
+                top = insets.getSystemWindowInsetTop();
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+            v.setPadding(dp(18), dp(18) + top, dp(18), dp(32) + bottom);
+            return insets;
+        });
+        root.requestApplyInsets();
+    }
+
+    private String tr(String english, String ukrainian) {
+        return LanguageManager.text(this, english, ukrainian);
     }
 
     private String shortBody(String body) {
@@ -250,18 +301,13 @@ public class MainActivity extends Activity {
     }
 
     private boolean canExactAlarms() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            return true;
-        }
-        AlarmManager manager =
-                (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true;
+        AlarmManager manager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
         return manager.canScheduleExactAlarms();
     }
 
     private void openExactAlarmSettings() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            return;
-        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return;
         try {
             Intent intent = new Intent(
                     Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
@@ -269,18 +315,18 @@ public class MainActivity extends Activity {
             );
             startActivity(intent);
         } catch (Exception e) {
-            Toast.makeText(this, "Open Special app access → Alarms & reminders", Toast.LENGTH_LONG).show();
+            Toast.makeText(
+                    this,
+                    tr("Open Special app access → Alarms & reminders", "Відкрий Спеціальний доступ → Будильники й нагадування"),
+                    Toast.LENGTH_LONG
+            ).show();
         }
     }
 
     private void requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= 33
-                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(
-                    new String[]{Manifest.permission.POST_NOTIFICATIONS},
-                    100
-            );
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 100);
         }
     }
 
@@ -329,9 +375,7 @@ public class MainActivity extends Activity {
         textView.setText(value);
         textView.setTextSize(sp);
         textView.setTextColor(color);
-        if (bold) {
-            textView.setTypeface(Typeface.DEFAULT_BOLD);
-        }
+        if (bold) textView.setTypeface(Typeface.DEFAULT_BOLD);
         return textView;
     }
 
@@ -343,14 +387,7 @@ public class MainActivity extends Activity {
         return drawable;
     }
 
-    private LinearLayout.LayoutParams margin(
-            int width,
-            int height,
-            int left,
-            int top,
-            int right,
-            int bottom
-    ) {
+    private LinearLayout.LayoutParams margin(int width, int height, int left, int top, int right, int bottom) {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(width, height);
         params.setMargins(dp(left), dp(top), dp(right), dp(bottom));
         return params;

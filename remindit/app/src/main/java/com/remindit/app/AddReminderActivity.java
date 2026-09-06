@@ -8,11 +8,13 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Parcelable;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
@@ -25,7 +27,6 @@ import android.widget.Toast;
 
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
-import java.util.Locale;
 
 public class AddReminderActivity extends Activity {
     private static final int BLUE = Color.rgb(10, 132, 255);
@@ -36,6 +37,8 @@ public class AddReminderActivity extends Activity {
     private static final int BG = Color.rgb(247, 250, 255);
     private static final int BORDER = Color.rgb(226, 232, 240);
     private static final int CARD = Color.WHITE;
+
+    private static final String[] CATEGORY_KEYS = {"Personal", "Shopping", "Travel", "Work", "Bills", "Other"};
 
     private EditText titleInput;
     private EditText bodyInput;
@@ -55,6 +58,11 @@ public class AddReminderActivity extends Activity {
         super.onCreate(savedInstanceState);
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(Color.WHITE);
+        int flags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        }
+        getWindow().getDecorView().setSystemUiVisibility(flags);
 
         selected.add(Calendar.HOUR_OF_DAY, 1);
         selected.set(Calendar.MINUTE, ((selected.get(Calendar.MINUTE) + 4) / 5) * 5);
@@ -78,6 +86,7 @@ public class AddReminderActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(18), dp(18), dp(18), dp(32));
+        applySystemBarInsets(root);
         scroll.addView(root);
 
         LinearLayout header = new LinearLayout(this);
@@ -95,8 +104,8 @@ public class AddReminderActivity extends Activity {
 
         LinearLayout titleBlock = new LinearLayout(this);
         titleBlock.setOrientation(LinearLayout.VERTICAL);
-        titleBlock.addView(text("New reminder", 25, true, TEXT));
-        titleBlock.addView(text("Save it now. Remember it later.", 13, false, MUTED));
+        titleBlock.addView(text(tr("New reminder", "Нове нагадування"), 25, true, TEXT));
+        titleBlock.addView(text(tr("Save it now. Remember it later.", "Збережи зараз. Згадай вчасно."), 13, false, MUTED));
         header.addView(titleBlock, new LinearLayout.LayoutParams(0, -2, 1f));
 
         ImageView logo = new ImageView(this);
@@ -110,61 +119,57 @@ public class AddReminderActivity extends Activity {
         sourceRow.setOrientation(LinearLayout.HORIZONTAL);
         sourceRow.setGravity(Gravity.CENTER_VERTICAL);
 
-        sourceBadge = pill("MANUAL", BLUE);
+        sourceBadge = pill(tr("MANUAL", "ВРУЧНУ"), BLUE);
         sourceRow.addView(sourceBadge);
-
-        TextView local = text("  On-device • private", 12, true, MUTED);
-        sourceRow.addView(local);
-
+        sourceRow.addView(text(tr("  On-device • private", "  На пристрої • приватно"), 12, true, MUTED));
         sourceCard.addView(sourceRow);
 
         smartHint = text(
-                "Share a screenshot, photo, link or text to let RemindIt suggest the date and category automatically.",
+                tr(
+                        "Share a screenshot, photo, link or text to let RemindIt suggest the date and category automatically.",
+                        "Поділись скріншотом, фото, посиланням або текстом — RemindIt автоматично запропонує дату й категорію."
+                ),
                 13,
                 false,
                 MUTED
         );
         sourceCard.addView(smartHint, margin(-1, -2, 0, 9, 0, 0));
-
         root.addView(sourceCard, margin(-1, -2, 0, 0, 0, 12));
 
         LinearLayout details = card();
-        details.addView(label("Title"));
+        details.addView(label(tr("Title", "Назва")));
 
-        titleInput = input("What should I remind you about?", false);
+        titleInput = input(tr("What should I remind you about?", "Про що тобі нагадати?"), false);
         details.addView(titleInput, margin(-1, dp(56), 0, 6, 0, 14));
 
-        details.addView(label("Details"));
-        bodyInput = input("Paste text, a link, or add a note…", true);
+        details.addView(label(tr("Details", "Деталі")));
+        bodyInput = input(tr("Paste text, a link, or add a note…", "Встав текст, посилання або додай нотатку…"), true);
         details.addView(bodyInput, margin(-1, dp(132), 0, 6, 0, 14));
 
-        details.addView(label("Category"));
+        details.addView(label(tr("Category", "Категорія")));
         categorySpinner = new Spinner(this);
-        String[] categories = {"Personal", "Shopping", "Travel", "Work", "Bills", "Other"};
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(
-                this,
-                android.R.layout.simple_spinner_item,
-                categories
-        );
+        String[] categories = LanguageManager.isUkrainian(this)
+                ? new String[]{"Особисте", "Покупки", "Подорожі", "Робота", "Платежі", "Інше"}
+                : new String[]{"Personal", "Shopping", "Travel", "Work", "Bills", "Other"};
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, categories);
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         categorySpinner.setAdapter(adapter);
         categorySpinner.setPadding(dp(12), 0, dp(12), 0);
         categorySpinner.setBackground(rounded(Color.rgb(248, 250, 252), BORDER, 1, 14));
         details.addView(categorySpinner, margin(-1, dp(54), 0, 6, 0, 0));
-
         root.addView(details, margin(-1, -2, 0, 0, 0, 12));
 
         LinearLayout when = card();
-        when.addView(text("When should I remind you?", 18, true, TEXT));
+        when.addView(text(tr("When should I remind you?", "Коли нагадати?"), 18, true, TEXT));
 
         LinearLayout dateTime = new LinearLayout(this);
         dateTime.setOrientation(LinearLayout.HORIZONTAL);
 
-        LinearLayout dateBlock = valueBlock("Date");
+        LinearLayout dateBlock = valueBlock(tr("Date", "Дата"));
         dateValue = (TextView) dateBlock.getChildAt(1);
         dateValue.setOnClickListener(v -> pickDate());
 
-        LinearLayout timeBlock = valueBlock("Time");
+        LinearLayout timeBlock = valueBlock(tr("Time", "Час"));
         timeValue = (TextView) timeBlock.getChildAt(1);
         timeValue.setOnClickListener(v -> pickTime());
 
@@ -172,12 +177,11 @@ public class AddReminderActivity extends Activity {
         View gap = new View(this);
         dateTime.addView(gap, new LinearLayout.LayoutParams(dp(10), 1));
         dateTime.addView(timeBlock, new LinearLayout.LayoutParams(0, -2, 1f));
-
         when.addView(dateTime, margin(-1, -2, 0, 12, 0, 0));
         root.addView(when, margin(-1, -2, 0, 0, 0, 14));
 
         saveButton = new Button(this);
-        saveButton.setText("Save reminder");
+        saveButton.setText(tr("Save reminder", "Зберегти нагадування"));
         saveButton.setAllCaps(false);
         saveButton.setTextSize(17);
         saveButton.setTypeface(Typeface.DEFAULT_BOLD);
@@ -190,22 +194,19 @@ public class AddReminderActivity extends Activity {
     }
 
     private void handleIncoming(Intent intent) {
-        if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) {
-            return;
-        }
+        if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) return;
 
         String type = intent.getType();
-
         if (type != null && type.startsWith("image/")) {
             sourceType = "image";
-            sourceBadge.setText("IMAGE • OCR");
+            sourceBadge.setText(tr("IMAGE • OCR", "ЗОБРАЖЕННЯ • OCR"));
             sourceBadge.setBackground(rounded(YELLOW, YELLOW, 1, 12));
             sourceBadge.setTextColor(TEXT);
-            smartHint.setText("Reading text from the image on this phone…");
+            smartHint.setText(tr("Reading text from the image on this phone…", "Розпізнаю текст із зображення на цьому телефоні…"));
 
             Uri uri = readSharedUri(intent);
             if (uri == null) {
-                smartHint.setText("Could not read the shared image.");
+                smartHint.setText(tr("Could not read the shared image.", "Не вдалося прочитати передане зображення."));
                 return;
             }
 
@@ -214,39 +215,35 @@ public class AddReminderActivity extends Activity {
                 public void onSuccess(String recognizedText) {
                     smartHint.setText(
                             recognizedText.trim().isEmpty()
-                                    ? "No text found. You can still create the reminder manually."
-                                    : "Text found. RemindIt suggested a date and category."
+                                    ? tr("No text found. You can still create the reminder manually.", "Текст не знайдено. Нагадування можна створити вручну.")
+                                    : tr("Text found. RemindIt suggested a date and category.", "Текст знайдено. RemindIt запропонував дату й категорію.")
                     );
-
                     bodyInput.setText(recognizedText);
-                    titleInput.setText(inferTitle(recognizedText, "Image reminder"));
+                    titleInput.setText(inferTitle(recognizedText, tr("Image reminder", "Нагадування із зображення")));
                     applySmartSuggestions(recognizedText);
                 }
 
                 @Override
                 public void onError(Exception error) {
-                    smartHint.setText("OCR could not read this image. Add the reminder manually.");
+                    smartHint.setText(tr("OCR could not read this image. Add the reminder manually.", "OCR не зміг прочитати зображення. Додай нагадування вручну."));
                 }
             });
             return;
         }
 
         sourceType = "text";
-        sourceBadge.setText("SHARED");
+        sourceBadge.setText(tr("SHARED", "ПОДІЛЕНО"));
         String sharedText = intent.getStringExtra(Intent.EXTRA_TEXT);
-        if (sharedText == null) {
-            sharedText = "";
-        }
-
+        if (sharedText == null) sharedText = "";
         bodyInput.setText(sharedText);
-        titleInput.setText(inferTitle(sharedText, "Shared reminder"));
+        titleInput.setText(inferTitle(sharedText, tr("Shared reminder", "Нагадування з переданого")));
         applySmartSuggestions(sharedText);
-        smartHint.setText("Shared content received. Date and category suggestions are ready.");
+        smartHint.setText(tr("Shared content received. Date and category suggestions are ready.", "Вміст отримано. Пропозиції дати й категорії готові."));
     }
 
     @SuppressWarnings("deprecation")
     private Uri readSharedUri(Intent intent) {
-        if (android.os.Build.VERSION.SDK_INT >= 33) {
+        if (Build.VERSION.SDK_INT >= 33) {
             return intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri.class);
         }
         Parcelable value = intent.getParcelableExtra(Intent.EXTRA_STREAM);
@@ -259,26 +256,17 @@ public class AddReminderActivity extends Activity {
             selected.setTimeInMillis(detected);
             refreshDateTime();
         }
-
-        String category = DateDetector.inferCategory(text);
-        setCategory(category);
+        setCategory(DateDetector.inferCategory(text));
     }
 
     private String inferTitle(String raw, String fallback) {
-        if (raw == null || raw.trim().isEmpty()) {
-            return fallback;
-        }
-
+        if (raw == null || raw.trim().isEmpty()) return fallback;
         String clean = raw.trim().replace('\r', ' ');
         String firstLine = clean.split("\\n", 2)[0].trim();
-        if (firstLine.length() > 55) {
-            firstLine = firstLine.substring(0, 52) + "…";
-        }
-
+        if (firstLine.length() > 55) firstLine = firstLine.substring(0, 52) + "…";
         if (firstLine.startsWith("http://") || firstLine.startsWith("https://")) {
-            return "Open saved link";
+            return tr("Open saved link", "Відкрити збережене посилання");
         }
-
         return firstLine.isEmpty() ? fallback : firstLine;
     }
 
@@ -287,19 +275,19 @@ public class AddReminderActivity extends Activity {
         String body = bodyInput.getText().toString().trim();
 
         if (TextUtils.isEmpty(title)) {
-            Toast.makeText(this, "Add a title", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, tr("Add a title", "Додай назву"), Toast.LENGTH_SHORT).show();
             return;
         }
-
         if (selected.getTimeInMillis() <= System.currentTimeMillis()) {
-            Toast.makeText(this, "Choose a time in the future", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, tr("Choose a time in the future", "Обери майбутній час"), Toast.LENGTH_SHORT).show();
             return;
         }
 
         Reminder reminder = new Reminder();
         reminder.title = title;
         reminder.body = body;
-        reminder.category = String.valueOf(categorySpinner.getSelectedItem());
+        int categoryIndex = categorySpinner.getSelectedItemPosition();
+        reminder.category = CATEGORY_KEYS[Math.max(0, Math.min(categoryIndex, CATEGORY_KEYS.length - 1))];
         reminder.sourceType = sourceType;
         reminder.imagePath = imagePath;
         reminder.remindAt = selected.getTimeInMillis();
@@ -310,13 +298,13 @@ public class AddReminderActivity extends Activity {
         reminder.id = db.insert(reminder);
         ReminderScheduler.schedule(this, reminder);
 
-        Toast.makeText(this, "Reminder saved", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, tr("Reminder saved", "Нагадування збережено"), Toast.LENGTH_SHORT).show();
         finish();
     }
 
     private void setCategory(String category) {
-        for (int i = 0; i < categorySpinner.getCount(); i++) {
-            if (category.equals(categorySpinner.getItemAtPosition(i))) {
+        for (int i = 0; i < CATEGORY_KEYS.length; i++) {
+            if (CATEGORY_KEYS[i].equals(category)) {
                 categorySpinner.setSelection(i);
                 return;
             }
@@ -358,23 +346,38 @@ public class AddReminderActivity extends Activity {
 
     private void refreshDateTime() {
         if (dateValue != null) {
-            dateValue.setText(
-                    new SimpleDateFormat("dd.MM.yyyy", Locale.getDefault())
-                            .format(selected.getTime())
-            );
+            dateValue.setText(new SimpleDateFormat("dd.MM.yyyy", LanguageManager.locale(this)).format(selected.getTime()));
         }
         if (timeValue != null) {
-            timeValue.setText(
-                    new SimpleDateFormat("HH:mm", Locale.getDefault())
-                            .format(selected.getTime())
-            );
+            timeValue.setText(new SimpleDateFormat("HH:mm", LanguageManager.locale(this)).format(selected.getTime()));
         }
+    }
+
+    private void applySystemBarInsets(View root) {
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            int top;
+            int bottom;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+                top = bars.top;
+                bottom = bars.bottom;
+            } else {
+                top = insets.getSystemWindowInsetTop();
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+            v.setPadding(dp(18), dp(18) + top, dp(18), dp(32) + bottom);
+            return insets;
+        });
+        root.requestApplyInsets();
+    }
+
+    private String tr(String english, String ukrainian) {
+        return LanguageManager.text(this, english, ukrainian);
     }
 
     private LinearLayout valueBlock(String label) {
         LinearLayout block = new LinearLayout(this);
         block.setOrientation(LinearLayout.VERTICAL);
-
         block.addView(text(label, 12, true, MUTED));
 
         TextView value = text("", 17, true, TEXT);
@@ -382,7 +385,6 @@ public class AddReminderActivity extends Activity {
         value.setPadding(dp(10), dp(15), dp(10), dp(15));
         value.setBackground(rounded(Color.rgb(248, 250, 252), BORDER, 1, 14));
         block.addView(value, margin(-1, -2, 0, 5, 0, 0));
-
         return block;
     }
 
@@ -406,7 +408,6 @@ public class AddReminderActivity extends Activity {
         input.setTextSize(16);
         input.setPadding(dp(14), dp(12), dp(14), dp(12));
         input.setBackground(rounded(Color.rgb(248, 250, 252), BORDER, 1, 14));
-
         if (multiline) {
             input.setMinLines(4);
             input.setGravity(Gravity.TOP | Gravity.START);
@@ -428,9 +429,7 @@ public class AddReminderActivity extends Activity {
         textView.setText(value);
         textView.setTextSize(sp);
         textView.setTextColor(color);
-        if (bold) {
-            textView.setTypeface(Typeface.DEFAULT_BOLD);
-        }
+        if (bold) textView.setTypeface(Typeface.DEFAULT_BOLD);
         return textView;
     }
 
@@ -442,16 +441,8 @@ public class AddReminderActivity extends Activity {
         return drawable;
     }
 
-    private LinearLayout.LayoutParams margin(
-            int width,
-            int height,
-            int left,
-            int top,
-            int right,
-            int bottom
-    ) {
-        LinearLayout.LayoutParams params =
-                new LinearLayout.LayoutParams(width, height);
+    private LinearLayout.LayoutParams margin(int width, int height, int left, int top, int right, int bottom) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(width, height);
         params.setMargins(dp(left), dp(top), dp(right), dp(bottom));
         return params;
     }
