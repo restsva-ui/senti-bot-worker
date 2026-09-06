@@ -11,7 +11,7 @@ import java.util.List;
 
 public class ReminderDb extends SQLiteOpenHelper {
     private static final String DB_NAME = "remindit.db";
-    private static final int DB_VERSION = 1;
+    private static final int DB_VERSION = 2;
 
     public ReminderDb(Context context) {
         super(context, DB_NAME, null, DB_VERSION);
@@ -24,6 +24,8 @@ public class ReminderDb extends SQLiteOpenHelper {
                         "id INTEGER PRIMARY KEY AUTOINCREMENT," +
                         "title TEXT NOT NULL," +
                         "body TEXT," +
+                        "goal TEXT," +
+                        "intent_type TEXT," +
                         "category TEXT," +
                         "source_type TEXT," +
                         "image_path TEXT," +
@@ -37,22 +39,20 @@ public class ReminderDb extends SQLiteOpenHelper {
 
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE reminders ADD COLUMN goal TEXT");
+            db.execSQL("ALTER TABLE reminders ADD COLUMN intent_type TEXT");
+        }
     }
 
     public long insert(Reminder reminder) {
-        ContentValues values = toValues(reminder);
-        return getWritableDatabase().insertOrThrow("reminders", null, values);
+        return getWritableDatabase().insertOrThrow("reminders", null, toValues(reminder));
     }
 
     public Reminder get(long id) {
         Cursor cursor = getReadableDatabase().query(
-                "reminders",
-                null,
-                "id=?",
-                new String[]{String.valueOf(id)},
-                null,
-                null,
-                null
+                "reminders", null, "id=?", new String[]{String.valueOf(id)},
+                null, null, null
         );
         try {
             return cursor.moveToFirst() ? fromCursor(cursor) : null;
@@ -64,18 +64,10 @@ public class ReminderDb extends SQLiteOpenHelper {
     public List<Reminder> getUpcoming() {
         ArrayList<Reminder> list = new ArrayList<>();
         Cursor cursor = getReadableDatabase().query(
-                "reminders",
-                null,
-                "done=0",
-                null,
-                null,
-                null,
-                "remind_at ASC"
+                "reminders", null, "done=0", null, null, null, "remind_at ASC"
         );
         try {
-            while (cursor.moveToNext()) {
-                list.add(fromCursor(cursor));
-            }
+            while (cursor.moveToNext()) list.add(fromCursor(cursor));
         } finally {
             cursor.close();
         }
@@ -85,47 +77,41 @@ public class ReminderDb extends SQLiteOpenHelper {
     public List<Reminder> getFuturePending(long now) {
         ArrayList<Reminder> list = new ArrayList<>();
         Cursor cursor = getReadableDatabase().query(
-                "reminders",
-                null,
-                "done=0 AND remind_at>?",
-                new String[]{String.valueOf(now)},
-                null,
-                null,
-                "remind_at ASC"
+                "reminders", null, "done=0 AND remind_at>?",
+                new String[]{String.valueOf(now)}, null, null, "remind_at ASC"
         );
         try {
-            while (cursor.moveToNext()) {
-                list.add(fromCursor(cursor));
-            }
+            while (cursor.moveToNext()) list.add(fromCursor(cursor));
         } finally {
             cursor.close();
         }
         return list;
     }
 
+    public void rescheduleFuture(Context context) {
+        if (!ReminderScheduler.canScheduleExactly(context)) return;
+        long now = System.currentTimeMillis();
+        for (Reminder reminder : getFuturePending(now)) {
+            ReminderScheduler.schedule(context, reminder);
+        }
+    }
+
     public void markDone(long id) {
         ContentValues values = new ContentValues();
         values.put("done", 1);
-        getWritableDatabase().update(
-                "reminders",
-                values,
-                "id=?",
-                new String[]{String.valueOf(id)}
-        );
+        getWritableDatabase().update("reminders", values, "id=?", new String[]{String.valueOf(id)});
     }
 
     public void delete(long id) {
-        getWritableDatabase().delete(
-                "reminders",
-                "id=?",
-                new String[]{String.valueOf(id)}
-        );
+        getWritableDatabase().delete("reminders", "id=?", new String[]{String.valueOf(id)});
     }
 
     private ContentValues toValues(Reminder reminder) {
         ContentValues values = new ContentValues();
         values.put("title", reminder.title);
         values.put("body", reminder.body);
+        values.put("goal", reminder.goal);
+        values.put("intent_type", reminder.intentType);
         values.put("category", reminder.category);
         values.put("source_type", reminder.sourceType);
         values.put("image_path", reminder.imagePath);
@@ -140,6 +126,10 @@ public class ReminderDb extends SQLiteOpenHelper {
         reminder.id = cursor.getLong(cursor.getColumnIndexOrThrow("id"));
         reminder.title = cursor.getString(cursor.getColumnIndexOrThrow("title"));
         reminder.body = cursor.getString(cursor.getColumnIndexOrThrow("body"));
+        int goalIndex = cursor.getColumnIndex("goal");
+        reminder.goal = goalIndex >= 0 ? cursor.getString(goalIndex) : null;
+        int intentIndex = cursor.getColumnIndex("intent_type");
+        reminder.intentType = intentIndex >= 0 ? cursor.getString(intentIndex) : null;
         reminder.category = cursor.getString(cursor.getColumnIndexOrThrow("category"));
         reminder.sourceType = cursor.getString(cursor.getColumnIndexOrThrow("source_type"));
         reminder.imagePath = cursor.getString(cursor.getColumnIndexOrThrow("image_path"));
