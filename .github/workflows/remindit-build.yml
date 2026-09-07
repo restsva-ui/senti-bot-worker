@@ -1,4 +1,4 @@
-name: RemindIt Android MVP
+name: RemindIt Android Beta
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -27,20 +27,30 @@ jobs:
       - name: Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android 35
-        run: yes | sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Install Android 36
+        run: yes | sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
-      - name: Gradle 8.9
+      - name: Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
+          gradle-version: '8.13'
 
       - name: Build debug APK
         run: gradle -p remindit :app:assembleDebug --stacktrace
 
+      - name: Build debug AAB
+        run: gradle -p remindit :app:bundleDebug --stacktrace
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: RemindIt-Beta-0.7
+          name: RemindIt-Beta-0.7-APK
           path: remindit/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: RemindIt-Beta-0.7-AAB
+          path: remindit/app/build/outputs/bundle/debug/app-debug.aab
           if-no-files-found: error
