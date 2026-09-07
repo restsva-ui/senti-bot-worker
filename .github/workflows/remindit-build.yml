@@ -69,6 +69,34 @@ jobs:
       - name: Build debug APK
         run: gradle -p remindit :app:assembleDebug --stacktrace
 
+      - name: Verify APK identity, privacy, OCR and signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="remindit/app/build/outputs/apk/debug/app-debug.apk"
+          analyzer="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
+          signer="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+
+          test -s "$apk"
+          unzip -tq "$apk"
+          test "$("$analyzer" manifest application-id "$apk")" = "com.remindit.app"
+          test "$("$analyzer" manifest version-code "$apk")" = "9"
+          test "$("$analyzer" manifest version-name "$apk")" = "0.9.0"
+          test "$("$analyzer" manifest min-sdk "$apk")" = "26"
+          test "$("$analyzer" manifest target-sdk "$apk")" = "36"
+
+          permissions="$("$analyzer" manifest permissions "$apk")"
+          if grep -Eq '^android\.permission\.(INTERNET|ACCESS_NETWORK_STATE)$' <<<"$permissions"; then
+            echo "Unexpected network permission in merged APK manifest" >&2
+            exit 1
+          fi
+
+          entries="$(unzip -Z1 "$apk")"
+          for lang in ukr rus eng; do
+            grep -Fxq "assets/tessdata/${lang}.traineddata" <<<"$entries"
+          done
+          "$signer" verify --verbose --print-certs "$apk"
+
       - name: Build debug AAB
         run: gradle -p remindit :app:bundleDebug --stacktrace
 
