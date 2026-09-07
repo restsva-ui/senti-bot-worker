@@ -10,8 +10,8 @@ android {
         applicationId 'com.remindit.app'
         minSdk 26
         targetSdk 36
-        versionCode 7
-        versionName '0.7.0'
+        versionCode 8
+        versionName '0.8.0'
     }
 
     buildTypes {
@@ -32,26 +32,30 @@ configurations.configureEach {
     exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
 }
 
-def ukrOcrModel = file('src/main/assets/tessdata/ukr.traineddata')
+def ocrDir = file('src/main/assets/tessdata')
+def ocrLanguages = ['ukr', 'rus', 'eng']
 
-tasks.register('prepareUkrOcrAsset') {
-    outputs.file(ukrOcrModel)
+tasks.register('prepareOcrAssets') {
+    outputs.dir(ocrDir)
     doLast {
-        if (!ukrOcrModel.exists() || ukrOcrModel.length() < 1000000L) {
-            ukrOcrModel.parentFile.mkdirs()
-            def modelUrl = new URL('https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/ukr.traineddata')
-            modelUrl.withInputStream { input ->
-                ukrOcrModel.withOutputStream { output -> output << input }
+        ocrDir.mkdirs()
+        ocrLanguages.each { lang ->
+            def model = new File(ocrDir, "${lang}.traineddata")
+            if (!model.exists() || model.length() < 500000L) {
+                def modelUrl = new URL("https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/${lang}.traineddata")
+                modelUrl.withInputStream { input ->
+                    model.withOutputStream { output -> output << input }
+                }
             }
-        }
-        if (!ukrOcrModel.exists() || ukrOcrModel.length() < 1000000L) {
-            throw new GradleException('Ukrainian OCR model was not prepared correctly')
+            if (!model.exists() || model.length() < 500000L) {
+                throw new GradleException("OCR model ${lang} was not prepared correctly")
+            }
         }
     }
 }
 
 tasks.named('preBuild').configure {
-    dependsOn(tasks.named('prepareUkrOcrAsset'))
+    dependsOn(tasks.named('prepareOcrAssets'))
 }
 
 dependencies {
