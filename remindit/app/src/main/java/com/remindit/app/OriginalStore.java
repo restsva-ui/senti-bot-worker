@@ -52,4 +52,12 @@ public final class OriginalStore {
         if (text == null) return "";
         return URL_PATTERN.matcher(text).replaceAll(" ").replaceAll("\\s+", " ").trim();
     }
+
+    public static void deletePath(String path) {
+        if (path == null || path.trim().isEmpty()) return;
+        try {
+            File file = new File(path);
+            if (file.exists()) file.delete();
+        } catch (Exception ignored) {}
+    }
 }

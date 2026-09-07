@@ -12,12 +12,14 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.PowerManager;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -37,6 +39,8 @@ public class SettingsActivity extends Activity {
     private TextView languageValue;
     private TextView notificationStatus;
     private TextView exactStatus;
+    private TextView batteryStatus;
+    private TextView diagnosticStatus;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -121,6 +125,21 @@ public class SettingsActivity extends Activity {
         permissions.addView(appSettings, new LinearLayout.LayoutParams(-1, dp(50)));
         root.addView(permissions, margin(-1, -2, 0, 0, 0, 12));
 
+        LinearLayout diagnostics = card();
+        diagnostics.addView(sectionTitle(LanguageManager.pick(this, "Перевірка надійності", "Reliability check")));
+        diagnostics.addView(text(LanguageManager.pick(this,
+                "RemindIt створить точне тестове нагадування через 2 хвилини. Заблокуй екран і не відкривай застосунок.",
+                "RemindIt will create an exact test reminder in 2 minutes. Lock the screen and leave the app closed."),
+                13, false, MUTED), margin(-1, -2, 0, 6, 0, 8));
+        batteryStatus = text("", 14, true, MUTED);
+        diagnostics.addView(batteryStatus, margin(-1, -2, 0, 0, 0, 6));
+        diagnosticStatus = text("", 14, true, MUTED);
+        diagnostics.addView(diagnosticStatus, margin(-1, -2, 0, 0, 0, 10));
+        Button testAlarm = primaryButton(LanguageManager.pick(this, "Перевірити через 2 хв", "Test in 2 minutes"));
+        testAlarm.setOnClickListener(v -> runAlarmTest());
+        diagnostics.addView(testAlarm);
+        root.addView(diagnostics, margin(-1, -2, 0, 0, 0, 12));
+
         LinearLayout sound = card();
         sound.addView(sectionTitle(LanguageManager.pick(this, "Звук RemindIt", "RemindIt sound")));
         sound.addView(text(
@@ -137,9 +156,12 @@ public class SettingsActivity extends Activity {
         privacy.addView(sectionTitle(LanguageManager.pick(this, "Приватність", "Privacy")));
         privacy.addView(text(
                 LanguageManager.pick(this,
-                        "Оригінали фото/скріншотів зберігаються у внутрішній пам’яті RemindIt. Посилання зберігаються разом із нагадуванням. При видаленні нагадування локальна копія фото також видаляється.",
-                        "Original images/screenshots are saved in RemindIt's private internal storage. Links are stored with the reminder. Deleting a reminder also deletes its local image copy."),
-                13, false, MUTED));
+                        "Фото, скріншоти, OCR і нагадування обробляються локально. Мовні моделі вже містяться у застосунку.",
+                        "Images, screenshots, OCR and reminders are processed locally. Language models are bundled with the app."),
+                13, false, MUTED), margin(-1, -2, 0, 6, 0, 10));
+        Button fullPolicy = secondaryButton(LanguageManager.pick(this, "Відкрити повну політику", "Open full policy"));
+        fullPolicy.setOnClickListener(v -> startActivity(new Intent(this, PrivacyPolicyActivity.class)));
+        privacy.addView(fullPolicy);
         root.addView(privacy);
 
         return scroll;
@@ -162,6 +184,65 @@ public class SettingsActivity extends Activity {
                     exact ? "Точні нагадування дозволені" : "Точні нагадування не дозволені",
                     exact ? "Exact reminders allowed" : "Exact reminders not allowed"));
             exactStatus.setTextColor(exact ? GREEN : AMBER);
+        }
+        PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+        boolean unrestricted = Build.VERSION.SDK_INT < Build.VERSION_CODES.M
+                || power == null
+                || power.isIgnoringBatteryOptimizations(getPackageName());
+        if (batteryStatus != null) {
+            batteryStatus.setText((unrestricted ? "✓ " : "! ") + LanguageManager.pick(this,
+                    unrestricted ? "Батарея не обмежує RemindIt" : "Перевір фонову роботу й автозапуск",
+                    unrestricted ? "Battery is not restricting RemindIt" : "Check background activity and autostart"));
+            batteryStatus.setTextColor(unrestricted ? GREEN : AMBER);
+        }
+        refreshDiagnosticStatus();
+    }
+
+    private void runAlarmTest() {
+        if (!notificationsAllowed()) {
+            requestNotifications();
+            Toast.makeText(this,
+                    LanguageManager.pick(this, "Дозволь сповіщення і натисни перевірку ще раз", "Allow notifications, then run the test again"),
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (!ReminderScheduler.canScheduleExactly(this)) {
+            openExactAlarmSettings();
+            Toast.makeText(this,
+                    LanguageManager.pick(this, "Дозволь точні нагадування і повтори перевірку", "Allow exact reminders, then run the test again"),
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (AlarmDiagnostics.scheduleTwoMinuteTest(this)) {
+            Toast.makeText(this,
+                    LanguageManager.pick(this, "Тест заплановано. Заблокуй екран на 2 хвилини.", "Test scheduled. Lock the screen for 2 minutes."),
+                    Toast.LENGTH_LONG).show();
+            refreshDiagnosticStatus();
+        }
+    }
+
+    private void refreshDiagnosticStatus() {
+        if (diagnosticStatus == null) return;
+        long scheduled = AlarmDiagnostics.lastScheduled(this);
+        long fired = AlarmDiagnostics.lastFired(this);
+        long now = System.currentTimeMillis();
+        if (scheduled == 0L) {
+            diagnosticStatus.setText(LanguageManager.pick(this, "Тест ще не запускався", "The test has not been run"));
+            diagnosticStatus.setTextColor(MUTED);
+        } else if (fired >= scheduled - 5000L) {
+            long seconds = Math.abs(fired - scheduled) / 1000L;
+            diagnosticStatus.setText("✓ " + LanguageManager.pick(this,
+                    "Останній тест успішний • відхилення " + seconds + " с",
+                    "Last test passed • deviation " + seconds + " s"));
+            diagnosticStatus.setTextColor(GREEN);
+        } else if (scheduled > now) {
+            diagnosticStatus.setText(LanguageManager.pick(this, "Тест очікує спрацювання", "Test is waiting to fire"));
+            diagnosticStatus.setTextColor(BLUE);
+        } else {
+            diagnosticStatus.setText("! " + LanguageManager.pick(this,
+                    "Тест не підтверджено — перевір дозволи й батарею",
+                    "Test not confirmed — check permissions and battery"));
+            diagnosticStatus.setTextColor(AMBER);
         }
     }
 

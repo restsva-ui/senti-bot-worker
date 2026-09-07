@@ -12,6 +12,22 @@ public final class ReminderIntentAnalyzer {
     private static final Pattern TIME_ONLY = Pattern.compile("^\\s*\\d{1,2}[:.]\\d{2}\\s*$");
     private static final Pattern LEADING_TIME = Pattern.compile("^\\s*\\d{1,2}[:.]\\d{2}\\s+");
     private static final Pattern DATEISH = Pattern.compile(".*\\b\\d{1,2}[./-]\\d{1,2}([./-]\\d{2,4})?\\b.*");
+    private static final Pattern CLOCK_DETAIL = Pattern.compile(
+            "(?:\\b(?:о|at)\\s*)?\\b(?:[01]?\\d|2[0-3])[:.]([0-5]\\d)\\b",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
+    );
+    private static final Pattern RELATIVE_DATE_DETAIL = Pattern.compile(
+            "\\b(day\\s+after\\s+tomorrow|післязавтра|сьогодні|завтра|today|tomorrow)\\b",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
+    );
+    private static final Pattern WEEKDAY_DETAIL = Pattern.compile(
+            "(?:\\b(?:у|в|on)\\s+)?\\b(понеділок|понеділка|вівторок|вівторка|середу|середа|четвер|четверга|п.?ятницю|п.?ятниця|суботу|субота|неділю|неділя|" +
+                    "monday|tuesday|wednesday|thursday|friday|saturday|sunday)\\b",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
+    );
+    private static final Pattern NUMERIC_DATE_DETAIL = Pattern.compile(
+            "\\b(?:20\\d{2}-\\d{1,2}-\\d{1,2}|\\d{1,2}[./-]\\d{1,2}(?:[./-]\\d{2,4})?)\\b"
+    );
     private static final Pattern URL = Pattern.compile("https?://\\S+", Pattern.CASE_INSENSITIVE);
     private static final Pattern STATUS_NOISE = Pattern.compile(
             ".*(\\b4g\\b|\\b5g\\b|volte|wi-?fi|battery|lifecell|kyivstar|vodafone|\\d{1,3}%|мб/с|kb/s).*",
@@ -94,6 +110,8 @@ public final class ReminderIntentAnalyzer {
         }
 
         if (TextUtils.isEmpty(subject)) subject = fallbackSubject(uk, sourceType);
+        String conciseSubject = stripScheduleDetails(subject);
+        if (!conciseSubject.isEmpty()) subject = conciseSubject;
 
         String goal = buildGoal(uk, type, subject);
         String title = shorten(subject, 64);
@@ -113,7 +131,7 @@ public final class ReminderIntentAnalyzer {
         return uk ? "Не забути" : "Remember";
     }
 
-    private static String buildGoal(boolean uk, String type, String subject) {
+    static String buildGoal(boolean uk, String type, String subject) {
         String clean = shorten(subject, 108);
         if (uk) {
             if ("payment".equals(type)) return "Оплатити: " + clean;
@@ -121,7 +139,7 @@ public final class ReminderIntentAnalyzer {
             if ("shopping".equals(type)) return "Перевірити або купити: " + clean;
             if ("call".equals(type)) return "Зателефонувати: " + clean;
             if ("reply".equals(type)) return "Відповісти: " + clean;
-            if ("appointment".equals(type)) return "Не пропустити подію: " + clean;
+            if ("appointment".equals(type)) return ukrainianAppointmentGoal(clean);
             if ("task".equals(type)) return "Виконати: " + clean;
             if ("review".equals(type)) return "Переглянути: " + clean;
             return "Не забути: " + clean;
@@ -274,6 +292,34 @@ public final class ReminderIntentAnalyzer {
         String clean = value.replaceAll("^[•·—–|:;\\-\\s]+", "")
                 .replaceAll("\\s+", " ").trim();
         return shorten(clean, 126);
+    }
+
+    static String stripScheduleDetails(String value) {
+        if (value == null) return "";
+        String clean = CLOCK_DETAIL.matcher(value).replaceAll(" ");
+        clean = RELATIVE_DATE_DETAIL.matcher(clean).replaceAll(" ");
+        clean = WEEKDAY_DETAIL.matcher(clean).replaceAll(" ");
+        clean = NUMERIC_DATE_DETAIL.matcher(clean).replaceAll(" ");
+        return clean.replaceAll("\\s+([,.;:!?])", "$1")
+                .replaceAll("^[•·—–|:;,\\-\\s]+", "")
+                .replaceAll("[•·—–|:;,\\-\\s]+$", "")
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
+
+    private static String ukrainianAppointmentGoal(String value) {
+        String clean = value;
+        String lower = clean.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("запис до ")) {
+            clean = "прийом до " + clean.substring("запис до ".length());
+            lower = clean.toLowerCase(Locale.ROOT);
+        }
+        if (lower.startsWith("прийом ") || lower.startsWith("запис ")
+                || lower.startsWith("зустріч ") || lower.startsWith("візит ")
+                || lower.startsWith("бронювання ")) {
+            return "Не пропустити " + Character.toLowerCase(clean.charAt(0)) + clean.substring(1);
+        }
+        return "Не пропустити подію: " + clean;
     }
 
     private static String fallbackSubject(boolean uk, String sourceType) {

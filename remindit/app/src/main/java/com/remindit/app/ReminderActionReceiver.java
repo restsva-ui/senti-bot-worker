@@ -22,14 +22,16 @@ public class ReminderActionReceiver extends BroadcastReceiver {
         ReminderDb db = new ReminderDb(context);
         Reminder reminder = db.get(id);
         if (reminder == null) return;
+        long occurrenceAt = intent.getLongExtra("occurrence_at", reminder.remindAt);
 
         String action = intent.getAction();
         if (ACTION_DONE.equals(action)) {
             if (!reminder.isRepeating()) {
                 ReminderScheduler.cancel(context, id);
                 db.markDone(id);
-            } else if (reminder.remindAt <= System.currentTimeMillis()) {
-                long next = ReminderScheduler.nextOccurrence(reminder, System.currentTimeMillis());
+            } else if (reminder.remindAt <= occurrenceAt + 1000L) {
+                ReminderScheduler.cancel(context, id);
+                long next = ReminderScheduler.nextOccurrence(reminder, occurrenceAt);
                 if (next > 0) {
                     reminder.remindAt = next;
                     db.update(reminder);
@@ -41,12 +43,16 @@ public class ReminderActionReceiver extends BroadcastReceiver {
         }
 
         if (ACTION_SNOOZE_10.equals(action)) {
-            snooze(context, db, reminder, 10 * 60_000L);
+            snooze(context, reminder, 10 * 60_000L);
         } else if (ACTION_SNOOZE_60.equals(action)) {
-            snooze(context, db, reminder, 60 * 60_000L);
+            snooze(context, reminder, 60 * 60_000L);
         } else if (ACTION_TOMORROW.equals(action)) {
+            ReminderScheduler.cancel(context, id);
             Calendar c = Calendar.getInstance();
-            c.add(Calendar.DAY_OF_YEAR, 1);
+            c.setTimeInMillis(reminder.remindAt);
+            do {
+                c.add(Calendar.DAY_OF_YEAR, 1);
+            } while (c.getTimeInMillis() <= System.currentTimeMillis());
             reminder.remindAt = c.getTimeInMillis();
             reminder.done = false;
             reminder.completedAt = 0;
@@ -56,12 +62,8 @@ public class ReminderActionReceiver extends BroadcastReceiver {
         }
     }
 
-    private void snooze(Context context, ReminderDb db, Reminder reminder, long delay) {
-        reminder.remindAt = System.currentTimeMillis() + delay;
-        reminder.done = false;
-        reminder.completedAt = 0;
-        db.update(reminder);
-        ReminderScheduler.schedule(context, reminder);
+    private void snooze(Context context, Reminder reminder, long delay) {
+        ReminderScheduler.scheduleSnooze(context, reminder.id, System.currentTimeMillis() + delay);
         cancelNotification(context, reminder.id);
     }
 

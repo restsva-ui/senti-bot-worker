@@ -9,10 +9,11 @@ import android.database.sqlite.SQLiteOpenHelper;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 public class ReminderDb extends SQLiteOpenHelper {
     private static final String DB_NAME = "remindit.db";
-    private static final int DB_VERSION = 4;
+    private static final int DB_VERSION = 5;
 
     public ReminderDb(Context context) {
         super(context, DB_NAME, null, DB_VERSION);
@@ -32,6 +33,9 @@ public class ReminderDb extends SQLiteOpenHelper {
                         "image_path TEXT," +
                         "source_uri TEXT," +
                         "repeat_mode TEXT NOT NULL DEFAULT 'once'," +
+                        "lead_minutes INTEGER NOT NULL DEFAULT 0," +
+                        "second_lead_minutes INTEGER NOT NULL DEFAULT -1," +
+                        "follow_up_minutes INTEGER NOT NULL DEFAULT 0," +
                         "remind_at INTEGER NOT NULL," +
                         "created_at INTEGER NOT NULL," +
                         "completed_at INTEGER NOT NULL DEFAULT 0," +
@@ -54,6 +58,11 @@ public class ReminderDb extends SQLiteOpenHelper {
         if (oldVersion < 4) {
             db.execSQL("ALTER TABLE reminders ADD COLUMN repeat_mode TEXT NOT NULL DEFAULT 'once'");
             db.execSQL("ALTER TABLE reminders ADD COLUMN completed_at INTEGER NOT NULL DEFAULT 0");
+        }
+        if (oldVersion < 5) {
+            db.execSQL("ALTER TABLE reminders ADD COLUMN lead_minutes INTEGER NOT NULL DEFAULT 0");
+            db.execSQL("ALTER TABLE reminders ADD COLUMN second_lead_minutes INTEGER NOT NULL DEFAULT -1");
+            db.execSQL("ALTER TABLE reminders ADD COLUMN follow_up_minutes INTEGER NOT NULL DEFAULT 0");
         }
     }
 
@@ -88,7 +97,23 @@ public class ReminderDb extends SQLiteOpenHelper {
     }
 
     public List<Reminder> getFuturePending(long now) {
-        return query("done=0 AND remind_at>?", new String[]{String.valueOf(now)}, "remind_at ASC");
+        return query(
+                "done=0 AND (remind_at>? OR (repeat_mode='once' AND follow_up_minutes>0 " +
+                        "AND remind_at+(follow_up_minutes*120000)>?))",
+                new String[]{String.valueOf(now), String.valueOf(now)},
+                "remind_at ASC"
+        );
+    }
+
+    public Reminder findActiveDuplicate(Reminder candidate) {
+        if (candidate == null) return null;
+        String wantedUrl = clean(candidate.sourceUri);
+        String wantedBody = duplicateText(candidate.body);
+        for (Reminder existing : getUpcoming()) {
+            if (!wantedUrl.isEmpty() && wantedUrl.equalsIgnoreCase(clean(existing.sourceUri))) return existing;
+            if (wantedBody.length() >= 12 && wantedBody.equals(duplicateText(existing.body))) return existing;
+        }
+        return null;
     }
 
     private List<Reminder> query(String selection, String[] args, String order) {
@@ -157,6 +182,9 @@ public class ReminderDb extends SQLiteOpenHelper {
         values.put("image_path", reminder.imagePath);
         values.put("source_uri", reminder.sourceUri);
         values.put("repeat_mode", reminder.repeatMode == null ? Reminder.REPEAT_ONCE : reminder.repeatMode);
+        values.put("lead_minutes", reminder.leadMinutes);
+        values.put("second_lead_minutes", reminder.secondLeadMinutes);
+        values.put("follow_up_minutes", reminder.followUpMinutes);
         values.put("remind_at", reminder.remindAt);
         values.put("created_at", reminder.createdAt);
         values.put("completed_at", reminder.completedAt);
@@ -177,11 +205,25 @@ public class ReminderDb extends SQLiteOpenHelper {
         reminder.sourceUri = cursor.getString(cursor.getColumnIndexOrThrow("source_uri"));
         int repeatIndex = cursor.getColumnIndex("repeat_mode");
         reminder.repeatMode = repeatIndex >= 0 ? cursor.getString(repeatIndex) : Reminder.REPEAT_ONCE;
+        int leadIndex = cursor.getColumnIndex("lead_minutes");
+        reminder.leadMinutes = leadIndex >= 0 ? cursor.getInt(leadIndex) : 0;
+        int secondLeadIndex = cursor.getColumnIndex("second_lead_minutes");
+        reminder.secondLeadMinutes = secondLeadIndex >= 0 ? cursor.getInt(secondLeadIndex) : -1;
+        int followUpIndex = cursor.getColumnIndex("follow_up_minutes");
+        reminder.followUpMinutes = followUpIndex >= 0 ? cursor.getInt(followUpIndex) : 0;
         reminder.remindAt = cursor.getLong(cursor.getColumnIndexOrThrow("remind_at"));
         reminder.createdAt = cursor.getLong(cursor.getColumnIndexOrThrow("created_at"));
         int completedIndex = cursor.getColumnIndex("completed_at");
         reminder.completedAt = completedIndex >= 0 ? cursor.getLong(completedIndex) : 0L;
         reminder.done = cursor.getInt(cursor.getColumnIndexOrThrow("done")) == 1;
         return reminder;
+    }
+
+    private String duplicateText(String value) {
+        return clean(value).toLowerCase(Locale.ROOT).replaceAll("\\s+", " ");
+    }
+
+    private String clean(String value) {
+        return value == null ? "" : value.trim();
     }
 }

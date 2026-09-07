@@ -211,11 +211,15 @@ public class MainActivity extends Activity {
             item.addView(essence);
 
             int timeColor = reminder.remindAt < now ? RED : BLUE;
-            String timeText = formatter.format(new Date(reminder.remindAt));
+            String timeText = LanguageManager.pick(this, "Подія • ", "Event • ")
+                    + formatter.format(new Date(reminder.remindAt));
             if (reminder.remindAt < now) {
-                timeText = LanguageManager.pick(this, "Прострочено • ", "Overdue • ") + timeText;
+                timeText = LanguageManager.pick(this, "Прострочено • ", "Overdue • ")
+                        + formatter.format(new Date(reminder.remindAt));
             }
             item.addView(text(timeText, 13, true, timeColor), margin(-1, -2, 0, 6, 0, 5));
+            item.addView(text("🔔 " + ReminderUi.summary(this, reminder), 12, false, MUTED),
+                    margin(-1, -2, 0, 0, 0, 6));
 
             if (reminder.isRepeating()) {
                 item.addView(text("↻ " + repeatLabel(reminder.repeatMode), 12, true, BLUE), margin(-1, -2, 0, 0, 0, 5));
@@ -227,6 +231,12 @@ public class MainActivity extends Activity {
                 Button original = secondaryButton(OriginalActions.actionLabel(this, reminder));
                 original.setOnClickListener(v -> OriginalActions.open(this, reminder));
                 item.addView(original, margin(-1, dp(46), 0, 0, 0, 8));
+            }
+
+            if (SmartActions.available(reminder)) {
+                Button smart = secondaryButton(SmartActions.label(this, reminder));
+                smart.setOnClickListener(v -> SmartActions.open(this, reminder));
+                item.addView(smart, margin(-1, dp(46), 0, 0, 0, 8));
             }
 
             if (!TextUtils.isEmpty(reminder.body)) {

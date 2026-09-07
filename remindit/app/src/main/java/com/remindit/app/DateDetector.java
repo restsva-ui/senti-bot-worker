@@ -1,5 +1,6 @@
 package com.remindit.app;
 
+import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -19,6 +20,15 @@ public final class DateDetector {
             "\\b(20\\d{2})-(\\d{1,2})-(\\d{1,2})(?:[ T](\\d{1,2}):(\\d{2}))?"
     );
     private static final Pattern TIME = Pattern.compile("\\b([01]?\\d|2[0-3]):([0-5]\\d)\\b");
+    private static final Pattern RELATIVE = Pattern.compile(
+            "\\b(?:через|in)\\s+(\\d{1,3})\\s*(хв(?:илин(?:у|и)?)?|minutes?|mins?|мін|год(?:ину|ини|ин)?|hours?|hrs?|д(?:ень|ні|нів|ня)|days?)\\b",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
+    );
+    private static final Pattern WEEKDAY = Pattern.compile(
+            "\\b(понеділок|понеділка|вівторок|вівторка|середу|середа|четвер|четверга|п.?ятницю|п.?ятниця|суботу|субота|неділю|неділя|" +
+                    "monday|tuesday|wednesday|thursday|friday|saturday|sunday)\\b",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
+    );
     private static final Pattern WORD_DATE = Pattern.compile(
             "\\b(\\d{1,2})\\s+(січня|лютого|березня|квітня|травня|червня|липня|серпня|вересня|жовтня|листопада|грудня|" +
                     "january|february|march|april|may|june|july|august|september|october|november|december|" +
@@ -37,6 +47,21 @@ public final class DateDetector {
         String text = raw.toLowerCase(Locale.ROOT);
         ZoneId zone = ZoneId.systemDefault();
         ZonedDateTime now = ZonedDateTime.now(zone);
+
+        Matcher relative = RELATIVE.matcher(text);
+        if (relative.find()) {
+            int amount = intOf(relative.group(1));
+            String unit = relative.group(2).toLowerCase(Locale.ROOT);
+            ZonedDateTime result;
+            if (unit.startsWith("хв") || unit.startsWith("мін") || unit.startsWith("min")) {
+                result = now.plusMinutes(amount);
+            } else if (unit.startsWith("год") || unit.startsWith("hour") || unit.startsWith("hr")) {
+                result = now.plusHours(amount);
+            } else {
+                result = now.plusDays(amount);
+            }
+            return result.withSecond(0).withNano(0).toInstant().toEpochMilli();
+        }
 
         Matcher ymd = YMD.matcher(text);
         if (ymd.find()) {
@@ -76,6 +101,12 @@ public final class DateDetector {
             return candidate;
         }
 
+        if (text.contains("післязавтра") || text.contains("day after tomorrow")) {
+            LocalDate date = now.toLocalDate().plusDays(2);
+            LocalTime time = findTime(text, LocalTime.of(9, 0));
+            return LocalDateTime.of(date, time).atZone(zone).toInstant().toEpochMilli();
+        }
+
         if (text.contains("завтра") || text.contains("tomorrow")) {
             LocalDate date = now.toLocalDate().plusDays(1);
             LocalTime time = findTime(text, LocalTime.of(9, 0));
@@ -90,6 +121,16 @@ public final class DateDetector {
                 value = LocalDateTime.of(date.plusDays(1), time).atZone(zone).toInstant().toEpochMilli();
             }
             return value;
+        }
+
+        Matcher weekday = WEEKDAY.matcher(text);
+        if (weekday.find()) {
+            DayOfWeek target = weekday(weekday.group(1));
+            int days = (target.getValue() - now.getDayOfWeek().getValue() + 7) % 7;
+            if (days == 0) days = 7;
+            LocalDate date = now.toLocalDate().plusDays(days);
+            LocalTime time = findTime(text, LocalTime.of(9, 0));
+            return LocalDateTime.of(date, time).atZone(zone).toInstant().toEpochMilli();
         }
 
         Matcher timeMatcher = TIME.matcher(text);
@@ -189,5 +230,16 @@ public final class DateDetector {
 
         Integer month = months.get(value.toLowerCase(Locale.ROOT));
         return month == null ? 1 : month;
+    }
+
+    private static DayOfWeek weekday(String value) {
+        String day = value.toLowerCase(Locale.ROOT).replace('’', '\'').replace('`', '\'');
+        if (day.startsWith("пон") || day.equals("monday")) return DayOfWeek.MONDAY;
+        if (day.startsWith("вів") || day.equals("tuesday")) return DayOfWeek.TUESDAY;
+        if (day.startsWith("сер") || day.equals("wednesday")) return DayOfWeek.WEDNESDAY;
+        if (day.startsWith("чет") || day.equals("thursday")) return DayOfWeek.THURSDAY;
+        if (day.startsWith("п'ят") || day.equals("friday")) return DayOfWeek.FRIDAY;
+        if (day.startsWith("суб") || day.equals("saturday")) return DayOfWeek.SATURDAY;
+        return DayOfWeek.SUNDAY;
     }
 }

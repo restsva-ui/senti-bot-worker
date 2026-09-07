@@ -1,5 +1,9 @@
 name: RemindIt Android Beta
 
+concurrency:
+  group: remindit-beta-build
+  cancel-in-progress: false
+
 on:
   push:
     branches:
@@ -13,6 +17,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      REMINDIT_KEYSTORE_PATH: ${{ runner.temp }}/remindit-beta.keystore
+      REMINDIT_KEYSTORE_PASSWORD: android
+      REMINDIT_KEY_ALIAS: remindit-beta
+      REMINDIT_KEY_PASSWORD: android
 
     steps:
       - name: Checkout
@@ -35,6 +44,28 @@ jobs:
         with:
           gradle-version: '8.13'
 
+      - name: Restore stable beta signing key
+        id: beta-signing-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/remindit-beta.keystore
+          key: remindit-beta-signing-v1
+
+      - name: Create beta signing key
+        if: steps.beta-signing-cache.outputs.cache-hit != 'true'
+        run: >-
+          keytool -genkeypair -v
+          -keystore "$REMINDIT_KEYSTORE_PATH"
+          -storepass "$REMINDIT_KEYSTORE_PASSWORD"
+          -alias "$REMINDIT_KEY_ALIAS"
+          -keypass "$REMINDIT_KEY_PASSWORD"
+          -keyalg RSA -keysize 2048 -validity 10000
+          -dname "CN=RemindIt Beta,O=RemindIt,C=UA"
+          -storetype JKS -noprompt
+
+      - name: Run unit tests
+        run: gradle -p remindit :app:testDebugUnitTest --stacktrace
+
       - name: Build debug APK
         run: gradle -p remindit :app:assembleDebug --stacktrace
 
@@ -44,13 +75,13 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: RemindIt-Beta-0.8-APK
+          name: RemindIt-Beta-0.9-APK
           path: remindit/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
       - name: Upload AAB
         uses: actions/upload-artifact@v4
         with:
-          name: RemindIt-Beta-0.8-AAB
+          name: RemindIt-Beta-0.9-AAB
           path: remindit/app/build/outputs/bundle/debug/app-debug.aab
           if-no-files-found: error

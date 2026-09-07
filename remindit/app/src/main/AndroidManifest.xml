@@ -14,6 +14,7 @@
         android:theme="@style/AppTheme">
 
         <activity android:name=".OriginalViewerActivity" android:exported="false" />
+        <activity android:name=".PrivacyPolicyActivity" android:exported="false" />
         <activity android:name=".SettingsActivity" android:exported="false" />
         <activity android:name=".HistoryActivity" android:exported="false" />
         <activity android:name=".EditReminderActivity" android:exported="false" />
@@ -44,6 +45,7 @@
 
         <receiver android:name=".ReminderReceiver" android:exported="false" />
         <receiver android:name=".ReminderActionReceiver" android:exported="false" />
+        <receiver android:name=".AlarmTestReceiver" android:exported="false" />
 
         <receiver
             android:name=".BootReceiver"

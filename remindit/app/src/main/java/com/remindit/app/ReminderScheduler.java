@@ -21,25 +21,47 @@ public final class ReminderScheduler {
 
     public static boolean schedule(Context context, Reminder reminder) {
         if (reminder == null || reminder.id <= 0 || reminder.done) return false;
-        if (reminder.remindAt <= System.currentTimeMillis()) return false;
 
         AlarmManager manager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
         if (manager == null) return false;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !manager.canScheduleExactAlarms()) return false;
 
-        PendingIntent fireIntent = pending(context, reminder.id);
-        manager.cancel(fireIntent);
+        cancel(context, reminder.id);
+        long now = System.currentTimeMillis();
+        int scheduled = 0;
+        for (ReminderTiming.Alert alert : ReminderTiming.alerts(reminder)) {
+            if (alert.at <= now) continue;
+            scheduleAt(context, manager, reminder.id, alert.stage, alert.at);
+            scheduled++;
+        }
+        return scheduled > 0;
+    }
+
+    public static boolean scheduleSnooze(Context context, long reminderId, long at) {
+        AlarmManager manager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+        if (manager == null || at <= System.currentTimeMillis()) return false;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !manager.canScheduleExactAlarms()) return false;
+        PendingIntent pending = pending(context, reminderId, ReminderTiming.STAGE_SNOOZE);
+        manager.cancel(pending);
+        scheduleAt(context, manager, reminderId, ReminderTiming.STAGE_SNOOZE, at);
+        return true;
+    }
+
+    private static void scheduleAt(Context context, AlarmManager manager, long reminderId, int stage, long at) {
+        PendingIntent fireIntent = pending(context, reminderId, stage);
         AlarmManager.AlarmClockInfo info = new AlarmManager.AlarmClockInfo(
-                reminder.remindAt,
-                showPending(context, reminder.id)
+                at,
+                showPending(context, reminderId)
         );
         manager.setAlarmClock(info, fireIntent);
-        return true;
     }
 
     public static void cancel(Context context, long reminderId) {
         AlarmManager manager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
-        if (manager != null) manager.cancel(pending(context, reminderId));
+        if (manager == null) return;
+        for (int stage = ReminderTiming.STAGE_SECONDARY; stage <= ReminderTiming.STAGE_SNOOZE; stage++) {
+            manager.cancel(pending(context, reminderId, stage));
+        }
     }
 
     public static long nextOccurrence(Reminder reminder, long fromMillis) {
@@ -69,17 +91,23 @@ public final class ReminderScheduler {
         return -1L;
     }
 
-    private static PendingIntent pending(Context context, long reminderId) {
+    private static PendingIntent pending(Context context, long reminderId, int stage) {
         Intent intent = new Intent(context, ReminderReceiver.class);
         intent.setAction(ACTION_FIRE);
         intent.putExtra("reminder_id", reminderId);
-        int requestCode = (int) (reminderId ^ (reminderId >>> 32));
+        intent.putExtra("alert_stage", stage);
+        int requestCode = requestCode(reminderId, stage);
         return PendingIntent.getBroadcast(
                 context,
                 requestCode,
                 intent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
+    }
+
+    private static int requestCode(long reminderId, int stage) {
+        int base = (int) (reminderId ^ (reminderId >>> 32));
+        return base * 8 + stage;
     }
 
     private static PendingIntent showPending(Context context, long reminderId) {

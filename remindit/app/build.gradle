@@ -2,6 +2,8 @@ plugins {
     id 'com.android.application'
 }
 
+def betaKeystorePath = System.getenv('REMINDIT_KEYSTORE_PATH')
+
 android {
     namespace 'com.remindit.app'
     compileSdk 36
@@ -10,11 +12,25 @@ android {
         applicationId 'com.remindit.app'
         minSdk 26
         targetSdk 36
-        versionCode 8
-        versionName '0.8.0'
+        versionCode 9
+        versionName '0.9.0'
+    }
+
+    signingConfigs {
+        beta {
+            if (betaKeystorePath) {
+                storeFile file(betaKeystorePath)
+                storePassword System.getenv('REMINDIT_KEYSTORE_PASSWORD') ?: 'android'
+                keyAlias System.getenv('REMINDIT_KEY_ALIAS') ?: 'remindit-beta'
+                keyPassword System.getenv('REMINDIT_KEY_PASSWORD') ?: 'android'
+            }
+        }
     }
 
     buildTypes {
+        debug {
+            if (betaKeystorePath) signingConfig signingConfigs.beta
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
@@ -34,6 +50,7 @@ configurations.configureEach {
 
 def ocrDir = file('src/main/assets/tessdata')
 def ocrLanguages = ['ukr', 'rus', 'eng']
+def ocrModelRevision = '87416418657359cb625c412a48b6e1d6d41c29bd'
 
 tasks.register('prepareOcrAssets') {
     outputs.dir(ocrDir)
@@ -42,7 +59,7 @@ tasks.register('prepareOcrAssets') {
         ocrLanguages.each { lang ->
             def model = new File(ocrDir, "${lang}.traineddata")
             if (!model.exists() || model.length() < 500000L) {
-                def modelUrl = new URL("https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/${lang}.traineddata")
+                def modelUrl = new URL("https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/${ocrModelRevision}/${lang}.traineddata")
                 modelUrl.withInputStream { input ->
                     model.withOutputStream { output -> output << input }
                 }
@@ -60,6 +77,6 @@ tasks.named('preBuild').configure {
 
 dependencies {
     implementation 'androidx.core:core:1.15.0'
-    implementation 'com.google.mlkit:text-recognition:16.0.1'
     implementation 'cz.adaptech.tesseract4android:tesseract4android:4.9.0'
+    testImplementation 'junit:junit:4.13.2'
 }

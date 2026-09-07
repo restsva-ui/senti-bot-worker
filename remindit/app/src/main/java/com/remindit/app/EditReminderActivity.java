@@ -40,6 +40,9 @@ public class EditReminderActivity extends Activity {
     private EditText meaningInput;
     private Spinner categorySpinner;
     private Spinner repeatSpinner;
+    private Spinner leadSpinner;
+    private Spinner secondLeadSpinner;
+    private Spinner followUpSpinner;
     private TextView dateValue;
     private TextView timeValue;
     private final Calendar selected = Calendar.getInstance();
@@ -125,10 +128,28 @@ public class EditReminderActivity extends Activity {
         repeatSpinner.setPadding(dp(10), 0, dp(10), 0);
         options.addView(repeatSpinner, margin(-1, dp(54), 0, 6, 0, 0));
         repeatSpinner.setSelection(repeatPosition(reminder.repeatMode));
+
+        options.addView(label(LanguageManager.pick(this, "Основне попередження", "Primary alert")),
+                margin(-1, -2, 0, 14, 0, 0));
+        leadSpinner = optionSpinner(ReminderUi.leadLabels(this, false));
+        leadSpinner.setSelection(ReminderUi.indexOf(ReminderUi.LEAD_VALUES, reminder.leadMinutes));
+        options.addView(leadSpinner, margin(-1, dp(54), 0, 6, 0, 0));
+
+        options.addView(label(LanguageManager.pick(this, "Додаткове попередження", "Additional alert")),
+                margin(-1, -2, 0, 12, 0, 0));
+        secondLeadSpinner = optionSpinner(ReminderUi.leadLabels(this, true));
+        secondLeadSpinner.setSelection(ReminderUi.indexOf(ReminderUi.SECOND_LEAD_VALUES, reminder.secondLeadMinutes));
+        options.addView(secondLeadSpinner, margin(-1, dp(54), 0, 6, 0, 0));
+
+        options.addView(label(LanguageManager.pick(this, "Якщо не виконано", "If not completed")),
+                margin(-1, -2, 0, 12, 0, 0));
+        followUpSpinner = optionSpinner(ReminderUi.followUpLabels(this));
+        followUpSpinner.setSelection(ReminderUi.indexOf(ReminderUi.FOLLOW_UP_VALUES, reminder.followUpMinutes));
+        options.addView(followUpSpinner, margin(-1, dp(54), 0, 6, 0, 0));
         root.addView(options, margin(-1, -2, 0, 0, 0, 12));
 
         LinearLayout when = card();
-        when.addView(text(LanguageManager.pick(this, "Коли нагадати?", "When should I remind you?"), 18, true, TEXT));
+        when.addView(text(LanguageManager.pick(this, "Коли відбудеться подія?", "When is the event?"), 18, true, TEXT));
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout dateBlock = valueBlock(LanguageManager.pick(this, "Дата", "Date"));
@@ -171,6 +192,10 @@ public class EditReminderActivity extends Activity {
         reminder.title = conciseTitle(meaning);
         reminder.category = LanguageManager.categoryKeyFromDisplay(String.valueOf(categorySpinner.getSelectedItem()));
         reminder.repeatMode = repeatMode(repeatSpinner.getSelectedItemPosition());
+        reminder.leadMinutes = selectedValue(leadSpinner, ReminderUi.LEAD_VALUES);
+        reminder.secondLeadMinutes = selectedValue(secondLeadSpinner, ReminderUi.SECOND_LEAD_VALUES);
+        reminder.followUpMinutes = selectedValue(followUpSpinner, ReminderUi.FOLLOW_UP_VALUES);
+        if (reminder.isRepeating()) reminder.followUpMinutes = 0;
         reminder.remindAt = selected.getTimeInMillis();
         reminder.done = false;
         reminder.completedAt = 0;
@@ -231,6 +256,22 @@ public class EditReminderActivity extends Activity {
     private String conciseTitle(String value) {
         String clean = value.replaceAll("\\s+", " ").trim();
         return clean.length() <= 64 ? clean : clean.substring(0, 61) + "…";
+    }
+
+    private Spinner optionSpinner(String[] labels) {
+        Spinner spinner = new Spinner(this);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, labels);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinner.setAdapter(adapter);
+        spinner.setBackground(rounded(Color.rgb(248, 250, 252), BORDER, 1, 14));
+        spinner.setPadding(dp(10), 0, dp(10), 0);
+        return spinner;
+    }
+
+    private int selectedValue(Spinner spinner, int[] values) {
+        int position = spinner == null ? 0 : spinner.getSelectedItemPosition();
+        return position >= 0 && position < values.length ? values[position] : values[0];
     }
 
     private LinearLayout valueBlock(String label) {

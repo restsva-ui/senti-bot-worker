@@ -49,13 +49,19 @@ public class AddReminderActivity extends Activity {
     private EditText goalInput;
     private EditText rawInput;
     private Spinner categorySpinner;
+    private Spinner repeatSpinner;
+    private Spinner leadSpinner;
+    private Spinner secondLeadSpinner;
+    private Spinner followUpSpinner;
     private TextView dateValue;
     private TextView timeValue;
     private TextView sourceBadge;
     private TextView smartHint;
+    private TextView detectedFacts;
     private LinearLayout rawSection;
     private Button rawToggle;
     private Button originalButton;
+    private Button quickSaveButton;
 
     private final Calendar selected = Calendar.getInstance();
     private String sourceType = "manual";
@@ -157,10 +163,19 @@ public class AddReminderActivity extends Activity {
                 13, false, MUTED);
         sourceCard.addView(smartHint, margin(-1, -2, 0, 9, 0, 0));
 
+        detectedFacts = text("", 13, true, BLUE);
+        detectedFacts.setVisibility(View.GONE);
+        sourceCard.addView(detectedFacts, margin(-1, -2, 0, 8, 0, 0));
+
         originalButton = secondaryButton(LanguageManager.pick(this, "Переглянути оригінал", "View original"));
         originalButton.setVisibility(View.GONE);
         originalButton.setOnClickListener(v -> openCurrentOriginal());
         sourceCard.addView(originalButton, margin(-1, dp(48), 0, 10, 0, 0));
+        quickSaveButton = primaryButton(LanguageManager.pick(this,
+                "⚡ Зберегти з розумними налаштуваннями",
+                "⚡ Save with smart settings"));
+        quickSaveButton.setOnClickListener(v -> saveReminder());
+        sourceCard.addView(quickSaveButton, margin(-1, dp(52), 0, 10, 0, 0));
         root.addView(sourceCard, margin(-1, -2, 0, 0, 0, 12));
 
         LinearLayout essenceCard = card();
@@ -209,7 +224,12 @@ public class AddReminderActivity extends Activity {
         categorySpinner.setAdapter(adapter);
         categorySpinner.setPadding(dp(12), 0, dp(12), 0);
         categorySpinner.setBackground(rounded(Color.rgb(248, 250, 252), BORDER, 1, 14));
-        categoryCard.addView(categorySpinner, margin(-1, dp(54), 0, 6, 0, 0));
+        categoryCard.addView(categorySpinner, margin(-1, dp(54), 0, 6, 0, 14));
+        categoryCard.addView(label(LanguageManager.pick(this, "Повтор події", "Repeat event")));
+        repeatSpinner = optionSpinner(LanguageManager.isUk(this)
+                ? new String[]{"Одноразово", "Щодня", "Пн–Пт", "Щотижня"}
+                : new String[]{"Once", "Daily", "Weekdays", "Weekly"});
+        categoryCard.addView(repeatSpinner, margin(-1, dp(54), 0, 6, 0, 0));
         root.addView(categoryCard, margin(-1, -2, 0, 0, 0, 12));
 
         LinearLayout rawCard = card();
@@ -231,7 +251,7 @@ public class AddReminderActivity extends Activity {
         root.addView(rawCard, margin(-1, -2, 0, 0, 0, 12));
 
         LinearLayout when = card();
-        when.addView(text(LanguageManager.pick(this, "Коли нагадати?", "When should I remind you?"), 18, true, TEXT));
+        when.addView(text(LanguageManager.pick(this, "Коли відбудеться подія?", "When is the event?"), 18, true, TEXT));
         LinearLayout dateTime = new LinearLayout(this);
         dateTime.setOrientation(LinearLayout.HORIZONTAL);
 
@@ -247,6 +267,22 @@ public class AddReminderActivity extends Activity {
         dateTime.addView(new View(this), new LinearLayout.LayoutParams(dp(10), 1));
         dateTime.addView(timeBlock, new LinearLayout.LayoutParams(0, -2, 1f));
         when.addView(dateTime, margin(-1, -2, 0, 12, 0, 0));
+
+        when.addView(label(LanguageManager.pick(this, "Основне попередження", "Primary alert")),
+                margin(-1, -2, 0, 14, 0, 0));
+        leadSpinner = optionSpinner(ReminderUi.leadLabels(this, false));
+        when.addView(leadSpinner, margin(-1, dp(54), 0, 6, 0, 0));
+
+        when.addView(label(LanguageManager.pick(this, "Додаткове попередження", "Additional alert")),
+                margin(-1, -2, 0, 12, 0, 0));
+        secondLeadSpinner = optionSpinner(ReminderUi.leadLabels(this, true));
+        when.addView(secondLeadSpinner, margin(-1, dp(54), 0, 6, 0, 0));
+
+        when.addView(label(LanguageManager.pick(this, "Якщо не виконано", "If not completed")),
+                margin(-1, -2, 0, 12, 0, 0));
+        followUpSpinner = optionSpinner(ReminderUi.followUpLabels(this));
+        when.addView(followUpSpinner, margin(-1, dp(54), 0, 6, 0, 0));
+        setTimingDefaults(ReminderTiming.defaultsFor("remember"));
         root.addView(when, margin(-1, -2, 0, 0, 0, 14));
 
         Button save = new Button(this);
@@ -279,6 +315,7 @@ public class AddReminderActivity extends Activity {
 
             imagePath = OriginalStore.saveImage(this, uri);
             updateOriginalButton();
+            setQuickSaveEnabled(false);
             smartHint.setText(LanguageManager.pick(this,
                     "Оригінальне зображення збережено. Читаю текст і формую коротку суть…",
                     "Original image saved. Reading text and forming a short meaning…"));
@@ -287,6 +324,7 @@ public class AddReminderActivity extends Activity {
             OcrHelper.recognize(this, uri, new OcrHelper.Callback() {
                 @Override
                 public void onSuccess(String recognizedText) {
+                    setQuickSaveEnabled(true);
                     rawInput.setText(recognizedText);
                     if (recognizedText.trim().isEmpty()) {
                         goalInput.setText(LanguageManager.pick(AddReminderActivity.this,
@@ -301,6 +339,7 @@ public class AddReminderActivity extends Activity {
 
                 @Override
                 public void onError(Exception error) {
+                    setQuickSaveEnabled(true);
                     goalInput.setText(LanguageManager.pick(AddReminderActivity.this,
                             "Переглянути збережене зображення",
                             "Review the saved image"));
@@ -321,6 +360,7 @@ public class AddReminderActivity extends Activity {
                 sourceUri != null ? "ПОСИЛАННЯ" : "ТЕКСТ",
                 sourceUri != null ? "LINK" : "TEXT"));
         rawInput.setText(sharedText);
+        setQuickSaveEnabled(true);
         updateOriginalButton();
         setRawVisible(false);
         applySmartSuggestions(sharedText);
@@ -350,6 +390,10 @@ public class AddReminderActivity extends Activity {
         generatedTitle = analysis.title;
         goalInput.setText(analysis.goal);
         setCategory(analysis.categoryKey);
+        setTimingDefaults(ReminderTiming.defaultsFor(analysis.intentType));
+        String facts = DetectedFacts.summary(this, text);
+        detectedFacts.setText(facts);
+        detectedFacts.setVisibility(facts.isEmpty() ? View.GONE : View.VISIBLE);
         smartHint.setText(LanguageManager.pick(this,
                 "Суть сформована окремо від вихідних даних. Перевір її — саме вона прийде у сповіщенні.",
                 "Meaning is separated from raw source data. Check it; this is what the notification will show."));
@@ -390,12 +434,48 @@ public class AddReminderActivity extends Activity {
         reminder.sourceType = sourceType;
         reminder.imagePath = imagePath;
         reminder.sourceUri = sourceUri;
+        reminder.repeatMode = repeatMode(repeatSpinner == null ? 0 : repeatSpinner.getSelectedItemPosition());
+        reminder.leadMinutes = selectedValue(leadSpinner, ReminderUi.LEAD_VALUES);
+        reminder.secondLeadMinutes = selectedValue(secondLeadSpinner, ReminderUi.SECOND_LEAD_VALUES);
+        reminder.followUpMinutes = selectedValue(followUpSpinner, ReminderUi.FOLLOW_UP_VALUES);
+        if (reminder.isRepeating()) reminder.followUpMinutes = 0;
         reminder.remindAt = selected.getTimeInMillis();
         reminder.createdAt = System.currentTimeMillis();
         reminder.done = false;
 
         ReminderDb db = new ReminderDb(this);
-        reminder.id = db.insert(reminder);
+        Reminder duplicate = db.findActiveDuplicate(reminder);
+        if (duplicate != null) {
+            new AlertDialog.Builder(this)
+                    .setTitle(LanguageManager.pick(this, "Схоже нагадування вже є", "A similar reminder already exists"))
+                    .setMessage(LanguageManager.pick(this,
+                            "Оновити існуюче нагадування чи зберегти ще одне?",
+                            "Update the existing reminder or keep another copy?"))
+                    .setPositiveButton(LanguageManager.pick(this, "Оновити", "Update"),
+                            (dialog, which) -> persistReminder(reminder, duplicate))
+                    .setNeutralButton(LanguageManager.pick(this, "Зберегти окремо", "Save another"),
+                            (dialog, which) -> persistReminder(reminder, null))
+                    .setNegativeButton(LanguageManager.pick(this, "Скасувати", "Cancel"), null)
+                    .show();
+            return;
+        }
+        persistReminder(reminder, null);
+    }
+
+    private void persistReminder(Reminder reminder, Reminder duplicate) {
+        ReminderDb db = new ReminderDb(this);
+        if (duplicate == null) {
+            reminder.id = db.insert(reminder);
+        } else {
+            ReminderScheduler.cancel(this, duplicate.id);
+            String oldImagePath = duplicate.imagePath;
+            reminder.id = duplicate.id;
+            reminder.createdAt = duplicate.createdAt;
+            db.update(reminder);
+            if (oldImagePath != null && !oldImagePath.equals(reminder.imagePath)) {
+                OriginalStore.deletePath(oldImagePath);
+            }
+        }
         boolean exact = ReminderScheduler.schedule(this, reminder);
 
         if (!exact && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -410,7 +490,9 @@ public class AddReminderActivity extends Activity {
         }
 
         Toast.makeText(this,
-                LanguageManager.pick(this, "Нагадування збережено", "Reminder saved"),
+                LanguageManager.pick(this,
+                        duplicate == null ? "Нагадування збережено" : "Нагадування оновлено",
+                        duplicate == null ? "Reminder saved" : "Reminder updated"),
                 Toast.LENGTH_SHORT).show();
         finish();
     }
@@ -465,6 +547,41 @@ public class AddReminderActivity extends Activity {
                 return;
             }
         }
+    }
+
+    private Spinner optionSpinner(String[] labels) {
+        Spinner spinner = new Spinner(this);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, labels);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinner.setAdapter(adapter);
+        spinner.setPadding(dp(12), 0, dp(12), 0);
+        spinner.setBackground(rounded(Color.rgb(248, 250, 252), BORDER, 1, 14));
+        return spinner;
+    }
+
+    private void setTimingDefaults(ReminderTiming.Defaults defaults) {
+        if (leadSpinner != null) {
+            leadSpinner.setSelection(ReminderUi.indexOf(ReminderUi.LEAD_VALUES, defaults.leadMinutes));
+        }
+        if (secondLeadSpinner != null) {
+            secondLeadSpinner.setSelection(ReminderUi.indexOf(ReminderUi.SECOND_LEAD_VALUES, defaults.secondLeadMinutes));
+        }
+        if (followUpSpinner != null) {
+            followUpSpinner.setSelection(ReminderUi.indexOf(ReminderUi.FOLLOW_UP_VALUES, defaults.followUpMinutes));
+        }
+    }
+
+    private int selectedValue(Spinner spinner, int[] values) {
+        int position = spinner == null ? 0 : spinner.getSelectedItemPosition();
+        return position >= 0 && position < values.length ? values[position] : values[0];
+    }
+
+    private String repeatMode(int position) {
+        if (position == 1) return Reminder.REPEAT_DAILY;
+        if (position == 2) return Reminder.REPEAT_WEEKDAYS;
+        if (position == 3) return Reminder.REPEAT_WEEKLY;
+        return Reminder.REPEAT_ONCE;
     }
 
     private void pickDate() {
@@ -547,6 +664,23 @@ public class AddReminderActivity extends Activity {
         button.setTypeface(Typeface.DEFAULT_BOLD);
         button.setBackground(rounded(Color.WHITE, BLUE, 1, 14));
         return button;
+    }
+
+    private Button primaryButton(String label) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setAllCaps(false);
+        button.setTextColor(Color.WHITE);
+        button.setTextSize(14);
+        button.setTypeface(Typeface.DEFAULT_BOLD);
+        button.setBackground(rounded(BLUE, BLUE_DARK, 1, 14));
+        return button;
+    }
+
+    private void setQuickSaveEnabled(boolean enabled) {
+        if (quickSaveButton == null) return;
+        quickSaveButton.setEnabled(enabled);
+        quickSaveButton.setAlpha(enabled ? 1f : 0.5f);
     }
 
     private TextView text(String value, int sp, boolean bold, int color) {

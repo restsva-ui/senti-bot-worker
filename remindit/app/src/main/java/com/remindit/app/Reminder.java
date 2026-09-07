@@ -16,6 +16,9 @@ public class Reminder {
     public String imagePath;
     public String sourceUri;
     public String repeatMode = REPEAT_ONCE;
+    public int leadMinutes;
+    public int secondLeadMinutes = -1;
+    public int followUpMinutes;
     public long remindAt;
     public long createdAt;
     public long completedAt;
