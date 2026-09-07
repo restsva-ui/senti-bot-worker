@@ -16,13 +16,10 @@ import com.googlecode.tesseract.android.TessBaseAPI;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 
 public final class OcrHelper {
-    private static final String UKR_MODEL_URL =
-            "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/ukr.traineddata";
     private static final long MIN_MODEL_BYTES = 1_000_000L;
+    private static final String ASSET_MODEL = "tessdata/ukr.traineddata";
 
     public interface Callback {
         void onSuccess(String recognizedText);
@@ -70,9 +67,7 @@ public final class OcrHelper {
                 }
 
                 File model = new File(tessData, "ukr.traineddata");
-                if (!model.exists() || model.length() < MIN_MODEL_BYTES) {
-                    downloadModel(model);
-                }
+                ensureBundledModel(context, model);
 
                 try (InputStream stream = context.getContentResolver().openInputStream(uri)) {
                     if (stream == null) throw new IllegalStateException("Cannot open shared image");
@@ -96,37 +91,25 @@ public final class OcrHelper {
         }, "RemindIt-UkrOCR").start();
     }
 
-    private static void downloadModel(File target) throws Exception {
+    private static void ensureBundledModel(Context context, File target) throws Exception {
+        if (target.exists() && target.length() >= MIN_MODEL_BYTES) return;
+
         File temp = new File(target.getParentFile(), target.getName() + ".tmp");
-        HttpURLConnection connection = (HttpURLConnection) new URL(UKR_MODEL_URL).openConnection();
-        connection.setConnectTimeout(15000);
-        connection.setReadTimeout(30000);
-        connection.setInstanceFollowRedirects(true);
-        connection.setRequestProperty("User-Agent", "RemindIt-Android");
-
-        int code = connection.getResponseCode();
-        if (code < 200 || code >= 300) {
-            connection.disconnect();
-            throw new IllegalStateException("OCR model download failed: HTTP " + code);
-        }
-
-        try (InputStream in = connection.getInputStream();
+        try (InputStream in = context.getAssets().open(ASSET_MODEL);
              FileOutputStream out = new FileOutputStream(temp)) {
             byte[] buffer = new byte[32 * 1024];
             int count;
             while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
             out.flush();
-        } finally {
-            connection.disconnect();
         }
 
         if (temp.length() < MIN_MODEL_BYTES) {
             temp.delete();
-            throw new IllegalStateException("Downloaded OCR model is incomplete");
+            throw new IllegalStateException("Bundled Ukrainian OCR model is incomplete");
         }
         if (target.exists()) target.delete();
         if (!temp.renameTo(target)) {
-            throw new IllegalStateException("Cannot install OCR model");
+            throw new IllegalStateException("Cannot install bundled Ukrainian OCR model");
         }
     }
 
