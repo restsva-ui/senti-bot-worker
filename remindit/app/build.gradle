@@ -4,12 +4,12 @@ plugins {
 
 android {
     namespace 'com.remindit.app'
-    compileSdk 35
+    compileSdk 36
 
     defaultConfig {
         applicationId 'com.remindit.app'
         minSdk 26
-        targetSdk 35
+        targetSdk 36
         versionCode 7
         versionName '0.7.0'
     }
@@ -30,6 +30,28 @@ android {
 configurations.configureEach {
     exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
     exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+}
+
+def ukrOcrModel = file('src/main/assets/tessdata/ukr.traineddata')
+
+tasks.register('prepareUkrOcrAsset') {
+    outputs.file(ukrOcrModel)
+    doLast {
+        if (!ukrOcrModel.exists() || ukrOcrModel.length() < 1000000L) {
+            ukrOcrModel.parentFile.mkdirs()
+            def modelUrl = new URL('https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/ukr.traineddata')
+            modelUrl.withInputStream { input ->
+                ukrOcrModel.withOutputStream { output -> output << input }
+            }
+        }
+        if (!ukrOcrModel.exists() || ukrOcrModel.length() < 1000000L) {
+            throw new GradleException('Ukrainian OCR model was not prepared correctly')
+        }
+    }
+}
+
+tasks.named('preBuild').configure {
+    dependsOn(tasks.named('prepareUkrOcrAsset'))
 }
 
 dependencies {
