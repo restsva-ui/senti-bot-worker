@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      REMINDIT_KEYSTORE_PATH: ${{ runner.temp }}/remindit-beta.keystore
+      REMINDIT_KEYSTORE_PATH: ${{ github.workspace }}/.remindit-beta.keystore
       REMINDIT_KEYSTORE_PASSWORD: android
       REMINDIT_KEY_ALIAS: remindit-beta
       REMINDIT_KEY_PASSWORD: android
@@ -48,7 +48,7 @@ jobs:
         id: beta-signing-cache
         uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}/remindit-beta.keystore
+          path: ${{ env.REMINDIT_KEYSTORE_PATH }}
           key: remindit-beta-signing-v1
 
       - name: Create beta signing key
