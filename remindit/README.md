@@ -1,4 +1,4 @@
-# RemindIt 0.9 Beta
+# RemindIt 0.10 Beta
 
 **See it now. Remember it in time.**
 
@@ -21,6 +21,9 @@ RemindIt turns text, links, screenshots and photos shared from Android apps into
 - Local SQLite storage, completed history and repeat schedules
 - Private local copies of shared images and saved source links
 - Ukrainian and English UI
+- Refined visual system with a focused home dashboard, category colors, clear status cards and bottom navigation
+- Live alert-plan preview while creating or editing a reminder
+- Permission readiness panel and safer confirmation before permanent deletion
 - No account, RemindIt server, ads or analytics
 - CI distributes a signed, non-debuggable beta release variant
 
@@ -28,13 +31,15 @@ Example: `Запис до лікаря завтра о 15:30` becomes **“Не 
 
 ## Physical-device test flow
 
-1. Install the newest `RemindIt-Beta-0.9-APK` artifact.
+1. Install the newest `RemindIt-Beta-0.10-APK` artifact.
 2. Allow notifications and exact reminders.
 3. On HyperOS/MIUI, allow autostart and unrestricted background battery activity.
 4. Open **Settings → Reliability check** and schedule the two-minute test.
 5. Share text from Notes or a browser and confirm the detected event time and early alerts.
 6. In airplane mode, share Ukrainian and English screenshots and verify OCR.
 7. Create an event at least 15 minutes ahead, reboot the phone, unlock it without opening RemindIt, and wait for the alert.
+
+Use [`TESTING_0.10.md`](TESTING_0.10.md) for the focused Ukrainian phone-test checklist, including UI, sharing, offline OCR, exact alarms, reboot recovery and privacy regression checks.
 
 Package: `com.remindit.app`
 

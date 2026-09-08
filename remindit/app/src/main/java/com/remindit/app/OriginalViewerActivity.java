@@ -4,7 +4,6 @@ import android.app.Activity;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
-import android.graphics.Typeface;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.widget.Button;
@@ -21,16 +20,15 @@ import androidx.core.view.WindowInsetsCompat;
 import java.io.File;
 
 public class OriginalViewerActivity extends Activity {
-    private static final int BG = Color.rgb(247, 250, 255);
-    private static final int TEXT = Color.rgb(15, 23, 42);
-    private static final int MUTED = Color.rgb(100, 116, 139);
+    private static final int BG = UiKit.BG;
+    private static final int TEXT = UiKit.TEXT;
+    private static final int MUTED = UiKit.MUTED;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
-        getWindow().setStatusBarColor(BG);
-        getWindow().setNavigationBarColor(Color.WHITE);
+        UiKit.applySystemBars(this);
 
         String path = getIntent().getStringExtra("image_path");
         setContentView(buildUi(path));
@@ -59,26 +57,26 @@ public class OriginalViewerActivity extends Activity {
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
 
-        Button back = new Button(this);
-        back.setText("‹");
-        back.setTextSize(30);
-        back.setBackgroundColor(Color.TRANSPARENT);
-        back.setTextColor(TEXT);
+        Button back = UiKit.iconButton(this, "‹");
+        back.setContentDescription(LanguageManager.pick(this, "Назад", "Back"));
         back.setOnClickListener(v -> finish());
-        header.addView(back, new LinearLayout.LayoutParams(dp(52), dp(54)));
+        header.addView(back, new LinearLayout.LayoutParams(dp(48), dp(48)));
 
-        TextView title = new TextView(this);
-        title.setText(LanguageManager.pick(this, "Оригінал", "Original"));
-        title.setTextSize(24);
-        title.setTextColor(TEXT);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
+        LinearLayout title = new LinearLayout(this);
+        title.setOrientation(LinearLayout.VERTICAL);
+        title.addView(UiKit.text(this, LanguageManager.pick(this, "Оригінал", "Original"), 25, true, TEXT));
+        title.addView(UiKit.text(this, LanguageManager.pick(this,
+                "Приватна локальна копія", "Private local copy"), 13, false, MUTED));
         header.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
-        root.addView(header);
+        root.addView(header, UiKit.margin(this, -1, -2, 0, 0, 0, 14));
 
         ImageView image = new ImageView(this);
         image.setAdjustViewBounds(true);
         image.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        image.setBackgroundColor(Color.WHITE);
+        image.setPadding(dp(8), dp(8), dp(8), dp(8));
+        image.setBackground(UiKit.rounded(this, Color.WHITE, UiKit.BORDER, 1, 22));
+        image.setElevation(dp(3));
+        image.setClipToOutline(true);
 
         Bitmap bitmap = null;
         if (path != null) {
@@ -89,6 +87,11 @@ public class OriginalViewerActivity extends Activity {
         if (bitmap != null) {
             image.setImageBitmap(bitmap);
             root.addView(image, new LinearLayout.LayoutParams(-1, -2));
+            TextView note = UiKit.text(this, LanguageManager.pick(this,
+                    "◇ Зображення доступне лише всередині RemindIt",
+                    "◇ This image is available only inside RemindIt"), 12, true, UiKit.GREEN);
+            note.setGravity(Gravity.CENTER);
+            root.addView(note, UiKit.margin(this, -1, -2, 0, 12, 0, 0));
         } else {
             TextView missing = new TextView(this);
             missing.setText(LanguageManager.pick(this,
@@ -104,6 +107,6 @@ public class OriginalViewerActivity extends Activity {
     }
 
     private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+        return UiKit.dp(this, value);
     }
 }

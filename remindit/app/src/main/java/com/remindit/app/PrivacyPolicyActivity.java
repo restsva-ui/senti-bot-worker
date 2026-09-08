@@ -2,7 +2,6 @@ package com.remindit.app;
 
 import android.app.Activity;
 import android.graphics.Color;
-import android.graphics.Typeface;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.widget.Button;
@@ -16,16 +15,15 @@ import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 
 public class PrivacyPolicyActivity extends Activity {
-    private static final int BG = Color.rgb(247, 250, 255);
-    private static final int TEXT = Color.rgb(15, 23, 42);
-    private static final int MUTED = Color.rgb(71, 85, 105);
+    private static final int BG = UiKit.BG;
+    private static final int TEXT = UiKit.TEXT;
+    private static final int MUTED = UiKit.MUTED;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
-        getWindow().setStatusBarColor(BG);
-        getWindow().setNavigationBarColor(Color.WHITE);
+        UiKit.applySystemBars(this);
         setContentView(buildUi());
     }
 
@@ -47,23 +45,37 @@ public class PrivacyPolicyActivity extends Activity {
 
         LinearLayout header = new LinearLayout(this);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        Button back = new Button(this);
-        back.setText("‹");
-        back.setTextSize(30);
-        back.setBackgroundColor(Color.TRANSPARENT);
+        Button back = UiKit.iconButton(this, "‹");
+        back.setContentDescription(LanguageManager.pick(this, "Назад", "Back"));
         back.setOnClickListener(v -> finish());
-        header.addView(back, new LinearLayout.LayoutParams(dp(52), dp(54)));
-        header.addView(text(LanguageManager.pick(this, "Політика конфіденційності", "Privacy Policy"), 24, true, TEXT),
-                new LinearLayout.LayoutParams(0, -2, 1f));
+        header.addView(back, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        LinearLayout title = new LinearLayout(this);
+        title.setOrientation(LinearLayout.VERTICAL);
+        title.addView(text(LanguageManager.pick(this, "Приватність", "Privacy"), 25, true, TEXT));
+        title.addView(text(LanguageManager.pick(this,
+                "Просто й без дрібного шрифту", "Plain language, no fine print"), 13, false, MUTED));
+        header.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
         root.addView(header);
 
+        TextView promise = text(LanguageManager.pick(this,
+                "◇ Локальна обробка • без реклами • без трекінгу",
+                "◇ Local processing • no ads • no tracking"), 13, true, UiKit.GREEN);
+        promise.setPadding(dp(14), dp(12), dp(14), dp(12));
+        promise.setBackground(UiKit.rounded(this, Color.rgb(240, 253, 250),
+                Color.rgb(153, 246, 228), 1, 16));
+        root.addView(promise, margin(-1, -2, 0, 10, 0, 12));
+
         root.addView(text(LanguageManager.pick(this,
-                "Версія для RemindIt 0.9 • оновлено 8 вересня 2026",
-                "For RemindIt 0.9 • updated 8 September 2026"),
-                13, true, MUTED), margin(-1, -2, 0, 2, 0, 16));
+                "Версія для RemindIt 0.10 • оновлено 8 вересня 2026",
+                "For RemindIt 0.10 • updated 8 September 2026"),
+                12, true, MUTED), margin(-1, -2, 0, 0, 0, 12));
+
+        LinearLayout policyCard = UiKit.card(this);
         TextView body = text(LanguageManager.pick(this, ukrainianPolicy(), englishPolicy()), 15, false, TEXT);
         body.setLineSpacing(0f, 1.18f);
-        root.addView(body);
+        body.setTextIsSelectable(true);
+        policyCard.addView(body);
+        root.addView(policyCard);
         return scroll;
     }
 
@@ -98,21 +110,14 @@ public class PrivacyPolicyActivity extends Activity {
     }
 
     private TextView text(String value, int size, boolean bold, int color) {
-        TextView view = new TextView(this);
-        view.setText(value);
-        view.setTextSize(size);
-        view.setTextColor(color);
-        if (bold) view.setTypeface(Typeface.DEFAULT_BOLD);
-        return view;
+        return UiKit.text(this, value, size, bold, color);
     }
 
     private LinearLayout.LayoutParams margin(int width, int height, int left, int top, int right, int bottom) {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(width, height);
-        params.setMargins(dp(left), dp(top), dp(right), dp(bottom));
-        return params;
+        return UiKit.margin(this, width, height, left, top, right, bottom);
     }
 
     private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+        return UiKit.dp(this, value);
     }
 }

@@ -7,7 +7,6 @@ import android.app.NotificationManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
-import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
@@ -27,27 +26,26 @@ import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 
 public class SettingsActivity extends Activity {
-    private static final int BLUE = Color.rgb(10, 132, 255);
-    private static final int BLUE_DARK = Color.rgb(6, 105, 216);
-    private static final int GREEN = Color.rgb(22, 163, 74);
-    private static final int AMBER = Color.rgb(217, 119, 6);
-    private static final int TEXT = Color.rgb(15, 23, 42);
-    private static final int MUTED = Color.rgb(100, 116, 139);
-    private static final int BG = Color.rgb(247, 250, 255);
-    private static final int BORDER = Color.rgb(226, 232, 240);
+    private static final int BLUE = UiKit.INDIGO;
+    private static final int GREEN = UiKit.GREEN;
+    private static final int AMBER = UiKit.AMBER;
+    private static final int TEXT = UiKit.TEXT;
+    private static final int MUTED = UiKit.MUTED;
+    private static final int BG = UiKit.BG;
+    private static final int BORDER = UiKit.BORDER;
 
     private TextView languageValue;
     private TextView notificationStatus;
     private TextView exactStatus;
     private TextView batteryStatus;
     private TextView diagnosticStatus;
+    private TextView readinessStatus;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
-        getWindow().setStatusBarColor(BG);
-        getWindow().setNavigationBarColor(Color.WHITE);
+        UiKit.applySystemBars(this);
         setContentView(buildUi());
     }
 
@@ -80,20 +78,36 @@ public class SettingsActivity extends Activity {
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
 
-        Button back = new Button(this);
-        back.setText("‹");
-        back.setTextSize(30);
-        back.setTextColor(TEXT);
-        back.setBackgroundColor(Color.TRANSPARENT);
+        Button back = UiKit.iconButton(this, "‹");
+        back.setContentDescription(LanguageManager.pick(this, "Назад", "Back"));
         back.setOnClickListener(v -> finish());
-        header.addView(back, new LinearLayout.LayoutParams(dp(52), dp(54)));
+        header.addView(back, new LinearLayout.LayoutParams(dp(48), dp(48)));
 
-        TextView title = text(LanguageManager.pick(this, "Налаштування", "Settings"), 26, true, TEXT);
+        LinearLayout title = new LinearLayout(this);
+        title.setOrientation(LinearLayout.VERTICAL);
+        title.addView(text(LanguageManager.pick(this, "Налаштування", "Settings"), 26, true, TEXT));
+        title.addView(text(LanguageManager.pick(this,
+                "Надійність, мова й приватність", "Reliability, language & privacy"), 13, false, MUTED));
         header.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
         root.addView(header, margin(-1, -2, 0, 0, 0, 14));
 
+        LinearLayout readiness = new LinearLayout(this);
+        readiness.setOrientation(LinearLayout.VERTICAL);
+        readiness.setPadding(dp(18), dp(18), dp(18), dp(18));
+        readiness.setBackground(UiKit.gradient(this, UiKit.INDIGO, UiKit.VIOLET, 22));
+        readiness.setElevation(dp(4));
+        readiness.addView(text(LanguageManager.pick(this,
+                "ГОТОВНІСТЬ REMINDIT", "REMINDIT READINESS"), 11, true, Color.rgb(224, 231, 255)));
+        readinessStatus = text("", 20, true, Color.WHITE);
+        readiness.addView(readinessStatus, margin(-1, -2, 0, 8, 0, 0));
+        readiness.addView(text(LanguageManager.pick(this,
+                "Для точного сигналу потрібні сповіщення, точні будильники та вільна фонова робота.",
+                "Notifications, exact alarms and unrestricted background work keep alerts reliable."),
+                13, false, Color.rgb(238, 242, 255)), margin(-1, -2, 0, 7, 0, 0));
+        root.addView(readiness, margin(-1, -2, 0, 0, 0, 14));
+
         LinearLayout languageCard = card();
-        languageCard.addView(sectionTitle(LanguageManager.pick(this, "Мова", "Language")));
+        languageCard.addView(sectionTitle("◎ " + LanguageManager.pick(this, "Мова", "Language")));
         languageValue = text("", 15, true, BLUE);
         languageCard.addView(languageValue, margin(-1, -2, 0, 5, 0, 10));
         Button languageButton = secondaryButton(LanguageManager.pick(this, "Змінити мову", "Change language"));
@@ -102,7 +116,7 @@ public class SettingsActivity extends Activity {
         root.addView(languageCard, margin(-1, -2, 0, 0, 0, 12));
 
         LinearLayout permissions = card();
-        permissions.addView(sectionTitle(LanguageManager.pick(this, "Дозволи", "Permissions")));
+        permissions.addView(sectionTitle("✓ " + LanguageManager.pick(this, "Дозволи", "Permissions")));
 
         notificationStatus = text("", 14, true, MUTED);
         permissions.addView(notificationStatus, margin(-1, -2, 0, 8, 0, 6));
@@ -126,7 +140,7 @@ public class SettingsActivity extends Activity {
         root.addView(permissions, margin(-1, -2, 0, 0, 0, 12));
 
         LinearLayout diagnostics = card();
-        diagnostics.addView(sectionTitle(LanguageManager.pick(this, "Перевірка надійності", "Reliability check")));
+        diagnostics.addView(sectionTitle("◷ " + LanguageManager.pick(this, "Перевірка надійності", "Reliability check")));
         diagnostics.addView(text(LanguageManager.pick(this,
                 "RemindIt створить точне тестове нагадування через 2 хвилини. Заблокуй екран і не відкривай застосунок.",
                 "RemindIt will create an exact test reminder in 2 minutes. Lock the screen and leave the app closed."),
@@ -141,7 +155,7 @@ public class SettingsActivity extends Activity {
         root.addView(diagnostics, margin(-1, -2, 0, 0, 0, 12));
 
         LinearLayout sound = card();
-        sound.addView(sectionTitle(LanguageManager.pick(this, "Звук RemindIt", "RemindIt sound")));
+        sound.addView(sectionTitle("♫ " + LanguageManager.pick(this, "Звук RemindIt", "RemindIt sound")));
         sound.addView(text(
                 LanguageManager.pick(this,
                         "Оригінальний короткий сигнал RemindIt: чотири м’які ноти, синтезовані самим застосунком.",
@@ -153,7 +167,8 @@ public class SettingsActivity extends Activity {
         root.addView(sound, margin(-1, -2, 0, 0, 0, 12));
 
         LinearLayout privacy = card();
-        privacy.addView(sectionTitle(LanguageManager.pick(this, "Приватність", "Privacy")));
+        privacy.addView(sectionTitle("♢ " + LanguageManager.pick(this, "Приватність", "Privacy")));
+        privacy.setBackground(rounded(Color.rgb(240, 253, 250), Color.rgb(153, 246, 228), 1, 22));
         privacy.addView(text(
                 LanguageManager.pick(this,
                         "Фото, скріншоти, OCR і нагадування обробляються локально. Мовні моделі вже містяться у застосунку.",
@@ -194,6 +209,12 @@ public class SettingsActivity extends Activity {
                     unrestricted ? "Батарея не обмежує RemindIt" : "Перевір фонову роботу й автозапуск",
                     unrestricted ? "Battery is not restricting RemindIt" : "Check background activity and autostart"));
             batteryStatus.setTextColor(unrestricted ? GREEN : AMBER);
+        }
+        if (readinessStatus != null) {
+            int ready = (notifications ? 1 : 0) + (exact ? 1 : 0) + (unrestricted ? 1 : 0);
+            readinessStatus.setText(ready == 3
+                    ? LanguageManager.pick(this, "✓ Усе готово", "✓ All set")
+                    : LanguageManager.pick(this, ready + " з 3 умов виконано", ready + " of 3 checks passed"));
         }
         refreshDiagnosticStatus();
     }
@@ -301,11 +322,7 @@ public class SettingsActivity extends Activity {
     }
 
     private LinearLayout card() {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(16), dp(16), dp(16), dp(16));
-        card.setBackground(rounded(Color.WHITE, BORDER, 1, 18));
-        return card;
+        return UiKit.card(this);
     }
 
     private TextView sectionTitle(String value) {
@@ -313,52 +330,26 @@ public class SettingsActivity extends Activity {
     }
 
     private Button primaryButton(String label) {
-        Button b = baseButton(label);
-        b.setTextColor(Color.WHITE);
-        b.setBackground(rounded(BLUE, BLUE_DARK, 1, 15));
-        return b;
+        return UiKit.primaryButton(this, label);
     }
 
     private Button secondaryButton(String label) {
-        Button b = baseButton(label);
-        b.setTextColor(BLUE);
-        b.setBackground(rounded(Color.WHITE, BLUE, 1, 15));
-        return b;
-    }
-
-    private Button baseButton(String label) {
-        Button b = new Button(this);
-        b.setText(label);
-        b.setAllCaps(false);
-        b.setTextSize(14);
-        b.setTypeface(Typeface.DEFAULT_BOLD);
-        return b;
+        return UiKit.secondaryButton(this, label);
     }
 
     private TextView text(String value, int sp, boolean bold, int color) {
-        TextView v = new TextView(this);
-        v.setText(value);
-        v.setTextSize(sp);
-        v.setTextColor(color);
-        if (bold) v.setTypeface(Typeface.DEFAULT_BOLD);
-        return v;
+        return UiKit.text(this, value, sp, bold, color);
     }
 
     private GradientDrawable rounded(int fill, int stroke, int strokeWidth, int radius) {
-        GradientDrawable d = new GradientDrawable();
-        d.setColor(fill);
-        d.setCornerRadius(dp(radius));
-        d.setStroke(dp(strokeWidth), stroke);
-        return d;
+        return UiKit.rounded(this, fill, stroke, strokeWidth, radius);
     }
 
     private LinearLayout.LayoutParams margin(int width, int height, int left, int top, int right, int bottom) {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(width, height);
-        p.setMargins(dp(left), dp(top), dp(right), dp(bottom));
-        return p;
+        return UiKit.margin(this, width, height, left, top, right, bottom);
     }
 
     private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+        return UiKit.dp(this, value);
     }
 }

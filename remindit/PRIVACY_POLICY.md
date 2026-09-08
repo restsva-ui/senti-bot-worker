@@ -1,4 +1,4 @@
-# RemindIt Privacy Policy (Beta 0.9)
+# RemindIt Privacy Policy (Beta 0.10)
 
 _Last updated: 8 September 2026_
 
@@ -16,7 +16,7 @@ Ukrainian, English and Russian OCR run on the device using language models bundl
 
 ## Internet access
 
-The RemindIt 0.9 application is designed not to request Android's `INTERNET` permission. When a user opens a saved web link, Android hands the link to the user's browser or another compatible application. Route and call actions are likewise handed to external compatible applications.
+The RemindIt 0.10 application is designed not to request Android's `INTERNET` permission. When a user opens a saved web link, Android hands the link to the user's browser or another compatible application. Route and call actions are likewise handed to external compatible applications.
 
 ## Notifications and exact alarms
 
