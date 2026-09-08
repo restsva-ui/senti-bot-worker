@@ -19,6 +19,7 @@ public class Reminder {
     public int leadMinutes;
     public int secondLeadMinutes = -1;
     public int followUpMinutes;
+    public long snoozeAt;
     public long remindAt;
     public long createdAt;
     public long completedAt;

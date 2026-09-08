@@ -58,8 +58,8 @@ public class PrivacyPolicyActivity extends Activity {
         root.addView(header);
 
         root.addView(text(LanguageManager.pick(this,
-                "Версія для RemindIt 0.9 • оновлено 7 вересня 2026",
-                "For RemindIt 0.9 • updated 7 September 2026"),
+                "Версія для RemindIt 0.9 • оновлено 8 вересня 2026",
+                "For RemindIt 0.9 • updated 8 September 2026"),
                 13, true, MUTED), margin(-1, -2, 0, 2, 0, 16));
         TextView body = text(LanguageManager.pick(this, ukrainianPolicy(), englishPolicy()), 15, false, TEXT);
         body.setLineSpacing(0f, 1.18f);

@@ -20,6 +20,10 @@ public final class ReminderIntentAnalyzer {
             "\\b(day\\s+after\\s+tomorrow|післязавтра|сьогодні|завтра|today|tomorrow)\\b",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
     );
+    private static final Pattern RELATIVE_OFFSET_DETAIL = Pattern.compile(
+            "\\b(?:через|in)\\s+\\d{1,3}\\s*(?:хв(?:илин(?:у|и)?)?|minutes?|mins?|мін|год(?:ину|ини|ин)?|hours?|hrs?|д(?:ень|ні|нів|ня)|days?)\\b",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
+    );
     private static final Pattern WEEKDAY_DETAIL = Pattern.compile(
             "(?:\\b(?:у|в|on)\\s+)?\\b(понеділок|понеділка|вівторок|вівторка|середу|середа|четвер|четверга|п.?ятницю|п.?ятниця|суботу|субота|неділю|неділя|" +
                     "monday|tuesday|wednesday|thursday|friday|saturday|sunday)\\b",
@@ -134,25 +138,25 @@ public final class ReminderIntentAnalyzer {
     static String buildGoal(boolean uk, String type, String subject) {
         String clean = shorten(subject, 108);
         if (uk) {
-            if ("payment".equals(type)) return "Оплатити: " + clean;
-            if ("travel".equals(type)) return "Не пропустити поїздку: " + clean;
-            if ("shopping".equals(type)) return "Перевірити або купити: " + clean;
-            if ("call".equals(type)) return "Зателефонувати: " + clean;
-            if ("reply".equals(type)) return "Відповісти: " + clean;
+            if ("payment".equals(type)) return naturalGoal(clean, "Оплатити", "оплатити", "сплатити");
+            if ("travel".equals(type)) return naturalGoal(clean, "Не пропустити поїздку", "не пропустити");
+            if ("shopping".equals(type)) return naturalGoal(clean, "Перевірити або купити", "купити", "замовити", "перевірити");
+            if ("call".equals(type)) return naturalGoal(clean, "Зателефонувати", "зателефонувати", "подзвонити", "передзвонити");
+            if ("reply".equals(type)) return naturalGoal(clean, "Відповісти", "відповісти", "відписати");
             if ("appointment".equals(type)) return ukrainianAppointmentGoal(clean);
-            if ("task".equals(type)) return "Виконати: " + clean;
-            if ("review".equals(type)) return "Переглянути: " + clean;
-            return "Не забути: " + clean;
+            if ("task".equals(type)) return naturalGoal(clean, "Виконати", "виконати", "зробити", "подати", "здати");
+            if ("review".equals(type)) return naturalGoal(clean, "Переглянути", "переглянути");
+            return naturalGoal(clean, "Не забути", "не забути");
         }
-        if ("payment".equals(type)) return "Pay: " + clean;
-        if ("travel".equals(type)) return "Don't miss the trip: " + clean;
-        if ("shopping".equals(type)) return "Check or buy: " + clean;
-        if ("call".equals(type)) return "Call: " + clean;
-        if ("reply".equals(type)) return "Reply: " + clean;
-        if ("appointment".equals(type)) return "Don't miss the event: " + clean;
-        if ("task".equals(type)) return "Do: " + clean;
-        if ("review".equals(type)) return "Review: " + clean;
-        return "Remember: " + clean;
+        if ("payment".equals(type)) return naturalGoal(clean, "Pay", "pay", "settle");
+        if ("travel".equals(type)) return naturalGoal(clean, "Don't miss the trip", "don't miss", "do not miss");
+        if ("shopping".equals(type)) return naturalGoal(clean, "Check or buy", "buy", "order", "check");
+        if ("call".equals(type)) return naturalGoal(clean, "Call", "call", "phone");
+        if ("reply".equals(type)) return naturalGoal(clean, "Reply", "reply", "respond", "text back");
+        if ("appointment".equals(type)) return naturalGoal(clean, "Don't miss the event", "don't miss", "do not miss");
+        if ("task".equals(type)) return naturalGoal(clean, "Do", "do", "finish", "complete", "submit");
+        if ("review".equals(type)) return naturalGoal(clean, "Review", "review");
+        return naturalGoal(clean, "Remember", "remember");
     }
 
     private static List<String> usefulLines(String text) {
@@ -296,7 +300,8 @@ public final class ReminderIntentAnalyzer {
 
     static String stripScheduleDetails(String value) {
         if (value == null) return "";
-        String clean = CLOCK_DETAIL.matcher(value).replaceAll(" ");
+        String clean = RELATIVE_OFFSET_DETAIL.matcher(value).replaceAll(" ");
+        clean = CLOCK_DETAIL.matcher(clean).replaceAll(" ");
         clean = RELATIVE_DATE_DETAIL.matcher(clean).replaceAll(" ");
         clean = WEEKDAY_DETAIL.matcher(clean).replaceAll(" ");
         clean = NUMERIC_DATE_DETAIL.matcher(clean).replaceAll(" ");
@@ -320,6 +325,21 @@ public final class ReminderIntentAnalyzer {
             return "Не пропустити " + Character.toLowerCase(clean.charAt(0)) + clean.substring(1);
         }
         return "Не пропустити подію: " + clean;
+    }
+
+    private static String naturalGoal(String value, String prefix, String... naturalStarts) {
+        String lower = value.toLowerCase(Locale.ROOT);
+        for (String start : naturalStarts) {
+            if (lower.equals(start) || lower.startsWith(start + " ") || lower.startsWith(start + ":")) {
+                return capitalize(value);
+            }
+        }
+        return prefix + ": " + value;
+    }
+
+    private static String capitalize(String value) {
+        if (value == null || value.isEmpty()) return "";
+        return Character.toUpperCase(value.charAt(0)) + value.substring(1);
     }
 
     private static String fallbackSubject(boolean uk, String sourceType) {

@@ -13,9 +13,10 @@ RemindIt turns text, links, screenshots and photos shared from Android apps into
 - Smart alert defaults based on intent: appointment, travel, payment, call, reply, task, shopping or review
 - Optional second early alert and two follow-ups when an item is not marked done
 - Exact alarms with an explicit permission flow; no silent inexact fallback
-- Automatic rescheduling after exact-alarm permission is granted and after device reboot
+- Automatic rescheduling after exact-alarm permission is granted and after device reboot, including missed repeat normalization without clock-time drift
 - Built-in two-minute exact-alarm reliability test
 - Notification actions for Done, snooze, tomorrow, saved original, phone call and route
+- Snoozed alerts survive reopening the app and device reboot
 - Duplicate reminder detection with update-or-save-another choice
 - Local SQLite storage, completed history and repeat schedules
 - Private local copies of shared images and saved source links

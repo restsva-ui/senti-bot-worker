@@ -13,10 +13,7 @@ public class ExactAlarmPermissionReceiver extends BroadcastReceiver {
             return;
         }
         if (ReminderScheduler.canScheduleExactly(context)) {
-            long now = System.currentTimeMillis();
-            for (Reminder reminder : new ReminderDb(context).getFuturePending(now)) {
-                ReminderScheduler.schedule(context, reminder);
-            }
+            new ReminderDb(context).rescheduleFuture(context);
         }
     }
 }

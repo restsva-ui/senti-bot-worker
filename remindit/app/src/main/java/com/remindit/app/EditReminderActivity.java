@@ -3,9 +3,11 @@ package com.remindit.app;
 import android.app.Activity;
 import android.app.DatePickerDialog;
 import android.app.TimePickerDialog;
+import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
 import android.os.Bundle;
 import android.text.TextUtils;
 import android.view.Gravity;
@@ -199,8 +201,19 @@ public class EditReminderActivity extends Activity {
         reminder.remindAt = selected.getTimeInMillis();
         reminder.done = false;
         reminder.completedAt = 0;
+        reminder.snoozeAt = 0L;
         new ReminderDb(this).update(reminder);
-        ReminderScheduler.schedule(this, reminder);
+        boolean exact = ReminderScheduler.schedule(this, reminder);
+        if (!exact && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            Toast.makeText(this,
+                    LanguageManager.pick(this,
+                            "Збережено. Дозволь точні нагадування у Налаштуваннях RemindIt.",
+                            "Saved. Allow exact reminders in RemindIt Settings."),
+                    Toast.LENGTH_LONG).show();
+            startActivity(new Intent(this, SettingsActivity.class));
+            finish();
+            return;
+        }
         Toast.makeText(this, LanguageManager.pick(this, "Зміни збережено", "Changes saved"), Toast.LENGTH_SHORT).show();
         finish();
     }

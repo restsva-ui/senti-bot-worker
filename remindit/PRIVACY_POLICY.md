@@ -1,6 +1,6 @@
 # RemindIt Privacy Policy (Beta 0.9)
 
-_Last updated: 7 September 2026_
+_Last updated: 8 September 2026_
 
 RemindIt is a local-first reminder application.
 

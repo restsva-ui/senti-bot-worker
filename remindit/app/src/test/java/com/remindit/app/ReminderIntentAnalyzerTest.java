@@ -15,6 +15,10 @@ public class ReminderIntentAnalyzerTest {
                 "Doctor appointment",
                 ReminderIntentAnalyzer.stripScheduleDetails("Doctor appointment day after tomorrow at 09:45")
         );
+        assertEquals(
+                "Зателефонувати мамі",
+                ReminderIntentAnalyzer.stripScheduleDetails("Зателефонувати мамі через 20 хвилин")
+        );
     }
 
     @Test
@@ -25,6 +29,18 @@ public class ReminderIntentAnalyzerTest {
         assertEquals(
                 "Не пропустити прийом до лікаря",
                 ReminderIntentAnalyzer.buildGoal(true, "appointment", subject)
+        );
+    }
+
+    @Test
+    public void avoidsDuplicatingAnActionVerb() {
+        assertEquals(
+                "Зателефонувати мамі",
+                ReminderIntentAnalyzer.buildGoal(true, "call", "Зателефонувати мамі")
+        );
+        assertEquals(
+                "Pay the electricity bill",
+                ReminderIntentAnalyzer.buildGoal(false, "payment", "Pay the electricity bill")
         );
     }
 }

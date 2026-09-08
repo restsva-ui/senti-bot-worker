@@ -22,6 +22,10 @@ public class ReminderReceiver extends BroadcastReceiver {
         ReminderDb db = new ReminderDb(context);
         Reminder reminder = db.get(id);
         if (reminder == null || reminder.done) return;
+        if (stage == ReminderTiming.STAGE_SNOOZE && reminder.snoozeAt > 0L) {
+            reminder.snoozeAt = 0L;
+            db.update(reminder);
+        }
 
         NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
         if (manager == null) return;
@@ -104,6 +108,7 @@ public class ReminderReceiver extends BroadcastReceiver {
             long next = ReminderScheduler.nextOccurrence(reminder, Math.max(System.currentTimeMillis(), reminder.remindAt));
             if (next > 0) {
                 reminder.remindAt = next;
+                reminder.snoozeAt = 0L;
                 db.update(reminder);
                 ReminderScheduler.schedule(context, reminder);
             }

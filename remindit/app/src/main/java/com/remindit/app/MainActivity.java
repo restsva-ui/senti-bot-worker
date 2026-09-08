@@ -218,6 +218,11 @@ public class MainActivity extends Activity {
                         + formatter.format(new Date(reminder.remindAt));
             }
             item.addView(text(timeText, 13, true, timeColor), margin(-1, -2, 0, 6, 0, 5));
+            if (reminder.snoozeAt > now) {
+                item.addView(text(LanguageManager.pick(this, "⏱ Відкладено до • ", "⏱ Snoozed until • ")
+                                + formatter.format(new Date(reminder.snoozeAt)), 13, true, BLUE),
+                        margin(-1, -2, 0, 0, 0, 5));
+            }
             item.addView(text("🔔 " + ReminderUi.summary(this, reminder), 12, false, MUTED),
                     margin(-1, -2, 0, 0, 0, 6));
 
@@ -272,6 +277,7 @@ public class MainActivity extends Activity {
                     long next = ReminderScheduler.nextOccurrence(reminder, Math.max(System.currentTimeMillis(), reminder.remindAt));
                     if (next > 0) {
                         reminder.remindAt = next;
+                        reminder.snoozeAt = 0L;
                         new ReminderDb(this).update(reminder);
                         ReminderScheduler.schedule(this, reminder);
                     }

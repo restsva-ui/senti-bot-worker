@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 
 import org.junit.Test;
 
+import java.util.Calendar;
 import java.util.List;
 
 public class ReminderTimingTest {
@@ -59,5 +60,27 @@ public class ReminderTimingTest {
         assertEquals(2, alerts.size());
         assertEquals(ReminderTiming.STAGE_PRIMARY, alerts.get(0).stage);
         assertEquals(ReminderTiming.STAGE_EVENT, alerts.get(1).stage);
+    }
+
+    @Test
+    public void lateDailyReminderKeepsItsOriginalClockTime() {
+        Calendar original = Calendar.getInstance();
+        original.set(2026, Calendar.SEPTEMBER, 1, 15, 30, 0);
+        original.set(Calendar.MILLISECOND, 0);
+
+        Calendar afterSeveralMissedDays = (Calendar) original.clone();
+        afterSeveralMissedDays.add(Calendar.DAY_OF_YEAR, 3);
+        afterSeveralMissedDays.add(Calendar.HOUR_OF_DAY, 2);
+
+        Reminder reminder = new Reminder();
+        reminder.remindAt = original.getTimeInMillis();
+        reminder.repeatMode = Reminder.REPEAT_DAILY;
+
+        Calendar next = Calendar.getInstance();
+        next.setTimeInMillis(ReminderScheduler.nextOccurrence(reminder, afterSeveralMissedDays.getTimeInMillis()));
+        assertEquals(15, next.get(Calendar.HOUR_OF_DAY));
+        assertEquals(30, next.get(Calendar.MINUTE));
+        assertEquals(Calendar.SEPTEMBER, next.get(Calendar.MONTH));
+        assertEquals(5, next.get(Calendar.DAY_OF_MONTH));
     }
 }

@@ -70,6 +70,7 @@ public class AddReminderActivity extends Activity {
     private String intentType = "remember";
     private String generatedTitle = "";
     private boolean rawVisible = true;
+    private boolean imageCommitted;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -332,6 +333,11 @@ public class AddReminderActivity extends Activity {
                                 "Review the saved image"));
                         generatedTitle = goalInput.getText().toString();
                         intentType = "review";
+                        setCategory("Other");
+                        setTimingDefaults(ReminderTiming.defaultsFor(intentType));
+                        smartHint.setText(LanguageManager.pick(AddReminderActivity.this,
+                                "Оригінал збережено. OCR не знайшов достатньо читабельного тексту — суть можна відредагувати вручну.",
+                                "Original saved. OCR did not find enough readable text; edit the meaning manually."));
                         return;
                     }
                     applySmartSuggestions(recognizedText);
@@ -344,6 +350,9 @@ public class AddReminderActivity extends Activity {
                             "Переглянути збережене зображення",
                             "Review the saved image"));
                     generatedTitle = goalInput.getText().toString();
+                    intentType = "review";
+                    setCategory("Other");
+                    setTimingDefaults(ReminderTiming.defaultsFor(intentType));
                     smartHint.setText(LanguageManager.pick(AddReminderActivity.this,
                             "Оригінал збережено. OCR не зміг надійно прочитати текст — суть можна відредагувати вручну.",
                             "Original saved. OCR could not reliably read the text; edit the meaning manually."));
@@ -476,6 +485,7 @@ public class AddReminderActivity extends Activity {
                 OriginalStore.deletePath(oldImagePath);
             }
         }
+        imageCommitted = true;
         boolean exact = ReminderScheduler.schedule(this, reminder);
 
         if (!exact && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -495,6 +505,15 @@ public class AddReminderActivity extends Activity {
                         duplicate == null ? "Reminder saved" : "Reminder updated"),
                 Toast.LENGTH_SHORT).show();
         finish();
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (isFinishing() && !imageCommitted && imagePath != null) {
+            OriginalStore.deletePath(imagePath);
+            imagePath = null;
+        }
+        super.onDestroy();
     }
 
     private String conciseTitle(String goal) {

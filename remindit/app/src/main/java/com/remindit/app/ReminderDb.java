@@ -13,7 +13,7 @@ import java.util.Locale;
 
 public class ReminderDb extends SQLiteOpenHelper {
     private static final String DB_NAME = "remindit.db";
-    private static final int DB_VERSION = 5;
+    private static final int DB_VERSION = 6;
 
     public ReminderDb(Context context) {
         super(context, DB_NAME, null, DB_VERSION);
@@ -36,6 +36,7 @@ public class ReminderDb extends SQLiteOpenHelper {
                         "lead_minutes INTEGER NOT NULL DEFAULT 0," +
                         "second_lead_minutes INTEGER NOT NULL DEFAULT -1," +
                         "follow_up_minutes INTEGER NOT NULL DEFAULT 0," +
+                        "snooze_at INTEGER NOT NULL DEFAULT 0," +
                         "remind_at INTEGER NOT NULL," +
                         "created_at INTEGER NOT NULL," +
                         "completed_at INTEGER NOT NULL DEFAULT 0," +
@@ -63,6 +64,9 @@ public class ReminderDb extends SQLiteOpenHelper {
             db.execSQL("ALTER TABLE reminders ADD COLUMN lead_minutes INTEGER NOT NULL DEFAULT 0");
             db.execSQL("ALTER TABLE reminders ADD COLUMN second_lead_minutes INTEGER NOT NULL DEFAULT -1");
             db.execSQL("ALTER TABLE reminders ADD COLUMN follow_up_minutes INTEGER NOT NULL DEFAULT 0");
+        }
+        if (oldVersion < 6) {
+            db.execSQL("ALTER TABLE reminders ADD COLUMN snooze_at INTEGER NOT NULL DEFAULT 0");
         }
     }
 
@@ -96,15 +100,6 @@ public class ReminderDb extends SQLiteOpenHelper {
         return query("done=1", null, "completed_at DESC, remind_at DESC");
     }
 
-    public List<Reminder> getFuturePending(long now) {
-        return query(
-                "done=0 AND (remind_at>? OR (repeat_mode='once' AND follow_up_minutes>0 " +
-                        "AND remind_at+(follow_up_minutes*120000)>?))",
-                new String[]{String.valueOf(now), String.valueOf(now)},
-                "remind_at ASC"
-        );
-    }
-
     public Reminder findActiveDuplicate(Reminder candidate) {
         if (candidate == null) return null;
         String wantedUrl = clean(candidate.sourceUri);
@@ -132,7 +127,14 @@ public class ReminderDb extends SQLiteOpenHelper {
     public void rescheduleFuture(Context context) {
         if (!ReminderScheduler.canScheduleExactly(context)) return;
         long now = System.currentTimeMillis();
-        for (Reminder reminder : getFuturePending(now)) {
+        for (Reminder reminder : getUpcoming()) {
+            if (reminder.isRepeating() && reminder.remindAt <= now) {
+                long next = ReminderScheduler.nextOccurrence(reminder, now);
+                if (next <= 0L) continue;
+                reminder.remindAt = next;
+                reminder.snoozeAt = 0L;
+                update(reminder);
+            }
             ReminderScheduler.schedule(context, reminder);
         }
     }
@@ -141,6 +143,7 @@ public class ReminderDb extends SQLiteOpenHelper {
         ContentValues values = new ContentValues();
         values.put("done", 1);
         values.put("completed_at", System.currentTimeMillis());
+        values.put("snooze_at", 0);
         getWritableDatabase().update("reminders", values, "id=?", new String[]{String.valueOf(id)});
     }
 
@@ -149,6 +152,7 @@ public class ReminderDb extends SQLiteOpenHelper {
         values.put("done", 0);
         values.put("completed_at", 0);
         values.put("remind_at", remindAt);
+        values.put("snooze_at", 0);
         getWritableDatabase().update("reminders", values, "id=?", new String[]{String.valueOf(id)});
     }
 
@@ -157,6 +161,7 @@ public class ReminderDb extends SQLiteOpenHelper {
         values.put("remind_at", remindAt);
         values.put("done", 0);
         values.put("completed_at", 0);
+        values.put("snooze_at", 0);
         getWritableDatabase().update("reminders", values, "id=?", new String[]{String.valueOf(id)});
     }
 
@@ -185,6 +190,7 @@ public class ReminderDb extends SQLiteOpenHelper {
         values.put("lead_minutes", reminder.leadMinutes);
         values.put("second_lead_minutes", reminder.secondLeadMinutes);
         values.put("follow_up_minutes", reminder.followUpMinutes);
+        values.put("snooze_at", reminder.snoozeAt);
         values.put("remind_at", reminder.remindAt);
         values.put("created_at", reminder.createdAt);
         values.put("completed_at", reminder.completedAt);
@@ -211,6 +217,8 @@ public class ReminderDb extends SQLiteOpenHelper {
         reminder.secondLeadMinutes = secondLeadIndex >= 0 ? cursor.getInt(secondLeadIndex) : -1;
         int followUpIndex = cursor.getColumnIndex("follow_up_minutes");
         reminder.followUpMinutes = followUpIndex >= 0 ? cursor.getInt(followUpIndex) : 0;
+        int snoozeIndex = cursor.getColumnIndex("snooze_at");
+        reminder.snoozeAt = snoozeIndex >= 0 ? cursor.getLong(snoozeIndex) : 0L;
         reminder.remindAt = cursor.getLong(cursor.getColumnIndexOrThrow("remind_at"));
         reminder.createdAt = cursor.getLong(cursor.getColumnIndexOrThrow("created_at"));
         int completedIndex = cursor.getColumnIndex("completed_at");

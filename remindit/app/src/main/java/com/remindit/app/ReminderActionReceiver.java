@@ -34,6 +34,7 @@ public class ReminderActionReceiver extends BroadcastReceiver {
                 long next = ReminderScheduler.nextOccurrence(reminder, occurrenceAt);
                 if (next > 0) {
                     reminder.remindAt = next;
+                    reminder.snoozeAt = 0L;
                     db.update(reminder);
                     ReminderScheduler.schedule(context, reminder);
                 }
@@ -43,9 +44,9 @@ public class ReminderActionReceiver extends BroadcastReceiver {
         }
 
         if (ACTION_SNOOZE_10.equals(action)) {
-            snooze(context, reminder, 10 * 60_000L);
+            snooze(context, db, reminder, 10 * 60_000L);
         } else if (ACTION_SNOOZE_60.equals(action)) {
-            snooze(context, reminder, 60 * 60_000L);
+            snooze(context, db, reminder, 60 * 60_000L);
         } else if (ACTION_TOMORROW.equals(action)) {
             ReminderScheduler.cancel(context, id);
             Calendar c = Calendar.getInstance();
@@ -56,14 +57,17 @@ public class ReminderActionReceiver extends BroadcastReceiver {
             reminder.remindAt = c.getTimeInMillis();
             reminder.done = false;
             reminder.completedAt = 0;
+            reminder.snoozeAt = 0L;
             db.update(reminder);
             ReminderScheduler.schedule(context, reminder);
             cancelNotification(context, id);
         }
     }
 
-    private void snooze(Context context, Reminder reminder, long delay) {
-        ReminderScheduler.scheduleSnooze(context, reminder.id, System.currentTimeMillis() + delay);
+    private void snooze(Context context, ReminderDb db, Reminder reminder, long delay) {
+        reminder.snoozeAt = System.currentTimeMillis() + delay;
+        db.update(reminder);
+        ReminderScheduler.schedule(context, reminder);
         cancelNotification(context, reminder.id);
     }
 

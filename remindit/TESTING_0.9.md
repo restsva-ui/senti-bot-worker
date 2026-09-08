@@ -24,6 +24,8 @@ Record the device model, Android/HyperOS version, RemindIt version and local tim
 
 Enable airplane mode before the first OCR test after installation.
 
+- Share the exact example screenshot: `Запис до лікаря завтра о 15:30`.
+  - Expected: `Не пропустити прийом до лікаря`, tomorrow at 15:30, with the appointment preset visible as one day, two hours, event time, +30 minutes and +60 minutes. An early alert whose calculated time is already past is intentionally skipped.
 - Ukrainian screenshot:
   - `Зустріч з лікарем`
   - `завтра о 18:30`
@@ -48,12 +50,16 @@ Enable airplane mode before the first OCR test after installation.
   - Expected: every remaining alarm for that reminder is cancelled.
 - Snooze an alert for 10 minutes.
   - Expected: a new exact alert after 10 minutes without changing the event time.
+- After snoozing, open and close RemindIt; repeat once with a reboot before the 10 minutes expire.
+  - Expected: the snoozed exact alert still fires in both cases.
 
 ## Reboot rescheduling
 
 - Create an event at least 15 minutes ahead.
 - Reboot the phone, unlock it, but do not open RemindIt.
 - Expected: the next scheduled alert fires on time.
+- For a daily repeat, power the phone off across one occurrence, then start it again without opening RemindIt.
+  - Expected: the missed occurrence is skipped and the next one keeps the originally selected clock time.
 - If it appears only after RemindIt is opened, record the battery/autostart settings as a failure condition.
 
 ## Privacy
@@ -62,7 +68,7 @@ Enable airplane mode before the first OCR test after installation.
 - Confirm OCR works in airplane mode.
 - Delete the original image from Gallery after sharing it; the private RemindIt copy should still open.
 - Delete the reminder; its copied image and future alarms should no longer be available.
-- Inspect the final merged APK manifest: it must not contain `android.permission.INTERNET` or `android.permission.ACCESS_NETWORK_STATE`.
+- Inspect the final beta APK manifest: it must not contain `android.permission.INTERNET` or `android.permission.ACCESS_NETWORK_STATE`.
 
 ## Result format
 

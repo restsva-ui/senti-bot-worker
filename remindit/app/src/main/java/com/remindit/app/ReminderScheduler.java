@@ -34,17 +34,11 @@ public final class ReminderScheduler {
             scheduleAt(context, manager, reminder.id, alert.stage, alert.at);
             scheduled++;
         }
+        if (reminder.snoozeAt > now) {
+            scheduleAt(context, manager, reminder.id, ReminderTiming.STAGE_SNOOZE, reminder.snoozeAt);
+            scheduled++;
+        }
         return scheduled > 0;
-    }
-
-    public static boolean scheduleSnooze(Context context, long reminderId, long at) {
-        AlarmManager manager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
-        if (manager == null || at <= System.currentTimeMillis()) return false;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !manager.canScheduleExactAlarms()) return false;
-        PendingIntent pending = pending(context, reminderId, ReminderTiming.STAGE_SNOOZE);
-        manager.cancel(pending);
-        scheduleAt(context, manager, reminderId, ReminderTiming.STAGE_SNOOZE, at);
-        return true;
     }
 
     private static void scheduleAt(Context context, AlarmManager manager, long reminderId, int stage, long at) {
@@ -70,22 +64,26 @@ public final class ReminderScheduler {
         }
 
         Calendar calendar = Calendar.getInstance();
-        long base = Math.max(fromMillis, reminder.remindAt);
-        calendar.setTimeInMillis(base);
+        calendar.setTimeInMillis(reminder.remindAt);
 
         if (Reminder.REPEAT_DAILY.equals(reminder.repeatMode)) {
-            calendar.add(Calendar.DAY_OF_YEAR, 1);
+            do {
+                calendar.add(Calendar.DAY_OF_YEAR, 1);
+            } while (calendar.getTimeInMillis() <= fromMillis);
             return calendar.getTimeInMillis();
         }
         if (Reminder.REPEAT_WEEKLY.equals(reminder.repeatMode)) {
-            calendar.add(Calendar.DAY_OF_YEAR, 7);
+            do {
+                calendar.add(Calendar.DAY_OF_YEAR, 7);
+            } while (calendar.getTimeInMillis() <= fromMillis);
             return calendar.getTimeInMillis();
         }
         if (Reminder.REPEAT_WEEKDAYS.equals(reminder.repeatMode)) {
             do {
                 calendar.add(Calendar.DAY_OF_YEAR, 1);
             } while (calendar.get(Calendar.DAY_OF_WEEK) == Calendar.SATURDAY
-                    || calendar.get(Calendar.DAY_OF_WEEK) == Calendar.SUNDAY);
+                    || calendar.get(Calendar.DAY_OF_WEEK) == Calendar.SUNDAY
+                    || calendar.getTimeInMillis() <= fromMillis);
             return calendar.getTimeInMillis();
         }
         return -1L;

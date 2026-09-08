@@ -36,8 +36,13 @@ public final class ReminderUi {
 
     public static String summary(Context context, Reminder reminder) {
         List<String> parts = new ArrayList<>();
-        addLead(context, parts, reminder.secondLeadMinutes);
-        addLead(context, parts, reminder.leadMinutes);
+        if (reminder.secondLeadMinutes > reminder.leadMinutes) {
+            addLead(context, parts, reminder.secondLeadMinutes);
+            addLead(context, parts, reminder.leadMinutes);
+        } else {
+            addLead(context, parts, reminder.leadMinutes);
+            addLead(context, parts, reminder.secondLeadMinutes);
+        }
         parts.add(LanguageManager.pick(context, "у момент події", "at event time"));
 
         String leadSummary = joinDistinct(parts);
@@ -64,8 +69,10 @@ public final class ReminderUi {
 
     private static String joinDistinct(List<String> values) {
         StringBuilder out = new StringBuilder();
+        List<String> seen = new ArrayList<>();
         for (String value : values) {
-            if (out.indexOf(value) >= 0) continue;
+            if (seen.contains(value)) continue;
+            seen.add(value);
             if (out.length() > 0) out.append(" • ");
             out.append(value);
         }
