@@ -69,6 +69,7 @@ Enable airplane mode before the first OCR test after installation.
 - Delete the original image from Gallery after sharing it; the private RemindIt copy should still open.
 - Delete the reminder; its copied image and future alarms should no longer be available.
 - Inspect the final beta APK manifest: it must not contain `android.permission.INTERNET` or `android.permission.ACCESS_NETWORK_STATE`.
+- Confirm the final beta APK is signed and does not set `android:debuggable="true"`.
 
 ## Result format
 

@@ -22,6 +22,7 @@ RemindIt turns text, links, screenshots and photos shared from Android apps into
 - Private local copies of shared images and saved source links
 - Ukrainian and English UI
 - No account, RemindIt server, ads or analytics
+- CI distributes a signed, non-debuggable beta release variant
 
 Example: `Запис до лікаря завтра о 15:30` becomes **“Не пропустити прийом до лікаря”** with the event set for tomorrow at 15:30. The appointment preset alerts one day and two hours beforehand, again at the event time, and—until marked Done—twice more every 30 minutes.
 

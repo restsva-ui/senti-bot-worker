@@ -64,16 +64,16 @@ jobs:
           -storetype JKS -noprompt
 
       - name: Run unit tests
-        run: gradle -p remindit :app:testDebugUnitTest --stacktrace
+        run: gradle -p remindit :app:testReleaseUnitTest --stacktrace
 
-      - name: Build debug APK
-        run: gradle -p remindit :app:assembleDebug --stacktrace
+      - name: Build signed beta APK
+        run: gradle -p remindit :app:assembleRelease --stacktrace
 
       - name: Verify APK identity, privacy, OCR and signature
         shell: bash
         run: |
           set -euo pipefail
-          apk="remindit/app/build/outputs/apk/debug/app-debug.apk"
+          apk="remindit/app/build/outputs/apk/release/app-release.apk"
           analyzer="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
           signer="$ANDROID_HOME/build-tools/36.0.0/apksigner"
 
@@ -85,9 +85,15 @@ jobs:
           test "$("$analyzer" manifest min-sdk "$apk")" = "26"
           test "$("$analyzer" manifest target-sdk "$apk")" = "36"
 
+          manifest="$("$analyzer" manifest print "$apk")"
+          if grep -Fq 'android:debuggable="true"' <<<"$manifest"; then
+            echo "Beta APK must not be debuggable" >&2
+            exit 1
+          fi
+
           permissions="$("$analyzer" manifest permissions "$apk")"
           if grep -Eq '^android\.permission\.(INTERNET|ACCESS_NETWORK_STATE)$' <<<"$permissions"; then
-            echo "Unexpected network permission in merged APK manifest" >&2
+            echo "Unexpected network permission in beta APK manifest" >&2
             exit 1
           fi
 
@@ -97,19 +103,19 @@ jobs:
           done
           "$signer" verify --verbose --print-certs "$apk"
 
-      - name: Build debug AAB
-        run: gradle -p remindit :app:bundleDebug --stacktrace
+      - name: Build signed beta AAB
+        run: gradle -p remindit :app:bundleRelease --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: RemindIt-Beta-0.9-APK
-          path: remindit/app/build/outputs/apk/debug/app-debug.apk
+          path: remindit/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
       - name: Upload AAB
         uses: actions/upload-artifact@v4
         with:
           name: RemindIt-Beta-0.9-AAB
-          path: remindit/app/build/outputs/bundle/debug/app-debug.aab
+          path: remindit/app/build/outputs/bundle/release/app-release.aab
           if-no-files-found: error
