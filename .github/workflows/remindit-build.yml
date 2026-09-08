@@ -1,0 +1,121 @@
+name: RemindIt Android Beta
+
+concurrency:
+  group: remindit-beta-build
+  cancel-in-progress: false
+
+on:
+  push:
+    branches:
+      - remindit-mvp
+    paths:
+      - 'remindit/**'
+      - '.github/workflows/remindit-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      REMINDIT_KEYSTORE_PATH: ${{ github.workspace }}/.remindit-beta.keystore
+      REMINDIT_KEYSTORE_PASSWORD: android
+      REMINDIT_KEY_ALIAS: remindit-beta
+      REMINDIT_KEY_PASSWORD: android
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 36
+        run: yes | sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Restore stable beta signing key
+        id: beta-signing-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.REMINDIT_KEYSTORE_PATH }}
+          key: remindit-beta-signing-v1
+
+      - name: Create beta signing key
+        if: steps.beta-signing-cache.outputs.cache-hit != 'true'
+        run: >-
+          keytool -genkeypair -v
+          -keystore "$REMINDIT_KEYSTORE_PATH"
+          -storepass "$REMINDIT_KEYSTORE_PASSWORD"
+          -alias "$REMINDIT_KEY_ALIAS"
+          -keypass "$REMINDIT_KEY_PASSWORD"
+          -keyalg RSA -keysize 2048 -validity 10000
+          -dname "CN=RemindIt Beta,O=RemindIt,C=UA"
+          -storetype JKS -noprompt
+
+      - name: Run unit tests
+        run: gradle -p remindit :app:testReleaseUnitTest --stacktrace
+
+      - name: Build signed beta APK
+        run: gradle -p remindit :app:assembleRelease --stacktrace
+
+      - name: Verify APK identity, privacy, OCR and signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="remindit/app/build/outputs/apk/release/app-release.apk"
+          analyzer="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
+          signer="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+
+          test -s "$apk"
+          unzip -tq "$apk"
+          test "$("$analyzer" manifest application-id "$apk")" = "com.remindit.app"
+          test "$("$analyzer" manifest version-code "$apk")" = "10"
+          test "$("$analyzer" manifest version-name "$apk")" = "0.10.0"
+          test "$("$analyzer" manifest min-sdk "$apk")" = "26"
+          test "$("$analyzer" manifest target-sdk "$apk")" = "36"
+
+          manifest="$("$analyzer" manifest print "$apk")"
+          if grep -Fq 'android:debuggable="true"' <<<"$manifest"; then
+            echo "Beta APK must not be debuggable" >&2
+            exit 1
+          fi
+
+          permissions="$("$analyzer" manifest permissions "$apk")"
+          if grep -Eq '^android\.permission\.(INTERNET|ACCESS_NETWORK_STATE)$' <<<"$permissions"; then
+            echo "Unexpected network permission in beta APK manifest" >&2
+            exit 1
+          fi
+
+          entries="$(unzip -Z1 "$apk")"
+          for lang in ukr rus eng; do
+            grep -Fxq "assets/tessdata/${lang}.traineddata" <<<"$entries"
+          done
+          "$signer" verify --verbose --print-certs "$apk"
+
+      - name: Build signed beta AAB
+        run: gradle -p remindit :app:bundleRelease --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: RemindIt-Beta-0.10-APK
+          path: remindit/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: RemindIt-Beta-0.10-AAB
+          path: remindit/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error

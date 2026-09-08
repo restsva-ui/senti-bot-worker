@@ -1,0 +1,785 @@
+package com.remindit.app;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.DatePickerDialog;
+import android.app.TimePickerDialog;
+import android.content.Intent;
+import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Parcelable;
+import android.text.TextUtils;
+import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
+import android.view.View;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.Spinner;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.core.graphics.Insets;
+import androidx.core.graphics.ColorUtils;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+
+import java.text.SimpleDateFormat;
+import java.util.Calendar;
+import java.util.Locale;
+
+public class AddReminderActivity extends Activity {
+    private static final int BLUE = UiKit.INDIGO;
+    private static final int YELLOW = UiKit.YELLOW;
+    private static final int TEXT = UiKit.TEXT;
+    private static final int MUTED = UiKit.MUTED;
+    private static final int BG = UiKit.BG;
+    private static final int BORDER = UiKit.BORDER;
+    private static final int SMART_BG = Color.rgb(247, 245, 255);
+
+    private EditText goalInput;
+    private EditText rawInput;
+    private Spinner categorySpinner;
+    private Spinner repeatSpinner;
+    private Spinner leadSpinner;
+    private Spinner secondLeadSpinner;
+    private Spinner followUpSpinner;
+    private TextView dateValue;
+    private TextView timeValue;
+    private TextView sourceBadge;
+    private TextView smartHint;
+    private TextView detectedFacts;
+    private TextView planPreview;
+    private LinearLayout rawSection;
+    private Button rawToggle;
+    private Button originalButton;
+    private Button quickSaveButton;
+
+    private final Calendar selected = Calendar.getInstance();
+    private String sourceType = "manual";
+    private String imagePath;
+    private String sourceUri;
+    private String intentType = "remember";
+    private String generatedTitle = "";
+    private boolean rawVisible = true;
+    private boolean imageCommitted;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        UiKit.applySystemBars(this);
+
+        selected.add(Calendar.HOUR_OF_DAY, 1);
+        selected.set(Calendar.MINUTE, ((selected.get(Calendar.MINUTE) + 4) / 5) * 5);
+        if (selected.get(Calendar.MINUTE) >= 60) {
+            selected.add(Calendar.HOUR_OF_DAY, 1);
+            selected.set(Calendar.MINUTE, 0);
+        }
+        selected.set(Calendar.SECOND, 0);
+        selected.set(Calendar.MILLISECOND, 0);
+
+        setContentView(buildUi());
+        refreshDateTime();
+        handleIncoming(getIntent());
+    }
+
+    private View buildUi() {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(BG);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        final int horizontal = dp(18);
+        final int normalTop = dp(18);
+        final int normalBottom = dp(38);
+        root.setPadding(horizontal, normalTop, horizontal, normalBottom);
+        scroll.addView(root);
+
+        ViewCompat.setOnApplyWindowInsetsListener(root, (view, insets) -> {
+            Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
+            view.setPadding(horizontal, normalTop + bars.top, horizontal, normalBottom + bars.bottom);
+            return insets;
+        });
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+
+        Button back = UiKit.iconButton(this, "‹");
+        back.setContentDescription(LanguageManager.pick(this, "Назад", "Back"));
+        back.setOnClickListener(v -> finish());
+        header.addView(back, new LinearLayout.LayoutParams(dp(48), dp(48)));
+
+        LinearLayout titleBlock = new LinearLayout(this);
+        titleBlock.setOrientation(LinearLayout.VERTICAL);
+        titleBlock.addView(text(LanguageManager.pick(this, "Нове нагадування", "New reminder"), 25, true, TEXT));
+        titleBlock.addView(text(LanguageManager.pick(this,
+                "Одна суть. Один час. Один оригінал.",
+                "One meaning. One time. One original."), 13, false, MUTED));
+        header.addView(titleBlock, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        Button settings = UiKit.iconButton(this, "⚙");
+        settings.setContentDescription(LanguageManager.pick(this, "Налаштування", "Settings"));
+        settings.setTextSize(20);
+        settings.setOnClickListener(v -> startActivity(new Intent(this, SettingsActivity.class)));
+        header.addView(settings, new LinearLayout.LayoutParams(dp(48), dp(48)));
+
+        root.addView(header, margin(-1, -2, 0, 0, 0, 14));
+
+        LinearLayout steps = new LinearLayout(this);
+        steps.setOrientation(LinearLayout.HORIZONTAL);
+        steps.setGravity(Gravity.CENTER_VERTICAL);
+        steps.setPadding(dp(4), 0, dp(4), 0);
+        steps.addView(stepChip("1", LanguageManager.pick(this, "Суть", "Meaning"), true),
+                new LinearLayout.LayoutParams(0, dp(40), 1f));
+        steps.addView(stepConnector());
+        steps.addView(stepChip("2", LanguageManager.pick(this, "Час", "Time"), true),
+                new LinearLayout.LayoutParams(0, dp(40), 1f));
+        steps.addView(stepConnector());
+        steps.addView(stepChip("3", LanguageManager.pick(this, "Готово", "Ready"), false),
+                new LinearLayout.LayoutParams(0, dp(40), 1f));
+        root.addView(steps, margin(-1, -2, 0, 0, 0, 14));
+
+        LinearLayout sourceCard = card();
+        LinearLayout sourceRow = new LinearLayout(this);
+        sourceRow.setOrientation(LinearLayout.HORIZONTAL);
+        sourceRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        sourceBadge = pill(LanguageManager.pick(this, "ВРУЧНУ", "MANUAL"), BLUE);
+        sourceRow.addView(sourceBadge);
+        sourceRow.addView(text(LanguageManager.pick(this,
+                "  Оригінал зберігається разом із нагадуванням",
+                "  Original stays with the reminder"), 12, true, MUTED),
+                new LinearLayout.LayoutParams(0, -2, 1f));
+        sourceCard.addView(sourceRow);
+
+        smartHint = text(LanguageManager.pick(this,
+                "Напиши або поділись тим, про що треба пам’ятати — RemindIt сформує коротку людську суть.",
+                "Type or share what matters and RemindIt will form a short human-readable meaning."),
+                13, false, MUTED);
+        sourceCard.addView(smartHint, margin(-1, -2, 0, 9, 0, 0));
+
+        detectedFacts = text("", 13, true, BLUE);
+        detectedFacts.setVisibility(View.GONE);
+        sourceCard.addView(detectedFacts, margin(-1, -2, 0, 8, 0, 0));
+
+        originalButton = secondaryButton(LanguageManager.pick(this, "Переглянути оригінал", "View original"));
+        originalButton.setVisibility(View.GONE);
+        originalButton.setOnClickListener(v -> openCurrentOriginal());
+        sourceCard.addView(originalButton, margin(-1, dp(48), 0, 10, 0, 0));
+        quickSaveButton = primaryButton(LanguageManager.pick(this,
+                "⚡ Зберегти з розумними налаштуваннями",
+                "⚡ Save with smart settings"));
+        quickSaveButton.setOnClickListener(v -> saveReminder());
+        sourceCard.addView(quickSaveButton, margin(-1, dp(52), 0, 10, 0, 0));
+        root.addView(sourceCard, margin(-1, -2, 0, 0, 0, 12));
+
+        LinearLayout essenceCard = card();
+        essenceCard.setBackground(rounded(SMART_BG, ColorUtils.setAlphaComponent(UiKit.VIOLET, 72), 1, 22));
+        essenceCard.addView(text("✨ 1. " + LanguageManager.pick(this, "Суть нагадування", "Reminder meaning"),
+                18, true, TEXT));
+        essenceCard.addView(text(LanguageManager.pick(this,
+                "Це саме той короткий текст, який з’явиться у сповіщенні.",
+                "This is the short text that will appear in the notification."),
+                12, false, MUTED), margin(-1, -2, 0, 4, 0, 8));
+
+        goalInput = input(LanguageManager.pick(this,
+                "Наприклад: Переглянути новину про… / Оплатити рахунок… / Відповісти…",
+                "For example: Review the article… / Pay the bill… / Reply…"), true);
+        goalInput.setMinLines(2);
+        goalInput.setMaxLines(4);
+        essenceCard.addView(goalInput, margin(-1, dp(92), 0, 4, 0, 10));
+
+        Button analyzeButton = secondaryButton(LanguageManager.pick(this, "✨ Оновити суть", "✨ Refresh meaning"));
+        analyzeButton.setOnClickListener(v -> {
+            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+            String source = rawInput.getText().toString().trim();
+            if (source.isEmpty()) {
+                source = goalInput.getText().toString().trim();
+            }
+            if (source.isEmpty()) {
+                Toast.makeText(this,
+                        LanguageManager.pick(this, "Спочатку додай вихідний текст або примітку", "Add source text or a note first"),
+                        Toast.LENGTH_SHORT).show();
+                return;
+            }
+            applySmartSuggestions(source);
+            Toast.makeText(this,
+                    LanguageManager.pick(this, "Суть оновлено", "Meaning updated"),
+                    Toast.LENGTH_SHORT).show();
+        });
+        essenceCard.addView(analyzeButton, new LinearLayout.LayoutParams(-1, dp(50)));
+        root.addView(essenceCard, margin(-1, -2, 0, 0, 0, 12));
+
+        LinearLayout categoryCard = card();
+        categoryCard.addView(text("◈ " + LanguageManager.pick(this, "Контекст", "Context"), 17, true, TEXT));
+        categoryCard.addView(label(LanguageManager.pick(this, "Категорія", "Category")),
+                margin(-1, -2, 0, 12, 0, 0));
+        categorySpinner = new Spinner(this);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, LanguageManager.categories(this));
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        categorySpinner.setAdapter(adapter);
+        categorySpinner.setPadding(dp(12), 0, dp(12), 0);
+        categorySpinner.setBackground(rounded(UiKit.SURFACE_ALT, BORDER, 1, 14));
+        categoryCard.addView(categorySpinner, margin(-1, dp(54), 0, 6, 0, 14));
+        categoryCard.addView(label(LanguageManager.pick(this, "Повтор події", "Repeat event")));
+        repeatSpinner = optionSpinner(LanguageManager.isUk(this)
+                ? new String[]{"Одноразово", "Щодня", "Пн–Пт", "Щотижня"}
+                : new String[]{"Once", "Daily", "Weekdays", "Weekly"});
+        categoryCard.addView(repeatSpinner, margin(-1, dp(54), 0, 6, 0, 0));
+        root.addView(categoryCard, margin(-1, -2, 0, 0, 0, 12));
+
+        LinearLayout rawCard = card();
+        rawToggle = secondaryButton(LanguageManager.pick(this, "▤ Сховати вихідний текст", "▤ Hide source text"));
+        rawToggle.setOnClickListener(v -> setRawVisible(!rawVisible));
+        rawCard.addView(rawToggle);
+
+        rawSection = new LinearLayout(this);
+        rawSection.setOrientation(LinearLayout.VERTICAL);
+        rawSection.addView(label(LanguageManager.pick(this, "Вихідний текст / OCR / примітка", "Source text / OCR / note")),
+                margin(-1, -2, 0, 12, 0, 0));
+        rawInput = input(LanguageManager.pick(this,
+                "Тут зберігається повний вихідний текст…",
+                "The full source text is stored here…"), true);
+        rawInput.setMinLines(4);
+        rawInput.setMaxLines(8);
+        rawSection.addView(rawInput, margin(-1, dp(160), 0, 6, 0, 0));
+        rawCard.addView(rawSection);
+        root.addView(rawCard, margin(-1, -2, 0, 0, 0, 12));
+
+        LinearLayout when = card();
+        when.addView(text("◷ 2. " + LanguageManager.pick(this, "Коли відбудеться подія?", "When is the event?"), 18, true, TEXT));
+        when.addView(text(LanguageManager.pick(this,
+                "Подія і сповіщення — це різні моменти. Обери, наскільки завчасно попередити.",
+                "The event and its alert are different moments. Choose how early to be notified."),
+                12, false, MUTED), margin(-1, -2, 0, 6, 0, 0));
+        LinearLayout dateTime = new LinearLayout(this);
+        dateTime.setOrientation(LinearLayout.HORIZONTAL);
+
+        LinearLayout dateBlock = valueBlock(LanguageManager.pick(this, "Дата", "Date"));
+        dateValue = (TextView) dateBlock.getChildAt(1);
+        dateValue.setOnClickListener(v -> pickDate());
+
+        LinearLayout timeBlock = valueBlock(LanguageManager.pick(this, "Час", "Time"));
+        timeValue = (TextView) timeBlock.getChildAt(1);
+        timeValue.setOnClickListener(v -> pickTime());
+
+        dateTime.addView(dateBlock, new LinearLayout.LayoutParams(0, -2, 1f));
+        dateTime.addView(new View(this), new LinearLayout.LayoutParams(dp(10), 1));
+        dateTime.addView(timeBlock, new LinearLayout.LayoutParams(0, -2, 1f));
+        when.addView(dateTime, margin(-1, -2, 0, 12, 0, 0));
+
+        when.addView(label(LanguageManager.pick(this, "Основне попередження", "Primary alert")),
+                margin(-1, -2, 0, 14, 0, 0));
+        leadSpinner = optionSpinner(ReminderUi.leadLabels(this, false));
+        when.addView(leadSpinner, margin(-1, dp(54), 0, 6, 0, 0));
+
+        when.addView(label(LanguageManager.pick(this, "Додаткове попередження", "Additional alert")),
+                margin(-1, -2, 0, 12, 0, 0));
+        secondLeadSpinner = optionSpinner(ReminderUi.leadLabels(this, true));
+        when.addView(secondLeadSpinner, margin(-1, dp(54), 0, 6, 0, 0));
+
+        when.addView(label(LanguageManager.pick(this, "Якщо не виконано", "If not completed")),
+                margin(-1, -2, 0, 12, 0, 0));
+        followUpSpinner = optionSpinner(ReminderUi.followUpLabels(this));
+        when.addView(followUpSpinner, margin(-1, dp(54), 0, 6, 0, 0));
+
+        LinearLayout plan = new LinearLayout(this);
+        plan.setOrientation(LinearLayout.VERTICAL);
+        plan.setPadding(dp(14), dp(13), dp(14), dp(13));
+        plan.setBackground(rounded(UiKit.SURFACE_ALT,
+                ColorUtils.setAlphaComponent(UiKit.INDIGO, 56), 1, 16));
+        plan.addView(text(LanguageManager.pick(this, "ПЛАН СПОВІЩЕНЬ", "ALERT PLAN"),
+                10, true, UiKit.INDIGO));
+        planPreview = text("", 14, true, TEXT);
+        plan.addView(planPreview, margin(-1, -2, 0, 7, 0, 0));
+        when.addView(plan, margin(-1, -2, 0, 14, 0, 0));
+
+        AdapterView.OnItemSelectedListener planListener = new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                refreshPlanPreview();
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+                refreshPlanPreview();
+            }
+        };
+        leadSpinner.setOnItemSelectedListener(planListener);
+        secondLeadSpinner.setOnItemSelectedListener(planListener);
+        followUpSpinner.setOnItemSelectedListener(planListener);
+        repeatSpinner.setOnItemSelectedListener(planListener);
+        setTimingDefaults(ReminderTiming.defaultsFor("remember"));
+        root.addView(when, margin(-1, -2, 0, 0, 0, 14));
+
+        Button save = UiKit.primaryButton(this,
+                LanguageManager.pick(this, "✓ Зберегти нагадування", "✓ Save reminder"));
+        save.setTextSize(16);
+        save.setOnClickListener(v -> saveReminder());
+        root.addView(save, new LinearLayout.LayoutParams(-1, dp(58)));
+
+        return scroll;
+    }
+
+    private void handleIncoming(Intent intent) {
+        if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) return;
+        String type = intent.getType();
+
+        if (type != null && type.startsWith("image/")) {
+            sourceType = "image";
+            sourceBadge.setText(LanguageManager.pick(this, "ЗОБРАЖЕННЯ", "IMAGE"));
+            sourceBadge.setBackground(rounded(YELLOW, YELLOW, 1, 12));
+            sourceBadge.setTextColor(TEXT);
+            Uri uri = readSharedUri(intent);
+            if (uri == null) {
+                smartHint.setText(LanguageManager.pick(this, "Не вдалося відкрити зображення.", "Could not open the image."));
+                return;
+            }
+
+            imagePath = OriginalStore.saveImage(this, uri);
+            updateOriginalButton();
+            setQuickSaveEnabled(false);
+            smartHint.setText(imagePath != null
+                    ? LanguageManager.pick(this,
+                    "Оригінальне зображення збережено локально. Читаю текст і формую коротку суть…",
+                    "Original image saved locally. Reading text and forming a short meaning…")
+                    : LanguageManager.pick(this,
+                    "Читаю текст. Копію оригіналу зберегти не вдалося — нагадування все одно можна створити.",
+                    "Reading text. The original copy could not be saved, but you can still create the reminder."));
+            setRawVisible(false);
+
+            OcrHelper.recognize(this, uri, new OcrHelper.Callback() {
+                @Override
+                public void onSuccess(String recognizedText) {
+                    setQuickSaveEnabled(true);
+                    rawInput.setText(recognizedText);
+                    if (recognizedText.trim().isEmpty()) {
+                        goalInput.setText(LanguageManager.pick(AddReminderActivity.this,
+                                "Переглянути збережене зображення",
+                                "Review the saved image"));
+                        generatedTitle = goalInput.getText().toString();
+                        intentType = "review";
+                        setCategory("Other");
+                        setTimingDefaults(ReminderTiming.defaultsFor(intentType));
+                        smartHint.setText(imagePath != null
+                                ? LanguageManager.pick(AddReminderActivity.this,
+                                "Оригінал збережено. OCR не знайшов достатньо читабельного тексту — суть можна відредагувати вручну.",
+                                "Original saved. OCR did not find enough readable text; edit the meaning manually.")
+                                : LanguageManager.pick(AddReminderActivity.this,
+                                "OCR не знайшов читабельного тексту. Введи суть вручну; копія фото недоступна.",
+                                "OCR found no readable text. Enter the meaning manually; no image copy is available."));
+                        return;
+                    }
+                    applySmartSuggestions(recognizedText);
+                }
+
+                @Override
+                public void onError(Exception error) {
+                    setQuickSaveEnabled(true);
+                    goalInput.setText(LanguageManager.pick(AddReminderActivity.this,
+                            "Переглянути збережене зображення",
+                            "Review the saved image"));
+                    generatedTitle = goalInput.getText().toString();
+                    intentType = "review";
+                    setCategory("Other");
+                    setTimingDefaults(ReminderTiming.defaultsFor(intentType));
+                    smartHint.setText(imagePath != null
+                            ? LanguageManager.pick(AddReminderActivity.this,
+                            "Оригінал збережено. OCR не зміг надійно прочитати текст — суть можна відредагувати вручну.",
+                            "Original saved. OCR could not reliably read the text; edit the meaning manually.")
+                            : LanguageManager.pick(AddReminderActivity.this,
+                            "OCR не зміг надійно прочитати текст. Введи суть вручну; копія фото недоступна.",
+                            "OCR could not reliably read the text. Enter the meaning manually; no image copy is available."));
+                }
+            });
+            return;
+        }
+
+        String sharedText = intent.getStringExtra(Intent.EXTRA_TEXT);
+        if (sharedText == null) sharedText = "";
+        sourceUri = OriginalStore.firstUrl(sharedText);
+        sourceType = sourceUri != null ? "link" : "text";
+        sourceBadge.setText(LanguageManager.pick(this,
+                sourceUri != null ? "ПОСИЛАННЯ" : "ТЕКСТ",
+                sourceUri != null ? "LINK" : "TEXT"));
+        rawInput.setText(sharedText);
+        setQuickSaveEnabled(true);
+        updateOriginalButton();
+        setRawVisible(false);
+        applySmartSuggestions(sharedText);
+    }
+
+    @SuppressWarnings("deprecation")
+    private Uri readSharedUri(Intent intent) {
+        if (Build.VERSION.SDK_INT >= 33) {
+            return intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri.class);
+        }
+        Parcelable value = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+        return value instanceof Uri ? (Uri) value : null;
+    }
+
+    private void applySmartSuggestions(String text) {
+        long detected = DateDetector.detect(text);
+        if (detected > System.currentTimeMillis()) {
+            selected.setTimeInMillis(detected);
+            refreshDateTime();
+        }
+
+        if (sourceUri == null) sourceUri = OriginalStore.firstUrl(text);
+        if (sourceUri != null && "text".equals(sourceType)) sourceType = "link";
+
+        ReminderIntentAnalyzer.Result analysis = ReminderIntentAnalyzer.analyze(this, text, sourceType);
+        intentType = analysis.intentType;
+        generatedTitle = analysis.title;
+        goalInput.setText(analysis.goal);
+        setCategory(analysis.categoryKey);
+        setTimingDefaults(ReminderTiming.defaultsFor(analysis.intentType));
+        String facts = DetectedFacts.summary(this, text);
+        detectedFacts.setText(facts);
+        detectedFacts.setVisibility(facts.isEmpty() ? View.GONE : View.VISIBLE);
+        smartHint.setText(LanguageManager.pick(this,
+                "Суть сформована окремо від вихідних даних. Перевір її — саме вона прийде у сповіщенні.",
+                "Meaning is separated from raw source data. Check it; this is what the notification will show."));
+        updateOriginalButton();
+    }
+
+    private void saveReminder() {
+        String goal = goalInput.getText().toString().trim();
+        String raw = rawInput.getText().toString().trim();
+
+        if (TextUtils.isEmpty(goal)) {
+            if (raw.isEmpty()) {
+                Toast.makeText(this,
+                        LanguageManager.pick(this, "Додай суть або вихідний текст", "Add a meaning or source text"),
+                        Toast.LENGTH_SHORT).show();
+                return;
+            }
+            applySmartSuggestions(raw);
+            goal = goalInput.getText().toString().trim();
+        }
+        if (selected.getTimeInMillis() <= System.currentTimeMillis()) {
+            Toast.makeText(this,
+                    LanguageManager.pick(this, "Обери час у майбутньому", "Choose a time in the future"),
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        if (sourceUri == null) sourceUri = OriginalStore.firstUrl(raw);
+        if (sourceUri != null && ("manual".equals(sourceType) || "text".equals(sourceType))) sourceType = "link";
+        if (TextUtils.isEmpty(generatedTitle)) generatedTitle = conciseTitle(goal);
+
+        Reminder reminder = new Reminder();
+        reminder.title = generatedTitle;
+        reminder.body = raw;
+        reminder.goal = goal;
+        reminder.intentType = intentType;
+        reminder.category = LanguageManager.categoryKeyFromDisplay(String.valueOf(categorySpinner.getSelectedItem()));
+        reminder.sourceType = sourceType;
+        reminder.imagePath = imagePath;
+        reminder.sourceUri = sourceUri;
+        reminder.repeatMode = repeatMode(repeatSpinner == null ? 0 : repeatSpinner.getSelectedItemPosition());
+        reminder.leadMinutes = selectedValue(leadSpinner, ReminderUi.LEAD_VALUES);
+        reminder.secondLeadMinutes = selectedValue(secondLeadSpinner, ReminderUi.SECOND_LEAD_VALUES);
+        reminder.followUpMinutes = selectedValue(followUpSpinner, ReminderUi.FOLLOW_UP_VALUES);
+        if (reminder.isRepeating()) reminder.followUpMinutes = 0;
+        reminder.remindAt = selected.getTimeInMillis();
+        reminder.createdAt = System.currentTimeMillis();
+        reminder.done = false;
+
+        ReminderDb db = new ReminderDb(this);
+        Reminder duplicate = db.findActiveDuplicate(reminder);
+        if (duplicate != null) {
+            new AlertDialog.Builder(this)
+                    .setTitle(LanguageManager.pick(this, "Схоже нагадування вже є", "A similar reminder already exists"))
+                    .setMessage(LanguageManager.pick(this,
+                            "Оновити існуюче нагадування чи зберегти ще одне?",
+                            "Update the existing reminder or keep another copy?"))
+                    .setPositiveButton(LanguageManager.pick(this, "Оновити", "Update"),
+                            (dialog, which) -> persistReminder(reminder, duplicate))
+                    .setNeutralButton(LanguageManager.pick(this, "Зберегти окремо", "Save another"),
+                            (dialog, which) -> persistReminder(reminder, null))
+                    .setNegativeButton(LanguageManager.pick(this, "Скасувати", "Cancel"), null)
+                    .show();
+            return;
+        }
+        persistReminder(reminder, null);
+    }
+
+    private void persistReminder(Reminder reminder, Reminder duplicate) {
+        ReminderDb db = new ReminderDb(this);
+        if (duplicate == null) {
+            reminder.id = db.insert(reminder);
+        } else {
+            ReminderScheduler.cancel(this, duplicate.id);
+            String oldImagePath = duplicate.imagePath;
+            reminder.id = duplicate.id;
+            reminder.createdAt = duplicate.createdAt;
+            db.update(reminder);
+            if (oldImagePath != null && !oldImagePath.equals(reminder.imagePath)) {
+                OriginalStore.deletePath(oldImagePath);
+            }
+        }
+        imageCommitted = true;
+        boolean exact = ReminderScheduler.schedule(this, reminder);
+
+        if (!exact && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            Toast.makeText(this,
+                    LanguageManager.pick(this,
+                            "Збережено. Дозволь точні нагадування у Налаштуваннях RemindIt.",
+                            "Saved. Allow exact reminders in RemindIt Settings."),
+                    Toast.LENGTH_LONG).show();
+            startActivity(new Intent(this, SettingsActivity.class));
+            finish();
+            return;
+        }
+
+        Toast.makeText(this,
+                LanguageManager.pick(this,
+                        duplicate == null ? "Нагадування збережено" : "Нагадування оновлено",
+                        duplicate == null ? "Reminder saved" : "Reminder updated"),
+                Toast.LENGTH_SHORT).show();
+        finish();
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (isFinishing() && !imageCommitted && imagePath != null) {
+            OriginalStore.deletePath(imagePath);
+            imagePath = null;
+        }
+        super.onDestroy();
+    }
+
+    private String conciseTitle(String goal) {
+        String clean = goal == null ? "" : goal.replaceAll("\\s+", " ").trim();
+        return clean.length() <= 64 ? clean : clean.substring(0, 61) + "…";
+    }
+
+    private void setRawVisible(boolean visible) {
+        rawVisible = visible;
+        if (rawSection != null) rawSection.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (rawToggle != null) rawToggle.setText("▤ " + LanguageManager.pick(this,
+                visible ? "Сховати вихідний текст" : "Показати вихідний текст",
+                visible ? "Hide source text" : "Show source text"));
+    }
+
+    private void updateOriginalButton() {
+        if (originalButton == null) return;
+        if (imagePath != null) {
+            originalButton.setVisibility(View.VISIBLE);
+            originalButton.setText(LanguageManager.pick(this, "Переглянути оригінальне фото", "View original image"));
+        } else if (sourceUri != null) {
+            originalButton.setVisibility(View.VISIBLE);
+            originalButton.setText(LanguageManager.pick(this, "Перейти за оригінальним посиланням", "Open original link"));
+        } else {
+            originalButton.setVisibility(View.GONE);
+        }
+    }
+
+    private void openCurrentOriginal() {
+        try {
+            if (imagePath != null) {
+                Intent intent = new Intent(this, OriginalViewerActivity.class);
+                intent.putExtra("image_path", imagePath);
+                startActivity(intent);
+            } else if (sourceUri != null) {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(sourceUri)));
+            }
+        } catch (Exception e) {
+            Toast.makeText(this,
+                    LanguageManager.pick(this, "Не вдалося відкрити оригінал", "Could not open original"),
+                    Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void setCategory(String categoryKey) {
+        String display = LanguageManager.categoryDisplay(this, categoryKey);
+        for (int i = 0; i < categorySpinner.getCount(); i++) {
+            if (display.equals(String.valueOf(categorySpinner.getItemAtPosition(i)))) {
+                categorySpinner.setSelection(i);
+                return;
+            }
+        }
+    }
+
+    private Spinner optionSpinner(String[] labels) {
+        Spinner spinner = new Spinner(this);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, labels);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinner.setAdapter(adapter);
+        spinner.setPadding(dp(12), 0, dp(12), 0);
+        spinner.setBackground(rounded(UiKit.SURFACE_ALT, BORDER, 1, 14));
+        return spinner;
+    }
+
+    private void setTimingDefaults(ReminderTiming.Defaults defaults) {
+        if (leadSpinner != null) {
+            leadSpinner.setSelection(ReminderUi.indexOf(ReminderUi.LEAD_VALUES, defaults.leadMinutes));
+        }
+        if (secondLeadSpinner != null) {
+            secondLeadSpinner.setSelection(ReminderUi.indexOf(ReminderUi.SECOND_LEAD_VALUES, defaults.secondLeadMinutes));
+        }
+        if (followUpSpinner != null) {
+            followUpSpinner.setSelection(ReminderUi.indexOf(ReminderUi.FOLLOW_UP_VALUES, defaults.followUpMinutes));
+        }
+        refreshPlanPreview();
+    }
+
+    private int selectedValue(Spinner spinner, int[] values) {
+        int position = spinner == null ? 0 : spinner.getSelectedItemPosition();
+        return position >= 0 && position < values.length ? values[position] : values[0];
+    }
+
+    private String repeatMode(int position) {
+        if (position == 1) return Reminder.REPEAT_DAILY;
+        if (position == 2) return Reminder.REPEAT_WEEKDAYS;
+        if (position == 3) return Reminder.REPEAT_WEEKLY;
+        return Reminder.REPEAT_ONCE;
+    }
+
+    private void pickDate() {
+        new DatePickerDialog(this, (view, year, month, day) -> {
+            selected.set(Calendar.YEAR, year);
+            selected.set(Calendar.MONTH, month);
+            selected.set(Calendar.DAY_OF_MONTH, day);
+            refreshDateTime();
+        }, selected.get(Calendar.YEAR), selected.get(Calendar.MONTH), selected.get(Calendar.DAY_OF_MONTH)).show();
+    }
+
+    private void pickTime() {
+        new TimePickerDialog(this, (view, hour, minute) -> {
+            selected.set(Calendar.HOUR_OF_DAY, hour);
+            selected.set(Calendar.MINUTE, minute);
+            selected.set(Calendar.SECOND, 0);
+            selected.set(Calendar.MILLISECOND, 0);
+            refreshDateTime();
+        }, selected.get(Calendar.HOUR_OF_DAY), selected.get(Calendar.MINUTE), true).show();
+    }
+
+    private void refreshDateTime() {
+        if (dateValue != null) dateValue.setText(new SimpleDateFormat("dd.MM.yyyy", Locale.getDefault()).format(selected.getTime()));
+        if (timeValue != null) timeValue.setText(new SimpleDateFormat("HH:mm", Locale.getDefault()).format(selected.getTime()));
+        refreshPlanPreview();
+    }
+
+    private void refreshPlanPreview() {
+        if (planPreview == null || leadSpinner == null || secondLeadSpinner == null
+                || followUpSpinner == null || repeatSpinner == null) return;
+        Reminder preview = new Reminder();
+        preview.remindAt = selected.getTimeInMillis();
+        preview.repeatMode = repeatMode(repeatSpinner.getSelectedItemPosition());
+        preview.leadMinutes = selectedValue(leadSpinner, ReminderUi.LEAD_VALUES);
+        preview.secondLeadMinutes = selectedValue(secondLeadSpinner, ReminderUi.SECOND_LEAD_VALUES);
+        preview.followUpMinutes = selectedValue(followUpSpinner, ReminderUi.FOLLOW_UP_VALUES);
+        if (preview.isRepeating()) preview.followUpMinutes = 0;
+        String event = new SimpleDateFormat("EEE, d MMM • HH:mm", Locale.getDefault())
+                .format(selected.getTime());
+        planPreview.setText(event + "\n" + ReminderUi.summary(this, preview));
+    }
+
+    private TextView stepChip(String number, String label, boolean active) {
+        TextView chip = text(number + "  " + label, 12, true, active ? UiKit.INDIGO : MUTED);
+        chip.setGravity(Gravity.CENTER);
+        chip.setSingleLine(true);
+        chip.setBackground(rounded(active ? UiKit.SURFACE_ALT : Color.TRANSPARENT,
+                active ? ColorUtils.setAlphaComponent(UiKit.INDIGO, 42) : Color.TRANSPARENT,
+                active ? 1 : 0, 999));
+        return chip;
+    }
+
+    private View stepConnector() {
+        View line = new View(this);
+        line.setBackgroundColor(ColorUtils.setAlphaComponent(UiKit.INDIGO, 50));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(12), dp(1));
+        params.setMargins(dp(3), 0, dp(3), 0);
+        line.setLayoutParams(params);
+        return line;
+    }
+
+    private LinearLayout valueBlock(String label) {
+        LinearLayout block = new LinearLayout(this);
+        block.setOrientation(LinearLayout.VERTICAL);
+        block.addView(text(label, 12, true, MUTED));
+        TextView value = text("", 17, true, TEXT);
+        value.setGravity(Gravity.CENTER);
+        value.setPadding(dp(10), dp(15), dp(10), dp(15));
+        value.setBackground(UiKit.ripple(this,
+                rounded(UiKit.SURFACE_ALT, BORDER, 1, 14),
+                ColorUtils.setAlphaComponent(UiKit.INDIGO, 28)));
+        block.addView(value, margin(-1, -2, 0, 5, 0, 0));
+        return block;
+    }
+
+    private LinearLayout card() {
+        return UiKit.card(this);
+    }
+
+    private TextView label(String value) {
+        return text(value, 13, true, MUTED);
+    }
+
+    private EditText input(String hint, boolean multiline) {
+        EditText input = new EditText(this);
+        input.setHint(hint);
+        input.setHintTextColor(Color.rgb(143, 151, 170));
+        input.setTextColor(TEXT);
+        input.setTextSize(16);
+        input.setPadding(dp(14), dp(12), dp(14), dp(12));
+        input.setBackground(rounded(UiKit.SURFACE_ALT, BORDER, 1, 14));
+        if (multiline) {
+            input.setGravity(Gravity.TOP | Gravity.START);
+        } else {
+            input.setSingleLine(true);
+        }
+        return input;
+    }
+
+    private TextView pill(String value, int color) {
+        TextView pill = text(value, 11, true, Color.WHITE);
+        pill.setPadding(dp(9), dp(5), dp(9), dp(5));
+        pill.setBackground(rounded(color, color, 1, 12));
+        return pill;
+    }
+
+    private Button secondaryButton(String label) {
+        return UiKit.secondaryButton(this, label);
+    }
+
+    private Button primaryButton(String label) {
+        return UiKit.primaryButton(this, label);
+    }
+
+    private void setQuickSaveEnabled(boolean enabled) {
+        if (quickSaveButton == null) return;
+        quickSaveButton.setEnabled(enabled);
+        quickSaveButton.setAlpha(enabled ? 1f : 0.5f);
+    }
+
+    private TextView text(String value, int sp, boolean bold, int color) {
+        return UiKit.text(this, value, sp, bold, color);
+    }
+
+    private GradientDrawable rounded(int fill, int stroke, int strokeWidth, int radius) {
+        return UiKit.rounded(this, fill, stroke, strokeWidth, radius);
+    }
+
+    private LinearLayout.LayoutParams margin(int width, int height, int left, int top, int right, int bottom) {
+        return UiKit.margin(this, width, height, left, top, right, bottom);
+    }
+
+    private int dp(int value) {
+        return UiKit.dp(this, value);
+    }
+}

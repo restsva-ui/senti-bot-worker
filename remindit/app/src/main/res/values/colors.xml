@@ -1,0 +1,9 @@
+<resources>
+    <color name="brand_blue">#4F46E5</color>
+    <color name="brand_blue_dark">#3730A3</color>
+    <color name="brand_violet">#7C3AED</color>
+    <color name="brand_yellow">#FACC15</color>
+    <color name="brand_text">#182033</color>
+    <color name="brand_muted">#667085</color>
+    <color name="brand_bg">#F6F7FC</color>
+</resources>
