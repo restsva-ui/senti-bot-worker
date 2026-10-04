@@ -1,0 +1,52 @@
+name: AntiJam Core CI Verify
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "antijam-core-0.1.1-ci" ]
+    paths:
+      - "antijam-core.zip"
+      - ".github/workflows/antijam-core-ci.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack verified source snapshot
+        run: |
+          rm -rf antijam-core
+          mkdir antijam-core
+          unzip -q antijam-core.zip -d antijam-core
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Gradle 9.6.0
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.0"
+
+      - name: Run unit tests
+        working-directory: antijam-core
+        run: gradle :app:testDebugUnitTest --stacktrace
+
+      - name: Build debug APK
+        working-directory: antijam-core
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AntiJamNav-Core-0.1.1-debug
+          path: antijam-core/app/build/outputs/apk/debug/app-debug.apk
