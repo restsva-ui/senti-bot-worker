@@ -5,7 +5,7 @@ on:
   push:
     branches: [ "antijam-core-0.1.1-ci" ]
     paths:
-      - "antijam-core.zip"
+      - "antijam-ci-parts/**"
       - ".github/workflows/antijam-core-ci.yml"
 
 jobs:
@@ -14,8 +14,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Unpack verified source snapshot
+      - name: Reconstruct verified source snapshot
         run: |
+          cat antijam-ci-parts/part*.txt | base64 -d > antijam-core.zip
+          echo "e85f213382b34be7815fb8e44b0785d95440754b167aea61bf1d87f4544a6067  antijam-core.zip" | sha256sum -c -
           rm -rf antijam-core
           mkdir antijam-core
           unzip -q antijam-core.zip -d antijam-core
